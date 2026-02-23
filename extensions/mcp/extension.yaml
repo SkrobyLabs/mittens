@@ -1,0 +1,15 @@
+# mcp extension for mittens
+# Whitelists MCP server API domains through the network firewall.
+# MCP servers run inside the container but their backend API calls are blocked
+# unless explicitly whitelisted. The entrypoint resolves domains at runtime.
+
+name: mcp
+description: Whitelist MCP server API domains through the firewall
+
+flags:
+  - name: "--mcp"
+    description: "Whitelist MCP server API domains (repeatable, comma-separated)"
+    arg: "csv"
+  - name: "--mcp-all"
+    description: "Whitelist all configured MCP servers"
+

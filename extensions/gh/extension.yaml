@@ -1,0 +1,16 @@
+# gh extension for mittens
+# Mounts GitHub CLI config into the container (read-only).
+
+name: gh
+description: Mount GitHub CLI config (~/.config/gh) into the container
+
+flags:
+  - name: "--gh"
+    description: "Mount GitHub CLI config (~/.config/gh, read-only)"
+    arg: "none"
+
+mounts:
+  - src: "~/.config/gh"
+    dst: "/home/claude/.config/gh"
+    mode: "ro"
+    when: "dir_exists"

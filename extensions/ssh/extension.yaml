@@ -1,0 +1,16 @@
+# ssh extension for mittens
+# Mounts SSH keys into the container (read-only).
+
+name: ssh
+description: Mount SSH keys (~/.ssh) into the container
+
+flags:
+  - name: "--ssh"
+    description: "Mount SSH keys (~/.ssh, read-only)"
+    arg: "none"
+
+mounts:
+  - src: "~/.ssh"
+    dst: "/home/claude/.ssh"
+    mode: "ro"
+    when: "dir_exists"

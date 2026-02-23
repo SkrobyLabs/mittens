@@ -1,0 +1,25 @@
+# gcp extension for mittens
+# Mounts GCP credentials into the container with optional config filtering.
+# --gcp CONFIG mounts only selected configurations; --gcp-all mounts everything.
+# --gcp (no argument) lists available configurations and exits.
+
+name: gcp
+description: Mount filtered GCP credentials into the container
+
+flags:
+  - name: "--gcp"
+    description: "Mount filtered GCP credentials (repeatable, comma-separated)"
+    arg: "csv"
+  - name: "--gcp-all"
+    description: "Mount entire ~/.config/gcloud directory (all configs)"
+
+firewall:
+  - "oauth2.googleapis.com"
+  - "cloudresourcemanager.googleapis.com"
+  - "compute.googleapis.com"
+  - "storage.googleapis.com"
+
+build:
+  script: "gcp.sh"
+  image_tag: "gcp"
+

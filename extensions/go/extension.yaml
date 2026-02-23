@@ -1,0 +1,33 @@
+# go extension for mittens
+# Installs the Go SDK into the Docker image at build time.
+# Optionally pins a minor version (1.23, 1.24); defaults to 1.23.
+
+name: go
+description: Install Go SDK into the container image
+
+flags:
+  - name: "--go"
+    description: "Install Go SDK (VERSION: 1.23, 1.24; default: 1.23)"
+    arg: "enum"
+    enum_values: ["1.23", "1.24"]
+
+# These domains are already in firewall.conf but listed here for completeness
+# when firewall rules are customized per-project.
+firewall:
+  - "proxy.golang.org"
+  - "sum.golang.org"
+  - "storage.googleapis.com"
+
+mounts:
+  - src: "~/go/pkg/mod"
+    dst: "/home/claude/go/pkg/mod-host"
+    mode: "ro"
+    when: "dir_exists"
+    env:
+      GOMODCACHE_FALLBACK: "/home/claude/go/pkg/mod-host"
+
+build:
+  script: "go.sh"
+  image_tag: "go{{.Arg}}"
+  args:
+    GO_VERSION: "{{.Arg}}"

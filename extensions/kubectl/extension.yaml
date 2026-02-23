@@ -1,0 +1,18 @@
+# kubectl extension for mittens
+# Mounts a filtered kubeconfig containing only explicitly allowed contexts.
+# --k8s CTX mounts selected contexts; --k8s (no arg) lists available contexts.
+# No --k8s-all variant: the extension always filters.
+# No declarative firewall: the resolver extracts API server hostnames dynamically.
+
+name: kubectl
+description: Mount filtered Kubernetes config into the container
+
+flags:
+  - name: "--k8s"
+    description: "Mount filtered kubeconfig (repeatable, comma-separated)"
+    arg: "csv"
+
+build:
+  script: "kubectl.sh"
+  image_tag: "kubectl"
+

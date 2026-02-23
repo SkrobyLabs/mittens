@@ -1,0 +1,12 @@
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/settings.local.json
+
+# Go build artifacts
+mittens
+mittens-*
+dist/

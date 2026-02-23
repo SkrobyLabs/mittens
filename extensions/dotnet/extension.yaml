@@ -1,0 +1,32 @@
+# dotnet extension for mittens
+# Installs the .NET SDK into the Docker image at build time.
+# Optionally pins a major version (8, 9, 10); defaults to LTS.
+
+name: dotnet
+description: Install .NET SDK into the container image
+
+flags:
+  - name: "--dotnet"
+    description: "Install .NET SDK (VERSION: 8, 9, 10; default: LTS)"
+    arg: "enum"
+    enum_values: ["8", "9", "10"]
+
+firewall:
+  - "nuget.org"
+  - "api.nuget.org"
+  - "azuresearch-usnc.nuget.org"
+  - "azuresearch-ussc.nuget.org"
+
+mounts:
+  - src: "~/.nuget/packages"
+    dst: "/home/claude/.nuget/host-packages"
+    mode: "ro"
+    when: "dir_exists"
+    env:
+      NUGET_FALLBACK_PACKAGES: "/home/claude/.nuget/host-packages"
+
+build:
+  script: "dotnet.sh"
+  image_tag: "dotnet{{.Arg}}"
+  args:
+    DOTNET_CHANNEL: "{{if .Arg}}{{.Arg}}.0{{else}}LTS{{end}}"

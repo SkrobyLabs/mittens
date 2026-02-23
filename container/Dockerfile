@@ -1,0 +1,127 @@
+# Mittens - Isolated Claude Code Environment
+FROM node:22-bookworm
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install common development tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core utilities
+    git \
+    curl \
+    jq \
+    less \
+    vim \
+    # Build essentials
+    build-essential \
+    # Python
+    python3 \
+    python3-pip \
+    python3-venv \
+    # Shell utilities
+    bash-completion \
+    fzf \
+    ripgrep \
+    fd-find \
+    # Network tools
+    openssh-client \
+    ca-certificates \
+    # For some language servers and tools
+    unzip \
+    # gosu for privilege de-escalation in entrypoint
+    gosu \
+    # Network firewall (--firewall mode)
+    iptables \
+    squid \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install yq for YAML processing (architecture-aware)
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" && \
+    chmod +x /usr/local/bin/yq
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && apt-get install -y gh && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Docker CE (for Docker-in-Docker support)
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+    > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Build-time extension installer
+# Extensions live in extensions/<name>/build.sh
+# Build context is the project root, so paths are relative to it.
+COPY extensions/ /tmp/ext-builds/
+ARG INSTALL_EXTENSIONS=""
+ARG DOTNET_CHANNEL="LTS"
+ARG GO_VERSION=""
+RUN if [ -n "$INSTALL_EXTENSIONS" ]; then \
+    IFS=','; for ext in $INSTALL_EXTENSIONS; do \
+        script="/tmp/ext-builds/${ext}/build.sh"; \
+        if [ -f "$script" ]; then \
+            echo "[mittens] Installing extension: $ext" && \
+            bash "$script" || exit 1; \
+        else \
+            echo "[mittens] Warning: no build script for extension '$ext'" >&2; \
+        fi; \
+    done; \
+fi && rm -rf /tmp/ext-builds/
+
+# Create a non-root user matching typical host UID
+# The node base image has a 'node' user at UID 1000 — if the requested UID
+# collides, rename that user instead of silently failing.
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN existing_user=$(getent passwd ${USER_ID} | cut -d: -f1) && \
+    if [ -n "$existing_user" ] && [ "$existing_user" != "claude" ]; then \
+        usermod -l claude -d /home/claude -m "$existing_user" && \
+        existing_group=$(getent group ${GROUP_ID} | cut -d: -f1) && \
+        if [ -n "$existing_group" ] && [ "$existing_group" != "claude" ]; then \
+            groupmod -n claude "$existing_group"; \
+        fi; \
+    elif [ -z "$existing_user" ]; then \
+        groupadd -g ${GROUP_ID} claude 2>/dev/null || true && \
+        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude; \
+    fi && \
+    usermod -aG docker claude 2>/dev/null || true
+
+# Create directories for mounts and config
+RUN mkdir -p /home/claude/.claude /home/claude/.config /mnt/claude-config && \
+    chown -R ${USER_ID}:${GROUP_ID} /home/claude /mnt/claude-config
+
+# Add squid config and entrypoint
+# These files are under container/ in the source tree; build context is the project root.
+COPY container/squid.conf /etc/squid/squid.conf
+COPY container/mcp-domains.conf /etc/mittens/mcp-domains.conf
+RUN mkdir -p /run/squid && chown proxy:proxy /run/squid
+
+COPY container/clipboard-shim.sh /usr/local/bin/xclip
+RUN chmod +x /usr/local/bin/xclip
+
+COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# NOTE: No USER directive here — entrypoint.sh handles the root→claude
+# privilege drop via gosu, which is needed for optional DinD (dockerd
+# must start as root). When DinD is disabled the entrypoint still drops
+# to the claude user immediately, so there is no security regression.
+
+WORKDIR /workspace
+
+ENV TERM=xterm-256color
+ENV SHELL=/bin/bash
+
+ENTRYPOINT ["entrypoint.sh"]
+CMD ["claude"]

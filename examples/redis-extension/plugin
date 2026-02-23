@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+Example external mittens extension: Redis credentials.
+
+Install to ~/.mittens/extensions/redis/plugin
+
+This demonstrates the subprocess protocol:
+  plugin manifest  → JSON Extension definition (stdout)
+  plugin list      → JSON string array of available items (stdout)
+  plugin setup     → reads JSON context from stdin, writes SetupResult to stdout
+
+Any language works — just needs to be executable and speak JSON.
+"""
+
+import json
+import os
+import sys
+
+
+def manifest():
+    """Return extension definition (same shape as extension.yaml but in JSON)."""
+    print(json.dumps({
+        "name": "redis",
+        "description": "Mount Redis credentials and add redis-cli",
+        "flags": [
+            {
+                "name": "--redis",
+                "description": "Mount Redis credentials (specify instance or 'all')",
+                "arg": "csv",
+            },
+            {
+                "name": "--redis-all",
+                "description": "Mount all Redis credentials",
+                "arg": "none",
+            },
+        ],
+        "firewall": [
+            # If your Redis is behind a known domain, list it here.
+            # These get added to the container firewall whitelist.
+        ],
+    }))
+
+
+def list_items():
+    """Return available Redis instances from ~/.redis/instances.json."""
+    instances_file = os.path.expanduser("~/.redis/instances.json")
+    if not os.path.exists(instances_file):
+        # No config file — return empty list (wizard will show "none found")
+        print("[]")
+        return
+
+    with open(instances_file) as f:
+        data = json.load(f)
+
+    # Expect {"instances": {"prod": {...}, "staging": {...}}}
+    names = sorted(data.get("instances", {}).keys())
+    print(json.dumps(names))
+
+
+def setup():
+    """
+    Read context from stdin, produce docker args on stdout.
+
+    Input JSON:
+      {"args": ["prod","staging"], "all_mode": false, "home": "/Users/you", "staging": "/tmp/sc-redis-xyz"}
+
+    Output JSON (SetupResult):
+      {"mounts": [...], "env": {...}, "firewall_extra": [...], "docker_args": [...]}
+    """
+    ctx = json.load(sys.stdin)
+    args = ctx.get("args", [])
+    all_mode = ctx.get("all_mode", False)
+    home = ctx["home"]
+    staging = ctx["staging"]
+
+    instances_file = os.path.join(home, ".redis", "instances.json")
+    result = {"mounts": [], "env": {}, "firewall_extra": [], "docker_args": []}
+
+    if not os.path.exists(instances_file):
+        print(json.dumps(result))
+        return
+
+    with open(instances_file) as f:
+        data = json.load(f)
+
+    instances = data.get("instances", {})
+
+    # Filter instances
+    if all_mode:
+        selected = instances
+    else:
+        selected = {k: v for k, v in instances.items() if k in args}
+
+    if not selected:
+        print(json.dumps(result))
+        return
+
+    # Write filtered config to staging dir
+    staged_config = os.path.join(staging, "redis-instances.json")
+    with open(staged_config, "w") as f:
+        json.dump({"instances": selected}, f)
+
+    # Mount the staged config read-only into the container
+    result["mounts"].append({
+        "src": staged_config,
+        "dst": "/home/claude/.redis/instances.json",
+        "mode": "ro",
+        "env": {},
+    })
+
+    # Set env var so scripts inside the container know which instances are available
+    result["env"]["REDIS_INSTANCES"] = ",".join(sorted(selected.keys()))
+
+    # If instances have hostnames, add them to firewall whitelist
+    for inst in selected.values():
+        host = inst.get("host", "")
+        if host and not host.startswith("127.") and not host.startswith("10."):
+            result["firewall_extra"].append(host)
+
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <manifest|list|setup>", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "manifest":
+        manifest()
+    elif cmd == "list":
+        list_items()
+    elif cmd == "setup":
+        setup()
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        sys.exit(1)

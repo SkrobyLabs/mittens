@@ -1,0 +1,21 @@
+# firewall extension for mittens
+# Controls the network firewall (iptables whitelist).
+# ENABLED BY DEFAULT -- unique among extensions.
+# --no-firewall disables it; --firewall FILE uses a custom whitelist.
+
+name: firewall
+description: Network firewall controlling outbound traffic via iptables whitelist
+default_on: true
+
+flags:
+  - name: "--no-firewall"
+    description: "Disable the network firewall (allow all outbound)"
+  - name: "--firewall"
+    description: "Use a custom whitelist file (default: bundled firewall.conf)"
+    arg: "path"
+
+env:
+  MITTENS_FIREWALL: "true"
+
+capabilities:
+  - "NET_ADMIN"

@@ -1,0 +1,676 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"syscall"
+
+	"github.com/Skroby/mittens/extensions/registry"
+)
+
+// App holds all state for a single mittens invocation.
+type App struct {
+	// Core flags
+	Verbose     bool
+	NoConfig    bool
+	NoHistory   bool
+	NoBuild     bool
+	DinD        bool
+	Yolo        bool
+	NetworkHost bool
+	Worktree    bool
+	Shell       bool
+	ExtraDirs   []string
+	ClaudeArgs  []string
+
+	// Computed state
+	Workspace          string // git root or cwd
+	EffectiveWorkspace string // worktree path if --worktree, else same as Workspace
+	WorkspaceMountSrc  string // what actually gets mounted at /workspace
+	Extensions         []*registry.Extension
+	Credentials        *CredentialManager
+	ContainerName      string
+	ImageName          string
+	ImageTag           string
+	HostProjectDir     string // cx_project_dir(Workspace)
+
+	// Image build state
+	imageTagParts []string
+	buildArgs     map[string]string
+
+	// Cleanup tracking
+	tempDirs        []string
+	worktreeDirs    []string
+	worktreeOrigins map[string]string // worktree path -> original HEAD sha
+	worktreeRepos   map[string]string // worktree path -> original repo root
+
+	// Clipboard sync
+	clipboardDir string
+	clipboardPID int
+}
+
+// coreFlags maps flag names to a setter function on *App.
+var coreFlags = map[string]func(*App){
+	"--verbose":      func(a *App) { a.Verbose = true },
+	"-v":             func(a *App) { a.Verbose = true },
+	"--no-config":    func(a *App) { a.NoConfig = true },
+	"--no-history":   func(a *App) { a.NoHistory = true },
+	"--no-build":     func(a *App) { a.NoBuild = true },
+	"--dind":         func(a *App) { a.DinD = true },
+	"--yolo":         func(a *App) { a.Yolo = true },
+	"--network-host": func(a *App) { a.NetworkHost = true },
+	"--worktree":     func(a *App) { a.Worktree = true },
+	"--shell":        func(a *App) { a.Shell = true },
+	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
+}
+
+// coreFlagsWithArg maps flag names that consume the next argument.
+var coreFlagsWithArg = map[string]func(*App, string){
+	"--dir": func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+}
+
+// ParseFlags parses all flags (core + extension) from the given args.
+// Everything after "--" is collected into ClaudeArgs.
+func (a *App) ParseFlags(args []string) error {
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+
+		// "--" separator: everything after goes to Claude.
+		if arg == "--" {
+			a.ClaudeArgs = append(a.ClaudeArgs, args[i+1:]...)
+			break
+		}
+
+		// Core boolean flags.
+		if setter, ok := coreFlags[arg]; ok {
+			setter(a)
+			i++
+			continue
+		}
+
+		// Core flags with an argument.
+		if setter, ok := coreFlagsWithArg[arg]; ok {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return fmt.Errorf("%s requires an argument", arg)
+			}
+			setter(a, args[i+1])
+			i += 2
+			continue
+		}
+
+		// Try each extension.
+		claimed := false
+		for _, ext := range a.Extensions {
+			consumed, ok := ext.ParseFlag(args[i:])
+			if ok {
+				claimed = true
+				i += consumed
+				break
+			}
+		}
+		if claimed {
+			continue
+		}
+
+		// Help flags -- handle here since cobra doesn't parse for us.
+		if arg == "--help" || arg == "-h" {
+			printHelp(a.Extensions)
+			os.Exit(0)
+		}
+		if arg == "--extensions" {
+			printExtensions(a.Extensions)
+			os.Exit(0)
+		}
+
+		// Unrecognised flag or positional arg -- forward to Claude.
+		// Claude Code accepts flags like --resume, --model, --print, etc.
+		a.ClaudeArgs = append(a.ClaudeArgs, arg)
+		i++
+	}
+	return nil
+}
+
+// Run is the main orchestration method.
+func (a *App) Run() error {
+	defer a.Cleanup()
+
+	// Precondition checks.
+	if os.Getenv("HOME") == "" {
+		return fmt.Errorf("HOME environment variable is not set")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("docker is not installed or not in PATH")
+	}
+
+	home := os.Getenv("HOME")
+	ensureDir(filepath.Join(home, ".claude"))
+
+	// Detect workspace.
+	a.Workspace = detectWorkspace()
+	a.EffectiveWorkspace = a.Workspace
+	cwd, _ := os.Getwd()
+	a.WorkspaceMountSrc = cwd
+
+	// Session persistence setup.
+	if !a.NoHistory {
+		a.HostProjectDir = ProjectDir(a.Workspace)
+		ensureDir(filepath.Join(home, ".claude", "projects", a.HostProjectDir))
+	}
+
+	// Worktree setup for primary workspace.
+	if a.Worktree {
+		gitRoot := a.Workspace
+		if gitRoot == cwd {
+			return fmt.Errorf("--worktree requires a git repository")
+		}
+		dirty, _ := captureCommand("git", "-C", gitRoot, "status", "--porcelain")
+		if dirty != "" {
+			logWarn("Working tree is dirty -- worktree will start clean from HEAD")
+		}
+		suffix := fmt.Sprintf("wt-%d", os.Getpid())
+		wtPath, err := a.createWorktree(gitRoot, suffix)
+		if err != nil {
+			return fmt.Errorf("failed to create worktree: %w", err)
+		}
+		a.EffectiveWorkspace = wtPath
+		rel := strings.TrimPrefix(cwd, gitRoot)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel != "" {
+			a.WorkspaceMountSrc = filepath.Join(wtPath, rel)
+		} else {
+			a.WorkspaceMountSrc = wtPath
+		}
+		logInfo("Worktree: %s", wtPath)
+	}
+
+	// Run setup resolvers for enabled extensions.
+	var resolverDockerArgs []string
+	var resolverFirewallExtra []string
+	for _, ext := range a.Extensions {
+		if !ext.Enabled {
+			continue
+		}
+		setupFn := registry.GetSetupResolver(ext.Name)
+		if setupFn == nil {
+			continue
+		}
+		// Create a staging directory for this extension.
+		staging, err := os.MkdirTemp("", "mittens-"+ext.Name+"-*")
+		if err != nil {
+			return fmt.Errorf("creating staging dir for %s: %w", ext.Name, err)
+		}
+		a.tempDirs = append(a.tempDirs, staging)
+
+		ctx := &registry.SetupContext{
+			Home:          home,
+			Extension:     ext,
+			DockerArgs:    &resolverDockerArgs,
+			FirewallExtra: &resolverFirewallExtra,
+			TempDirs:      &a.tempDirs,
+			StagingDir:    staging,
+		}
+		if err := setupFn(ctx); err != nil {
+			return fmt.Errorf("extension %s setup: %w", ext.Name, err)
+		}
+	}
+
+	// Collect extension build state.
+	a.buildArgs = make(map[string]string)
+	var installExtensions []string
+	for _, ext := range a.Extensions {
+		if !ext.Enabled {
+			continue
+		}
+		if ext.Build != nil && ext.Build.Script != "" {
+			installExtensions = append(installExtensions, ext.Name)
+		}
+		for k, v := range ext.BuildArgs() {
+			a.buildArgs[k] = v
+		}
+		tag := ext.ImageTagPart()
+		if tag != "" {
+			a.imageTagParts = append(a.imageTagParts, tag)
+		}
+	}
+	if len(installExtensions) > 0 {
+		a.buildArgs["INSTALL_EXTENSIONS"] = strings.Join(installExtensions, ",")
+	}
+	if len(a.imageTagParts) > 0 {
+		sort.Strings(a.imageTagParts)
+		a.ImageTag = strings.Join(a.imageTagParts, "-")
+	}
+
+	// Setup credentials.
+	a.Credentials = NewCredentialManager()
+	if err := a.Credentials.Setup(); err != nil {
+		logWarn("Credential setup: %v", err)
+	}
+
+	// Build Docker image.
+	if !a.NoBuild {
+		if err := a.buildImage(); err != nil {
+			return err
+		}
+	}
+
+	// Container name.
+	a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
+
+	// Yolo mode: prepend --dangerously-skip-permissions.
+	if a.Yolo {
+		a.ClaudeArgs = append([]string{"--dangerously-skip-permissions"}, a.ClaudeArgs...)
+		logWarn("YOLO mode: all permission prompts will be skipped")
+	}
+
+	// Assemble docker run args and run.
+	dockerArgs := a.assembleDockerArgs(resolverDockerArgs, resolverFirewallExtra)
+
+	// Summary logging.
+	logInfo("Working directory: %s", cwd)
+	if !a.NoHistory && a.HostProjectDir != "" {
+		logInfo("Session persistence: enabled (project dir: %s)", a.HostProjectDir)
+	} else if a.NoHistory {
+		logInfo("Session persistence: disabled (--no-history)")
+	}
+	if len(a.ClaudeArgs) > 0 {
+		logInfo("Claude args: %s", strings.Join(a.ClaudeArgs, " "))
+	}
+
+	if a.Verbose {
+		logInfo("Command: docker run %s", strings.Join(dockerArgs, " "))
+	}
+
+	return a.runContainer(dockerArgs)
+}
+
+// Cleanup extracts credentials, removes the container, cleans temp state.
+func (a *App) Cleanup() {
+	// Stop clipboard sync.
+	if a.clipboardPID > 0 {
+		if p, err := os.FindProcess(a.clipboardPID); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+			_, _ = p.Wait()
+		}
+	}
+	if a.clipboardDir != "" {
+		os.RemoveAll(a.clipboardDir)
+	}
+
+	// Extract refreshed credentials from the stopped container.
+	if a.ContainerName != "" {
+		if a.Credentials != nil {
+			_ = a.Credentials.PersistFromContainer(a.ContainerName)
+		}
+		RemoveContainer(a.ContainerName)
+	}
+
+	// Clean up credential temp file.
+	if a.Credentials != nil {
+		a.Credentials.Cleanup()
+	}
+
+	// Clean up worktrees: remove if clean, keep if dirty/new commits.
+	for _, wt := range a.worktreeDirs {
+		info, err := os.Stat(wt)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		dirty, _ := captureCommand("git", "-C", wt, "status", "--porcelain")
+		cur, _ := captureCommand("git", "-C", wt, "rev-parse", "HEAD")
+		orig := a.worktreeOrigins[wt]
+		if dirty == "" && cur == orig {
+			if err := exec.Command("git", "worktree", "remove", wt).Run(); err == nil {
+				logInfo("Removed clean worktree: %s", wt)
+			}
+		} else {
+			logInfo("Keeping worktree with changes: %s", wt)
+		}
+	}
+
+	// Clean up temp dirs.
+	for _, d := range a.tempDirs {
+		os.RemoveAll(d)
+	}
+}
+
+// buildImage runs docker build.
+func (a *App) buildImage() error {
+	logInfo("Building Docker image...")
+
+	projectRoot := scriptDir()
+	dockerfile := filepath.Join(projectRoot, "container", "Dockerfile")
+	if _, err := os.Stat(dockerfile); err != nil {
+		return fmt.Errorf("Dockerfile not found at %s", dockerfile)
+	}
+
+	uid, gid := CurrentUserIDs()
+
+	var enabledExts []*registry.Extension
+	for _, ext := range a.Extensions {
+		if ext.Enabled {
+			enabledExts = append(enabledExts, ext)
+		}
+	}
+
+	return BuildImage(BuildContext{
+		ContextDir: projectRoot,
+		Dockerfile: dockerfile,
+		ImageName:  a.ImageName,
+		ImageTag:   a.ImageTag,
+		UserID:     uid,
+		GroupID:    gid,
+		Extensions: enabledExts,
+		Quiet:      true,
+	})
+}
+
+// assembleDockerArgs builds the full docker run argument list.
+// resolverArgs and resolverFirewall come from extension setup resolvers.
+func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []string) []string {
+	home := os.Getenv("HOME")
+	args := []string{
+		"-it",
+		"--name", a.ContainerName,
+	}
+
+	// Primary workspace mount.
+	args = append(args, "-v", a.WorkspaceMountSrc+":/workspace")
+
+	// Claude config staging (read-only).
+	args = append(args, "-v", filepath.Join(home, ".claude")+":/mnt/claude-config/.claude:ro")
+
+	// Environment variables.
+	args = append(args, "-e", "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
+	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
+	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
+
+	// Credential mount.
+	if a.Credentials != nil && a.Credentials.TmpFile() != "" {
+		args = append(args, "-v", a.Credentials.TmpFile()+":/mnt/claude-config/.credentials.json:ro")
+	}
+
+	// Session persistence mounts.
+	if !a.NoHistory && a.HostProjectDir != "" {
+		projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
+		containerProjDir := filepath.Join("/home/claude/.claude/projects", a.HostProjectDir)
+		args = append(args, "-v", projDir+":"+containerProjDir)
+
+		if !a.Worktree {
+			ensureDir(filepath.Join(home, ".claude", "plans"))
+			ensureDir(filepath.Join(home, ".claude", "tasks"))
+			args = append(args, "-v", filepath.Join(home, ".claude", "plans")+":/home/claude/.claude/plans")
+			args = append(args, "-v", filepath.Join(home, ".claude", "tasks")+":/home/claude/.claude/tasks")
+		}
+
+		sessionWS := a.EffectiveWorkspace
+		if sessionWS != "" && sessionWS != "/workspace" {
+			args = append(args, "-e", "MITTENS_HOST_WORKSPACE="+sessionWS)
+			args = append(args, "-v", a.WorkspaceMountSrc+":"+sessionWS)
+		}
+	}
+
+	// Extra directory mounts.
+	if len(a.ExtraDirs) > 0 {
+		wtSuffix := fmt.Sprintf("wt-%d", os.Getpid())
+		var extraPaths []string
+		for _, dir := range a.ExtraDirs {
+			resolved, err := filepath.Abs(dir)
+			if err != nil {
+				logWarn("--dir path not resolvable: %s", dir)
+				continue
+			}
+			if _, err := os.Stat(resolved); err != nil {
+				logError("--dir path does not exist: %s", dir)
+				continue
+			}
+
+			var extraPath string
+			if a.Worktree {
+				gitRoot, err := captureCommand("git", "-C", resolved, "rev-parse", "--show-toplevel")
+				if err == nil && gitRoot != "" {
+					wtPath, err := a.createWorktree(gitRoot, wtSuffix)
+					if err == nil {
+						rel := strings.TrimPrefix(resolved, gitRoot)
+						rel = strings.TrimPrefix(rel, "/")
+						if rel != "" {
+							extraPath = filepath.Join(wtPath, rel)
+						} else {
+							extraPath = wtPath
+						}
+						args = append(args, "-v", wtPath+":"+wtPath)
+						logInfo("Extra directory worktree: %s", wtPath)
+					} else {
+						logWarn("Failed to create worktree for %s, mounting shared", gitRoot)
+						extraPath = resolved
+						args = append(args, "-v", resolved+":"+resolved)
+					}
+				} else {
+					extraPath = resolved
+					args = append(args, "-v", resolved+":"+resolved)
+				}
+			} else {
+				extraPath = resolved
+				args = append(args, "-v", resolved+":"+resolved)
+			}
+			extraPaths = append(extraPaths, extraPath)
+			logInfo("Extra directory: %s", extraPath)
+		}
+		if len(extraPaths) > 0 {
+			args = append(args, "-e", "MITTENS_EXTRA_DIRS="+strings.Join(extraPaths, ":"))
+		}
+	}
+
+	// Worktree git metadata mounts.
+	if len(a.worktreeRepos) > 0 {
+		mounted := make(map[string]bool)
+		for _, repo := range a.worktreeRepos {
+			if !mounted[repo] {
+				gitDir := filepath.Join(repo, ".git")
+				args = append(args, "-v", gitDir+":"+gitDir)
+				mounted[repo] = true
+			}
+		}
+	}
+
+	// .claude.json (user prefs, account info, MCP servers).
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if fileExists(claudeJSON) {
+		args = append(args, "-v", claudeJSON+":/mnt/claude-config/.claude.json:ro")
+	}
+
+	// .gitconfig
+	gitconfig := filepath.Join(home, ".gitconfig")
+	if fileExists(gitconfig) {
+		args = append(args, "-v", gitconfig+":/mnt/claude-config/.gitconfig:ro")
+	}
+
+	// Extension mounts, env vars, capabilities (from YAML declarations).
+	var firewallDomains []string
+	for _, ext := range a.Extensions {
+		if !ext.Enabled {
+			continue
+		}
+
+		// Mounts from YAML.
+		for _, m := range ext.ExpandedMounts(home) {
+			mountStr := m.Src + ":" + m.Dst
+			if m.Mode != "" {
+				mountStr += ":" + m.Mode
+			}
+			args = append(args, "-v", mountStr)
+			for k, v := range m.Env {
+				args = append(args, "-e", k+"="+v)
+			}
+		}
+
+		// Env vars from YAML.
+		for k, v := range ext.Env {
+			args = append(args, "-e", k+"="+v)
+		}
+
+		// Capabilities from YAML.
+		for _, capability := range ext.Capabilities {
+			args = append(args, "--cap-add", capability)
+		}
+
+		// Firewall domains from YAML.
+		firewallDomains = append(firewallDomains, ext.FirewallDomains()...)
+	}
+
+	// Add resolver-contributed docker args and firewall domains.
+	args = append(args, resolverArgs...)
+	firewallDomains = append(firewallDomains, resolverFirewall...)
+
+	if len(firewallDomains) > 0 {
+		args = append(args, "-e", "MITTENS_FIREWALL_EXTRA="+strings.Join(firewallDomains, ","))
+	}
+
+	// Security hardening.
+	if a.DinD {
+		args = append(args, "--privileged")
+		args = append(args, "-v", "mittens-docker-data:/var/lib/docker")
+		logWarn("Docker-in-Docker enabled (--privileged)")
+	} else {
+		args = append(args,
+			"--cap-drop", "ALL",
+			"--cap-add", "SETUID",
+			"--cap-add", "SETGID",
+			"--security-opt", "no-new-privileges",
+		)
+	}
+
+	// Network mode.
+	if a.NetworkHost {
+		args = append(args, "--network", "host")
+	}
+
+	// Clipboard image sync (macOS only).
+	if runtime.GOOS == "darwin" {
+		dir, err := os.MkdirTemp("", "mittens-clipboard.*")
+		if err == nil {
+			a.clipboardDir = dir
+			syncScript := filepath.Join(containerDir(), "clipboard-sync.sh")
+			cmd := exec.Command("bash", syncScript, dir)
+			if err := cmd.Start(); err == nil {
+				a.clipboardPID = cmd.Process.Pid
+				args = append(args, "-v", dir+":/tmp/mittens-clipboard:ro")
+				logInfo("Clipboard image sync: enabled")
+			}
+		}
+	}
+
+	return args
+}
+
+// runContainer runs docker run with the assembled args.
+func (a *App) runContainer(dockerArgs []string) error {
+	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.ClaudeArgs)
+	if err != nil {
+		return fmt.Errorf("docker run failed: %w", err)
+	}
+	if code != 0 {
+		os.Exit(code)
+	}
+	return nil
+}
+
+// createWorktree creates a detached-HEAD git worktree as a sibling directory.
+func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
+	headSHA, err := captureCommand("git", "-C", repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+
+	wtPath := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+"."+suffix)
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", wtPath, "HEAD")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git worktree add: %w: %s", err, out)
+	}
+
+	a.worktreeDirs = append(a.worktreeDirs, wtPath)
+	a.worktreeOrigins[wtPath] = headSHA
+	a.worktreeRepos[wtPath] = repoRoot
+	return wtPath, nil
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func ensureDir(path string) {
+	_ = os.MkdirAll(path, 0o755)
+}
+
+// ---------------------------------------------------------------------------
+// Help text
+// ---------------------------------------------------------------------------
+
+func printHelp(exts []*registry.Extension) {
+	fmt.Println(`mittens - Run Claude Code in an isolated Docker container
+
+Usage: mittens [flags] [-- claude-args...]
+
+Core flags:
+  --verbose, -v     Show the docker command being run
+  --no-config       Skip project config file loading
+  --no-history      Disable session persistence (fully ephemeral)
+  --no-build        Skip the Docker image build step
+  --dind            Enable Docker-in-Docker (--privileged)
+  --yolo            Skip all permission prompts
+  --network-host    Use host networking (default: bridge)
+  --worktree        Git worktree isolation per invocation
+  --shell           Start a bash shell instead of Claude
+  --dir PATH        Mount an additional directory (repeatable)
+  --extensions      List loaded extensions and their flags
+  --help, -h        Show this help message`)
+
+	if len(exts) > 0 {
+		fmt.Println("\nExtension flags:")
+		for _, ext := range exts {
+			for _, f := range ext.Flags {
+				desc := f.Description
+				if desc == "" {
+					desc = ext.Description
+				}
+				fmt.Printf("  %-18s %s\n", f.Name, desc)
+			}
+		}
+	}
+}
+
+func printExtensions(exts []*registry.Extension) {
+	if len(exts) == 0 {
+		fmt.Println("No extensions loaded")
+		return
+	}
+	fmt.Println("Loaded extensions:")
+	fmt.Println()
+	for _, ext := range exts {
+		fmt.Printf("  %s: %s\n", ext.Name, ext.Description)
+		for _, f := range ext.Flags {
+			desc := f.Description
+			if desc == "" {
+				desc = "(no description)"
+			}
+			fmt.Printf("    %-16s %s\n", f.Name, desc)
+		}
+	}
+}

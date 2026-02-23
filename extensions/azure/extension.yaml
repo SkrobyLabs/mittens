@@ -1,0 +1,24 @@
+# azure extension for mittens
+# Mounts Azure credentials into the container with optional subscription filtering.
+# --azure SUB mounts only selected subscriptions; --azure-all mounts everything.
+# --azure (no argument) lists available subscriptions and exits.
+
+name: azure
+description: Mount filtered Azure credentials into the container
+
+flags:
+  - name: "--azure"
+    description: "Mount filtered Azure credentials (repeatable, comma-separated)"
+    arg: "csv"
+  - name: "--azure-all"
+    description: "Mount entire ~/.azure directory (all subscriptions)"
+
+firewall:
+  - "login.microsoftonline.com"
+  - "management.azure.com"
+  - "graph.microsoft.com"
+
+build:
+  script: "azure.sh"
+  image_tag: "azure"
+

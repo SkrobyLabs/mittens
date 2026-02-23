@@ -1,0 +1,23 @@
+# aws extension for mittens
+# Mounts AWS credentials into the container with optional profile filtering.
+# --aws PROFILE mounts only selected profiles; --aws-all mounts everything.
+# --aws (no argument) lists available profiles and exits.
+
+name: aws
+description: Mount filtered AWS credentials into the container
+
+flags:
+  - name: "--aws"
+    description: "Mount filtered AWS credentials (repeatable, comma-separated)"
+    arg: "csv"
+  - name: "--aws-all"
+    description: "Mount entire ~/.aws directory (all profiles)"
+
+firewall:
+  - "sts.amazonaws.com"
+  - "signin.aws.amazon.com"
+
+build:
+  script: "aws.sh"
+  image_tag: "aws"
+
