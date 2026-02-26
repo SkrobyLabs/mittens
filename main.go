@@ -15,6 +15,7 @@ import (
 	_ "github.com/Skroby/mittens/extensions/azure"
 	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	_ "github.com/Skroby/mittens/extensions/gcp"
+	_ "github.com/Skroby/mittens/extensions/gh"
 	_ "github.com/Skroby/mittens/extensions/kubectl"
 	_ "github.com/Skroby/mittens/extensions/mcp"
 )
@@ -109,7 +110,10 @@ func runMain(args []string) error {
 	app.Extensions = exts
 
 	// Set the default firewall.conf path for the firewall extension.
+	// Also provide the embedded copy so the binary works standalone
+	// (e.g. after "make install" to /usr/local/bin).
 	firewallext.DefaultConfPath = filepath.Join(containerDir(), "firewall.conf")
+	firewallext.EmbeddedConf = embeddedFirewallConf
 
 	// 3. Pre-scan for --no-config (needed before loading project config).
 	noConfig := false
