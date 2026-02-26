@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	"github.com/Skroby/mittens/extensions/registry"
 )
 
@@ -76,6 +77,7 @@ var coreFlags = map[string]func(*App){
 	"--shell":        func(a *App) { a.Shell = true },
 	"--no-resume":    func(a *App) { a.NoResume = true },
 	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
+	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
 
 // coreFlagsWithArg maps flag names that consume the next argument.
@@ -745,6 +747,7 @@ Core flags:
   --no-history      Disable session persistence (fully ephemeral)
   --no-resume       Start a new session (default: continue last)
   --no-build        Skip the Docker image build step
+  --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
   --dind            Enable Docker-in-Docker (--privileged)
   --yolo            Skip all permission prompts
   --network-host    Use host networking (default: bridge)

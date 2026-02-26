@@ -97,6 +97,7 @@ func runMain(args []string) error {
 	// (e.g. after "make install" to /usr/local/bin).
 	firewallext.DefaultConfPath = filepath.Join(containerDir(), "firewall.conf")
 	firewallext.EmbeddedConf = embeddedFirewallConf
+	firewallext.EmbeddedDevConf = embeddedFirewallDevConf
 
 	// 3. Pre-scan for --no-config (needed before loading project config).
 	noConfig := false
