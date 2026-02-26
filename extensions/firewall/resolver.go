@@ -32,9 +32,22 @@ var DefaultConfPath string
 // resolver extracts this to a temp file so it can be bind-mounted.
 var EmbeddedConf []byte
 
+// DevMode is set to true when --firewall-dev is passed. It switches the
+// firewall from the strict whitelist to the developer-friendly superset.
+var DevMode bool
+
+// EmbeddedDevConf can be set by the main package to provide the embedded
+// firewall-dev.conf content (developer-friendly whitelist).
+var EmbeddedDevConf []byte
+
 // listDomains reads the firewall.conf file and returns a sorted list of
 // whitelisted domain names (one per line, comments stripped).
 func listDomains() ([]string, error) {
+	// In DevMode, use the developer-friendly conf if available.
+	if DevMode && len(EmbeddedDevConf) > 0 {
+		return parseFirewallDomains(string(EmbeddedDevConf))
+	}
+
 	path := resolveConfPath("")
 
 	// Fall back to parsing the embedded content directly (no temp file
@@ -63,6 +76,16 @@ func listDomains() ([]string, error) {
 func setup(ctx *registry.SetupContext) error {
 	ext := ctx.Extension
 
+	// In DevMode, use the developer-friendly conf directly from the
+	// embedded content (ignore any custom --firewall path).
+	if DevMode && len(EmbeddedDevConf) > 0 {
+		tmp, err := extractEmbedded(EmbeddedDevConf, "mittens-firewall-dev-*.conf")
+		if err != nil {
+			return fmt.Errorf("extracting embedded firewall-dev.conf: %w", err)
+		}
+		return mountFirewall(ctx, tmp)
+	}
+
 	confPath := resolveConfPath(ext.RawArg)
 
 	// If the resolved path doesn't exist on disk, try extracting the
@@ -71,7 +94,7 @@ func setup(ctx *registry.SetupContext) error {
 	// container/ directory alongside it.
 	if confPath == "" || !fileExists(confPath) {
 		if len(EmbeddedConf) > 0 {
-			tmp, err := extractEmbeddedConf()
+			tmp, err := extractEmbedded(EmbeddedConf, "mittens-firewall-*.conf")
 			if err != nil {
 				return fmt.Errorf("extracting embedded firewall.conf: %w", err)
 			}
@@ -83,15 +106,7 @@ func setup(ctx *registry.SetupContext) error {
 		}
 	}
 
-	// Mount the config file read-only into the container.
-	*ctx.DockerArgs = append(*ctx.DockerArgs,
-		"-v", confPath+":/mnt/claude-config/firewall.conf:ro",
-	)
-
-	// Tell the entrypoint to enable the firewall.
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-e", "MITTENS_FIREWALL=true")
-
-	return nil
+	return mountFirewall(ctx, confPath)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,14 +169,24 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// extractEmbeddedConf writes EmbeddedConf to a temp file and returns its
-// path. The file is placed in os.TempDir so the OS cleans it up eventually.
-func extractEmbeddedConf() (string, error) {
-	f, err := os.CreateTemp("", "mittens-firewall-*.conf")
+// mountFirewall adds docker args to mount a firewall config file and enable
+// the firewall in the container entrypoint.
+func mountFirewall(ctx *registry.SetupContext, confPath string) error {
+	*ctx.DockerArgs = append(*ctx.DockerArgs,
+		"-v", confPath+":/mnt/claude-config/firewall.conf:ro",
+		"-e", "MITTENS_FIREWALL=true",
+	)
+	return nil
+}
+
+// extractEmbedded writes the given content to a temp file with the given
+// name pattern and returns its path.
+func extractEmbedded(content []byte, pattern string) (string, error) {
+	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return "", err
 	}
-	if _, err := f.Write(EmbeddedConf); err != nil {
+	if _, err := f.Write(content); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", err

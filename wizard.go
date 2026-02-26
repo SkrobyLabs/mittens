@@ -43,7 +43,6 @@ var knownExtEntries = []extEntry{
 	{label: "GitHub CLI auth (--gh)", key: "gh", flag: "--gh"},
 	{label: ".NET SDK (--dotnet)", key: "dotnet", flag: "--dotnet", needsCfg: true},
 	{label: "Go SDK (--go)", key: "go", flag: "--go", needsCfg: true},
-	{label: "Disable network firewall (--no-firewall)", key: "firewall", flag: "--no-firewall"},
 	{label: "AWS credentials (--aws)", key: "aws", flag: "--aws", needsCfg: true},
 	{label: "GCP credentials (--gcp)", key: "gcp", flag: "--gcp", needsCfg: true},
 	{label: "Azure credentials (--azure)", key: "azure", flag: "--azure", needsCfg: true},
@@ -81,7 +80,7 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	editMode := false
-	var existDirs, existExts, existOpts []string
+	var existDirs, existExts, existFirewall, existOpts []string
 
 	if len(existing) > 0 {
 		configPath := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
@@ -118,7 +117,7 @@ func runWizard(extensions []*registry.Extension) error {
 			return nil
 		case "edit":
 			editMode = true
-			existDirs, existExts, existOpts = parseExistingConfig(existing)
+			existDirs, existExts, existFirewall, existOpts = parseExistingConfig(existing)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
@@ -138,6 +137,13 @@ func runWizard(extensions []*registry.Extension) error {
 		return gracefulAbort(err)
 	}
 	configLines = append(configLines, extLines...)
+
+	// ── Step 3: Firewall ───────────────────────────────────────────────────
+	fwLines, err := wizardFirewall(editMode, existFirewall)
+	if err != nil {
+		return gracefulAbort(err)
+	}
+	configLines = append(configLines, fwLines...)
 
 	// ── Step N: Options ────────────────────────────────────────────────────
 	optLines, err := wizardOptions(editMode, existOpts)
@@ -623,6 +629,82 @@ func configureMCP() ([]string, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Step 3: Firewall
+// ---------------------------------------------------------------------------
+
+func wizardFirewall(editMode bool, existFirewall []string) ([]string, error) {
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Firewall"))
+
+	if editMode {
+		if len(existFirewall) > 0 {
+			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
+			for _, f := range existFirewall {
+				fmt.Fprintln(os.Stderr, "  "+f)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "  (strict — default)")
+		}
+		fmt.Fprintln(os.Stderr)
+
+		var action string
+		if err := huh.NewSelect[string]().
+			Title("Firewall mode").
+			Options(
+				huh.NewOption("Keep", "keep"),
+				huh.NewOption("Change", "change"),
+			).
+			Value(&action).
+			Run(); err != nil {
+			return nil, err
+		}
+		if action == "keep" {
+			fmt.Fprintln(os.Stderr)
+			return existFirewall, nil
+		}
+	}
+
+	fmt.Fprintln(os.Stderr)
+
+	var mode string
+	if err := huh.NewSelect[string]().
+		Title("Firewall mode").
+		Options(
+			huh.NewOption("Strict (default) — git, registries, package managers only", "strict"),
+			huh.NewOption("Developer-friendly (--firewall-dev) — adds cloud APIs, apt, CDN", "dev"),
+			huh.NewOption("Custom file — provide your own whitelist", "custom"),
+			huh.NewOption("Disabled (--no-firewall) — allow all outbound traffic", "off"),
+		).
+		Value(&mode).
+		Run(); err != nil {
+		return nil, err
+	}
+	fmt.Fprintln(os.Stderr)
+
+	switch mode {
+	case "dev":
+		return []string{"--firewall-dev"}, nil
+	case "custom":
+		var path string
+		if err := huh.NewInput().
+			Title("Path to custom whitelist file").
+			Placeholder("/path/to/firewall.conf").
+			Value(&path).
+			Run(); err != nil {
+			return nil, err
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return nil, nil
+		}
+		return []string{"--firewall " + path}, nil
+	case "off":
+		return []string{"--no-firewall"}, nil
+	default:
+		return nil, nil
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Step N: Options
 // ---------------------------------------------------------------------------
 
@@ -727,14 +809,16 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 // ---------------------------------------------------------------------------
 
 // parseExistingConfig categorises existing config lines into directories,
-// extensions, and options.
-func parseExistingConfig(lines []string) (dirs, exts, opts []string) {
+// extensions, firewall, and options.
+func parseExistingConfig(lines []string) (dirs, exts, firewall, opts []string) {
 	for _, line := range lines {
 		switch {
 		case strings.HasPrefix(line, "--dir "):
 			dirs = append(dirs, line)
 		case line == "--dind" || line == "--yolo" || line == "--network-host" || line == "--worktree":
 			opts = append(opts, line)
+		case line == "--firewall-dev" || line == "--no-firewall" || strings.HasPrefix(line, "--firewall "):
+			firewall = append(firewall, line)
 		default:
 			exts = append(exts, line)
 		}
