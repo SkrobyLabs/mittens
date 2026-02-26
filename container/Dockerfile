@@ -57,8 +57,12 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
     containerd.io \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code CLI (native binary — required for fast mode)
+# The installer may create a symlink; cp -L follows it to copy the real binary.
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    cp -L /root/.local/bin/claude /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude && \
+    /usr/local/bin/claude --version
 
 # Build-time extension installer
 # Extensions live in extensions/<name>/build.sh

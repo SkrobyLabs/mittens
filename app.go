@@ -308,6 +308,11 @@ func (a *App) Cleanup() {
 			_ = a.Credentials.PersistFromContainer(a.ContainerName)
 		}
 		RemoveContainer(a.ContainerName)
+
+		// Remove per-container DinD volume.
+		if a.DinD {
+			_ = exec.Command("docker", "volume", "rm", a.ContainerName+"-docker").Run()
+		}
 	}
 
 	// Clean up credential temp file.
@@ -534,7 +539,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Security hardening.
 	if a.DinD {
 		args = append(args, "--privileged")
-		args = append(args, "-v", "mittens-docker-data:/var/lib/docker")
+		args = append(args, "-v", a.ContainerName+"-docker:/var/lib/docker")
 		logWarn("Docker-in-Docker enabled (--privileged)")
 	} else {
 		args = append(args,
