@@ -1,16 +1,16 @@
 # gh extension for mittens
-# Mounts GitHub CLI config into the container (read-only).
+# Mounts GitHub CLI config into the container with token forwarding.
+# Tokens are extracted from the host's keyring via `gh auth token` and
+# embedded in hosts.yml so they work inside containers without a keyring.
 
 name: gh
-description: Mount GitHub CLI config (~/.config/gh) into the container
+description: Mount GitHub CLI config (~/.config/gh) with token forwarding
 
 flags:
   - name: "--gh"
-    description: "Mount GitHub CLI config (~/.config/gh, read-only)"
+    description: "Mount GitHub CLI config with token forwarding"
     arg: "none"
 
-mounts:
-  - src: "~/.config/gh"
-    dst: "/home/claude/.config/gh"
-    mode: "ro"
-    when: "dir_exists"
+# No declarative mounts — the Go resolver in resolver.go handles mounting.
+# It copies ~/.config/gh to a staging dir, enriches hosts.yml with tokens
+# extracted from the host's credential store, and mounts the result.

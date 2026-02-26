@@ -4,8 +4,7 @@
 *.swo
 *~
 .DS_Store
-.claude/settings.local.json
-.claude/.planArchives/
+.claude/
 
 # Go build artifacts
 mittens
