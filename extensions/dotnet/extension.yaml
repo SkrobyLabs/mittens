@@ -7,9 +7,10 @@ description: Install .NET SDK into the container image
 
 flags:
   - name: "--dotnet"
-    description: "Install .NET SDK (VERSION: 8, 9, 10; default: LTS)"
+    description: "Install .NET SDK (VERSION: 8, 9, 10 — comma-separated; default: LTS)"
     arg: "enum"
     enum_values: ["8", "9", "10"]
+    multi: true
 
 firewall:
   - "nuget.org"
@@ -29,4 +30,4 @@ build:
   script: "dotnet.sh"
   image_tag: "dotnet{{.Arg}}"
   args:
-    DOTNET_CHANNEL: "{{if .Arg}}{{.Arg}}.0{{else}}LTS{{end}}"
+    DOTNET_CHANNEL: "{{if .Arg}}{{.Arg}}{{else}}LTS{{end}}"

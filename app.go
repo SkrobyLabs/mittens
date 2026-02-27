@@ -25,6 +25,7 @@ type App struct {
 	NetworkHost bool
 	Worktree    bool
 	Shell       bool
+	NoResume    bool
 	ExtraDirs   []string
 	ClaudeArgs  []string
 
@@ -66,6 +67,7 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
+	"--no-resume":    func(a *App) { a.NoResume = true },
 	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
 }
 
@@ -261,6 +263,23 @@ func (a *App) Run() error {
 
 	// Container name.
 	a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
+
+	// Auto-continue last session unless opted out or user already specified resume/continue.
+	if !a.NoResume && !a.Shell && a.HostProjectDir != "" {
+		hasResume := false
+		for _, arg := range a.ClaudeArgs {
+			if arg == "--continue" || arg == "-c" || arg == "--resume" || arg == "-r" {
+				hasResume = true
+				break
+			}
+		}
+		if !hasResume {
+			projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
+			if matches, _ := filepath.Glob(filepath.Join(projDir, "*.jsonl")); len(matches) > 0 {
+				a.ClaudeArgs = append([]string{"--continue"}, a.ClaudeArgs...)
+			}
+		}
+	}
 
 	// Yolo mode: prepend --dangerously-skip-permissions.
 	if a.Yolo {
@@ -637,6 +656,7 @@ Core flags:
   --verbose, -v     Show the docker command being run
   --no-config       Skip project config file loading
   --no-history      Disable session persistence (fully ephemeral)
+  --no-resume       Start a new session (default: continue last)
   --no-build        Skip the Docker image build step
   --dind            Enable Docker-in-Docker (--privileged)
   --yolo            Skip all permission prompts

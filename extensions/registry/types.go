@@ -33,6 +33,7 @@ type ExtensionFlag struct {
 	Description string   `yaml:"description"`
 	Arg         string   `yaml:"arg"`         // none, csv, enum, path
 	EnumValues  []string `yaml:"enum_values"` // for enum arg type
+	Multi       bool     `yaml:"multi"`       // allow comma-separated enum values
 }
 
 // MountConfig describes a bind mount an extension needs.
@@ -120,15 +121,34 @@ func (e *Extension) ParseFlag(args []string) (consumed int, matched bool) {
 		case "enum":
 			e.Enabled = true
 			// Enum arg is optional: if next arg is a valid value, consume it.
+			// When multi=true, comma-separated lists of valid values are accepted.
 			// Otherwise just enable the extension with no specific value.
 			if len(args) >= 2 {
 				val := args[1]
-				for _, ev := range flag.EnumValues {
-					if ev == val {
-						e.RawArg = val
-						e.Args = []string{val}
-						return 2, true
+				var parts []string
+				if flag.Multi {
+					parts = strings.Split(val, ",")
+				} else {
+					parts = []string{val}
+				}
+				allValid := true
+				for _, p := range parts {
+					found := false
+					for _, ev := range flag.EnumValues {
+						if ev == p {
+							found = true
+							break
+						}
 					}
+					if !found {
+						allValid = false
+						break
+					}
+				}
+				if allValid {
+					e.RawArg = val
+					e.Args = parts
+					return 2, true
 				}
 			}
 			return 1, true
@@ -153,7 +173,9 @@ func (e *Extension) ImageTagPart() string {
 	if e.Build == nil || e.Build.ImageTag == "" {
 		return ""
 	}
-	return strings.ReplaceAll(e.Build.ImageTag, "{{.Arg}}", e.RawArg)
+	tag := strings.ReplaceAll(e.Build.ImageTag, "{{.Arg}}", e.RawArg)
+	// Sanitize comma-separated args for Docker tag compatibility.
+	return strings.ReplaceAll(tag, ",", "-")
 }
 
 // BuildArgs returns the resolved build arguments, expanding Go templates

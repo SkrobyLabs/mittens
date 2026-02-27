@@ -35,9 +35,9 @@ build: tidy ## Build the mittens binary
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
 	@echo "Built ./$(BINARY) — run 'make help' to see all targets"
 
-install: build ## Install binary to PREFIX/bin (default: /usr/local/bin)
+install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
-	install -m 755 $(BINARY) $(PREFIX)/bin/$(BINARY)
+	ln -sf $(CURDIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 
