@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,11 @@ type App struct {
 	// Clipboard sync
 	clipboardDir string
 	clipboardPID int
+
+	// Credential broker
+	brokerDir  string
+	brokerSock string
+	broker     *CredentialBroker
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -254,6 +260,23 @@ func (a *App) Run() error {
 		logWarn("Credential setup: %v", err)
 	}
 
+	// Start credential broker (for multi-container token sync).
+	if a.Credentials.TmpFile() != "" {
+		seed, _ := os.ReadFile(a.Credentials.TmpFile())
+		dir, err := os.MkdirTemp("", "mittens-broker.*")
+		if err == nil {
+			a.brokerDir = dir
+			a.brokerSock = filepath.Join(dir, "broker.sock")
+			a.broker = NewCredentialBroker(a.brokerSock, string(seed))
+			go func() {
+				if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
+					logWarn("Credential broker: %v", err)
+				}
+			}()
+			logInfo("Credential broker: started")
+		}
+	}
+
 	// Build Docker image.
 	if !a.NoBuild {
 		if err := a.buildImage(); err != nil {
@@ -324,7 +347,17 @@ func (a *App) Cleanup() {
 	// Extract refreshed credentials from the stopped container.
 	if a.ContainerName != "" {
 		if a.Credentials != nil {
-			_ = a.Credentials.PersistFromContainer(a.ContainerName)
+			if a.broker != nil {
+				// Broker has the freshest credentials from all containers.
+				finalCreds := a.broker.Credentials()
+				_ = a.broker.Close()
+				if finalCreds != "" {
+					a.Credentials.PersistAll(finalCreds)
+				}
+			} else {
+				// Fallback: docker cp from the single container.
+				_ = a.Credentials.PersistFromContainer(a.ContainerName)
+			}
 		}
 		RemoveContainer(a.ContainerName)
 
@@ -332,6 +365,11 @@ func (a *App) Cleanup() {
 		if a.DinD {
 			_ = exec.Command("docker", "volume", "rm", a.ContainerName+"-docker").Run()
 		}
+	}
+
+	// Clean up credential broker temp dir.
+	if a.brokerDir != "" {
+		os.RemoveAll(a.brokerDir)
 	}
 
 	// Clean up credential temp file.
@@ -417,6 +455,12 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Credential mount.
 	if a.Credentials != nil && a.Credentials.TmpFile() != "" {
 		args = append(args, "-v", a.Credentials.TmpFile()+":/mnt/claude-config/.credentials.json:ro")
+	}
+
+	// Credential broker socket mount.
+	if a.brokerDir != "" {
+		args = append(args, "-v", a.brokerDir+":/tmp/mittens-broker")
+		args = append(args, "-e", "MITTENS_CRED_BROKER_SOCK=/tmp/mittens-broker/broker.sock")
 	}
 
 	// Session persistence mounts.

@@ -117,6 +117,9 @@ RUN chmod +x /usr/local/bin/xclip
 COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+COPY container/cred-sync.sh /usr/local/bin/cred-sync.sh
+RUN chmod +x /usr/local/bin/cred-sync.sh
+
 # NOTE: No USER directive here — entrypoint.sh handles the root→claude
 # privilege drop via gosu, which is needed for optional DinD (dockerd
 # must start as root). When DinD is disabled the entrypoint still drops

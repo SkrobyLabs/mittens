@@ -280,6 +280,34 @@ func TestCredentialManager_Cleanup(t *testing.T) {
 	}
 }
 
+func TestCredentialManager_PersistAll(t *testing.T) {
+	tmp := t.TempDir()
+
+	pathA := filepath.Join(tmp, "a.json")
+	pathB := filepath.Join(tmp, "b.json")
+
+	mgr := &CredentialManager{
+		stores: []CredentialStore{
+			&FileCredentialStore{path: pathA},
+			&FileCredentialStore{path: pathB},
+		},
+	}
+
+	creds := `{"accessToken":"refreshed","expiresAt":9999}`
+	mgr.PersistAll(creds)
+
+	// Both stores should have the credentials.
+	for _, path := range []string{pathA, pathB} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		if string(data) != creds {
+			t.Errorf("%s = %q, want %q", path, data, creds)
+		}
+	}
+}
+
 func TestCredentialManager_Setup_PicksFreshest(t *testing.T) {
 	tmp := t.TempDir()
 

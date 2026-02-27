@@ -588,6 +588,60 @@ func TestAssembleDockerArgs_OptionalFiles(t *testing.T) {
 	}
 }
 
+func TestAssembleDockerArgs_CredBroker(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	brokerDir := t.TempDir()
+
+	a := &App{
+		NoHistory:         true,
+		ContainerName:     "mittens-broker",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+		brokerDir:         brokerDir,
+		brokerSock:        filepath.Join(brokerDir, "broker.sock"),
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Broker dir mount.
+	wantMount := brokerDir + ":/tmp/mittens-broker"
+	if !argPairExists(args, "-v", wantMount) {
+		t.Errorf("missing broker mount, want -v %s\nargs: %v", wantMount, args)
+	}
+
+	// Broker socket env var.
+	if !argPairExists(args, "-e", "MITTENS_CRED_BROKER_SOCK=/tmp/mittens-broker/broker.sock") {
+		t.Error("missing MITTENS_CRED_BROKER_SOCK env var")
+	}
+}
+
+func TestAssembleDockerArgs_NoBroker(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		ContainerName:     "mittens-nobroker",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+		// brokerDir is empty — no broker
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Should NOT have broker mount or env var.
+	if argPairContains(args, "-v", "mittens-broker") {
+		t.Error("broker mount should not be present without broker")
+	}
+	if argPairContains(args, "-e", "MITTENS_CRED_BROKER_SOCK") {
+		t.Error("MITTENS_CRED_BROKER_SOCK should not be present without broker")
+	}
+}
+
 func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

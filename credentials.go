@@ -124,6 +124,15 @@ func (m *CredentialManager) PersistFromContainer(containerName string) error {
 	return nil
 }
 
+// PersistAll writes the given JSON credentials to all known stores.
+func (m *CredentialManager) PersistAll(jsonData string) {
+	for _, s := range m.stores {
+		if err := s.Persist(jsonData); err != nil {
+			logWarn("Failed to persist credentials to %s: %v", s.Label(), err)
+		}
+	}
+}
+
 // Cleanup removes the temporary credential file.
 func (m *CredentialManager) Cleanup() {
 	if m.tmpFile != "" {

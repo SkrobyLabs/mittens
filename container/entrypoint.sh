@@ -280,6 +280,11 @@ if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; 
     } >> "$CLAUDE_DIR/CLAUDE.md"
 fi
 
+# --- Start credential sync daemon (if broker socket is available) ---
+if [[ -n "${MITTENS_CRED_BROKER_SOCK:-}" && -S "$MITTENS_CRED_BROKER_SOCK" ]]; then
+    /usr/local/bin/cred-sync.sh &
+fi
+
 # --- cd to host workspace path so Claude computes the correct project dir ---
 if [[ -n "${MITTENS_HOST_WORKSPACE:-}" && "$MITTENS_HOST_WORKSPACE" != "/workspace" ]]; then
     cd "$MITTENS_HOST_WORKSPACE"
