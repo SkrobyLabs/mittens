@@ -37,7 +37,12 @@ type Server struct {
 }
 
 // New creates a new server with all dependencies wired up.
-func New(cfg Config) *Server {
+func New(cfg Config) (*Server, error) {
+	// Fail fast if tmux is not installed.
+	if err := session.RequireTmux(); err != nil {
+		return nil, err
+	}
+
 	store := session.NewStore(cfg.StateDir)
 	hubs := ws.NewHubManager()
 
@@ -67,7 +72,7 @@ func New(cfg Config) *Server {
 		hubs:       hubs,
 		channelMgr: channelMgr,
 		channelSSE: channelSSE,
-	}
+	}, nil
 }
 
 // Start starts the HTTP server.

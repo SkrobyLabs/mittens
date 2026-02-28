@@ -34,6 +34,7 @@ type Session struct {
 	ExitCode  int       `json:"exitCode"`
 	CreatedAt time.Time `json:"createdAt"`
 	StoppedAt time.Time `json:"stoppedAt,omitempty"`
+	TmuxName  string    `json:"tmuxName,omitempty"`
 
 	mu        sync.Mutex
 	ptyFd     *PtyHandle

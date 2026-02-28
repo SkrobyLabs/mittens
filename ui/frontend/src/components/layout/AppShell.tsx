@@ -22,23 +22,15 @@ export function AppShell() {
   const { tabs, activeTabId, addTab, removeTab: rawRemoveTab, setActiveTab, splitPane } = useLayoutStore()
   const channelRequests = useChannelStore(s => s.requests)
 
-  const [showCreate, setShowCreate] = useState(false)
+  const [createMode, setCreateMode] = useState<'closed' | 'session' | 'shell'>('closed')
   const [relaunchTarget, setRelaunchTarget] = useState<Session | null>(null)
 
   const activeTab = tabs.find(t => t.id === activeTabId) || null
 
-  // Close tab = terminate all sessions in its panes.
+  // Close tab — sessions persist in tmux; user kills explicitly via sidebar.
   const handleCloseTab = useCallback((tabId: string) => {
-    const tab = tabs.find(t => t.id === tabId)
-    if (tab) {
-      for (const pane of tab.panes) {
-        if (pane.sessionId) {
-          terminateSession(pane.sessionId).catch(() => {})
-        }
-      }
-    }
     rawRemoveTab(tabId)
-  }, [tabs, rawRemoveTab, terminateSession])
+  }, [rawRemoveTab])
 
   const handleCreate = useCallback(async (req: CreateSessionRequest) => {
     try {
@@ -85,14 +77,14 @@ export function AppShell() {
 
   const handleSplitH = useCallback((paneId: string) => {
     if (!activeTab) return
-    setShowCreate(true) // User picks a session for the new pane
+    setCreateMode('session') // User picks a session for the new pane
     // For simplicity, create a new session and split.
     // In a full implementation, this would open a session picker.
   }, [activeTab])
 
   const handleSplitV = useCallback((paneId: string) => {
     if (!activeTab) return
-    setShowCreate(true)
+    setCreateMode('session')
   }, [activeTab])
 
   // Get the first pending channel request for dialog display.
@@ -107,7 +99,7 @@ export function AppShell() {
         activeTabId={activeTabId}
         onSelect={setActiveTab}
         onClose={handleCloseTab}
-        onNew={() => setShowCreate(true)}
+        onNew={() => setCreateMode('session')}
       />
 
       {/* Main content: sidebar + terminal area */}
@@ -130,7 +122,10 @@ export function AppShell() {
                   onRestart={handleRestart}
                 />
               </div>
-              <SessionControls onNewSession={() => setShowCreate(true)} />
+              <SessionControls
+                onNewSession={() => setCreateMode('session')}
+                onNewShell={() => setCreateMode('shell')}
+              />
             </div>
           </Allotment.Pane>
 
@@ -159,7 +154,7 @@ export function AppShell() {
                   Create a new session to get started
                 </div>
                 <button
-                  onClick={() => setShowCreate(true)}
+                  onClick={() => setCreateMode('session')}
                   style={{
                     padding: '8px 20px',
                     backgroundColor: '#61dafb',
@@ -181,9 +176,10 @@ export function AppShell() {
 
       {/* Dialogs */}
       <CreateSessionWizard
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
+        open={createMode !== 'closed'}
+        onClose={() => setCreateMode('closed')}
         onCreate={handleCreate}
+        initialShell={createMode === 'shell'}
       />
       <RelaunchDialog
         open={!!relaunchTarget}

@@ -37,12 +37,14 @@ func NewManager(mittensBin string, store *Store) *Manager {
 	}
 }
 
-// Create starts a new mittens session.
+// Create starts a new mittens session inside a tmux session.
 func (m *Manager) Create(name string, cfg Config) (*Session, error) {
 	id := uuid.New().String()[:8]
 	if name == "" {
 		name = "session-" + id
 	}
+
+	tmuxName := TmuxSessionName(id)
 
 	s := &Session{
 		ID:        id,
@@ -50,6 +52,7 @@ func (m *Manager) Create(name string, cfg Config) (*Session, error) {
 		Config:    cfg,
 		State:     StateRunning,
 		CreatedAt: time.Now(),
+		TmuxName:  tmuxName,
 		scrollbuf: NewRingBuffer(256 * 1024), // 256KB scrollback
 	}
 
@@ -61,17 +64,28 @@ func (m *Manager) Create(name string, cfg Config) (*Session, error) {
 		channelSock = filepath.Join(sockDir, "channel.sock")
 	}
 	args := m.buildArgs(cfg, channelSock)
-	cmd := exec.Command(m.MittensBin, args...)
-	cmd.Dir = cfg.WorkDir
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	// Start in a PTY.
-	ph, err := StartPty(cmd, 24, 80)
+	// Full command: cd to workdir, set TERM, exec mittens.
+	cmdArgs := []string{m.MittensBin}
+	cmdArgs = append(cmdArgs, args...)
+	fullCmd := fmt.Sprintf("cd %s && TERM=xterm-256color exec %s",
+		shellQuoteArgs([]string{cfg.WorkDir}),
+		shellQuoteArgs(cmdArgs),
+	)
+
+	// Create the tmux session (detached, runs mittens inside).
+	if err := TmuxCreate(tmuxName, 80, 24, []string{"sh", "-c", fullCmd}); err != nil {
+		return nil, fmt.Errorf("tmux create: %w", err)
+	}
+
+	// Attach to the tmux session via a PTY for I/O.
+	ph, err := TmuxAttach(tmuxName, 24, 80)
 	if err != nil {
-		return nil, fmt.Errorf("start pty: %w", err)
+		_ = TmuxKillSession(tmuxName)
+		return nil, fmt.Errorf("tmux attach: %w", err)
 	}
 	s.ptyFd = ph
-	s.PID = cmd.Process.Pid
+	s.PID = ph.Cmd.Process.Pid
 
 	// Set up output hub if factory is available.
 	if m.HubFactory != nil {
@@ -96,7 +110,7 @@ func (m *Manager) Create(name string, cfg Config) (*Session, error) {
 func (m *Manager) readLoop(s *Session) {
 	_ = s.ptyFd.ReadLoop(s)
 
-	// Process exited — wait for exit code.
+	// The attach process ended — wait for its exit code.
 	var code int
 	if err := s.ptyFd.Cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -105,6 +119,19 @@ func (m *Manager) readLoop(s *Session) {
 			code = 1
 		}
 	}
+	_ = s.ptyFd.Close()
+
+	// If tmux-managed, check if the underlying tmux session is still alive.
+	// If the attach was severed (e.g. server shutdown) but mittens is still
+	// running inside tmux, don't mark as stopped — recovery will re-attach.
+	s.mu.Lock()
+	tmuxName := s.TmuxName
+	s.mu.Unlock()
+
+	if tmuxName != "" && TmuxHasSession(tmuxName) {
+		// tmux session still alive — attach was severed, not a real exit.
+		return
+	}
 
 	s.mu.Lock()
 	s.State = StateStopped
@@ -112,8 +139,6 @@ func (m *Manager) readLoop(s *Session) {
 	s.StoppedAt = time.Now()
 	hub := s.hub
 	s.mu.Unlock()
-
-	_ = s.ptyFd.Close()
 
 	if hub != nil {
 		hub.Exited(code)
@@ -142,7 +167,7 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-// Terminate stops a session.
+// Terminate stops a session by killing its tmux session.
 func (m *Manager) Terminate(id string) error {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
@@ -156,10 +181,20 @@ func (m *Manager) Terminate(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("session %s is not running", id)
 	}
+	tmuxName := s.TmuxName
+	s.mu.Unlock()
+
+	if tmuxName != "" {
+		// Kill the tmux session — this terminates mittens and the attach
+		// process. The readLoop will detect EOF and handle state transition.
+		return TmuxKillSession(tmuxName)
+	}
+
+	// Fallback for legacy non-tmux sessions.
+	s.mu.Lock()
 	pid := s.PID
 	s.mu.Unlock()
 
-	// SIGTERM first, then SIGKILL after grace period.
 	if proc, err := os.FindProcess(pid); err == nil {
 		_ = proc.Signal(syscall.SIGTERM)
 		done := make(chan struct{})
@@ -178,7 +213,7 @@ func (m *Manager) Terminate(id string) error {
 	return nil
 }
 
-// Resize resizes the PTY for a session.
+// Resize resizes the PTY for a session and the underlying tmux window.
 func (m *Manager) Resize(id string, rows, cols uint16) error {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
@@ -188,11 +223,23 @@ func (m *Manager) Resize(id string, rows, cols uint16) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ptyFd == nil {
+	ptyFd := s.ptyFd
+	tmuxName := s.TmuxName
+	s.mu.Unlock()
+
+	if ptyFd == nil {
 		return fmt.Errorf("session %s has no PTY", id)
 	}
-	return s.ptyFd.Resize(rows, cols)
+	if err := ptyFd.Resize(rows, cols); err != nil {
+		return err
+	}
+
+	// Also resize the tmux window so the inner process sees the new size.
+	if tmuxName != "" {
+		_ = TmuxResizeWindow(tmuxName, cols, rows)
+	}
+
+	return nil
 }
 
 // WriteInput writes input to a session's PTY.
@@ -267,7 +314,7 @@ func (m *Manager) Remove(id string) error {
 	return nil
 }
 
-// Recover loads sessions from the store and checks their status.
+// Recover loads sessions from the store and re-attaches to live tmux sessions.
 func (m *Manager) Recover() {
 	if m.store == nil {
 		return
@@ -283,15 +330,41 @@ func (m *Manager) Recover() {
 			ExitCode:  e.ExitCode,
 			CreatedAt: e.CreatedAt,
 			StoppedAt: e.StoppedAt,
+			TmuxName:  e.TmuxName,
 			scrollbuf: NewRingBuffer(256 * 1024),
 		}
 
-		// Check if PID is still alive.
-		if e.State == StateRunning && e.PID > 0 {
-			proc, err := os.FindProcess(e.PID)
-			if err != nil || proc.Signal(syscall.Signal(0)) != nil {
-				// Process is dead — mark as orphaned.
-				s.State = StateOrphaned
+		if e.State == StateRunning {
+			if e.TmuxName != "" && TmuxHasSession(e.TmuxName) {
+				// tmux session alive — capture scrollback and re-attach.
+				if captured, err := TmuxCapturePane(e.TmuxName); err == nil && len(captured) > 0 {
+					s.scrollbuf.Write(captured)
+				}
+				ph, err := TmuxAttach(e.TmuxName, 24, 80)
+				if err != nil {
+					// Can't re-attach — mark orphaned.
+					s.State = StateOrphaned
+					s.StoppedAt = time.Now()
+				} else {
+					s.ptyFd = ph
+					s.PID = ph.Cmd.Process.Pid
+
+					// Wire up the output hub.
+					if m.HubFactory != nil {
+						hub := m.HubFactory(s.ID)
+						s.SetHub(hub)
+					}
+
+					m.mu.Lock()
+					m.sessions[s.ID] = s
+					m.mu.Unlock()
+
+					go m.readLoop(s)
+					continue
+				}
+			} else {
+				// No tmux session (legacy entry or tmux session died).
+				s.State = StateStopped
 				s.StoppedAt = time.Now()
 			}
 		}
@@ -300,6 +373,8 @@ func (m *Manager) Recover() {
 		m.sessions[s.ID] = s
 		m.mu.Unlock()
 	}
+
+	m.persistState()
 }
 
 // buildArgs constructs the mittens CLI arguments from session config.
@@ -349,6 +424,7 @@ func (m *Manager) persistStateLocked() {
 			ExitCode:  s.ExitCode,
 			CreatedAt: s.CreatedAt,
 			StoppedAt: s.StoppedAt,
+			TmuxName:  s.TmuxName,
 		})
 	}
 	m.store.Save(entries)
