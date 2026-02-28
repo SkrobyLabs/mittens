@@ -256,6 +256,17 @@ func (m *Manager) WriteInput(id string, data []byte) error {
 	if s.ptyFd == nil || s.State != StateRunning {
 		return fmt.Errorf("session %s is not running", id)
 	}
+
+	// Strip terminal response sequences (DA1/DA2) that xterm.js generates
+	// in reply to tmux capability queries. Without this filter, responses
+	// like "\e[>0;276;0c" leak into the tmux pane as visible garbage.
+	if s.TmuxName != "" {
+		data = FilterTerminalResponses(data)
+		if len(data) == 0 {
+			return nil
+		}
+	}
+
 	_, err := s.ptyFd.WriteInput(data)
 	return err
 }

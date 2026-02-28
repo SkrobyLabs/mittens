@@ -4,10 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 )
+
+// termResponseRe matches Device Attributes responses (DA1/DA2) that xterm.js
+// sends back when tmux queries terminal capabilities on attach. If these
+// reach tmux's pane stdin they appear as visible garbage (e.g. "[>0;276;0c").
+var termResponseRe = regexp.MustCompile(`\x1b\[[?>][0-9;]*c`)
+
+// FilterTerminalResponses strips DA1/DA2 response sequences from data
+// before it is forwarded to a tmux-managed PTY.
+func FilterTerminalResponses(data []byte) []byte {
+	return termResponseRe.ReplaceAll(data, nil)
+}
 
 // RequireTmux checks that tmux is installed and returns an error with
 // install instructions if it is missing.
