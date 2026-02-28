@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ type App struct {
 	Shell       bool
 	NoResume    bool
 	ExtraDirs   []string
+	ChannelSock string
 	ClaudeArgs  []string
 
 	// Computed state
@@ -79,7 +81,8 @@ var coreFlags = map[string]func(*App){
 
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
-	"--dir": func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--dir":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--channel-sock": func(a *App, val string) { a.ChannelSock = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -133,6 +136,10 @@ func (a *App) ParseFlags(args []string) error {
 		}
 		if arg == "--extensions" {
 			printExtensions(a.Extensions)
+			os.Exit(0)
+		}
+		if arg == "--json-caps" {
+			printJSONCaps(a.Extensions)
 			os.Exit(0)
 		}
 
@@ -463,6 +470,14 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", "MITTENS_CRED_BROKER_SOCK=/tmp/mittens-broker/broker.sock")
 	}
 
+	// Channel socket mount (for mittens-ui container communication).
+	if a.ChannelSock != "" {
+		sockDir := filepath.Dir(a.ChannelSock)
+		sockBase := filepath.Base(a.ChannelSock)
+		args = append(args, "-v", sockDir+":/tmp/mittens-channel")
+		args = append(args, "-e", "MITTENS_CHANNEL_SOCK=/tmp/mittens-channel/"+sockBase)
+	}
+
 	// Session persistence mounts.
 	if !a.NoHistory && a.HostProjectDir != "" {
 		projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
@@ -708,6 +723,7 @@ Core flags:
   --worktree        Git worktree isolation per invocation
   --shell           Start a bash shell instead of Claude
   --dir PATH        Mount an additional directory (repeatable)
+  --channel-sock P  Channel socket path (used by mittens-ui)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
 
@@ -742,4 +758,68 @@ func printExtensions(exts []*registry.Extension) {
 			fmt.Printf("    %-16s %s\n", f.Name, desc)
 		}
 	}
+}
+
+// jsonCapsOutput is the structured output for --json-caps.
+type jsonCapsOutput struct {
+	Extensions []jsonCapsExtension `json:"extensions"`
+	CoreFlags  []jsonCapsFlag      `json:"coreFlags"`
+}
+
+type jsonCapsExtension struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	DefaultOn   bool           `json:"defaultOn"`
+	Flags       []jsonCapsFlag `json:"flags"`
+}
+
+type jsonCapsFlag struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	ArgType     string   `json:"argType,omitempty"`
+	EnumValues  []string `json:"enumValues,omitempty"`
+	Multi       bool     `json:"multi,omitempty"`
+}
+
+func printJSONCaps(exts []*registry.Extension) {
+	out := jsonCapsOutput{
+		Extensions: make([]jsonCapsExtension, 0, len(exts)),
+		CoreFlags: []jsonCapsFlag{
+			{Name: "--dind", Description: "Enable Docker-in-Docker (--privileged)"},
+			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
+			{Name: "--yolo", Description: "Skip all permission prompts"},
+			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
+			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
+			{Name: "--no-build", Description: "Skip the Docker image build step"},
+			{Name: "--no-resume", Description: "Start a new session (default: continue last)"},
+			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
+		},
+	}
+
+	for _, ext := range exts {
+		je := jsonCapsExtension{
+			Name:        ext.Name,
+			Description: ext.Description,
+			DefaultOn:   ext.DefaultOn,
+			Flags:       make([]jsonCapsFlag, 0, len(ext.Flags)),
+		}
+		for _, f := range ext.Flags {
+			jf := jsonCapsFlag{
+				Name:        f.Name,
+				Description: f.Description,
+				ArgType:     f.Arg,
+				EnumValues:  f.EnumValues,
+				Multi:       f.Multi,
+			}
+			if jf.ArgType == "" {
+				jf.ArgType = "none"
+			}
+			je.Flags = append(je.Flags, jf)
+		}
+		out.Extensions = append(out.Extensions, je)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(out)
 }

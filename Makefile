@@ -86,6 +86,33 @@ release: tidy ## Cross-compile for common platforms into dist/
 	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   .
 	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   .
 
+# ─── Distribution ────────────────────────────────────────────────────────────
+
+dist: build ## Build a self-contained dist/ folder with all runtime files
+	@rm -rf $(DIST)
+	@mkdir -p $(DIST)/container $(DIST)/extensions
+	@# Binaries
+	cp $(BINARY) $(DIST)/
+	$(MAKE) -C ui all
+	cp ui/mittens-ui $(DIST)/
+	@# Container runtime files (Dockerfile, entrypoint, configs, scripts)
+	cp container/* $(DIST)/container/
+	@# Extension build scripts (YAML manifests are embedded in the binary)
+	@for ext in extensions/*/; do \
+		name=$$(basename "$$ext"); \
+		[ "$$name" = "registry" ] && continue; \
+		if ls "$$ext"build.sh >/dev/null 2>&1; then \
+			mkdir -p "$(DIST)/extensions/$$name"; \
+			cp "$$ext"build.sh "$(DIST)/extensions/$$name/"; \
+		fi; \
+	done
+	@echo ""
+	@echo "Distribution ready in $(DIST)/"
+	@echo "  $(DIST)/mittens        — CLI"
+	@echo "  $(DIST)/mittens-ui     — Web UI (frontend embedded)"
+	@echo "  $(DIST)/container/     — Docker image files"
+	@echo "  $(DIST)/extensions/    — Extension build scripts"
+
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
 clean: ## Remove build artifacts
@@ -105,4 +132,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build install tidy docker test test-v test-race lint fmt vet check release clean run help
+.PHONY: all build install tidy docker test test-v test-race lint fmt vet check release dist clean run help

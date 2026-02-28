@@ -1,0 +1,198 @@
+import { useState, useCallback } from 'react'
+import { Allotment } from 'allotment'
+import 'allotment/dist/style.css'
+import { TabBar } from './TabBar'
+import { SplitPane } from './SplitPane'
+import { SessionList } from '../session/SessionList'
+import { SessionControls } from '../session/SessionControls'
+import { CreateSessionWizard } from '../session/CreateSessionWizard'
+import { RelaunchDialog } from '../session/RelaunchDialog'
+import { AddDirDialog } from '../channel/AddDirDialog'
+import { LoginDialog } from '../channel/LoginDialog'
+import { useSessionAPI } from '../../hooks/useSessionAPI'
+import { useChannelEvents } from '../../hooks/useChannelEvents'
+import { useLayoutStore } from '../../store/layoutStore'
+import { useChannelStore } from '../../store/channelStore'
+import type { Session, CreateSessionRequest, RelaunchRequest } from '../../types/session'
+
+export function AppShell() {
+  const { sessions, createSession, terminateSession, relaunchSession } = useSessionAPI()
+  useChannelEvents()
+
+  const { tabs, activeTabId, addTab, removeTab: rawRemoveTab, setActiveTab, splitPane } = useLayoutStore()
+  const channelRequests = useChannelStore(s => s.requests)
+
+  const [showCreate, setShowCreate] = useState(false)
+  const [relaunchTarget, setRelaunchTarget] = useState<Session | null>(null)
+
+  const activeTab = tabs.find(t => t.id === activeTabId) || null
+
+  // Close tab = terminate all sessions in its panes.
+  const handleCloseTab = useCallback((tabId: string) => {
+    const tab = tabs.find(t => t.id === tabId)
+    if (tab) {
+      for (const pane of tab.panes) {
+        if (pane.sessionId) {
+          terminateSession(pane.sessionId).catch(() => {})
+        }
+      }
+    }
+    rawRemoveTab(tabId)
+  }, [tabs, rawRemoveTab, terminateSession])
+
+  const handleCreate = useCallback(async (req: CreateSessionRequest) => {
+    try {
+      const session = await createSession(req)
+      addTab(session.name, session.id)
+    } catch (e) {
+      console.error('Failed to create session:', e)
+    }
+  }, [createSession, addTab])
+
+  const handleSelectSession = useCallback((session: Session) => {
+    // Find existing tab for this session.
+    const existingTab = tabs.find(t => t.panes.some(p => p.sessionId === session.id))
+    if (existingTab) {
+      setActiveTab(existingTab.id)
+    } else {
+      addTab(session.name, session.id)
+    }
+  }, [tabs, setActiveTab, addTab])
+
+  const handleRelaunch = useCallback(async (id: string, req: RelaunchRequest) => {
+    try {
+      const newSession = await relaunchSession(id, req)
+      // Layout store will handle replacing the session in panes.
+      useLayoutStore.getState().replaceSession(id, newSession.id)
+    } catch (e) {
+      console.error('Failed to relaunch session:', e)
+    }
+  }, [relaunchSession])
+
+  const handleRestart = useCallback(async (session: Session) => {
+    try {
+      const newSession = await relaunchSession(session.id, {})
+      useLayoutStore.getState().replaceSession(session.id, newSession.id)
+      // Open a tab for the restarted session.
+      const existingTab = tabs.find(t => t.panes.some(p => p.sessionId === newSession.id))
+      if (!existingTab) {
+        addTab(newSession.name, newSession.id)
+      }
+    } catch (e) {
+      console.error('Failed to restart session:', e)
+    }
+  }, [relaunchSession, tabs, addTab])
+
+  const handleSplitH = useCallback((paneId: string) => {
+    if (!activeTab) return
+    setShowCreate(true) // User picks a session for the new pane
+    // For simplicity, create a new session and split.
+    // In a full implementation, this would open a session picker.
+  }, [activeTab])
+
+  const handleSplitV = useCallback((paneId: string) => {
+    if (!activeTab) return
+    setShowCreate(true)
+  }, [activeTab])
+
+  // Get the first pending channel request for dialog display.
+  const addDirRequest = channelRequests.find(r => r.type === 'add-dir') || null
+  const loginRequest = channelRequests.find(r => r.type === 'login') || null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw' }}>
+      {/* Tab Bar */}
+      <TabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSelect={setActiveTab}
+        onClose={handleCloseTab}
+        onNew={() => setShowCreate(true)}
+      />
+
+      {/* Main content: sidebar + terminal area */}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <Allotment>
+          {/* Sidebar */}
+          <Allotment.Pane minSize={150} preferredSize={200} maxSize={350}>
+            <div style={{
+              height: '100%',
+              backgroundColor: '#12122a',
+              display: 'flex',
+              flexDirection: 'column',
+              borderRight: '1px solid #2a2a4a',
+            }}>
+              <div style={{ flex: 1, overflow: 'auto' }}>
+                <SessionList
+                  sessions={sessions}
+                  onSelect={handleSelectSession}
+                  onTerminate={terminateSession}
+                  onRestart={handleRestart}
+                />
+              </div>
+              <SessionControls onNewSession={() => setShowCreate(true)} />
+            </div>
+          </Allotment.Pane>
+
+          {/* Terminal area */}
+          <Allotment.Pane>
+            {activeTab ? (
+              <SplitPane
+                panes={activeTab.panes}
+                direction={activeTab.splitDirection}
+                tabId={activeTab.id}
+                onSplitH={handleSplitH}
+                onSplitV={handleSplitV}
+              />
+            ) : (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                height: '100%',
+                color: '#555',
+                gap: '12px',
+              }}>
+                <div style={{ fontSize: '24px' }}>mittens-ui</div>
+                <div style={{ fontSize: '13px' }}>
+                  Create a new session to get started
+                </div>
+                <button
+                  onClick={() => setShowCreate(true)}
+                  style={{
+                    padding: '8px 20px',
+                    backgroundColor: '#61dafb',
+                    border: 'none',
+                    borderRadius: '4px',
+                    color: '#000',
+                    cursor: 'pointer',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                  }}
+                >
+                  New Session
+                </button>
+              </div>
+            )}
+          </Allotment.Pane>
+        </Allotment>
+      </div>
+
+      {/* Dialogs */}
+      <CreateSessionWizard
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreate={handleCreate}
+      />
+      <RelaunchDialog
+        open={!!relaunchTarget}
+        session={relaunchTarget}
+        onClose={() => setRelaunchTarget(null)}
+        onRelaunch={handleRelaunch}
+      />
+      <AddDirDialog request={addDirRequest} />
+      <LoginDialog request={loginRequest} />
+    </div>
+  )
+}

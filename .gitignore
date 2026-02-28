@@ -5,8 +5,14 @@
 *~
 .DS_Store
 .claude/settings.local.json
+.claude/.planArchives/
 
 # Go build artifacts
 mittens
 mittens-*
 dist/
+
+# UI build artifacts
+ui/mittens-ui
+ui/frontend/node_modules/
+ui/frontend/dist/
