@@ -59,6 +59,7 @@ interface LayoutStore {
   mergeTab: (sourceTabId: string, targetTabId: string) => void
   dockSession: (sourceTabId: string, targetTabId: string, direction: SplitDirection, position: 'before' | 'after') => void
 
+  removeSession: (sessionId: string) => void
   pruneStaleSessions: (liveSessionIds: Set<string>) => void
 }
 
@@ -232,6 +233,19 @@ export const useLayoutStore = create<LayoutStore>()(
     const activeTabId = get().activeTabId === sourceTabId && remaining.length === 0
       ? targetTabId : get().activeTabId
     set({ tabs: newTabs, activeTabId })
+  },
+
+  removeSession: (sessionId) => {
+    const tabs = get().tabs
+      .map(t => ({
+        ...t,
+        panes: t.panes.filter(p => p.sessionId !== sessionId),
+      }))
+      .filter(t => t.panes.length > 0)
+    const activeTabId = tabs.find(t => t.id === get().activeTabId)
+      ? get().activeTabId
+      : (tabs.length > 0 ? tabs[tabs.length - 1].id : null)
+    set({ tabs, activeTabId })
   },
 
   pruneStaleSessions: (liveSessionIds) => {

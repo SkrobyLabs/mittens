@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/Skroby/mittens/ui/internal/session"
 )
@@ -160,9 +161,16 @@ func (h *SessionHandler) Terminate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// Wait for readLoop to process the EOF and mark the session as stopped.
+		for i := 0; i < 10; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if s, ok := h.Sessions.Get(id); ok && s.State != session.StateRunning {
+				break
+			}
+		}
 	}
 
-	// Remove non-running sessions from the list.
+	// Remove the stopped session from the list.
 	_ = h.Sessions.Remove(id)
 	w.WriteHeader(http.StatusNoContent)
 }

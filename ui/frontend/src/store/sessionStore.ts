@@ -56,6 +56,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   terminateSession: async (id) => {
     await fetch(`${API}/sessions/${id}`, { method: 'DELETE' })
     set({ sessions: get().sessions.filter(s => s.id !== id) })
+    // Remove from layout so the tab/pane doesn't linger.
+    const { useLayoutStore } = await import('./layoutStore')
+    useLayoutStore.getState().removeSession(id)
   },
 
   relaunchSession: async (id, req) => {

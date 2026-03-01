@@ -63,9 +63,9 @@ function buildTree(tabs: Tab[], sessions: Session[]): TreeNode[] {
         nodes.push({ kind: 'group', tab, sessions: groupSessions })
       }
     } else {
-      // Single-pane tab — render as root-level session
+      // Single-pane tab — render as root-level session (skip if already in a group)
       const sid = tab.panes[0]?.sessionId
-      if (sid) {
+      if (sid && !assignedIds.has(sid)) {
         const s = sessionMap.get(sid)
         if (s) {
           nodes.push({ kind: 'session', session: s })
