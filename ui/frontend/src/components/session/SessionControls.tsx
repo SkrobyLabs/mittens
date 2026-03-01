@@ -1,17 +1,20 @@
 interface SessionControlsProps {
   onNewSession: () => void
+  onNewShell: () => void
 }
 
-export function SessionControls({ onNewSession }: SessionControlsProps) {
+export function SessionControls({ onNewSession, onNewShell }: SessionControlsProps) {
   return (
     <div style={{
       padding: '8px',
       borderTop: '1px solid #2a2a4a',
+      display: 'flex',
+      gap: '4px',
     }}>
       <button
         onClick={onNewSession}
         style={{
-          width: '100%',
+          flex: 1,
           padding: '8px',
           backgroundColor: '#16213e',
           border: '1px solid #2a2a4a',
@@ -21,7 +24,22 @@ export function SessionControls({ onNewSession }: SessionControlsProps) {
           fontSize: '12px',
         }}
       >
-        + New Session
+        + Session
+      </button>
+      <button
+        onClick={onNewShell}
+        style={{
+          flex: 1,
+          padding: '8px',
+          backgroundColor: '#16213e',
+          border: '1px solid #2a2a4a',
+          borderRadius: '4px',
+          color: '#4caf50',
+          cursor: 'pointer',
+          fontSize: '12px',
+        }}
+      >
+        + Shell
       </button>
     </div>
   )

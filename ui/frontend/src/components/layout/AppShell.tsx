@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Allotment } from 'allotment'
 import 'allotment/dist/style.css'
 import { TabBar } from './TabBar'
 import { SplitPane } from './SplitPane'
+import { DropZoneOverlay } from './DropZoneOverlay'
 import { SessionList } from '../session/SessionList'
 import { SessionControls } from '../session/SessionControls'
 import { CreateSessionWizard } from '../session/CreateSessionWizard'
@@ -12,18 +13,32 @@ import { LoginDialog } from '../channel/LoginDialog'
 import { useSessionAPI } from '../../hooks/useSessionAPI'
 import { useChannelEvents } from '../../hooks/useChannelEvents'
 import { useLayoutStore } from '../../store/layoutStore'
+import { useSessionStore } from '../../store/sessionStore'
 import { useChannelStore } from '../../store/channelStore'
 import type { Session, CreateSessionRequest, RelaunchRequest } from '../../types/session'
 
 export function AppShell() {
   const { sessions, createSession, terminateSession, relaunchSession } = useSessionAPI()
+  const renameSession = useSessionStore(s => s.renameSession)
+  const duplicateSession = useSessionStore(s => s.duplicateSession)
   useChannelEvents()
 
-  const { tabs, activeTabId, addTab, removeTab: rawRemoveTab, setActiveTab, splitPane } = useLayoutStore()
+  const { tabs, activeTabId, sidebarCollapsed, toggleSidebar, addTab, removeTab: rawRemoveTab, setActiveTab, renameTab, updateTabBaseLabel, togglePinTab, reorderTab, mergeTab, dockSession, isDraggingTab, dragSourceTabId, pruneStaleSessions } = useLayoutStore()
   const channelRequests = useChannelStore(s => s.requests)
 
+  // Prune layout panes referencing sessions that no longer exist.
+  const hasPruned = useRef(false)
+  useEffect(() => {
+    if (sessions.length > 0 && !hasPruned.current) {
+      hasPruned.current = true
+      pruneStaleSessions(new Set(sessions.map(s => s.id)))
+    }
+  }, [sessions, pruneStaleSessions])
+
   const [createMode, setCreateMode] = useState<'closed' | 'session' | 'shell'>('closed')
+  const [wizardWorkDir, setWizardWorkDir] = useState<string | undefined>(undefined)
   const [relaunchTarget, setRelaunchTarget] = useState<Session | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const activeTab = tabs.find(t => t.id === activeTabId) || null
 
@@ -33,11 +48,29 @@ export function AppShell() {
   }, [rawRemoveTab])
 
   const handleCreate = useCallback(async (req: CreateSessionRequest) => {
+    setCreateError(null)
     try {
       const session = await createSession(req)
       addTab(session.name, session.id)
     } catch (e) {
-      console.error('Failed to create session:', e)
+      const msg = e instanceof Error ? e.message : 'Failed to create session'
+      setCreateError(msg)
+      throw e
+    }
+  }, [createSession, addTab])
+
+  const handleNewShell = useCallback(async () => {
+    const workDir = localStorage.getItem('mittens:lastFolder') || ''
+    if (!workDir) {
+      // No last folder — fall back to wizard for directory selection.
+      setCreateMode('shell')
+      return
+    }
+    try {
+      const session = await createSession({ workDir, shell: true })
+      addTab(session.name, session.id)
+    } catch (e) {
+      console.error('Failed to create shell:', e)
     }
   }, [createSession, addTab])
 
@@ -75,17 +108,52 @@ export function AppShell() {
     }
   }, [relaunchSession, tabs, addTab])
 
-  const handleSplitH = useCallback((paneId: string) => {
-    if (!activeTab) return
-    setCreateMode('session') // User picks a session for the new pane
-    // For simplicity, create a new session and split.
-    // In a full implementation, this would open a session picker.
-  }, [activeTab])
+  // Context menu actions.
+  const handleRename = useCallback(async (id: string, name: string) => {
+    try {
+      const updated = await renameSession(id, name)
+      // Update the base label for single-pane tabs (don't override customLabel).
+      const tab = tabs.find(t => t.panes.some(p => p.sessionId === id))
+      if (tab && tab.panes.length === 1) {
+        updateTabBaseLabel(tab.id, updated.name)
+      }
+    } catch (e) {
+      console.error('Failed to rename session:', e)
+    }
+  }, [renameSession, tabs, updateTabBaseLabel])
 
-  const handleSplitV = useCallback((paneId: string) => {
-    if (!activeTab) return
+  const handleDuplicate = useCallback(async (session: Session) => {
+    try {
+      const newSession = await duplicateSession(session)
+      addTab(newSession.name, newSession.id)
+    } catch (e) {
+      console.error('Failed to duplicate session:', e)
+    }
+  }, [duplicateSession, addTab])
+
+  const handleEdit = useCallback((session: Session) => {
+    setRelaunchTarget(session)
+  }, [])
+
+  const handleOpenShell = useCallback(async (workDir: string) => {
+    try {
+      const session = await createSession({ workDir, shell: true })
+      addTab(session.name, session.id)
+    } catch (e) {
+      console.error('Failed to open shell:', e)
+    }
+  }, [createSession, addTab])
+
+  const handleOpenMittens = useCallback((workDir: string) => {
+    setWizardWorkDir(workDir)
     setCreateMode('session')
-  }, [activeTab])
+  }, [])
+
+  const handleWizardClose = useCallback(() => {
+    setCreateMode('closed')
+    setWizardWorkDir(undefined)
+    setCreateError(null)
+  }, [])
 
   // Get the first pending channel request for dialog display.
   const addDirRequest = channelRequests.find(r => r.type === 'add-dir') || null
@@ -97,15 +165,22 @@ export function AppShell() {
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}
+        sidebarCollapsed={sidebarCollapsed}
         onSelect={setActiveTab}
         onClose={handleCloseTab}
         onNew={() => setCreateMode('session')}
+        onReorder={reorderTab}
+        onMerge={mergeTab}
+        onToggleSidebar={toggleSidebar}
+        onRenameTab={renameTab}
+        onTogglePin={togglePinTab}
       />
 
       {/* Main content: sidebar + terminal area */}
       <div style={{ flex: 1, minHeight: 0 }}>
         <Allotment>
           {/* Sidebar */}
+          {!sidebarCollapsed && (
           <Allotment.Pane minSize={150} preferredSize={200} maxSize={350}>
             <div style={{
               height: '100%',
@@ -117,59 +192,81 @@ export function AppShell() {
               <div style={{ flex: 1, overflow: 'auto' }}>
                 <SessionList
                   sessions={sessions}
+                  tabs={tabs}
                   onSelect={handleSelectSession}
                   onTerminate={terminateSession}
                   onRestart={handleRestart}
+                  onRename={handleRename}
+                  onDuplicate={handleDuplicate}
+                  onEdit={handleEdit}
+                  onOpenShell={handleOpenShell}
+                  onOpenMittens={handleOpenMittens}
+                  onRenameTab={renameTab}
                 />
               </div>
               <SessionControls
                 onNewSession={() => setCreateMode('session')}
-                onNewShell={() => setCreateMode('shell')}
+                onNewShell={handleNewShell}
               />
             </div>
           </Allotment.Pane>
+          )}
 
           {/* Terminal area */}
           <Allotment.Pane>
-            {activeTab ? (
-              <SplitPane
-                panes={activeTab.panes}
-                direction={activeTab.splitDirection}
-                tabId={activeTab.id}
-                onSplitH={handleSplitH}
-                onSplitV={handleSplitV}
-              />
-            ) : (
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                height: '100%',
-                color: '#555',
-                gap: '12px',
-              }}>
-                <div style={{ fontSize: '24px' }}>mittens-ui</div>
-                <div style={{ fontSize: '13px' }}>
-                  Create a new session to get started
+            <div style={{ position: 'relative', height: '100%' }}>
+              {activeTab ? (
+                <SplitPane
+                  panes={activeTab.panes}
+                  direction={activeTab.splitDirection}
+                  tabId={activeTab.id}
+                  onRename={handleRename}
+                  onDuplicate={handleDuplicate}
+                  onEdit={handleEdit}
+                  onOpenShell={handleOpenShell}
+                  onOpenMittens={handleOpenMittens}
+                />
+              ) : (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  height: '100%',
+                  color: '#555',
+                  gap: '12px',
+                }}>
+                  <div style={{ fontSize: '24px' }}>mittens-ui</div>
+                  <div style={{ fontSize: '13px' }}>
+                    Create a new session to get started
+                  </div>
+                  <button
+                    onClick={() => setCreateMode('session')}
+                    style={{
+                      padding: '8px 20px',
+                      backgroundColor: '#61dafb',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: '#000',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      fontSize: '13px',
+                    }}
+                  >
+                    New Session
+                  </button>
                 </div>
-                <button
-                  onClick={() => setCreateMode('session')}
-                  style={{
-                    padding: '8px 20px',
-                    backgroundColor: '#61dafb',
-                    border: 'none',
-                    borderRadius: '4px',
-                    color: '#000',
-                    cursor: 'pointer',
-                    fontWeight: 'bold',
-                    fontSize: '13px',
+              )}
+              {isDraggingTab && activeTab && dragSourceTabId !== activeTab.id && (
+                <DropZoneOverlay
+                  onDock={(direction, position) => {
+                    if (dragSourceTabId) {
+                      dockSession(dragSourceTabId, activeTab.id, direction, position)
+                    }
                   }}
-                >
-                  New Session
-                </button>
-              </div>
-            )}
+                />
+              )}
+            </div>
           </Allotment.Pane>
         </Allotment>
       </div>
@@ -177,9 +274,11 @@ export function AppShell() {
       {/* Dialogs */}
       <CreateSessionWizard
         open={createMode !== 'closed'}
-        onClose={() => setCreateMode('closed')}
+        onClose={handleWizardClose}
         onCreate={handleCreate}
         initialShell={createMode === 'shell'}
+        initialWorkDir={wizardWorkDir}
+        error={createError}
       />
       <RelaunchDialog
         open={!!relaunchTarget}

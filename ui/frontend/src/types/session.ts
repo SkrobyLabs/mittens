@@ -26,6 +26,7 @@ export interface CreateSessionRequest {
   flags?: string[]
   claudeArgs?: string[]
   extraDirs?: string[]
+  shell?: boolean
 }
 
 export interface RelaunchRequest {

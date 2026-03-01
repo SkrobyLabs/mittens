@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 
 const LAST_FOLDER_KEY = 'mittens:lastFolder'
 
@@ -26,9 +26,12 @@ export function FolderPicker({ value, onChange, placeholder }: FolderPickerProps
   const [entries, setEntries] = useState<BrowseEntry[]>([])
   const [parent, setParent] = useState('')
   const [loading, setLoading] = useState(false)
+  const [filter, setFilter] = useState('')
+  const filterRef = useRef<HTMLInputElement>(null)
 
   const browse = useCallback(async (path: string) => {
     setLoading(true)
+    setFilter('')
     try {
       const params = path ? `?path=${encodeURIComponent(path)}` : ''
       const res = await fetch(`/api/v1/fs/browse${params}`)
@@ -44,11 +47,23 @@ export function FolderPicker({ value, onChange, placeholder }: FolderPickerProps
 
   useEffect(() => {
     if (open) {
-      // Start from: current value → last used folder → home (empty triggers server default)
       const startPath = value || localStorage.getItem(LAST_FOLDER_KEY) || ''
       browse(startPath)
     }
   }, [open, value, browse])
+
+  // Auto-focus the filter input when entries load.
+  useEffect(() => {
+    if (open && !loading && entries.length > 0) {
+      filterRef.current?.focus()
+    }
+  }, [open, loading, entries])
+
+  const filteredEntries = useMemo(() => {
+    if (!filter) return entries
+    const lower = filter.toLowerCase()
+    return entries.filter(e => e.name.toLowerCase().includes(lower))
+  }, [entries, filter])
 
   const handleSelect = () => {
     onChange(browsePath)
@@ -56,13 +71,44 @@ export function FolderPicker({ value, onChange, placeholder }: FolderPickerProps
     setOpen(false)
   }
 
+  const handleFilterKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && filteredEntries.length === 1) {
+      // Single match — navigate into it.
+      browse(filteredEntries[0].path)
+    }
+  }, [filteredEntries, browse])
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange(e.target.value)
+  }, [onChange])
+
+  const handleInputCommit = useCallback(() => {
+    if (value) {
+      localStorage.setItem(LAST_FOLDER_KEY, value)
+    }
+  }, [value])
+
+  const handleInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleInputCommit()
+    }
+  }, [handleInputCommit])
+
   if (!open) {
     return (
-      <div style={closedStyle} onClick={() => setOpen(true)}>
-        <span style={{ flex: 1, color: value ? '#e0e0e0' : '#555' }}>
-          {value || placeholder || 'Select a folder...'}
-        </span>
-        <span style={{ color: '#888', fontSize: '12px' }}>Browse</span>
+      <div style={closedStyle}>
+        <input
+          type="text"
+          value={value}
+          onChange={handleInputChange}
+          onBlur={handleInputCommit}
+          onKeyDown={handleInputKeyDown}
+          placeholder={placeholder || 'Type a path or browse...'}
+          style={pathInputStyle}
+        />
+        <button type="button" onClick={() => setOpen(true)} style={browseBtnStyle}>
+          Browse
+        </button>
       </div>
     )
   }
@@ -101,6 +147,24 @@ export function FolderPicker({ value, onChange, placeholder }: FolderPickerProps
         })}
       </div>
 
+      {/* Filter input */}
+      <div style={filterBarStyle}>
+        <input
+          ref={filterRef}
+          type="text"
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+          onKeyDown={handleFilterKeyDown}
+          placeholder="Filter directories..."
+          style={filterInputStyle}
+        />
+        {filter && (
+          <span style={{ color: '#555', fontSize: '11px', flexShrink: 0 }}>
+            {filteredEntries.length}/{entries.length}
+          </span>
+        )}
+      </div>
+
       {/* Directory listing */}
       <div style={listStyle}>
         {parent && (
@@ -112,10 +176,12 @@ export function FolderPicker({ value, onChange, placeholder }: FolderPickerProps
           </div>
         )}
         {loading && <div style={{ color: '#555', padding: '8px', fontSize: '12px' }}>Loading...</div>}
-        {!loading && entries.length === 0 && (
-          <div style={{ color: '#555', padding: '8px', fontSize: '12px' }}>No subdirectories</div>
+        {!loading && filteredEntries.length === 0 && (
+          <div style={{ color: '#555', padding: '8px', fontSize: '12px' }}>
+            {filter ? 'No matches' : 'No subdirectories'}
+          </div>
         )}
-        {!loading && entries.map(e => (
+        {!loading && filteredEntries.map(e => (
           <div
             key={e.path}
             style={entryStyle}
@@ -144,12 +210,31 @@ const closedStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
+  fontSize: '13px',
+}
+
+const pathInputStyle: React.CSSProperties = {
+  flex: 1,
   padding: '8px',
   backgroundColor: '#0f0f23',
   border: '1px solid #333',
   borderRadius: '4px',
-  cursor: 'pointer',
+  color: '#e0e0e0',
   fontSize: '13px',
+  outline: 'none',
+  fontFamily: 'inherit',
+}
+
+const browseBtnStyle: React.CSSProperties = {
+  padding: '8px 12px',
+  backgroundColor: '#2a2a4a',
+  border: '1px solid #333',
+  borderRadius: '4px',
+  color: '#888',
+  cursor: 'pointer',
+  fontSize: '12px',
+  whiteSpace: 'nowrap',
+  flexShrink: 0,
 }
 
 const browserStyle: React.CSSProperties = {
@@ -173,6 +258,26 @@ const crumbStyle: React.CSSProperties = {
   color: '#61dafb',
   cursor: 'pointer',
   padding: '0 2px',
+}
+
+const filterBarStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  padding: '4px 10px',
+  borderBottom: '1px solid #2a2a4a',
+}
+
+const filterInputStyle: React.CSSProperties = {
+  flex: 1,
+  padding: '4px 6px',
+  backgroundColor: '#0f0f23',
+  border: '1px solid #333',
+  borderRadius: '3px',
+  color: '#e0e0e0',
+  fontSize: '12px',
+  outline: 'none',
+  fontFamily: 'inherit',
 }
 
 const listStyle: React.CSSProperties = {

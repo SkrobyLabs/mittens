@@ -31,6 +31,7 @@ func Register(mux *http.ServeMux, deps *Deps) {
 	mux.HandleFunc("GET /api/v1/sessions", sh.List)
 	mux.HandleFunc("POST /api/v1/sessions", sh.Create)
 	mux.HandleFunc("GET /api/v1/sessions/{id}", sh.Get)
+	mux.HandleFunc("PATCH /api/v1/sessions/{id}", sh.Update)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", sh.Terminate)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/relaunch", sh.Relaunch)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resize", sh.Resize)

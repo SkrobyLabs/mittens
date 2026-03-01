@@ -57,6 +57,12 @@ func TmuxCreate(name string, cols, rows uint16, cmdArgs []string) error {
 		return fmt.Errorf("tmux new-session: %w: %s", err, bytes.TrimSpace(out))
 	}
 
+	// Keep the pane alive after the process exits so we can read its output
+	// and exit code before cleaning up. Without this, fast-exiting processes
+	// (e.g. Docker not running) kill the tmux session before we can attach.
+	roCmd := exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on")
+	_ = roCmd.Run()
+
 	// Set a large scrollback history.
 	setArgs := []string{"set-option", "-t", name, "history-limit", "50000"}
 	setCmd := exec.Command("tmux", setArgs...)
@@ -96,6 +102,30 @@ func TmuxCapturePane(name string) ([]byte, error) {
 		return nil, fmt.Errorf("tmux capture-pane: %w", err)
 	}
 	return out, nil
+}
+
+// TmuxPaneDead returns true if the pane's process has exited (remain-on-exit keeps it visible).
+func TmuxPaneDead(name string) bool {
+	cmd := exec.Command("tmux", "display-message", "-t", name, "-p", "#{pane_dead}")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+// TmuxPaneExitStatus returns the exit code of a dead pane's process.
+func TmuxPaneExitStatus(name string) int {
+	cmd := exec.Command("tmux", "display-message", "-t", name, "-p", "#{pane_dead_status}")
+	out, err := cmd.Output()
+	if err != nil {
+		return 1
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 1
+	}
+	return code
 }
 
 // TmuxResizeWindow resizes the tmux window for the given session.

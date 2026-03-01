@@ -1,15 +1,19 @@
 import { TerminalView } from '../terminal/Terminal'
 import { TerminalToolbar } from '../terminal/TerminalToolbar'
 import { useSessionStore } from '../../store/sessionStore'
+import type { Session } from '../../types/session'
 
 interface PaneContainerProps {
   sessionId: string | null
   onTerminate?: () => void
-  onSplitH?: () => void
-  onSplitV?: () => void
+  onRename?: (id: string, name: string) => void
+  onDuplicate?: (session: Session) => void
+  onEdit?: (session: Session) => void
+  onOpenShell?: (workDir: string) => void
+  onOpenMittens?: (workDir: string) => void
 }
 
-export function PaneContainer({ sessionId, onTerminate, onSplitH, onSplitV }: PaneContainerProps) {
+export function PaneContainer({ sessionId, onTerminate, onRename, onDuplicate, onEdit, onOpenShell, onOpenMittens }: PaneContainerProps) {
   const session = useSessionStore(s => s.sessions.find(sess => sess.id === sessionId))
 
   if (!sessionId) {
@@ -31,10 +35,13 @@ export function PaneContainer({ sessionId, onTerminate, onSplitH, onSplitV }: Pa
       <TerminalToolbar
         session={session}
         onTerminate={onTerminate}
-        onSplitH={onSplitH}
-        onSplitV={onSplitV}
+        onRename={onRename}
+        onDuplicate={onDuplicate}
+        onEdit={onEdit}
+        onOpenShell={onOpenShell}
+        onOpenMittens={onOpenMittens}
       />
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, paddingLeft: 6 }}>
         <TerminalView sessionId={sessionId} />
       </div>
     </div>

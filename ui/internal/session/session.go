@@ -22,6 +22,7 @@ type Config struct {
 	Flags      []string `json:"flags,omitempty"`
 	ClaudeArgs []string `json:"claudeArgs,omitempty"`
 	ExtraDirs  []string `json:"extraDirs,omitempty"`
+	Shell      bool     `json:"shell,omitempty"`
 }
 
 // Session represents a single mittens subprocess with its PTY.
@@ -36,10 +37,12 @@ type Session struct {
 	StoppedAt time.Time `json:"stoppedAt,omitempty"`
 	TmuxName  string    `json:"tmuxName,omitempty"`
 
-	mu        sync.Mutex
-	ptyFd     *PtyHandle
-	scrollbuf *RingBuffer
-	hub       OutputHub
+	mu           sync.Mutex
+	ptyFd        *PtyHandle
+	scrollbuf    *RingBuffer
+	hub          OutputHub
+	paneExitCode int
+	paneExitSet  bool
 }
 
 // OutputHub broadcasts terminal output to connected WebSocket clients.
@@ -108,6 +111,14 @@ func (r *RingBuffer) Write(p []byte) {
 			r.full = true
 		}
 	}
+}
+
+// Reset clears all data in the ring buffer.
+func (r *RingBuffer) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pos = 0
+	r.full = false
 }
 
 // Bytes returns the contents of the ring buffer in order.

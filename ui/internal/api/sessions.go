@@ -20,6 +20,7 @@ type CreateRequest struct {
 	Flags      []string `json:"flags,omitempty"`
 	ClaudeArgs []string `json:"claudeArgs,omitempty"`
 	ExtraDirs  []string `json:"extraDirs,omitempty"`
+	Shell      bool     `json:"shell,omitempty"`
 }
 
 // ResizeRequest is the JSON body for resizing a session.
@@ -96,6 +97,7 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Flags:      req.Flags,
 		ClaudeArgs: req.ClaudeArgs,
 		ExtraDirs:  req.ExtraDirs,
+		Shell:      req.Shell,
 	}
 
 	s, err := h.Sessions.Create(req.Name, cfg)
@@ -115,6 +117,31 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	writeJSON(w, http.StatusOK, sessionToResponse(s))
+}
+
+// UpdateRequest is the JSON body for updating a session.
+type UpdateRequest struct {
+	Name string `json:"name"`
+}
+
+// Update modifies session properties (currently just the name).
+func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req UpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := h.Sessions.Rename(id, req.Name); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s, _ := h.Sessions.Get(id)
 	writeJSON(w, http.StatusOK, sessionToResponse(s))
 }
 

@@ -9,7 +9,10 @@ import type { WizardState, WizardTab, ExtensionToggle } from '../../types/wizard
 interface CreateSessionWizardProps {
   open: boolean
   onClose: () => void
-  onCreate: (req: CreateSessionRequest) => void
+  onCreate: (req: CreateSessionRequest) => Promise<void>
+  initialShell?: boolean
+  initialWorkDir?: string
+  error?: string | null
 }
 
 interface Preset {
@@ -41,7 +44,7 @@ const INITIAL_OPTIONS: WizardState['options'] = {
 
 function makeDefaultState(metas: ExtensionMeta[]): WizardState {
   return {
-    project: { name: '', workDir: '', extraDirs: [] },
+    project: { name: '', workDir: localStorage.getItem('mittens:lastFolder') || '', extraDirs: [] },
     extensions: metas.map(ext => ({
       name: ext.name,
       enabled: ext.defaultOn,
@@ -52,10 +55,11 @@ function makeDefaultState(metas: ExtensionMeta[]): WizardState {
   }
 }
 
-export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWizardProps) {
+export function CreateSessionWizard({ open, onClose, onCreate, initialShell, initialWorkDir, error }: CreateSessionWizardProps) {
   const [tab, setTab] = useState<WizardTab>('project')
   const [extensionMetas, setExtensionMetas] = useState<ExtensionMeta[]>([])
   const [capsLoading, setCapsLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
   const [state, setState] = useState<WizardState>({
     project: { name: '', workDir: '', extraDirs: [] },
     extensions: [],
@@ -80,11 +84,19 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
       setPresets(savedPresets || [])
       setState(prev => {
         // Only reset extensions if they haven't been initialized yet.
-        if (prev.extensions.length > 0) return prev
-        return makeDefaultState(metas)
+        if (prev.extensions.length > 0) {
+          if (initialShell !== undefined) {
+            return { ...prev, options: { ...prev.options, shell: !!initialShell } }
+          }
+          return prev
+        }
+        const s = makeDefaultState(metas)
+        if (initialShell) s.options.shell = true
+        if (initialWorkDir) s.project.workDir = initialWorkDir
+        return s
       })
     }).finally(() => setCapsLoading(false))
-  }, [open])
+  }, [open, initialShell, initialWorkDir])
 
   const loadPreset = useCallback((preset: Preset) => {
     setState(prev => ({
@@ -137,8 +149,8 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
     setPresets(prev => prev.filter(p => p.name !== name))
   }, [])
 
-  const handleCreate = useCallback(() => {
-    if (!state.project.workDir) return
+  const handleCreate = useCallback(async () => {
+    if (!state.project.workDir || creating) return
 
     const flags: string[] = []
 
@@ -196,19 +208,28 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
       extraDirs: state.project.extraDirs.filter(Boolean).length > 0
         ? state.project.extraDirs.filter(Boolean)
         : undefined,
+      shell: initialShell || undefined,
     }
 
-    onCreate(req)
-    setState(makeDefaultState(extensionMetas))
-    setTab('project')
-    onClose()
-  }, [state, extensionMetas, onCreate, onClose])
+    setCreating(true)
+    try {
+      await onCreate(req)
+      setState(makeDefaultState(extensionMetas))
+      setTab('project')
+      onClose()
+    } catch {
+      // Error is displayed via the error prop from parent.
+    } finally {
+      setCreating(false)
+    }
+  }, [state, extensionMetas, onCreate, onClose, creating])
 
   if (!open) return null
 
-  const tabIdx = TABS.findIndex(t => t.id === tab)
+  const visibleTabs = initialShell ? TABS.filter(t => t.id === 'project') : TABS
+  const tabIdx = visibleTabs.findIndex(t => t.id === tab)
   const isFirst = tabIdx === 0
-  const isLast = tabIdx === TABS.length - 1
+  const isLast = tabIdx === visibleTabs.length - 1
   const canCreate = !!state.project.workDir
 
   return (
@@ -216,7 +237,9 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
       <div style={panelStyle} onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div style={headerStyle}>
-          <h3 style={{ margin: 0, color: '#e0e0e0', fontSize: '16px' }}>New Session</h3>
+          <h3 style={{ margin: 0, color: '#e0e0e0', fontSize: '16px' }}>
+            {state.options.shell ? 'New Shell' : 'New Session'}
+          </h3>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {/* Preset selector */}
             {presets.length > 0 && (
@@ -239,10 +262,14 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
           </div>
         </div>
 
+        {error && (
+          <div style={errorBannerStyle}>{error}</div>
+        )}
+
         <div style={bodyStyle}>
           {/* Tab sidebar */}
           <div style={sidebarStyle}>
-            {TABS.map((t, i) => (
+            {visibleTabs.map((t, i) => (
               <button
                 key={t.id}
                 type="button"
@@ -355,7 +382,7 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
         <div style={footerStyle}>
           <button
             type="button"
-            onClick={() => !isFirst && setTab(TABS[tabIdx - 1].id)}
+            onClick={() => !isFirst && setTab(visibleTabs[tabIdx - 1].id)}
             disabled={isFirst}
             style={{
               ...navBtnStyle,
@@ -370,19 +397,20 @@ export function CreateSessionWizard({ open, onClose, onCreate }: CreateSessionWi
             <button
               type="button"
               onClick={handleCreate}
-              disabled={!canCreate}
+              disabled={!canCreate || creating}
               style={{
                 ...createBtnStyle,
-                opacity: canCreate ? 1 : 0.4,
-                cursor: canCreate ? 'pointer' : 'default',
+                backgroundColor: state.options.shell ? '#4caf50' : '#61dafb',
+                opacity: canCreate && !creating ? 1 : 0.4,
+                cursor: canCreate && !creating ? 'pointer' : 'default',
               }}
             >
-              Create
+              {creating ? 'Creating...' : state.options.shell ? 'Create Shell' : 'Create'}
             </button>
           ) : (
             <button
               type="button"
-              onClick={() => setTab(TABS[tabIdx + 1].id)}
+              onClick={() => setTab(visibleTabs[tabIdx + 1].id)}
               style={nextBtnStyle}
             >
               Next
@@ -424,6 +452,15 @@ const headerStyle: React.CSSProperties = {
   justifyContent: 'space-between',
   padding: '16px 20px',
   borderBottom: '1px solid #2a2a4a',
+}
+
+const errorBannerStyle: React.CSSProperties = {
+  padding: '10px 20px',
+  backgroundColor: 'rgba(244, 67, 54, 0.15)',
+  borderBottom: '1px solid rgba(244, 67, 54, 0.3)',
+  color: '#f44336',
+  fontSize: '13px',
+  lineHeight: '1.4',
 }
 
 const closeBtnStyle: React.CSSProperties = {

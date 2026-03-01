@@ -12,6 +12,8 @@ interface SessionStore {
   createSession: (req: CreateSessionRequest) => Promise<Session>
   terminateSession: (id: string) => Promise<void>
   relaunchSession: (id: string, req: RelaunchRequest) => Promise<Session>
+  renameSession: (id: string, name: string) => Promise<Session>
+  duplicateSession: (session: Session) => Promise<Session>
   updateSessionState: (id: string, state: Session['state'], exitCode?: number) => void
 }
 
@@ -74,6 +76,33 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       ],
     })
     return newSession
+  },
+
+  renameSession: async (id, name) => {
+    const res = await fetch(`${API}/sessions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Failed to rename session')
+    }
+    const session: Session = await res.json()
+    set({ sessions: get().sessions.map(s => s.id === id ? session : s) })
+    return session
+  },
+
+  duplicateSession: async (session) => {
+    const req: CreateSessionRequest = {
+      name: session.name + ' (copy)',
+      workDir: session.config.workDir,
+      extensions: session.config.extensions,
+      flags: session.config.flags,
+      claudeArgs: session.config.claudeArgs,
+      extraDirs: session.config.extraDirs,
+    }
+    return get().createSession(req)
   },
 
   updateSessionState: (id, state, exitCode) => {

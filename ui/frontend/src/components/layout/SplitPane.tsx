@@ -3,16 +3,20 @@ import 'allotment/dist/style.css'
 import { PaneContainer } from './PaneContainer'
 import type { Pane, SplitDirection } from '../../store/layoutStore'
 import { useSessionStore } from '../../store/sessionStore'
+import type { Session } from '../../types/session'
 
 interface SplitPaneProps {
   panes: Pane[]
   direction: SplitDirection
   tabId: string
-  onSplitH?: (paneId: string) => void
-  onSplitV?: (paneId: string) => void
+  onRename?: (id: string, name: string) => void
+  onDuplicate?: (session: Session) => void
+  onEdit?: (session: Session) => void
+  onOpenShell?: (workDir: string) => void
+  onOpenMittens?: (workDir: string) => void
 }
 
-export function SplitPane({ panes, direction, tabId, onSplitH, onSplitV }: SplitPaneProps) {
+export function SplitPane({ panes, direction, tabId, onRename, onDuplicate, onEdit, onOpenShell, onOpenMittens }: SplitPaneProps) {
   const terminateSession = useSessionStore(s => s.terminateSession)
 
   if (panes.length === 0) {
@@ -35,8 +39,11 @@ export function SplitPane({ panes, direction, tabId, onSplitH, onSplitV }: Split
       <PaneContainer
         sessionId={pane.sessionId}
         onTerminate={() => pane.sessionId && terminateSession(pane.sessionId)}
-        onSplitH={() => onSplitH?.(pane.id)}
-        onSplitV={() => onSplitV?.(pane.id)}
+        onRename={onRename}
+        onDuplicate={onDuplicate}
+        onEdit={onEdit}
+        onOpenShell={onOpenShell}
+        onOpenMittens={onOpenMittens}
       />
     )
   }
@@ -48,8 +55,11 @@ export function SplitPane({ panes, direction, tabId, onSplitH, onSplitV }: Split
           <PaneContainer
             sessionId={pane.sessionId}
             onTerminate={() => pane.sessionId && terminateSession(pane.sessionId)}
-            onSplitH={() => onSplitH?.(pane.id)}
-            onSplitV={() => onSplitV?.(pane.id)}
+            onRename={onRename}
+            onDuplicate={onDuplicate}
+            onEdit={onEdit}
+            onOpenShell={onOpenShell}
+            onOpenMittens={onOpenMittens}
           />
         </Allotment.Pane>
       ))}
