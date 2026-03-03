@@ -40,7 +40,7 @@ func main() {
 
 	// NOTE: "init" is NOT registered as a cobra subcommand.
 	// With DisableFlagParsing: true, cobra's stripFlags() can't tell which
-	// flags consume a value (e.g. --channel-sock PATH), so any bare path
+	// flags consume a value (e.g. --dir PATH), so any bare path
 	// arg gets misidentified as a subcommand name and triggers
 	// "unknown command" errors. Handling "init" in runMain's switch avoids
 	// this entirely.

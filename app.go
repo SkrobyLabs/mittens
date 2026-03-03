@@ -31,7 +31,6 @@ type App struct {
 	Shell        bool
 	NoResume     bool
 	ExtraDirs    []string
-	ChannelSock  string
 	InstanceName string // user-provided name via --name
 	ClaudeArgs   []string
 
@@ -85,7 +84,6 @@ var coreFlags = map[string]func(*App){
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
 	"--dir":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
-	"--channel-sock": func(a *App, val string) { a.ChannelSock = val },
 	"--name":         func(a *App, val string) { a.InstanceName = val },
 }
 
@@ -514,14 +512,6 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}
 
-	// Channel socket mount (for mittens-ui container communication).
-	if a.ChannelSock != "" {
-		sockDir := filepath.Dir(a.ChannelSock)
-		sockBase := filepath.Base(a.ChannelSock)
-		args = append(args, "-v", sockDir+":/tmp/mittens-channel")
-		args = append(args, "-e", "MITTENS_CHANNEL_SOCK=/tmp/mittens-channel/"+sockBase)
-	}
-
 	// Session persistence mounts.
 	if !a.NoHistory && a.HostProjectDir != "" {
 		projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
@@ -867,7 +857,6 @@ Core flags:
   --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
-  --channel-sock P  Channel socket path (used by mittens-ui)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
 

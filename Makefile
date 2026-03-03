@@ -93,8 +93,6 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 	@mkdir -p $(DIST)/container $(DIST)/extensions
 	@# Binaries
 	cp $(BINARY) $(DIST)/
-	$(MAKE) -C ui all
-	cp ui/mittens-ui $(DIST)/
 	@# Container runtime files (Dockerfile, entrypoint, configs, scripts)
 	cp container/* $(DIST)/container/
 	@# Extension build scripts (YAML manifests are embedded in the binary)
@@ -109,7 +107,6 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 	@echo ""
 	@echo "Distribution ready in $(DIST)/"
 	@echo "  $(DIST)/mittens        — CLI"
-	@echo "  $(DIST)/mittens-ui     — Web UI (frontend embedded)"
 	@echo "  $(DIST)/container/     — Docker image files"
 	@echo "  $(DIST)/extensions/    — Extension build scripts"
 

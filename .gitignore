@@ -11,8 +11,3 @@
 mittens
 mittens-*
 dist/
-
-# UI build artifacts
-ui/mittens-ui
-ui/frontend/node_modules/
-ui/frontend/dist/
