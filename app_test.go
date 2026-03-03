@@ -692,3 +692,70 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 		t.Error("missing MITTENS_EXTRA_DIRS env var")
 	}
 }
+
+func TestParseFlags_Name(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--name", "my-instance"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.InstanceName != "my-instance" {
+		t.Errorf("InstanceName = %q, want %q", a.InstanceName, "my-instance")
+	}
+}
+
+func TestAssembleDockerArgs_CustomName(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		InstanceName:      "planner-1",
+		ContainerName:     "mittens-planner-1",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "--name", "mittens-planner-1") {
+		t.Error("missing --name mittens-planner-1")
+	}
+	if !argPairExists(args, "-e", "MITTENS_INSTANCE_NAME=planner-1") {
+		t.Error("missing MITTENS_INSTANCE_NAME env var")
+	}
+}
+
+func TestAssembleDockerArgs_NoCustomName(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		ContainerName:     "mittens-12345",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if argPairContains(args, "-e", "MITTENS_INSTANCE_NAME") {
+		t.Error("MITTENS_INSTANCE_NAME should not be set without --name")
+	}
+}
+
+func TestIsValidContainerName(t *testing.T) {
+	valid := []string{"foo", "my-instance", "app.v2", "test_1", "A123"}
+	for _, name := range valid {
+		if !isValidContainerName(name) {
+			t.Errorf("expected %q to be valid", name)
+		}
+	}
+	invalid := []string{"", "-bad", ".dot", "_under", "has space", "no/slash", "no:colon"}
+	for _, name := range invalid {
+		if isValidContainerName(name) {
+			t.Errorf("expected %q to be invalid", name)
+		}
+	}
+}

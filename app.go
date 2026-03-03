@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -18,19 +19,20 @@ import (
 // App holds all state for a single mittens invocation.
 type App struct {
 	// Core flags
-	Verbose     bool
-	NoConfig    bool
-	NoHistory   bool
-	NoBuild     bool
-	DinD        bool
-	Yolo        bool
-	NetworkHost bool
-	Worktree    bool
-	Shell       bool
-	NoResume    bool
-	ExtraDirs   []string
-	ChannelSock string
-	ClaudeArgs  []string
+	Verbose      bool
+	NoConfig     bool
+	NoHistory    bool
+	NoBuild      bool
+	DinD         bool
+	Yolo         bool
+	NetworkHost  bool
+	Worktree     bool
+	Shell        bool
+	NoResume     bool
+	ExtraDirs    []string
+	ChannelSock  string
+	InstanceName string // user-provided name via --name
+	ClaudeArgs   []string
 
 	// Computed state
 	Workspace          string // git root or cwd
@@ -82,6 +84,7 @@ var coreFlags = map[string]func(*App){
 var coreFlagsWithArg = map[string]func(*App, string){
 	"--dir":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
 	"--channel-sock": func(a *App, val string) { a.ChannelSock = val },
+	"--name":         func(a *App, val string) { a.InstanceName = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -307,7 +310,14 @@ func (a *App) Run() error {
 	}
 
 	// Container name.
-	a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
+	if a.InstanceName != "" {
+		if !isValidContainerName(a.InstanceName) {
+			return fmt.Errorf("invalid --name %q: must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", a.InstanceName)
+		}
+		a.ContainerName = "mittens-" + a.InstanceName
+	} else {
+		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
+	}
 
 	// Auto-continue last session unless opted out or user already specified resume/continue.
 	if !a.NoResume && !a.Shell && a.HostProjectDir != "" {
@@ -468,6 +478,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	args = append(args, "-e", "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
+	if a.InstanceName != "" {
+		args = append(args, "-e", "MITTENS_INSTANCE_NAME="+a.InstanceName)
+	}
 
 	// Credential mount.
 	if a.Credentials != nil && a.Credentials.TmpFile() != "" {
@@ -710,6 +723,12 @@ func openOnHost(url string) {
 	}
 }
 
+var validContainerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+func isValidContainerName(name string) bool {
+	return validContainerName.MatchString(name)
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -751,6 +770,7 @@ Core flags:
   --network-host    Use host networking (default: bridge)
   --worktree        Git worktree isolation per invocation
   --shell           Start a bash shell instead of Claude
+  --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
   --channel-sock P  Channel socket path (used by mittens-ui)
   --extensions      List loaded extensions and their flags
@@ -821,6 +841,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--no-resume", Description: "Start a new session (default: continue last)"},
+			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
 		},
 	}
