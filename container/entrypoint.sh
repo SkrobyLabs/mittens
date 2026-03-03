@@ -248,6 +248,12 @@ else
     jq -n --argjson dirs "$TRUST_DIRS" '{"trustedDirectories": $dirs}' > "$SETTINGS_FILE"
 fi
 
+# --- Auto-accept yolo permission prompt ---
+if [[ "${MITTENS_YOLO:-false}" == "true" ]]; then
+    jq '.skipDangerousModePermissionPrompt = true' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
+        && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+fi
+
 # --- Copy git config and mark mounted paths as safe ---
 if [[ -f "$CONFIG_MOUNT/.gitconfig" ]]; then
     cp "$CONFIG_MOUNT/.gitconfig" "$CLAUDE_HOME/.gitconfig"

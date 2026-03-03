@@ -478,6 +478,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	args = append(args, "-e", "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
+	if a.Yolo {
+		args = append(args, "-e", "MITTENS_YOLO=true")
+	}
 	if a.InstanceName != "" {
 		args = append(args, "-e", "MITTENS_INSTANCE_NAME="+a.InstanceName)
 	}
