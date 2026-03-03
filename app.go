@@ -507,7 +507,7 @@ func (a *App) buildImage() error {
 			"AI_INSTALL_CMD": a.Provider.InstallCmd,
 			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
 		},
-		Quiet: !a.Verbose,
+		Verbose: a.Verbose,
 	})
 }
 

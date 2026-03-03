@@ -7,8 +7,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/Skroby/mittens/extensions/registry"
 )
@@ -23,14 +21,14 @@ type BuildContext struct {
 	GroupID        int                  // host GID to bake into the image
 	Extensions     []*registry.Extension // enabled extensions with build configs
 	ExtraBuildArgs map[string]string    // additional --build-arg key=value pairs (e.g. provider args)
-	Quiet          bool                 // suppress build output (docker -q)
+	Verbose        bool                 // pass --progress=plain to docker build
 }
 
 // BuildImage runs `docker build` with the given context and returns any error.
 func BuildImage(ctx BuildContext) error {
 	args := []string{"build"}
-	if ctx.Quiet {
-		args = append(args, "-q")
+	if ctx.Verbose {
+		args = append(args, "--progress=plain")
 	}
 
 	// Dockerfile path
@@ -70,59 +68,11 @@ func BuildImage(ctx BuildContext) error {
 	args = append(args, ctx.ContextDir)
 
 	cmd := exec.Command("docker", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	if ctx.Quiet {
-		// Suppress output and show a progress spinner instead.
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-
-		start := time.Now()
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("docker build failed: %w", err)
-		}
-
-		// Spinner in a goroutine.
-		var wg sync.WaitGroup
-		done := make(chan struct{})
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			frames := []rune{'|', '/', '-', '\\'}
-			i := 0
-			ticker := time.NewTicker(200 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					// Clear the spinner line.
-					fmt.Fprintf(os.Stderr, "\r%s", strings.Repeat(" ", 60))
-					fmt.Fprintf(os.Stderr, "\r")
-					return
-				case <-ticker.C:
-					elapsed := time.Since(start).Truncate(time.Second)
-					fmt.Fprintf(os.Stderr, "\r%s[mittens]%s Building Docker image... %c (%s)",
-						colorCyan, colorReset, frames[i%len(frames)], elapsed)
-					i++
-				}
-			}
-		}()
-
-		err := cmd.Wait()
-		close(done)
-		wg.Wait()
-
-		if err != nil {
-			return fmt.Errorf("docker build failed: %w", err)
-		}
-		elapsed := time.Since(start).Truncate(time.Second)
-		logInfo("Docker image built in %s", elapsed)
-	} else {
-		// Verbose: stream full build output.
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("docker build failed: %w", err)
-		}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker build failed: %w", err)
 	}
 	return nil
 }
