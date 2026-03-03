@@ -210,6 +210,19 @@ func (a *App) Run() error {
 		logInfo("Worktree: %s", wtPath)
 	}
 
+	// Log enabled extensions.
+	{
+		var names []string
+		for _, ext := range a.Extensions {
+			if ext.Enabled {
+				names = append(names, ext.Name)
+			}
+		}
+		if len(names) > 0 {
+			logVerbose(a.Verbose, "Enabled extensions: %s", strings.Join(names, ", "))
+		}
+	}
+
 	// Run setup resolvers for enabled extensions.
 	var resolverDockerArgs []string
 	var resolverFirewallExtra []string
@@ -217,6 +230,7 @@ func (a *App) Run() error {
 		if !ext.Enabled {
 			continue
 		}
+		logVerbose(a.Verbose, "Setting up extension: %s", ext.Name)
 		setupFn := registry.GetSetupResolver(ext.Name)
 		if setupFn == nil {
 			continue
@@ -277,6 +291,11 @@ func (a *App) Run() error {
 	if err := a.Credentials.Setup(); err != nil {
 		logWarn("Credential setup: %v", err)
 	}
+	if a.Credentials.TmpFile() != "" {
+		logVerbose(a.Verbose, "Credentials staged: %s", a.Credentials.TmpFile())
+	} else {
+		logVerbose(a.Verbose, "No credentials found")
+	}
 
 	// Start broker (credential sync + host URL opening via TCP).
 	{
@@ -317,6 +336,8 @@ func (a *App) Run() error {
 		}
 	}
 
+	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
+
 	// Build Docker image.
 	if !a.NoBuild {
 		if err := a.buildImage(); err != nil {
@@ -342,6 +363,8 @@ func (a *App) Run() error {
 	} else {
 		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
 	}
+
+	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
 
 	// Auto-continue last session unless opted out or user already specified resume/continue.
 	if !a.NoResume && !a.Shell && a.HostProjectDir != "" {
@@ -454,7 +477,6 @@ func (a *App) Cleanup() {
 
 // buildImage runs docker build.
 func (a *App) buildImage() error {
-	logInfo("Building Docker image...")
 
 	projectRoot := scriptDir()
 	dockerfile := filepath.Join(projectRoot, "container", "Dockerfile")
@@ -485,7 +507,7 @@ func (a *App) buildImage() error {
 			"AI_INSTALL_CMD": a.Provider.InstallCmd,
 			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
 		},
-		Quiet: true,
+		Quiet: !a.Verbose,
 	})
 }
 
@@ -688,6 +710,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	firewallDomains = append(firewallDomains, resolverFirewall...)
 
 	if len(firewallDomains) > 0 {
+		logVerbose(a.Verbose, "Firewall domains: %d extra", len(firewallDomains))
 		args = append(args, "-e", "MITTENS_FIREWALL_EXTRA="+strings.Join(firewallDomains, ","))
 	}
 
@@ -898,7 +921,7 @@ Commands:
   clean [--dry-run] [--images]  Remove stopped mittens containers
 
 Core flags:
-  --verbose, -v     Show the docker command being run
+  --verbose, -v     Show detailed output (Docker build, extension setup)
   --no-config       Skip project config file loading
   --no-history      Disable session persistence (fully ephemeral)
   --no-resume       Start a new session (default: continue last)
