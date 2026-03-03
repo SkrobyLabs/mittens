@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ func brokerClient(sockPath string) *http.Client {
 func startBroker(t *testing.T, seed string) (*CredentialBroker, *http.Client) {
 	t.Helper()
 	sockPath := filepath.Join(t.TempDir(), "broker.sock")
-	b := NewCredentialBroker(sockPath, seed)
+	b := NewCredentialBroker(sockPath, seed, nil)
 
 	go func() { _ = b.Serve() }()
 
@@ -212,7 +213,7 @@ func TestBroker_MethodNotAllowed(t *testing.T) {
 
 func TestBroker_Lifecycle(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "broker.sock")
-	b := NewCredentialBroker(sockPath, "")
+	b := NewCredentialBroker(sockPath, "", nil)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- b.Serve() }()
@@ -237,6 +238,89 @@ func TestBroker_Lifecycle(t *testing.T) {
 	// Serve should return http.ErrServerClosed.
 	if err := <-errCh; err != http.ErrServerClosed {
 		t.Errorf("Serve() after Close = %v, want ErrServerClosed", err)
+	}
+}
+
+func TestBroker_PUT_WritesThrough(t *testing.T) {
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "creds.json")
+	store := &FileCredentialStore{path: storePath}
+
+	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	client := brokerClient(sockPath)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://broker/")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// PUT fresher creds — should write-through to the store.
+	newer := `{"accessToken":"refreshed","expiresAt":999}`
+	resp, err := client.Do(putReq(newer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != newer {
+		t.Errorf("store file = %q, want %q", data, newer)
+	}
+}
+
+func TestBroker_PullFromHost(t *testing.T) {
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "creds.json")
+	store := &FileCredentialStore{path: storePath}
+
+	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
+
+	// Write fresher creds to the host store file.
+	fresher := `{"accessToken":"host-refreshed","expiresAt":500}`
+	os.WriteFile(storePath, []byte(fresher), 0600)
+
+	// pullFromHost should pick it up.
+	b.pullFromHost()
+
+	got := b.Credentials()
+	if got != fresher {
+		t.Errorf("after pullFromHost: creds = %q, want %q", got, fresher)
+	}
+}
+
+func TestBroker_PullFromHost_StaleIgnored(t *testing.T) {
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "creds.json")
+	store := &FileCredentialStore{path: storePath}
+
+	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	seed := `{"accessToken":"current","expiresAt":500}`
+	b := NewCredentialBroker(sockPath, seed, []CredentialStore{store})
+
+	// Write staler creds to host store.
+	os.WriteFile(storePath, []byte(`{"expiresAt":100}`), 0600)
+
+	b.pullFromHost()
+
+	got := b.Credentials()
+	if got != seed {
+		t.Errorf("pullFromHost should not downgrade: creds = %q, want %q", got, seed)
 	}
 }
 

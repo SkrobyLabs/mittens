@@ -44,6 +44,11 @@ func NewCredentialManager() *CredentialManager {
 	return &CredentialManager{stores: stores}
 }
 
+// Stores returns the underlying credential stores for use by the broker.
+func (m *CredentialManager) Stores() []CredentialStore {
+	return m.stores
+}
+
 // Setup extracts credentials from the freshest source and writes them to a
 // temporary file that can be mounted into the container.
 func (m *CredentialManager) Setup() error {

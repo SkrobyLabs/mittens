@@ -267,20 +267,25 @@ func (a *App) Run() error {
 		logWarn("Credential setup: %v", err)
 	}
 
-	// Start credential broker (for multi-container token sync).
-	if a.Credentials.TmpFile() != "" {
-		seed, _ := os.ReadFile(a.Credentials.TmpFile())
+	// Start broker (credential sync + host URL opening).
+	{
+		var seed string
+		if a.Credentials.TmpFile() != "" {
+			data, _ := os.ReadFile(a.Credentials.TmpFile())
+			seed = string(data)
+		}
 		dir, err := os.MkdirTemp("", "mittens-broker.*")
 		if err == nil {
 			a.brokerDir = dir
 			a.brokerSock = filepath.Join(dir, "broker.sock")
-			a.broker = NewCredentialBroker(a.brokerSock, string(seed))
+			a.broker = NewCredentialBroker(a.brokerSock, seed, a.Credentials.Stores())
+			a.broker.OnOpen = openOnHost
 			go func() {
 				if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
-					logWarn("Credential broker: %v", err)
+					logWarn("Broker: %v", err)
 				}
 			}()
-			logInfo("Credential broker: started")
+			logInfo("Broker: started")
 		}
 	}
 
@@ -685,6 +690,20 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+// openOnHost opens a URL in the host's default browser.
+func openOnHost(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		logWarn("Failed to open URL on host: %v", err)
+	}
+}
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {

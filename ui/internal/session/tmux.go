@@ -64,9 +64,13 @@ func TmuxCreate(name string, cols, rows uint16, cmdArgs []string) error {
 	_ = roCmd.Run()
 
 	// Set a large scrollback history.
-	setArgs := []string{"set-option", "-t", name, "history-limit", "50000"}
-	setCmd := exec.Command("tmux", setArgs...)
+	setCmd := exec.Command("tmux", "set-option", "-t", name, "history-limit", "50000")
 	_ = setCmd.Run()
+
+	// Enable mouse mode so scroll wheel enters copy-mode and scrolls the
+	// pane buffer instead of being converted to up/down arrow keys.
+	mouseCmd := exec.Command("tmux", "set-option", "-t", name, "mouse", "on")
+	_ = mouseCmd.Run()
 
 	return nil
 }

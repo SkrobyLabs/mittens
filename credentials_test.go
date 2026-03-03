@@ -308,6 +308,21 @@ func TestCredentialManager_PersistAll(t *testing.T) {
 	}
 }
 
+func TestCredentialManager_Stores(t *testing.T) {
+	stores := []CredentialStore{
+		&FileCredentialStore{path: "/a"},
+		&FileCredentialStore{path: "/b"},
+	}
+	mgr := &CredentialManager{stores: stores}
+	got := mgr.Stores()
+	if len(got) != 2 {
+		t.Fatalf("Stores() returned %d stores, want 2", len(got))
+	}
+	if got[0].Label() != "/a" || got[1].Label() != "/b" {
+		t.Errorf("Stores() returned wrong stores: %v, %v", got[0].Label(), got[1].Label())
+	}
+}
+
 func TestCredentialManager_Setup_PicksFreshest(t *testing.T) {
 	tmp := t.TempDir()
 

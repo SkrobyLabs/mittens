@@ -114,6 +114,9 @@ RUN mkdir -p /run/squid && chown proxy:proxy /run/squid
 COPY container/clipboard-shim.sh /usr/local/bin/xclip
 RUN chmod +x /usr/local/bin/xclip
 
+COPY container/open-url.sh /usr/local/bin/xdg-open
+RUN chmod +x /usr/local/bin/xdg-open
+
 COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
