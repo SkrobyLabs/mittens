@@ -18,6 +18,9 @@ import (
 
 // App holds all state for a single mittens invocation.
 type App struct {
+	// Provider configuration (AI assistant identity, paths, keys).
+	Provider *Provider
+
 	// Core flags
 	Verbose      bool
 	NoConfig     bool
@@ -85,6 +88,7 @@ var coreFlags = map[string]func(*App){
 var coreFlagsWithArg = map[string]func(*App, string){
 	"--dir":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
 	"--name":         func(a *App, val string) { a.InstanceName = val },
+	"--provider":     func(a *App, val string) {}, // already applied in main.go pre-scan
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -166,7 +170,7 @@ func (a *App) Run() error {
 	}
 
 	home := os.Getenv("HOME")
-	ensureDir(filepath.Join(home, ".claude"))
+	ensureDir(a.Provider.HostConfigDir(home))
 
 	// Detect workspace.
 	a.Workspace = detectWorkspace()
@@ -177,7 +181,7 @@ func (a *App) Run() error {
 	// Session persistence setup.
 	if !a.NoHistory {
 		a.HostProjectDir = ProjectDir(a.Workspace)
-		ensureDir(filepath.Join(home, ".claude", "projects", a.HostProjectDir))
+		ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
 	}
 
 	// Worktree setup for primary workspace.
@@ -237,6 +241,11 @@ func (a *App) Run() error {
 		}
 	}
 
+	// Include non-default provider in image tag to avoid cache collisions.
+	if a.Provider.Name != "claude" {
+		a.imageTagParts = append(a.imageTagParts, a.Provider.Name)
+	}
+
 	// Collect extension build state.
 	a.buildArgs = make(map[string]string)
 	var installExtensions []string
@@ -264,7 +273,7 @@ func (a *App) Run() error {
 	}
 
 	// Setup credentials.
-	a.Credentials = NewCredentialManager()
+	a.Credentials = NewCredentialManager(a.Provider)
 	if err := a.Credentials.Setup(); err != nil {
 		logWarn("Credential setup: %v", err)
 	}
@@ -279,7 +288,10 @@ func (a *App) Run() error {
 		a.broker = NewCredentialBroker("", seed, a.Credentials.Stores())
 		a.broker.OnOpen = openOnHost
 		if !a.NoNotify {
-			a.broker.OnNotify = notifyOnHost
+			displayName := a.Provider.DisplayName
+			a.broker.OnNotify = func(container, event, message string) {
+				notifyOnHost(container, event, message, displayName)
+			}
 		}
 
 		// Persistent broker log for debugging.
@@ -335,22 +347,22 @@ func (a *App) Run() error {
 	if !a.NoResume && !a.Shell && a.HostProjectDir != "" {
 		hasResume := false
 		for _, arg := range a.ClaudeArgs {
-			if arg == "--continue" || arg == "-c" || arg == "--resume" || arg == "-r" {
+			if a.Provider.IsResumeFlag(arg) {
 				hasResume = true
 				break
 			}
 		}
 		if !hasResume {
-			projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
+			projDir := filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir)
 			if matches, _ := filepath.Glob(filepath.Join(projDir, "*.jsonl")); len(matches) > 0 {
 				a.ClaudeArgs = append([]string{"--continue"}, a.ClaudeArgs...)
 			}
 		}
 	}
 
-	// Yolo mode: prepend --dangerously-skip-permissions.
+	// Yolo mode: prepend skip-permissions flag.
 	if a.Yolo {
-		a.ClaudeArgs = append([]string{"--dangerously-skip-permissions"}, a.ClaudeArgs...)
+		a.ClaudeArgs = append([]string{a.Provider.SkipPermsFlag}, a.ClaudeArgs...)
 		logWarn("YOLO mode: all permission prompts will be skipped")
 	}
 
@@ -400,7 +412,7 @@ func (a *App) Cleanup() {
 				}
 			} else {
 				// Fallback: docker cp from the single container.
-				_ = a.Credentials.PersistFromContainer(a.ContainerName)
+				_ = a.Credentials.PersistFromContainer(a.ContainerName, a.Provider.ContainerCredentialPath())
 			}
 		}
 		RemoveContainer(a.ContainerName)
@@ -467,7 +479,13 @@ func (a *App) buildImage() error {
 		UserID:     uid,
 		GroupID:    gid,
 		Extensions: enabledExts,
-		Quiet:      true,
+		ExtraBuildArgs: map[string]string{
+			"AI_USERNAME":    a.Provider.Username,
+			"AI_BINARY":     a.Provider.Binary,
+			"AI_INSTALL_CMD": a.Provider.InstallCmd,
+			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
+		},
+		Quiet: true,
 	})
 }
 
@@ -483,11 +501,13 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Primary workspace mount.
 	args = append(args, "-v", a.WorkspaceMountSrc+":/workspace")
 
-	// Claude config staging (read-only).
-	args = append(args, "-v", filepath.Join(home, ".claude")+":/mnt/claude-config/.claude:ro")
+	// AI config staging (read-only).
+	args = append(args, "-v", a.Provider.HostConfigDir(home)+":"+a.Provider.StagingConfigDir()+":ro")
 
 	// Environment variables.
-	args = append(args, "-e", "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
+	if a.Provider.APIKeyEnv != "" {
+		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
+	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
 	if a.Yolo {
@@ -503,8 +523,26 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Credential mount.
 	if a.Credentials != nil && a.Credentials.TmpFile() != "" {
-		args = append(args, "-v", a.Credentials.TmpFile()+":/mnt/claude-config/.credentials.json:ro")
+		args = append(args, "-v", a.Credentials.TmpFile()+":"+a.Provider.StagingCredentialPath()+":ro")
 	}
+
+	// Provider env vars — passed into the container for entrypoint.sh.
+	args = append(args,
+		"-e", "MITTENS_AI_USERNAME="+a.Provider.Username,
+		"-e", "MITTENS_AI_BINARY="+a.Provider.Binary,
+		"-e", "MITTENS_AI_CONFIG_DIR="+a.Provider.ConfigDir,
+		"-e", "MITTENS_AI_CRED_FILE="+a.Provider.CredentialFile,
+		"-e", "MITTENS_AI_PREFS_FILE="+a.Provider.UserPrefsFile,
+		"-e", "MITTENS_AI_SETTINGS_FILE="+a.Provider.SettingsFile,
+		"-e", "MITTENS_AI_PROJECT_FILE="+a.Provider.ProjectFile,
+		"-e", "MITTENS_AI_TRUSTED_DIRS_KEY="+a.Provider.TrustedDirsKey,
+		"-e", "MITTENS_AI_YOLO_KEY="+a.Provider.YoloKey,
+		"-e", "MITTENS_AI_MCP_SERVERS_KEY="+a.Provider.MCPServersKey,
+		"-e", "MITTENS_AI_SETTINGS_FORMAT="+a.Provider.SettingsFormat,
+		"-e", "MITTENS_AI_CONFIG_SUBDIRS="+strings.Join(a.Provider.ConfigSubdirs, ","),
+		"-e", "MITTENS_AI_PLUGIN_DIR="+a.Provider.PluginDir,
+		"-e", "MITTENS_AI_PLUGIN_FILES="+strings.Join(a.Provider.PluginFiles, ","),
+	)
 
 	// Credential broker (TCP).
 	if a.brokerPort > 0 {
@@ -514,15 +552,17 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Session persistence mounts.
 	if !a.NoHistory && a.HostProjectDir != "" {
-		projDir := filepath.Join(home, ".claude", "projects", a.HostProjectDir)
-		containerProjDir := filepath.Join("/home/claude/.claude/projects", a.HostProjectDir)
+		hostConfigDir := a.Provider.HostConfigDir(home)
+		containerConfigDir := a.Provider.ContainerConfigDir()
+		projDir := filepath.Join(hostConfigDir, "projects", a.HostProjectDir)
+		containerProjDir := filepath.Join(containerConfigDir, "projects", a.HostProjectDir)
 		args = append(args, "-v", projDir+":"+containerProjDir)
 
 		if !a.Worktree {
-			ensureDir(filepath.Join(home, ".claude", "plans"))
-			ensureDir(filepath.Join(home, ".claude", "tasks"))
-			args = append(args, "-v", filepath.Join(home, ".claude", "plans")+":/home/claude/.claude/plans")
-			args = append(args, "-v", filepath.Join(home, ".claude", "tasks")+":/home/claude/.claude/tasks")
+			ensureDir(filepath.Join(hostConfigDir, "plans"))
+			ensureDir(filepath.Join(hostConfigDir, "tasks"))
+			args = append(args, "-v", filepath.Join(hostConfigDir, "plans")+":"+filepath.Join(containerConfigDir, "plans"))
+			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
 
 		sessionWS := a.EffectiveWorkspace
@@ -595,10 +635,12 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		}
 	}
 
-	// .claude.json (user prefs, account info, MCP servers).
-	claudeJSON := filepath.Join(home, ".claude.json")
-	if fileExists(claudeJSON) {
-		args = append(args, "-v", claudeJSON+":/mnt/claude-config/.claude.json:ro")
+	// User prefs file (account info, MCP servers) — skip if provider has no prefs file.
+	if a.Provider.UserPrefsFile != "" {
+		userPrefsPath := a.Provider.HostUserPrefsPath(home)
+		if fileExists(userPrefsPath) {
+			args = append(args, "-v", userPrefsPath+":"+a.Provider.StagingUserPrefsPath()+":ro")
+		}
 	}
 
 	// .gitconfig
@@ -640,7 +682,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		firewallDomains = append(firewallDomains, ext.FirewallDomains()...)
 	}
 
-	// Add resolver-contributed docker args and firewall domains.
+	// Add provider, resolver-contributed docker args and firewall domains.
+	firewallDomains = append(firewallDomains, a.Provider.FirewallDomains...)
 	args = append(args, resolverArgs...)
 	firewallDomains = append(firewallDomains, resolverFirewall...)
 
@@ -687,7 +730,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 // runContainer runs docker run with the assembled args.
 func (a *App) runContainer(dockerArgs []string) error {
-	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.ClaudeArgs)
+	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.Provider.Binary, a.ClaudeArgs)
 	if err != nil {
 		return fmt.Errorf("docker run failed: %w", err)
 	}
@@ -721,12 +764,12 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // ---------------------------------------------------------------------------
 
 // notifyOnHost sends a native desktop notification.
-func notifyOnHost(container, event, message string) {
+func notifyOnHost(container, event, message, displayName string) {
 	var title, body string
 	switch event {
 	case "stop":
 		title = "mittens"
-		body = container + ": Claude finished"
+		body = container + ": " + displayName + " finished"
 	case "notification":
 		title = "mittens"
 		if message != "" {
@@ -868,6 +911,7 @@ Core flags:
   --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
+  --provider NAME   AI provider to use (claude, codex; default: claude)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
 
@@ -939,6 +983,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-resume", Description: "Start a new session (default: continue last)"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
+			{Name: "--provider", Description: "AI provider (claude, codex)", ArgType: "string"},
 		},
 	}
 

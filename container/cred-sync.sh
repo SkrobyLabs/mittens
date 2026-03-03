@@ -10,7 +10,10 @@
 set -euo pipefail
 trap 'exit 0' TERM
 
-CRED_FILE="/home/claude/.claude/.credentials.json"
+AI_USERNAME="${AI_USERNAME:-claude}"
+AI_CONFIG_DIR="${MITTENS_AI_CONFIG_DIR:-.claude}"
+AI_CRED_FILE="${MITTENS_AI_CRED_FILE:-.credentials.json}"
+CRED_FILE="/home/${AI_USERNAME}/${AI_CONFIG_DIR}/${AI_CRED_FILE}"
 BROKER_PORT="${MITTENS_BROKER_PORT:-}"
 POLL_INTERVAL=5
 CURL_TIMEOUT=3

@@ -57,12 +57,11 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
     containerd.io \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI (native binary — required for fast mode)
+# Install AI CLI (default: Claude Code)
 # The installer may create a symlink; cp -L follows it to copy the real binary.
-RUN curl -fsSL https://claude.ai/install.sh | bash && \
-    cp -L /root/.local/bin/claude /usr/local/bin/claude && \
-    chmod +x /usr/local/bin/claude && \
-    /usr/local/bin/claude --version
+ARG AI_BINARY="claude"
+ARG AI_INSTALL_CMD="curl -fsSL https://claude.ai/install.sh | bash && cp -L /root/.local/bin/claude /usr/local/bin/claude && chmod +x /usr/local/bin/claude && /usr/local/bin/claude --version"
+RUN bash -c "${AI_INSTALL_CMD}"
 
 # Build-time extension installer
 # Extensions live in extensions/<name>/build.sh
@@ -86,24 +85,29 @@ fi && rm -rf /tmp/ext-builds/
 # Create a non-root user matching typical host UID
 # The node base image has a 'node' user at UID 1000 — if the requested UID
 # collides, rename that user instead of silently failing.
+ARG AI_USERNAME="claude"
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 RUN existing_user=$(getent passwd ${USER_ID} | cut -d: -f1) && \
-    if [ -n "$existing_user" ] && [ "$existing_user" != "claude" ]; then \
-        usermod -l claude -d /home/claude -m "$existing_user" && \
+    if [ -n "$existing_user" ] && [ "$existing_user" != "${AI_USERNAME}" ]; then \
+        usermod -l ${AI_USERNAME} -d /home/${AI_USERNAME} -m "$existing_user" && \
         existing_group=$(getent group ${GROUP_ID} | cut -d: -f1) && \
-        if [ -n "$existing_group" ] && [ "$existing_group" != "claude" ]; then \
-            groupmod -n claude "$existing_group"; \
+        if [ -n "$existing_group" ] && [ "$existing_group" != "${AI_USERNAME}" ]; then \
+            groupmod -n ${AI_USERNAME} "$existing_group"; \
         fi; \
     elif [ -z "$existing_user" ]; then \
-        groupadd -g ${GROUP_ID} claude 2>/dev/null || true && \
-        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash claude; \
+        groupadd -g ${GROUP_ID} ${AI_USERNAME} 2>/dev/null || true && \
+        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash ${AI_USERNAME}; \
     fi && \
-    usermod -aG docker claude 2>/dev/null || true
+    usermod -aG docker ${AI_USERNAME} 2>/dev/null || true
 
 # Create directories for mounts and config
-RUN mkdir -p /home/claude/.claude /home/claude/.config /mnt/claude-config && \
-    chown -R ${USER_ID}:${GROUP_ID} /home/claude /mnt/claude-config
+ARG AI_CONFIG_DIR=".claude"
+RUN mkdir -p /home/${AI_USERNAME}/${AI_CONFIG_DIR} /home/${AI_USERNAME}/.config /mnt/claude-config && \
+    chown -R ${USER_ID}:${GROUP_ID} /home/${AI_USERNAME} /mnt/claude-config
+
+# Make AI_USERNAME available at runtime for entrypoint.sh
+ENV AI_USERNAME=${AI_USERNAME}
 
 # Add squid config and entrypoint
 # These files are under container/ in the source tree; build context is the project root.

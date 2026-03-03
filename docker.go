@@ -13,14 +13,15 @@ import (
 
 // BuildContext holds the parameters needed to build a Docker image.
 type BuildContext struct {
-	ContextDir string               // project root (docker build context)
-	Dockerfile string               // path to Dockerfile (relative to ContextDir or absolute)
-	ImageName  string               // e.g. "mittens"
-	ImageTag   string               // e.g. "latest" or "aws-kubectl"
-	UserID     int                  // host UID to bake into the image
-	GroupID    int                  // host GID to bake into the image
-	Extensions []*registry.Extension // enabled extensions with build configs
-	Quiet      bool                 // suppress build output (docker -q)
+	ContextDir     string               // project root (docker build context)
+	Dockerfile     string               // path to Dockerfile (relative to ContextDir or absolute)
+	ImageName      string               // e.g. "mittens"
+	ImageTag       string               // e.g. "latest" or "aws-kubectl"
+	UserID         int                  // host UID to bake into the image
+	GroupID        int                  // host GID to bake into the image
+	Extensions     []*registry.Extension // enabled extensions with build configs
+	ExtraBuildArgs map[string]string    // additional --build-arg key=value pairs (e.g. provider args)
+	Quiet          bool                 // suppress build output (docker -q)
 }
 
 // BuildImage runs `docker build` with the given context and returns any error.
@@ -54,6 +55,11 @@ func BuildImage(ctx BuildContext) error {
 		}
 	}
 
+	// Extra build args (e.g. provider-specific).
+	for k, v := range ctx.ExtraBuildArgs {
+		args = append(args, "--build-arg", k+"="+v)
+	}
+
 	// Tag and context
 	args = append(args, "-t", ctx.ImageName+":"+ctx.ImageTag)
 	args = append(args, ctx.ContextDir)
@@ -68,8 +74,9 @@ func BuildImage(ctx BuildContext) error {
 }
 
 // RunContainer executes `docker run` with the provided arguments and returns
-// the container's exit code.
-func RunContainer(args []string, imageName, imageTag string, shell bool, claudeArgs []string) (int, error) {
+// the container's exit code. The binary parameter specifies the AI CLI binary
+// name to invoke (e.g. "claude").
+func RunContainer(args []string, imageName, imageTag string, shell bool, binary string, cliArgs []string) (int, error) {
 	dockerArgs := []string{"run"}
 	dockerArgs = append(dockerArgs, args...)
 	dockerArgs = append(dockerArgs, imageName+":"+imageTag)
@@ -77,8 +84,8 @@ func RunContainer(args []string, imageName, imageTag string, shell bool, claudeA
 	if shell {
 		dockerArgs = append(dockerArgs, "/bin/bash")
 	} else {
-		dockerArgs = append(dockerArgs, "claude")
-		dockerArgs = append(dockerArgs, claudeArgs...)
+		dockerArgs = append(dockerArgs, binary)
+		dockerArgs = append(dockerArgs, cliArgs...)
 	}
 
 	cmd := exec.Command("docker", dockerArgs...)
@@ -98,9 +105,10 @@ func RunContainer(args []string, imageName, imageTag string, shell bool, claudeA
 }
 
 // ExtractCredentials copies the credential file out of a stopped container.
-func ExtractCredentials(containerName, destPath string) error {
+// containerCredPath is the full path to the credential file inside the container.
+func ExtractCredentials(containerName, containerCredPath, destPath string) error {
 	cmd := exec.Command("docker", "cp",
-		containerName+":/home/claude/.claude/.credentials.json",
+		containerName+":"+containerCredPath,
 		destPath,
 	)
 	_ = cmd.Run()

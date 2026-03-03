@@ -255,6 +255,7 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-test",
 		WorkspaceMountSrc: "/tmp/workspace",
@@ -320,6 +321,7 @@ func TestAssembleDockerArgs_WithCredentials(t *testing.T) {
 	os.WriteFile(credFile, []byte(`{"token":"test"}`), 0600)
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-cred",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -346,6 +348,7 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 	os.MkdirAll(filepath.Join(home, ".claude", "projects", hostProjectDir), 0o755)
 
 	a := &App{
+		Provider:           DefaultProvider(),
 		NoHistory:          false,
 		ContainerName:      "mittens-session",
 		WorkspaceMountSrc:  "/tmp/ws",
@@ -358,8 +361,9 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 	args := a.assembleDockerArgs(nil, nil)
 
 	// Project dir mount.
-	projDir := filepath.Join(home, ".claude", "projects", hostProjectDir)
-	containerProjDir := filepath.Join("/home/claude/.claude/projects", hostProjectDir)
+	p := DefaultProvider()
+	projDir := filepath.Join(p.HostConfigDir(home), "projects", hostProjectDir)
+	containerProjDir := filepath.Join(p.ContainerConfigDir(), "projects", hostProjectDir)
 	if !argPairExists(args, "-v", projDir+":"+containerProjDir) {
 		t.Error("missing project dir mount")
 	}
@@ -384,6 +388,7 @@ func TestAssembleDockerArgs_DinD(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		DinD:              true,
 		ContainerName:     "mittens-dind",
@@ -423,6 +428,7 @@ func TestAssembleDockerArgs_NetworkHost(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		NetworkHost:       true,
 		ContainerName:     "mittens-net",
@@ -464,6 +470,7 @@ func TestAssembleDockerArgs_ExtensionMountsEnvCaps(t *testing.T) {
 	}
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-ext",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -512,6 +519,7 @@ func TestAssembleDockerArgs_ResolverContributions(t *testing.T) {
 	}
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-resolver",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -560,6 +568,7 @@ func TestAssembleDockerArgs_OptionalFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[user]\nname=test"), 0644)
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-opt",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -583,6 +592,7 @@ func TestAssembleDockerArgs_OptionalFiles(t *testing.T) {
 	t.Setenv("HOME", home2)
 
 	a2 := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-opt2",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -605,6 +615,7 @@ func TestAssembleDockerArgs_CredBroker(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-broker",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -631,6 +642,7 @@ func TestAssembleDockerArgs_NoBroker(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-nobroker",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -656,6 +668,7 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 	dir2 := t.TempDir()
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-extra",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -710,6 +723,7 @@ func TestAssembleDockerArgs_CustomName(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		InstanceName:      "planner-1",
 		ContainerName:     "mittens-planner-1",
@@ -733,6 +747,7 @@ func TestAssembleDockerArgs_NoCustomName(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-12345",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -752,6 +767,7 @@ func TestAssembleDockerArgs_ContainerNameEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-42",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -771,6 +787,7 @@ func TestAssembleDockerArgs_NoNotify(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		NoNotify:          true,
 		ContainerName:     "mittens-nn",
@@ -791,6 +808,7 @@ func TestAssembleDockerArgs_NotifyEnabled(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
 	a := &App{
+		Provider:          DefaultProvider(),
 		NoHistory:         true,
 		ContainerName:     "mittens-yes",
 		WorkspaceMountSrc: "/tmp/ws",
@@ -828,4 +846,227 @@ func TestInspectContainerRunning_NonExistent(t *testing.T) {
 	if running {
 		t.Error("expected running=false for non-existent container")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// assembleDockerArgs — provider env vars
+// ---------------------------------------------------------------------------
+
+func TestAssembleDockerArgs_ProviderEnvVars(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		Provider:          DefaultProvider(),
+		NoHistory:         true,
+		ContainerName:     "mittens-prov",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	envVars := []string{
+		"MITTENS_AI_USERNAME=claude",
+		"MITTENS_AI_BINARY=claude",
+		"MITTENS_AI_CONFIG_DIR=.claude",
+		"MITTENS_AI_CRED_FILE=.credentials.json",
+		"MITTENS_AI_PREFS_FILE=.claude.json",
+		"MITTENS_AI_SETTINGS_FILE=settings.json",
+		"MITTENS_AI_PROJECT_FILE=CLAUDE.md",
+		"MITTENS_AI_TRUSTED_DIRS_KEY=trustedDirectories",
+		"MITTENS_AI_YOLO_KEY=skipDangerousModePermissionPrompt",
+		"MITTENS_AI_MCP_SERVERS_KEY=mcpServers",
+		"MITTENS_AI_SETTINGS_FORMAT=json",
+		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
+		"MITTENS_AI_PLUGIN_DIR=plugins",
+		"MITTENS_AI_PLUGIN_FILES=installed_plugins.json,known_marketplaces.json,config.json",
+	}
+	for _, env := range envVars {
+		if !argPairExists(args, "-e", env) {
+			t.Errorf("missing env var %s", env)
+		}
+	}
+}
+
+func TestAssembleDockerArgs_ProviderPaths(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	p := DefaultProvider()
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-paths",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Config staging mount should use provider paths.
+	wantConfig := p.HostConfigDir(home) + ":" + p.StagingConfigDir() + ":ro"
+	if !argPairExists(args, "-v", wantConfig) {
+		t.Errorf("missing config staging mount, want -v %s", wantConfig)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// assembleDockerArgs — provider API key parameterization
+// ---------------------------------------------------------------------------
+
+func TestAssembleDockerArgs_ProviderAPIKeyEnv(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENAI_API_KEY", "sk-openai-test")
+
+	p := CodexProvider()
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-apikey",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Should use OPENAI_API_KEY, not ANTHROPIC_API_KEY.
+	if !argPairExists(args, "-e", "OPENAI_API_KEY=sk-openai-test") {
+		t.Error("missing OPENAI_API_KEY env var")
+	}
+	if argPairContains(args, "-e", "ANTHROPIC_API_KEY") {
+		t.Error("ANTHROPIC_API_KEY should not be present for Codex provider")
+	}
+}
+
+func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENAI_API_KEY", "sk-openai-test")
+
+	p := CodexProvider()
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-codex",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Codex-specific provider env vars.
+	codexEnvVars := []string{
+		"MITTENS_AI_USERNAME=codex",
+		"MITTENS_AI_BINARY=codex",
+		"MITTENS_AI_CONFIG_DIR=.codex",
+		"MITTENS_AI_CRED_FILE=auth.json",
+		"MITTENS_AI_PREFS_FILE=",
+		"MITTENS_AI_SETTINGS_FILE=config.toml",
+		"MITTENS_AI_PROJECT_FILE=AGENTS.md",
+		"MITTENS_AI_SETTINGS_FORMAT=toml",
+		"MITTENS_AI_CONFIG_SUBDIRS=",
+		"MITTENS_AI_PLUGIN_DIR=",
+		"MITTENS_AI_PLUGIN_FILES=",
+	}
+	for _, env := range codexEnvVars {
+		if !argPairExists(args, "-e", env) {
+			t.Errorf("missing env var %s", env)
+		}
+	}
+
+	// UserPrefsFile is empty — should NOT mount a user prefs file.
+	if argPairContains(args, "-v", "StagingUserPrefsPath") {
+		t.Error("user prefs mount should not be present for Codex (empty UserPrefsFile)")
+	}
+}
+
+func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		Provider:          DefaultProvider(),
+		NoHistory:         true,
+		ContainerName:     "mittens-fmt",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "-e", "MITTENS_AI_SETTINGS_FORMAT=json") {
+		t.Error("missing MITTENS_AI_SETTINGS_FORMAT=json for Claude provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ParseFlags — --provider flag
+// ---------------------------------------------------------------------------
+
+func TestParseFlags_ProviderConsumed(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--provider", "codex", "--verbose"}); err != nil {
+		t.Fatal(err)
+	}
+	// --provider and its value should be consumed (not forwarded to ClaudeArgs).
+	if argExists(a.ClaudeArgs, "--provider") {
+		t.Error("--provider should not be forwarded to ClaudeArgs")
+	}
+	if argExists(a.ClaudeArgs, "codex") {
+		t.Error("codex should not be forwarded to ClaudeArgs")
+	}
+	if !a.Verbose {
+		t.Error("--verbose should still be parsed after --provider")
+	}
+}
+
+func TestParseFlags_ProviderMissingArg(t *testing.T) {
+	a := &App{}
+	err := a.ParseFlags([]string{"--provider"})
+	if err == nil {
+		t.Error("expected error for --provider without argument")
+	}
+}
+
+func TestAssembleDockerArgs_ProviderFirewallDomains(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	p := CodexProvider()
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-fw",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Provider firewall domains should appear in MITTENS_FIREWALL_EXTRA.
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=") {
+			val := strings.TrimPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=")
+			for _, domain := range p.FirewallDomains {
+				if !strings.Contains(val, domain) {
+					t.Errorf("MITTENS_FIREWALL_EXTRA missing provider domain %s", domain)
+				}
+			}
+			return
+		}
+	}
+	t.Error("missing MITTENS_FIREWALL_EXTRA env var")
 }

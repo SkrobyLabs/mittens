@@ -68,7 +68,24 @@ func runMain(args []string) error {
 		}
 	}
 
+	// Pre-scan for --provider before constructing App (needs to be resolved early).
+	provider := DefaultProvider()
+	for i, a := range args {
+		if a == "--provider" && i+1 < len(args) {
+			switch args[i+1] {
+			case "claude":
+				provider = ClaudeProvider()
+			case "codex":
+				provider = CodexProvider()
+			default:
+				return fmt.Errorf("unknown provider %q (available: claude, codex)", args[i+1])
+			}
+			break
+		}
+	}
+
 	app := &App{
+		Provider:        provider,
 		ImageName:       "mittens",
 		ImageTag:        "latest",
 		worktreeOrigins: make(map[string]string),

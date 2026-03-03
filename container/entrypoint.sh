@@ -2,8 +2,21 @@
 set -e
 
 CONFIG_MOUNT="/mnt/claude-config"
-CLAUDE_HOME="/home/claude"
-CLAUDE_DIR="${CLAUDE_HOME}/.claude"
+AI_USERNAME="${AI_USERNAME:-claude}"
+AI_HOME="/home/${AI_USERNAME}"
+AI_CONFIG_DIR="${MITTENS_AI_CONFIG_DIR:-.claude}"
+AI_DIR="${AI_HOME}/${AI_CONFIG_DIR}"
+AI_CRED_FILE="${MITTENS_AI_CRED_FILE:-.credentials.json}"
+AI_PREFS_FILE="${MITTENS_AI_PREFS_FILE:-.claude.json}"
+AI_SETTINGS_FILE="${MITTENS_AI_SETTINGS_FILE:-settings.json}"
+AI_PROJECT_FILE="${MITTENS_AI_PROJECT_FILE:-CLAUDE.md}"
+AI_TRUSTED_DIRS_KEY="${MITTENS_AI_TRUSTED_DIRS_KEY:-trustedDirectories}"
+AI_YOLO_KEY="${MITTENS_AI_YOLO_KEY:-skipDangerousModePermissionPrompt}"
+AI_MCP_SERVERS_KEY="${MITTENS_AI_MCP_SERVERS_KEY:-mcpServers}"
+AI_SETTINGS_FORMAT="${MITTENS_AI_SETTINGS_FORMAT:-json}"
+AI_CONFIG_SUBDIRS="${MITTENS_AI_CONFIG_SUBDIRS:-skills,hooks,agents,output-styles}"
+AI_PLUGIN_DIR="${MITTENS_AI_PLUGIN_DIR:-plugins}"
+AI_PLUGIN_FILES="${MITTENS_AI_PLUGIN_FILES:-installed_plugins.json,known_marketplaces.json,config.json}"
 FIREWALL_CONF="/mnt/claude-config/firewall.conf"
 
 # ===========================================================
@@ -45,8 +58,8 @@ if [[ "$(id -u)" == "0" ]]; then
         # ── MCP server domain passthrough ──────────────────
         if [[ -n "${MITTENS_MCP:-}" ]]; then
             MCP_DOMAINS_BUILTIN="/etc/mittens/mcp-domains.conf"
-            MCP_DOMAINS_USER="/mnt/claude-config/.claude/mcp-domains.conf"
-            CLAUDE_JSON="/mnt/claude-config/.claude.json"
+            MCP_DOMAINS_USER="/mnt/claude-config/${AI_CONFIG_DIR}/mcp-domains.conf"
+            CLAUDE_JSON="/mnt/claude-config/${AI_PREFS_FILE}"
             mcp_count=0
 
             # Load domain mappings (user overrides built-in)
@@ -67,7 +80,7 @@ if [[ "$(id -u)" == "0" ]]; then
                 # Collect all MCP server names from .claude.json
                 mcp_list=""
                 if [[ -f "$CLAUDE_JSON" ]]; then
-                    mcp_list=$(jq -r '.mcpServers // {} | keys[]' "$CLAUDE_JSON" 2>/dev/null || true)
+                    mcp_list=$(jq -r --arg key "$AI_MCP_SERVERS_KEY" '.[$key] // {} | keys[]' "$CLAUDE_JSON" 2>/dev/null || true)
                 fi
                 # Also check project-level .mcp.json
                 if [[ -f /workspace/.mcp.json ]]; then
@@ -87,7 +100,7 @@ if [[ "$(id -u)" == "0" ]]; then
 
                 # Check if server is SSE/HTTP type with a URL in config
                 if [[ -f "$CLAUDE_JSON" ]]; then
-                    url=$(jq -r --arg s "$server" '.mcpServers[$s].url // empty' "$CLAUDE_JSON" 2>/dev/null || true)
+                    url=$(jq -r --arg s "$server" --arg key "$AI_MCP_SERVERS_KEY" '.[$key][$s].url // empty' "$CLAUDE_JSON" 2>/dev/null || true)
                     if [[ -n "$url" ]]; then
                         # Extract hostname from URL
                         resolved=$(echo "$url" | sed -E 's|^https?://([^/:]+).*|\1|')
@@ -176,102 +189,112 @@ if [[ "$(id -u)" == "0" ]]; then
         echo "[mittens] Firewall active: outbound HTTP(S) restricted to whitelisted domains"
     fi
 
-    # Drop privileges and re-exec this script as the claude user
-    exec gosu claude "$0" "$@"
+    # Drop privileges and re-exec this script as the AI user
+    exec gosu "$AI_USERNAME" "$0" "$@"
 fi
 
 # ===========================================================
-# Phase 2: User-level setup (runs as claude)
+# Phase 2: User-level setup (runs as AI user)
 # ===========================================================
 
-mkdir -p "$CLAUDE_DIR"
+mkdir -p "$AI_DIR"
 
 # --- Source extension environment (Go, .NET, etc.) ---
 for f in /etc/profile.d/*.sh; do
     [ -r "$f" ] && . "$f"
 done
 
-# --- Ensure ~/.local/bin/claude exists so Claude Code diagnostics are clean ---
-mkdir -p "$CLAUDE_HOME/.local/bin"
-if command -v claude &>/dev/null && [[ ! -e "$CLAUDE_HOME/.local/bin/claude" ]]; then
-    ln -s "$(command -v claude)" "$CLAUDE_HOME/.local/bin/claude"
+# --- Ensure ~/.local/bin/<binary> exists so AI CLI diagnostics are clean ---
+AI_BINARY="${MITTENS_AI_BINARY:-claude}"
+mkdir -p "$AI_HOME/.local/bin"
+if command -v "$AI_BINARY" &>/dev/null && [[ ! -e "$AI_HOME/.local/bin/$AI_BINARY" ]]; then
+    ln -s "$(command -v "$AI_BINARY")" "$AI_HOME/.local/bin/$AI_BINARY"
 fi
-export PATH="$CLAUDE_HOME/.local/bin:$PATH"
+export PATH="$AI_HOME/.local/bin:$PATH"
 
 # --- Copy read-only config into writable home ---
-if [[ -d "$CONFIG_MOUNT/.claude" ]]; then
-    # Config directories (skills, hooks, agents, plugins, etc.)
-    for item in skills hooks agents output-styles; do
-        if [[ -d "$CONFIG_MOUNT/.claude/$item" ]]; then
-            cp -a "$CONFIG_MOUNT/.claude/$item" "$CLAUDE_DIR/$item"
-        fi
-    done
-
-    # Plugin config files (not cache)
-    if [[ -d "$CONFIG_MOUNT/.claude/plugins" ]]; then
-        mkdir -p "$CLAUDE_DIR/plugins"
-        for file in installed_plugins.json known_marketplaces.json config.json; do
-            if [[ -f "$CONFIG_MOUNT/.claude/plugins/$file" ]]; then
-                cp "$CONFIG_MOUNT/.claude/plugins/$file" "$CLAUDE_DIR/plugins/$file"
+STAGING_CONFIG="${CONFIG_MOUNT}/${AI_CONFIG_DIR}"
+if [[ -d "$STAGING_CONFIG" ]]; then
+    # Config subdirectories (provider-defined, e.g. skills,hooks,agents,output-styles)
+    if [[ -n "$AI_CONFIG_SUBDIRS" ]]; then
+        IFS=',' read -ra _subdirs <<< "$AI_CONFIG_SUBDIRS"
+        for item in "${_subdirs[@]}"; do
+            if [[ -d "$STAGING_CONFIG/$item" ]]; then
+                cp -a "$STAGING_CONFIG/$item" "$AI_DIR/$item"
             fi
         done
-        if [[ -d "$CONFIG_MOUNT/.claude/plugins/marketplaces" ]]; then
-            cp -a "$CONFIG_MOUNT/.claude/plugins/marketplaces" "$CLAUDE_DIR/plugins/marketplaces"
+    fi
+
+    # Plugin config files (provider-defined, not cache)
+    if [[ -n "$AI_PLUGIN_DIR" && -d "$STAGING_CONFIG/$AI_PLUGIN_DIR" ]]; then
+        mkdir -p "$AI_DIR/$AI_PLUGIN_DIR"
+        if [[ -n "$AI_PLUGIN_FILES" ]]; then
+            IFS=',' read -ra _pfiles <<< "$AI_PLUGIN_FILES"
+            for file in "${_pfiles[@]}"; do
+                if [[ -f "$STAGING_CONFIG/$AI_PLUGIN_DIR/$file" ]]; then
+                    cp "$STAGING_CONFIG/$AI_PLUGIN_DIR/$file" "$AI_DIR/$AI_PLUGIN_DIR/$file"
+                fi
+            done
+        fi
+        if [[ -d "$STAGING_CONFIG/$AI_PLUGIN_DIR/marketplaces" ]]; then
+            cp -a "$STAGING_CONFIG/$AI_PLUGIN_DIR/marketplaces" "$AI_DIR/$AI_PLUGIN_DIR/marketplaces"
         fi
     fi
 
     # Config files
-    for file in settings.json settings.local.json CLAUDE.md statusline.sh; do
-        if [[ -f "$CONFIG_MOUNT/.claude/$file" ]]; then
-            cp "$CONFIG_MOUNT/.claude/$file" "$CLAUDE_DIR/$file"
+    for file in ${AI_SETTINGS_FILE} settings.local.json ${AI_PROJECT_FILE} statusline.sh; do
+        if [[ -f "$STAGING_CONFIG/$file" ]]; then
+            cp "$STAGING_CONFIG/$file" "$AI_DIR/$file"
         fi
     done
 
     # Make statusline executable if copied
-    [[ -f "$CLAUDE_DIR/statusline.sh" ]] && chmod +x "$CLAUDE_DIR/statusline.sh"
+    [[ -f "$AI_DIR/statusline.sh" ]] && chmod +x "$AI_DIR/statusline.sh"
 fi
 
 # --- Pre-trust /workspace (and host workspace path + extra dirs if set) ---
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-TRUST_DIRS='["/workspace"]'
-if [[ -n "${MITTENS_HOST_WORKSPACE:-}" && "$MITTENS_HOST_WORKSPACE" != "/workspace" ]]; then
-    TRUST_DIRS=$(echo "$TRUST_DIRS" | jq --arg d "$MITTENS_HOST_WORKSPACE" '. + [$d]')
-fi
-if [[ -n "${MITTENS_EXTRA_DIRS:-}" ]]; then
-    TRUST_DIRS=$(echo "$TRUST_DIRS" | jq --arg dirs "$MITTENS_EXTRA_DIRS" '. + ($dirs | split(":"))')
-fi
-if [[ -f "$SETTINGS_FILE" ]]; then
-    jq --argjson dirs "$TRUST_DIRS" \
-        '.trustedDirectories = ((.trustedDirectories // []) + $dirs | unique)' \
-        "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-else
-    jq -n --argjson dirs "$TRUST_DIRS" '{"trustedDirectories": $dirs}' > "$SETTINGS_FILE"
+SETTINGS_FILE="$AI_DIR/${AI_SETTINGS_FILE}"
+if [[ -n "$AI_TRUSTED_DIRS_KEY" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
+    TRUST_DIRS='["/workspace"]'
+    if [[ -n "${MITTENS_HOST_WORKSPACE:-}" && "$MITTENS_HOST_WORKSPACE" != "/workspace" ]]; then
+        TRUST_DIRS=$(echo "$TRUST_DIRS" | jq --arg d "$MITTENS_HOST_WORKSPACE" '. + [$d]')
+    fi
+    if [[ -n "${MITTENS_EXTRA_DIRS:-}" ]]; then
+        TRUST_DIRS=$(echo "$TRUST_DIRS" | jq --arg dirs "$MITTENS_EXTRA_DIRS" '. + ($dirs | split(":"))')
+    fi
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        jq --argjson dirs "$TRUST_DIRS" --arg key "$AI_TRUSTED_DIRS_KEY" \
+            '.[$key] = ((.[$key] // []) + $dirs | unique)' \
+            "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+    else
+        jq -n --argjson dirs "$TRUST_DIRS" --arg key "$AI_TRUSTED_DIRS_KEY" '{($key): $dirs}' > "$SETTINGS_FILE"
+    fi
 fi
 
 # --- Auto-accept yolo permission prompt ---
-if [[ "${MITTENS_YOLO:-false}" == "true" ]]; then
-    jq '.skipDangerousModePermissionPrompt = true' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
+if [[ "${MITTENS_YOLO:-false}" == "true" && -n "$AI_YOLO_KEY" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
+    jq --arg key "$AI_YOLO_KEY" '.[$key] = true' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
         && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 fi
 
 # --- Copy git config and mark mounted paths as safe ---
 if [[ -f "$CONFIG_MOUNT/.gitconfig" ]]; then
-    cp "$CONFIG_MOUNT/.gitconfig" "$CLAUDE_HOME/.gitconfig"
+    cp "$CONFIG_MOUNT/.gitconfig" "$AI_HOME/.gitconfig"
 fi
 git config --global --add safe.directory '*'
 
-# --- Copy user preferences (.claude.json) ---
-if [[ -f "$CONFIG_MOUNT/.claude.json" ]]; then
-    cp "$CONFIG_MOUNT/.claude.json" "$CLAUDE_HOME/.claude.json"
+# --- Copy user preferences ---
+if [[ -n "$AI_PREFS_FILE" && -f "$CONFIG_MOUNT/${AI_PREFS_FILE}" ]]; then
+    cp "$CONFIG_MOUNT/${AI_PREFS_FILE}" "$AI_HOME/${AI_PREFS_FILE}"
 fi
 
 # --- Write OAuth credentials into the plaintext credential store ---
-if [[ -f "$CONFIG_MOUNT/.credentials.json" ]]; then
-    cp "$CONFIG_MOUNT/.credentials.json" "$CLAUDE_DIR/.credentials.json"
-    chmod 600 "$CLAUDE_DIR/.credentials.json"
+if [[ -f "$CONFIG_MOUNT/${AI_CRED_FILE}" ]]; then
+    cp "$CONFIG_MOUNT/${AI_CRED_FILE}" "$AI_DIR/${AI_CRED_FILE}"
+    chmod 600 "$AI_DIR/${AI_CRED_FILE}"
 fi
 
-# --- Inform Claude about extra workspace directories ---
+# --- Inform AI about extra workspace directories ---
 if [[ -n "${MITTENS_EXTRA_DIRS:-}" ]]; then
     {
         echo ""
@@ -280,10 +303,10 @@ if [[ -n "${MITTENS_EXTRA_DIRS:-}" ]]; then
         while IFS= read -r _ed; do
             [[ -n "$_ed" ]] && echo "- ${_ed}"
         done < <(echo "$MITTENS_EXTRA_DIRS" | tr ':' '\n')
-    } >> "$CLAUDE_DIR/CLAUDE.md"
+    } >> "$AI_DIR/${AI_PROJECT_FILE}"
 fi
 
-# --- Inform Claude about network firewall restrictions ---
+# --- Inform AI about network firewall restrictions ---
 if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; then
     {
         echo ""
@@ -298,11 +321,11 @@ if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; 
         echo '```'
         cat /etc/squid/whitelist.txt
         echo '```'
-    } >> "$CLAUDE_DIR/CLAUDE.md"
+    } >> "$AI_DIR/${AI_PROJECT_FILE}"
 fi
 
-# --- Inject notification hooks (if broker port is available) ---
-if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" ]]; then
+# --- Inject notification hooks (if broker port is available, JSON settings only) ---
+if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
     HOOKS_JSON=$(cat <<'HOOKEOF'
 {
   "hooks": {

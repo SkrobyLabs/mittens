@@ -9,19 +9,22 @@ import (
 	"strings"
 )
 
-const keychainService = "Claude Code-credentials"
-
 // KeychainStore reads and writes credentials from the macOS Keychain.
-type KeychainStore struct{}
+type KeychainStore struct {
+	service string
+}
 
-func newKeychainStore() CredentialStore {
-	return &KeychainStore{}
+func newKeychainStore(service string) CredentialStore {
+	if service == "" {
+		return nil
+	}
+	return &KeychainStore{service: service}
 }
 
 func (k *KeychainStore) Extract() (string, error) {
 	// -w prints only the password (the JSON blob).
 	out, err := exec.Command("security", "find-generic-password",
-		"-s", keychainService, "-w").Output()
+		"-s", k.service, "-w").Output()
 	if err != nil {
 		return "", err
 	}
@@ -36,7 +39,7 @@ func (k *KeychainStore) Persist(jsonData string) error {
 	}
 
 	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychainService, "-a", acct, "-w", jsonData)
+		"-s", k.service, "-a", acct, "-w", jsonData)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("keychain update: %w: %s", err, out)
 	}
@@ -53,7 +56,7 @@ var acctRegexp = regexp.MustCompile(`"acct"<blob>="([^"]*)"`)
 
 func (k *KeychainStore) accountName() (string, error) {
 	out, err := exec.Command("security", "find-generic-password",
-		"-s", keychainService).Output()
+		"-s", k.service).Output()
 	if err != nil {
 		return "", err
 	}

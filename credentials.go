@@ -27,18 +27,19 @@ type CredentialManager struct {
 
 // NewCredentialManager creates a manager with the platform credential stores.
 // On macOS the keychain store is included; on other platforms only the file store
-// is used.
-func NewCredentialManager() *CredentialManager {
+// is used. Paths and service names are derived from the given provider.
+func NewCredentialManager(provider *Provider) *CredentialManager {
 	var stores []CredentialStore
 
 	// Platform-specific store (keychain on darwin, nil on others).
-	if ks := newKeychainStore(); ks != nil {
+	if ks := newKeychainStore(provider.KeychainService); ks != nil {
 		stores = append(stores, ks)
 	}
 
 	// File-based store is always available.
+	home := os.Getenv("HOME")
 	stores = append(stores, &FileCredentialStore{
-		path: filepath.Join(os.Getenv("HOME"), ".claude", ".credentials.json"),
+		path: provider.HostCredentialPath(home),
 	})
 
 	return &CredentialManager{stores: stores}
@@ -98,14 +99,15 @@ func (m *CredentialManager) TmpFile() string {
 
 // PersistFromContainer extracts the (possibly refreshed) credentials from the
 // stopped container and writes them back to all known stores.
-func (m *CredentialManager) PersistFromContainer(containerName string) error {
+// containerCredPath is the full path to the credential file inside the container.
+func (m *CredentialManager) PersistFromContainer(containerName, containerCredPath string) error {
 	if m.tmpFile == "" {
 		return nil
 	}
 
 	// docker cp from the container overlay filesystem (handles atomic writes).
 	cmd := exec.Command("docker", "cp",
-		containerName+":/home/claude/.claude/.credentials.json",
+		containerName+":"+containerCredPath,
 		m.tmpFile,
 	)
 	if err := cmd.Run(); err != nil {
