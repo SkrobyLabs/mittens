@@ -90,16 +90,16 @@ ARG USER_ID=1000
 ARG GROUP_ID=1000
 RUN existing_user=$(getent passwd ${USER_ID} | cut -d: -f1) && \
     if [ -n "$existing_user" ] && [ "$existing_user" != "${AI_USERNAME}" ]; then \
-        usermod -l ${AI_USERNAME} -d /home/${AI_USERNAME} -m "$existing_user" && \
+        usermod -l "${AI_USERNAME}" -d "/home/${AI_USERNAME}" -m "$existing_user" && \
         existing_group=$(getent group ${GROUP_ID} | cut -d: -f1) && \
         if [ -n "$existing_group" ] && [ "$existing_group" != "${AI_USERNAME}" ]; then \
-            groupmod -n ${AI_USERNAME} "$existing_group"; \
+            groupmod -n "${AI_USERNAME}" "$existing_group"; \
         fi; \
     elif [ -z "$existing_user" ]; then \
-        groupadd -g ${GROUP_ID} ${AI_USERNAME} 2>/dev/null || true && \
-        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash ${AI_USERNAME}; \
+        groupadd -g ${GROUP_ID} "${AI_USERNAME}" 2>/dev/null || true && \
+        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash "${AI_USERNAME}"; \
     fi && \
-    usermod -aG docker ${AI_USERNAME} 2>/dev/null || true
+    usermod -aG docker "${AI_USERNAME}" 2>/dev/null || true
 
 # Create directories for mounts and config
 ARG AI_CONFIG_DIR=".claude"

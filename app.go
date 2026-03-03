@@ -549,8 +549,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Provider env vars — passed into the container for entrypoint.sh.
+	// Note: AI_USERNAME is baked into the image via Dockerfile ENV, not passed at runtime.
 	args = append(args,
-		"-e", "MITTENS_AI_USERNAME="+a.Provider.Username,
 		"-e", "MITTENS_AI_BINARY="+a.Provider.Binary,
 		"-e", "MITTENS_AI_CONFIG_DIR="+a.Provider.ConfigDir,
 		"-e", "MITTENS_AI_CRED_FILE="+a.Provider.CredentialFile,

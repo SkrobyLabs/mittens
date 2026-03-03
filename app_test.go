@@ -868,7 +868,6 @@ func TestAssembleDockerArgs_ProviderEnvVars(t *testing.T) {
 	args := a.assembleDockerArgs(nil, nil)
 
 	envVars := []string{
-		"MITTENS_AI_USERNAME=claude",
 		"MITTENS_AI_BINARY=claude",
 		"MITTENS_AI_CONFIG_DIR=.claude",
 		"MITTENS_AI_CRED_FILE=.credentials.json",
@@ -965,7 +964,6 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 
 	// Codex-specific provider env vars.
 	codexEnvVars := []string{
-		"MITTENS_AI_USERNAME=codex",
 		"MITTENS_AI_BINARY=codex",
 		"MITTENS_AI_CONFIG_DIR=.codex",
 		"MITTENS_AI_CRED_FILE=auth.json",

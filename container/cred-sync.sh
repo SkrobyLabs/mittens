@@ -47,8 +47,8 @@ compute_hash() {
 get_expires_at() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        # Check root .expiresAt first, then nested (e.g. .claudeAiOauth.expiresAt).
-        jq -r '[.expiresAt // 0, (.[] | objects | .expiresAt // 0)] | max' "$file" 2>/dev/null || echo "0"
+        # Check both expiresAt (Claude) and expires_at (Codex) at root and nested levels.
+        jq -r '[.expiresAt // 0, .expires_at // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' "$file" 2>/dev/null || echo "0"
     else
         echo "0"
     fi
@@ -118,7 +118,7 @@ while true; do
         continue
     fi
 
-    remote_exp=$(echo "$remote" | jq -r '[.expiresAt // 0, (.[] | objects | .expiresAt // 0)] | max' 2>/dev/null) || continue
+    remote_exp=$(echo "$remote" | jq -r '[.expiresAt // 0, .expires_at // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' 2>/dev/null) || continue
     local_exp=$(get_expires_at "$CRED_FILE")
 
     # Guard: both values must be integers for -gt comparison.
