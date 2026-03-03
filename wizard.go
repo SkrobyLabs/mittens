@@ -243,6 +243,14 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		sort.Strings(siblings)
 	}
 
+	// Build a set of existing dir paths for pre-selection in edit mode.
+	existPathSet := make(map[string]bool, len(existDirs))
+	if editMode {
+		for _, d := range existDirs {
+			existPathSet[strings.TrimPrefix(d, "--dir ")] = true
+		}
+	}
+
 	var selectedDirs []string
 
 	// Multi-select from siblings.
@@ -250,10 +258,18 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		fmt.Fprintln(os.Stderr)
 		var opts []huh.Option[string]
 		for _, s := range siblings {
-			opts = append(opts, huh.NewOption(s, s))
+			opts = append(opts, huh.NewOption(s, s).Selected(existPathSet[s]))
 		}
 
+		// Pre-populate chosen with existing sibling paths so Value() matches.
 		var chosen []string
+		if editMode {
+			for _, s := range siblings {
+				if existPathSet[s] {
+					chosen = append(chosen, s)
+				}
+			}
+		}
 		if err := huh.NewMultiSelect[string]().
 			Title("Sibling directories with git repos").
 			Options(opts...).
@@ -262,6 +278,20 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 			return nil, err
 		}
 		selectedDirs = append(selectedDirs, chosen...)
+	}
+
+	// Carry forward existing custom dirs (paths not in siblings).
+	if editMode {
+		siblingSet := make(map[string]bool, len(siblings))
+		for _, s := range siblings {
+			siblingSet[s] = true
+		}
+		for p := range existPathSet {
+			if !siblingSet[p] {
+				selectedDirs = append(selectedDirs, p)
+				fmt.Fprintf(os.Stderr, "  Kept custom dir: %s\n", p)
+			}
+		}
 	}
 
 	// Custom path entry loop.
@@ -335,11 +365,24 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 		}
 	}
 
+	// Build a set of existing extension keys for pre-selection in edit mode.
+	existExtSet := make(map[string]bool)
+	if editMode {
+		for _, line := range existExts {
+			for _, e := range knownExtEntries {
+				if line == e.flag || strings.HasPrefix(line, e.flag+" ") {
+					existExtSet[e.key] = true
+					break
+				}
+			}
+		}
+	}
+
 	// Build options from the known entries, filtered by what is loaded.
 	var opts []huh.Option[string]
 	for _, e := range knownExtEntries {
 		if loaded[e.key] {
-			opts = append(opts, huh.NewOption(e.label, e.key))
+			opts = append(opts, huh.NewOption(e.label, e.key).Selected(existExtSet[e.key]))
 		}
 	}
 
@@ -349,7 +392,15 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 		return nil, nil
 	}
 
+	// Pre-populate chosen with existing extension keys so Value() matches.
 	var chosen []string
+	if editMode {
+		for _, e := range knownExtEntries {
+			if loaded[e.key] && existExtSet[e.key] {
+				chosen = append(chosen, e.key)
+			}
+		}
+	}
 	if err := huh.NewMultiSelect[string]().
 		Title("Select extensions to enable").
 		Options(opts...).
@@ -653,7 +704,13 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 
 	fmt.Fprintln(os.Stderr)
 
-	var dind bool
+	// Pre-fill from existing options in edit mode.
+	optSet := make(map[string]bool, len(existOpts))
+	for _, o := range existOpts {
+		optSet[o] = true
+	}
+
+	dind := optSet["--dind"]
 	if err := huh.NewConfirm().
 		Title("Docker-in-Docker? (--dind)").
 		Value(&dind).
@@ -661,7 +718,7 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		return nil, err
 	}
 
-	var yolo bool
+	yolo := optSet["--yolo"]
 	if err := huh.NewConfirm().
 		Title("YOLO mode (skip permission prompts)? (--yolo)").
 		Value(&yolo).
@@ -669,7 +726,10 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		return nil, err
 	}
 
-	var networkMode string
+	networkMode := "bridge"
+	if optSet["--network-host"] {
+		networkMode = "host"
+	}
 	if err := huh.NewSelect[string]().
 		Title("Network mode").
 		Options(
@@ -681,7 +741,7 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		return nil, err
 	}
 
-	var worktree bool
+	worktree := optSet["--worktree"]
 	if err := huh.NewConfirm().
 		Title("Parallel agent isolation (git worktree)? (--worktree)").
 		Value(&worktree).
