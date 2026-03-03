@@ -470,24 +470,32 @@ func configureExtension(key string) ([]string, error) {
 }
 
 func configureDotnet() ([]string, error) {
-	var version string
-	if err := huh.NewSelect[string]().
-		Title(".NET SDK version").
+	var versions []string
+	if err := huh.NewMultiSelect[string]().
+		Title(".NET SDK versions").
 		Options(
 			huh.NewOption("LTS (latest long-term support)", "lts"),
 			huh.NewOption(".NET 8", "8"),
 			huh.NewOption(".NET 9", "9"),
 			huh.NewOption(".NET 10", "10"),
 		).
-		Value(&version).
+		Value(&versions).
 		Run(); err != nil {
 		return nil, err
 	}
 
-	if version == "lts" {
+	// Filter out "lts" when specific versions are also selected.
+	var specific []string
+	for _, v := range versions {
+		if v != "lts" {
+			specific = append(specific, v)
+		}
+	}
+
+	if len(specific) == 0 {
 		return []string{"--dotnet"}, nil
 	}
-	return []string{"--dotnet " + version}, nil
+	return []string{"--dotnet " + strings.Join(specific, ",")}, nil
 }
 
 func configureGo() ([]string, error) {
