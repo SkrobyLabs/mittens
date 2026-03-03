@@ -25,6 +25,7 @@ type App struct {
 	NoBuild      bool
 	DinD         bool
 	Yolo         bool
+	NoNotify     bool
 	NetworkHost  bool
 	Worktree     bool
 	Shell        bool
@@ -73,6 +74,7 @@ var coreFlags = map[string]func(*App){
 	"--no-build":     func(a *App) { a.NoBuild = true },
 	"--dind":         func(a *App) { a.DinD = true },
 	"--yolo":         func(a *App) { a.Yolo = true },
+	"--no-notify":    func(a *App) { a.NoNotify = true },
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
@@ -278,6 +280,9 @@ func (a *App) Run() error {
 		}
 		a.broker = NewCredentialBroker("", seed, a.Credentials.Stores())
 		a.broker.OnOpen = openOnHost
+		if !a.NoNotify {
+			a.broker.OnNotify = notifyOnHost
+		}
 
 		// Persistent broker log for debugging.
 		logDir := filepath.Join(home, ".mittens", "logs")
@@ -480,6 +485,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
 	if a.Yolo {
 		args = append(args, "-e", "MITTENS_YOLO=true")
+	}
+	args = append(args, "-e", "MITTENS_CONTAINER_NAME="+a.ContainerName)
+	if a.NoNotify {
+		args = append(args, "-e", "MITTENS_NO_NOTIFY=true")
 	}
 	if a.InstanceName != "" {
 		args = append(args, "-e", "MITTENS_INSTANCE_NAME="+a.InstanceName)
@@ -712,6 +721,34 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // Small helpers
 // ---------------------------------------------------------------------------
 
+// notifyOnHost sends a native desktop notification.
+func notifyOnHost(container, event, message string) {
+	var title, body string
+	switch event {
+	case "stop":
+		title = "mittens"
+		body = container + ": Claude finished"
+	case "notification":
+		title = "mittens"
+		if message != "" {
+			body = container + ": " + message
+		} else {
+			body = container + ": needs attention"
+		}
+	default:
+		title = "mittens"
+		body = container + ": " + event
+	}
+	var cmd *exec.Cmd
+	if runtime.GOOS == "darwin" {
+		cmd = exec.Command("osascript", "-e",
+			fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+	} else {
+		cmd = exec.Command("notify-send", title, body)
+	}
+	_ = cmd.Start()
+}
+
 // openOnHost opens a URL in the host's default browser.
 func openOnHost(url string) {
 	var cmd *exec.Cmd
@@ -770,6 +807,7 @@ Core flags:
   --no-build        Skip the Docker image build step
   --dind            Enable Docker-in-Docker (--privileged)
   --yolo            Skip all permission prompts
+  --no-notify       Disable desktop notifications
   --network-host    Use host networking (default: bridge)
   --worktree        Git worktree isolation per invocation
   --shell           Start a bash shell instead of Claude
@@ -840,6 +878,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--dind", Description: "Enable Docker-in-Docker (--privileged)"},
 			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
 			{Name: "--yolo", Description: "Skip all permission prompts"},
+			{Name: "--no-notify", Description: "Disable desktop notifications"},
 			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},

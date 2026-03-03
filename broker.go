@@ -85,6 +85,9 @@ type CredentialBroker struct {
 	// OnOpen is called when a container requests a URL to be opened on the host.
 	OnOpen func(url string)
 
+	// OnNotify is called when a container sends a notification to the host.
+	OnNotify func(container, event, message string)
+
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 }
@@ -101,6 +104,7 @@ func NewCredentialBroker(sockPath, seed string, stores []CredentialStore) *Crede
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/open", b.handleOpen)
+	mux.HandleFunc("/notify", b.handleNotify)
 	mux.HandleFunc("/login-callback", b.handleLoginCallback)
 	mux.HandleFunc("/", b.handle)
 	b.srv = &http.Server{Handler: mux}
@@ -338,6 +342,41 @@ func (b *CredentialBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 
 	if b.OnOpen != nil {
 		b.OnOpen(rawURL)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+const maxNotifySize = 4096
+
+func (b *CredentialBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxNotifySize+1))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxNotifySize {
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	var payload struct {
+		Container string `json:"container"`
+		Event     string `json:"event"`
+		Message   string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	b.blog("NOTIFY → %s: %s", payload.Container, payload.Event)
+
+	if b.OnNotify != nil {
+		b.OnNotify(payload.Container, payload.Event, payload.Message)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -904,6 +904,177 @@ func TestBroker_OpenNonOAuthStillWorks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// /notify endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestBroker_TCP_NotifyEndpoint(t *testing.T) {
+	var mu sync.Mutex
+	var gotContainer, gotEvent string
+
+	b := NewCredentialBroker("", "", nil)
+	b.OnNotify = func(container, event, _ string) {
+		mu.Lock()
+		gotContainer = container
+		gotEvent = event
+		mu.Unlock()
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// POST valid notification.
+	payload := `{"container":"mittens-42","event":"stop","message":""}`
+	req, _ := http.NewRequest(http.MethodPost, base+"/notify", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /notify: status = %d, want 204", resp.StatusCode)
+	}
+
+	mu.Lock()
+	if gotContainer != "mittens-42" {
+		t.Errorf("container = %q, want %q", gotContainer, "mittens-42")
+	}
+	if gotEvent != "stop" {
+		t.Errorf("event = %q, want %q", gotEvent, "stop")
+	}
+	mu.Unlock()
+}
+
+func TestBroker_TCP_NotifyWithMessage(t *testing.T) {
+	var mu sync.Mutex
+	var gotMessage string
+
+	b := NewCredentialBroker("", "", nil)
+	b.OnNotify = func(_, _, message string) {
+		mu.Lock()
+		gotMessage = message
+		mu.Unlock()
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	payload := `{"container":"mittens-99","event":"notification","message":"needs your attention"}`
+	req, _ := http.NewRequest(http.MethodPost, base+"/notify", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /notify: status = %d, want 204", resp.StatusCode)
+	}
+
+	mu.Lock()
+	if gotMessage != "needs your attention" {
+		t.Errorf("message = %q, want %q", gotMessage, "needs your attention")
+	}
+	mu.Unlock()
+}
+
+func TestBroker_TCP_NotifyRejectsGET(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	resp, err := client.Get(base + "/notify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /notify: status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestBroker_TCP_NotifyRejectsOversized(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// Send a payload larger than maxNotifySize (4096).
+	oversized := strings.Repeat("x", 5000)
+	req, _ := http.NewRequest(http.MethodPost, base+"/notify", strings.NewReader(oversized))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized POST /notify: status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestBroker_TCP_NotifyRejectsInvalidJSON(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	req, _ := http.NewRequest(http.MethodPost, base+"/notify", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid JSON POST /notify: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // jsonKeys / redactURL tests
 // ---------------------------------------------------------------------------
 

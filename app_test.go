@@ -29,6 +29,7 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--worktree", func(a *App) bool { return a.Worktree }},
 		{"--shell", func(a *App) bool { return a.Shell }},
 		{"--no-resume", func(a *App) bool { return a.NoResume }},
+		{"--no-notify", func(a *App) bool { return a.NoNotify }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.flag, func(t *testing.T) {
@@ -742,6 +743,64 @@ func TestAssembleDockerArgs_NoCustomName(t *testing.T) {
 
 	if argPairContains(args, "-e", "MITTENS_INSTANCE_NAME") {
 		t.Error("MITTENS_INSTANCE_NAME should not be set without --name")
+	}
+}
+
+func TestAssembleDockerArgs_ContainerNameEnv(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		ContainerName:     "mittens-42",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "-e", "MITTENS_CONTAINER_NAME=mittens-42") {
+		t.Error("missing MITTENS_CONTAINER_NAME env var")
+	}
+}
+
+func TestAssembleDockerArgs_NoNotify(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		NoNotify:          true,
+		ContainerName:     "mittens-nn",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "-e", "MITTENS_NO_NOTIFY=true") {
+		t.Error("missing MITTENS_NO_NOTIFY env var")
+	}
+}
+
+func TestAssembleDockerArgs_NotifyEnabled(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		NoHistory:         true,
+		ContainerName:     "mittens-yes",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if argPairContains(args, "-e", "MITTENS_NO_NOTIFY") {
+		t.Error("MITTENS_NO_NOTIFY should not be set when notifications enabled")
 	}
 }
 

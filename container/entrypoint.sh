@@ -301,6 +301,21 @@ if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; 
     } >> "$CLAUDE_DIR/CLAUDE.md"
 fi
 
+# --- Inject notification hooks (if broker port is available) ---
+if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" ]]; then
+    HOOKS_JSON=$(cat <<'HOOKEOF'
+{
+  "hooks": {
+    "Stop": [{"hooks": [{"type": "command", "command": "/usr/local/bin/notify.sh stop"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "cat /dev/stdin | jq -r '.message // \"needs attention\"' | xargs -I{} /usr/local/bin/notify.sh notification '{}'"}]}]
+  }
+}
+HOOKEOF
+    )
+    jq -s '.[0] * .[1]' "$SETTINGS_FILE" <(echo "$HOOKS_JSON") > "${SETTINGS_FILE}.tmp" \
+        && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+fi
+
 # --- Start credential sync daemon (if broker port is available) ---
 if [[ -n "${MITTENS_BROKER_PORT:-}" ]]; then
     /usr/local/bin/cred-sync.sh &
