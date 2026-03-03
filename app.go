@@ -742,7 +742,7 @@ func notifyOnHost(container, event, message string) {
 	if runtime.GOOS == "darwin" {
 		appPath := ensureNotifierApp()
 		if appPath != "" {
-			cmd = exec.Command("osascript", appPath, title, body)
+			cmd = exec.Command("open", "-g", "-a", appPath, "--args", title, body)
 		} else {
 			cmd = exec.Command("osascript", "-e",
 				fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
@@ -763,9 +763,16 @@ func ensureNotifierApp() string {
 	appPath := filepath.Join(home, ".mittens", "Mittens.app")
 	plistPath := filepath.Join(appPath, "Contents", "Info.plist")
 
-	// Already built — return immediately.
+	// Already built — verify bundle ID is ours, not Script Editor's.
 	if _, err := os.Stat(plistPath); err == nil {
-		return appPath
+		if data, err := os.ReadFile(plistPath); err == nil {
+			if strings.Contains(string(data), "com.mittens.notifier") {
+				return appPath
+			}
+			// Stale applet from before plist patching — rebuild.
+			logInfo("Rebuilding Mittens.app (stale bundle ID)")
+			_ = os.RemoveAll(appPath)
+		}
 	}
 
 	// Build the applet with osacompile.
@@ -790,6 +797,10 @@ end run`
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return ""
 	}
+
+	// Ad-hoc codesign the modified bundle so macOS accepts it.
+	_ = exec.Command("codesign", "--force", "--sign", "-", appPath).Run()
+
 	return appPath
 }
 
