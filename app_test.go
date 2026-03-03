@@ -818,3 +818,14 @@ func TestIsValidContainerName(t *testing.T) {
 		}
 	}
 }
+
+func TestInspectContainerRunning_NonExistent(t *testing.T) {
+	// A container that doesn't exist should return (false, false).
+	exists, running := InspectContainerRunning("mittens-nonexistent-test-container-xyz")
+	if exists {
+		t.Error("expected exists=false for non-existent container")
+	}
+	if running {
+		t.Error("expected running=false for non-existent container")
+	}
+}

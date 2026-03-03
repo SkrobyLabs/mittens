@@ -107,6 +107,16 @@ func ExtractCredentials(containerName, destPath string) error {
 	return nil
 }
 
+// InspectContainerRunning checks if a container exists and whether it is running.
+// Returns (exists, running). If the container does not exist, both are false.
+func InspectContainerRunning(containerName string) (exists bool, running bool) {
+	out, err := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", containerName).Output()
+	if err != nil {
+		return false, false
+	}
+	return true, strings.TrimSpace(string(out)) == "true"
+}
+
 // RemoveContainer force-removes a container by name.
 func RemoveContainer(containerName string) error {
 	cmd := exec.Command("docker", "rm", "-f", containerName)

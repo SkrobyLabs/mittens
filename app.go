@@ -320,6 +320,15 @@ func (a *App) Run() error {
 			return fmt.Errorf("invalid --name %q: must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", a.InstanceName)
 		}
 		a.ContainerName = "mittens-" + a.InstanceName
+
+		// Remove stale (stopped) container with the same name, or error if running.
+		if exists, running := InspectContainerRunning(a.ContainerName); exists {
+			if running {
+				return fmt.Errorf("container %q is already running; stop it first or use a different --name", a.ContainerName)
+			}
+			logInfo("Removed stale container: %s", a.ContainerName)
+			_ = RemoveContainer(a.ContainerName)
+		}
 	} else {
 		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
 	}
@@ -741,12 +750,57 @@ func notifyOnHost(container, event, message string) {
 	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("osascript", "-e",
-			fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+		appPath := ensureNotifierApp()
+		if appPath != "" {
+			cmd = exec.Command("osascript", appPath, title, body)
+		} else {
+			cmd = exec.Command("osascript", "-e",
+				fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+		}
 	} else {
 		cmd = exec.Command("notify-send", title, body)
 	}
 	_ = cmd.Start()
+}
+
+// ensureNotifierApp creates a minimal macOS .app bundle at ~/.mittens/Mittens.app
+// so that notifications are attributed to "Mittens" instead of "Script Editor".
+func ensureNotifierApp() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	appPath := filepath.Join(home, ".mittens", "Mittens.app")
+	plistPath := filepath.Join(appPath, "Contents", "Info.plist")
+
+	// Already built — return immediately.
+	if _, err := os.Stat(plistPath); err == nil {
+		return appPath
+	}
+
+	// Build the applet with osacompile.
+	script := `on run argv
+	set theTitle to item 1 of argv
+	set theBody to item 2 of argv
+	display notification theBody with title theTitle sound name "Glass"
+end run`
+	cmd := exec.Command("osacompile", "-o", appPath, "-e", script)
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+
+	// Patch CFBundleIdentifier so macOS attributes notifications to "Mittens"
+	// instead of grouping them under Script Editor.
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		return ""
+	}
+	plist := strings.Replace(string(data),
+		"com.apple.ScriptEditor.id.Mittens", "com.mittens.notifier", 1)
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		return ""
+	}
+	return appPath
 }
 
 // openOnHost opens a URL in the host's default browser.
