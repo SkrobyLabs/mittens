@@ -138,16 +138,17 @@ if [[ "$(id -u)" == "0" ]]; then
 
         # Start Squid (FQDN-based HTTP/HTTPS filtering)
         squid -f /etc/squid/squid.conf
-        retries=20
-        while [[ ! -f /run/squid.pid ]] && [[ $retries -gt 0 ]]; do
+        retries=40
+        while ! (echo > /dev/tcp/127.0.0.1/3128) 2>/dev/null && [[ $retries -gt 0 ]]; do
             retries=$((retries - 1))
             sleep 0.25
         done
 
-        if [[ -f /run/squid.pid ]]; then
+        if (echo > /dev/tcp/127.0.0.1/3128) 2>/dev/null; then
             echo "[mittens] Proxy ready ($domain_count domains whitelisted)"
         else
             echo "[mittens] Warning: Squid proxy failed to start" >&2
+            cat /var/log/squid/cache.log >&2 2>/dev/null || true
         fi
 
         # iptables: force all HTTP(S) through the proxy
