@@ -737,6 +737,7 @@ Usage: mittens [flags] [-- claude-args...]
 Commands:
   init              Interactive project setup wizard
   logs [-f]         Show broker logs (-f to follow)
+  clean [--dry-run] [--images]  Remove stopped mittens containers
 
 Core flags:
   --verbose, -v     Show the docker command being run

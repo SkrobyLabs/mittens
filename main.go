@@ -60,6 +60,8 @@ func runMain(args []string) error {
 			return runInit()
 		case "logs":
 			return runLogs(args[1:])
+		case "clean":
+			return runClean(args[1:])
 		case "--version", "-V":
 			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
 			return nil
