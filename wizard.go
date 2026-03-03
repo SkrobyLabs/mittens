@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -223,26 +222,6 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		}
 	}
 
-	// Discover sibling git repos.
-	parentDir := filepath.Dir(workspace)
-	var siblings []string
-	if entries, err := os.ReadDir(parentDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			full := filepath.Join(parentDir, e.Name())
-			if full == workspace {
-				continue
-			}
-			gitDir := filepath.Join(full, ".git")
-			if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
-				siblings = append(siblings, full)
-			}
-		}
-		sort.Strings(siblings)
-	}
-
 	// Build a set of existing dir paths for pre-selection in edit mode.
 	existPathSet := make(map[string]bool, len(existDirs))
 	if editMode {
@@ -253,46 +232,14 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 
 	var selectedDirs []string
 
-	// Multi-select from siblings.
-	if len(siblings) > 0 {
-		fmt.Fprintln(os.Stderr)
-		var opts []huh.Option[string]
-		for _, s := range siblings {
-			opts = append(opts, huh.NewOption(s, s).Selected(existPathSet[s]))
-		}
-
-		// Pre-populate chosen with existing sibling paths so Value() matches.
-		var chosen []string
-		if editMode {
-			for _, s := range siblings {
-				if existPathSet[s] {
-					chosen = append(chosen, s)
-				}
-			}
-		}
-		if err := huh.NewMultiSelect[string]().
-			Title("Sibling directories with git repos").
-			Options(opts...).
-			Value(&chosen).
-			Run(); err != nil {
-			return nil, err
-		}
-		selectedDirs = append(selectedDirs, chosen...)
+	// Interactive directory browser starting at the workspace's parent.
+	parentDir := filepath.Dir(workspace)
+	fmt.Fprintln(os.Stderr)
+	chosen, err := runDirPicker(parentDir, existPathSet)
+	if err != nil {
+		return nil, err
 	}
-
-	// Carry forward existing custom dirs (paths not in siblings).
-	if editMode {
-		siblingSet := make(map[string]bool, len(siblings))
-		for _, s := range siblings {
-			siblingSet[s] = true
-		}
-		for p := range existPathSet {
-			if !siblingSet[p] {
-				selectedDirs = append(selectedDirs, p)
-				fmt.Fprintf(os.Stderr, "  Kept custom dir: %s\n", p)
-			}
-		}
-	}
+	selectedDirs = append(selectedDirs, chosen...)
 
 	// Custom path entry loop.
 	for {
