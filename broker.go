@@ -16,6 +16,54 @@ import (
 	"time"
 )
 
+const oauthSuccessPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mittens — Login successful</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:system-ui,-apple-system,sans-serif;
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#f0f4ff 0%,#e8eef8 100%);
+  color:#1a1a2e;
+}
+@media(prefers-color-scheme:dark){
+  body{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e8e8e8}
+  .card{background:#1f2937;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+  .subtitle{color:#9ca3af}
+  .hint{color:#6b7280;border-top-color:#374151}
+}
+.card{
+  background:#fff;border-radius:16px;padding:48px 40px;max-width:420px;width:90%;
+  text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.08);
+}
+.logo{font-size:48px;margin-bottom:8px}
+.brand{font-size:14px;font-weight:600;letter-spacing:2px;text-transform:uppercase;opacity:.6;margin-bottom:28px}
+.check{
+  width:56px;height:56px;border-radius:50%;
+  background:#22c55e;color:#fff;font-size:28px;line-height:56px;
+  margin:0 auto 20px;
+}
+h1{font-size:22px;font-weight:600;margin-bottom:8px}
+.subtitle{color:#555;font-size:15px;line-height:1.5;margin-bottom:24px}
+.hint{font-size:13px;color:#888;border-top:1px solid #eee;padding-top:20px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">🐱</div>
+  <div class="brand">mittens</div>
+  <div class="check">✓</div>
+  <h1>Login successful</h1>
+  <p class="subtitle">mittens intercepted the OAuth callback and forwarded your credentials to the container.</p>
+  <p class="hint">You can close this tab and return to your terminal.</p>
+</div>
+</body>
+</html>`
+
 // CredentialBroker is an HTTP server on a Unix socket that acts as the single
 // source of truth for OAuth credentials across multiple mittens containers.
 //
@@ -341,10 +389,7 @@ func (b *CredentialBroker) interceptOAuthCallback(port int, ready chan struct{})
 		default:
 		}
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body style="font-family:system-ui;text-align:center;padding:60px">`+
-			`<h2>Login successful</h2>`+
-			`<p>You can close this tab and return to your terminal.</p>`+
-			`</body></html>`)
+		fmt.Fprint(w, oauthSuccessPage)
 	})
 
 	srv := &http.Server{Handler: mux}
