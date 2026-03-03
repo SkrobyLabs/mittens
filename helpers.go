@@ -42,6 +42,16 @@ func logVerbose(verbose bool, format string, args ...interface{}) {
 	}
 }
 
+const maxBrokerLogSize = 1 << 20 // 1 MB
+
+func rotateBrokerLog(logPath string) {
+	fi, err := os.Stat(logPath)
+	if err != nil || fi.Size() < maxBrokerLogSize {
+		return
+	}
+	_ = os.Rename(logPath, logPath+".1")
+}
+
 // scriptDir returns the directory containing the running binary.
 // Used to locate container files (Dockerfile, etc.) relative to the binary.
 func scriptDir() string {

@@ -279,6 +279,7 @@ func (a *App) Run() error {
 		// Persistent broker log for debugging.
 		logDir := filepath.Join(home, ".mittens", "logs")
 		ensureDir(logDir)
+		rotateBrokerLog(filepath.Join(logDir, "broker.log"))
 		if lf, err := os.OpenFile(filepath.Join(logDir, "broker.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 			a.broker.LogFile = lf
 		}
