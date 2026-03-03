@@ -45,8 +45,9 @@ type dirPickerModel struct {
 	selected   map[string]bool
 	done       bool
 	cancelled  bool
-	height     int // visible entry rows (terminal height - 4)
+	height     int // visible entry rows (terminal height - 7)
 	termHeight int // full terminal height
+	termWidth  int // full terminal width
 	offset     int // scroll offset
 	err        error
 }
@@ -105,8 +106,9 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.termHeight = msg.Height
-		// Reserve 4 lines for header + footer
-		m.height = msg.Height - 4
+		m.termWidth = msg.Width
+		// Reserve 7 lines for header(2) + scroll indicator(1) + selected count(2) + footer(2)
+		m.height = msg.Height - 7
 		if m.height < 3 {
 			m.height = 3
 		}
@@ -245,13 +247,10 @@ func (m dirPickerModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(dpStyleHelp.Render("  ←/→ navigate  space select  d done  esc cancel"))
 
-	// Pad to full terminal height to prevent stale line artifacts.
-	rendered := b.String()
-	lines := strings.Count(rendered, "\n")
-	for i := lines; i < m.termHeight; i++ {
-		b.WriteString("\n")
+	// Place content in a fixed-size box to overwrite stale lines on navigation.
+	if m.termWidth > 0 && m.termHeight > 0 {
+		return lipgloss.Place(m.termWidth, m.termHeight, lipgloss.Left, lipgloss.Top, b.String())
 	}
-
 	return b.String()
 }
 
