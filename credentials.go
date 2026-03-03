@@ -150,22 +150,41 @@ func (m *CredentialManager) Cleanup() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// expiresAt parses the JSON and returns the expiresAt field as a Unix timestamp.
-// Returns 0 if the field is missing or the JSON is invalid.
+// expiresAt extracts the highest expiresAt timestamp from credential JSON.
+// It checks both the root level and known nested objects (e.g. claudeAiOauth)
+// since Claude Code stores credentials as {"claudeAiOauth": {"expiresAt": ...}}.
+// Returns 0 if no valid expiresAt is found.
 func expiresAt(jsonData string) int64 {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(jsonData), &obj); err != nil {
 		return 0
 	}
-	raw, ok := obj["expiresAt"]
-	if !ok {
-		return 0
+
+	var best int64
+
+	// Check root-level expiresAt.
+	if raw, ok := obj["expiresAt"]; ok {
+		var ts float64
+		if json.Unmarshal(raw, &ts) == nil && int64(ts) > best {
+			best = int64(ts)
+		}
 	}
-	var ts float64
-	if err := json.Unmarshal(raw, &ts); err != nil {
-		return 0
+
+	// Check nested objects for expiresAt (e.g. claudeAiOauth).
+	for _, raw := range obj {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(raw, &nested) != nil {
+			continue
+		}
+		if expRaw, ok := nested["expiresAt"]; ok {
+			var ts float64
+			if json.Unmarshal(expRaw, &ts) == nil && int64(ts) > best {
+				best = int64(ts)
+			}
+		}
 	}
-	return int64(ts)
+
+	return best
 }
 
 // credentialSource pairs raw JSON with a human-readable label.

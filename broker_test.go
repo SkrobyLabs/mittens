@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,27 +26,32 @@ func brokerClient(sockPath string) *http.Client {
 	}
 }
 
+// shortSockPath creates a short Unix socket path under /tmp to stay within
+// macOS's 104-byte sun_path limit. t.TempDir() paths are too long when
+// combined with test names.
+func shortSockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "mb-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "b.sock")
+}
+
 // startBroker creates and starts a broker in a background goroutine.
 // Returns the broker and a cleanup function. The broker is ready to
 // accept connections when this function returns.
 func startBroker(t *testing.T, seed string) (*CredentialBroker, *http.Client) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	sockPath := shortSockPath(t)
 	b := NewCredentialBroker(sockPath, seed, nil)
 
 	go func() { _ = b.Serve() }()
 
 	// Poll until the broker is accepting connections.
 	client := brokerClient(sockPath)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://broker/")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForBroker(t, client)
 
 	t.Cleanup(func() { _ = b.Close() })
 	return b, client
@@ -212,7 +218,7 @@ func TestBroker_MethodNotAllowed(t *testing.T) {
 }
 
 func TestBroker_Lifecycle(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	sockPath := shortSockPath(t)
 	b := NewCredentialBroker(sockPath, "", nil)
 
 	errCh := make(chan error, 1)
@@ -220,15 +226,7 @@ func TestBroker_Lifecycle(t *testing.T) {
 
 	// Wait for socket.
 	client := brokerClient(sockPath)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://broker/")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForBroker(t, client)
 
 	// Close should return nil.
 	if err := b.Close(); err != nil {
@@ -246,21 +244,13 @@ func TestBroker_PUT_WritesThrough(t *testing.T) {
 	storePath := filepath.Join(tmp, "creds.json")
 	store := &FileCredentialStore{path: storePath}
 
-	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	sockPath := shortSockPath(t)
 	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
 	go func() { _ = b.Serve() }()
 	t.Cleanup(func() { _ = b.Close() })
 
 	client := brokerClient(sockPath)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://broker/")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForBroker(t, client)
 
 	// PUT fresher creds — should write-through to the store.
 	newer := `{"accessToken":"refreshed","expiresAt":999}`
@@ -288,7 +278,7 @@ func TestBroker_PullFromHost(t *testing.T) {
 	storePath := filepath.Join(tmp, "creds.json")
 	store := &FileCredentialStore{path: storePath}
 
-	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	sockPath := shortSockPath(t)
 	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
 
 	// Write fresher creds to the host store file.
@@ -309,7 +299,7 @@ func TestBroker_PullFromHost_StaleIgnored(t *testing.T) {
 	storePath := filepath.Join(tmp, "creds.json")
 	store := &FileCredentialStore{path: storePath}
 
-	sockPath := filepath.Join(t.TempDir(), "broker.sock")
+	sockPath := shortSockPath(t)
 	seed := `{"accessToken":"current","expiresAt":500}`
 	b := NewCredentialBroker(sockPath, seed, []CredentialStore{store})
 
@@ -325,8 +315,699 @@ func TestBroker_PullFromHost_StaleIgnored(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TCP mode tests
+// ---------------------------------------------------------------------------
+
+func TestBroker_TCP_GetPut(t *testing.T) {
+	b := NewCredentialBroker("", `{"expiresAt":10}`, nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	// Use a regular HTTP client against the TCP port.
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// GET should return the seed.
+	resp, err := client.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"expiresAt":10`) {
+		t.Errorf("GET body = %q, want seed", body)
+	}
+
+	// PUT fresher creds.
+	newer := `{"accessToken":"tcp-new","expiresAt":999}`
+	req, _ := http.NewRequest(http.MethodPut, base+"/", strings.NewReader(newer))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT: status = %d, want 204", resp.StatusCode)
+	}
+
+	// GET should return the newer creds.
+	resp, err = client.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != newer {
+		t.Errorf("GET after PUT = %q, want %q", body, newer)
+	}
+}
+
+func TestBroker_TCP_OpenEndpoint(t *testing.T) {
+	var opened string
+	var mu sync.Mutex
+
+	b := NewCredentialBroker("", "", nil)
+	b.OnOpen = func(url string) {
+		mu.Lock()
+		opened = url
+		mu.Unlock()
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// POST a URL to /open.
+	testURL := "https://accounts.anthropic.com/authorize?code=abc123"
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(testURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /open: status = %d, want 204", resp.StatusCode)
+	}
+
+	mu.Lock()
+	if opened != testURL {
+		t.Errorf("OnOpen called with %q, want %q", opened, testURL)
+	}
+	mu.Unlock()
+}
+
+func TestBroker_TCP_OpenRejectsNonHTTP(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// POST a non-HTTP URL — should be rejected.
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader("file:///etc/passwd"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /open with file:// URL: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-broker sync via TCP (simulates two containers syncing through host stores)
+// ---------------------------------------------------------------------------
+
+func TestBroker_CrossBrokerSync(t *testing.T) {
+	// This test simulates the full sync path:
+	// Container A → PUT to Broker A → write-through to host store
+	// Broker B → pullFromHost → picks up fresher creds from host store
+	// Container B → GET from Broker B → gets the synced creds
+
+	tmp := t.TempDir()
+	sharedStorePath := filepath.Join(tmp, "shared-creds.json")
+	storeA := &FileCredentialStore{path: sharedStorePath}
+	storeB := &FileCredentialStore{path: sharedStorePath}
+
+	tcpClient := &http.Client{Timeout: 2 * time.Second}
+
+	// Start Broker A (for "container A") with no initial creds.
+	brokerA := NewCredentialBroker("", "", []CredentialStore{storeA})
+	portA, err := brokerA.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerA.Serve() }()
+	t.Cleanup(func() { _ = brokerA.Close() })
+	baseA := fmt.Sprintf("http://127.0.0.1:%d", portA)
+	waitForTCPBroker(t, tcpClient, baseA)
+
+	// Start Broker B (for "container B") with no initial creds.
+	brokerB := NewCredentialBroker("", "", []CredentialStore{storeB})
+	portB, err := brokerB.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerB.Serve() }()
+	t.Cleanup(func() { _ = brokerB.Close() })
+	baseB := fmt.Sprintf("http://127.0.0.1:%d", portB)
+	waitForTCPBroker(t, tcpClient, baseB)
+
+	// Container A does /login and gets fresh credentials.
+	freshCreds := `{"accessToken":"fresh-from-login","expiresAt":9999}`
+	req, _ := http.NewRequest(http.MethodPut, baseA+"/", strings.NewReader(freshCreds))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tcpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT to broker A: status = %d, want 204", resp.StatusCode)
+	}
+
+	// Verify write-through: host store should have the creds.
+	data, err := os.ReadFile(sharedStorePath)
+	if err != nil {
+		t.Fatalf("host store should have creds after PUT write-through: %v", err)
+	}
+	if string(data) != freshCreds {
+		t.Errorf("host store = %q, want %q", data, freshCreds)
+	}
+
+	// Broker B polls host stores (simulating the 5s hostSync tick).
+	brokerB.pullFromHost()
+
+	// Container B should now get the fresh creds via GET.
+	resp, err = tcpClient.Get(baseB + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET from broker B: status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != freshCreds {
+		t.Errorf("broker B GET = %q, want %q", body, freshCreds)
+	}
+}
+
+func TestBroker_CrossBrokerSync_BidirectionalFreshest(t *testing.T) {
+	// Both containers get creds; the fresher one should win across all brokers.
+
+	tmp := t.TempDir()
+	sharedStorePath := filepath.Join(tmp, "shared-creds.json")
+	store := &FileCredentialStore{path: sharedStorePath}
+
+	tcpClient := &http.Client{Timeout: 2 * time.Second}
+
+	brokerA := NewCredentialBroker("", "", []CredentialStore{store})
+	portA, err := brokerA.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerA.Serve() }()
+	t.Cleanup(func() { _ = brokerA.Close() })
+	baseA := fmt.Sprintf("http://127.0.0.1:%d", portA)
+	waitForTCPBroker(t, tcpClient, baseA)
+
+	brokerB := NewCredentialBroker("", "", []CredentialStore{store})
+	portB, err := brokerB.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerB.Serve() }()
+	t.Cleanup(func() { _ = brokerB.Close() })
+	baseB := fmt.Sprintf("http://127.0.0.1:%d", portB)
+	waitForTCPBroker(t, tcpClient, baseB)
+
+	// Container A pushes creds with expiresAt=100.
+	credsA := `{"accessToken":"from-A","expiresAt":100}`
+	req, _ := http.NewRequest(http.MethodPut, baseA+"/", strings.NewReader(credsA))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tcpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Container B pushes creds with expiresAt=500 (fresher).
+	credsB := `{"accessToken":"from-B","expiresAt":500}`
+	req, _ = http.NewRequest(http.MethodPut, baseB+"/", strings.NewReader(credsB))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = tcpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Host store should have B's creds (fresher).
+	data, _ := os.ReadFile(sharedStorePath)
+	if string(data) != credsB {
+		t.Errorf("host store = %q, want %q (B's fresher creds)", data, credsB)
+	}
+
+	// Broker A pulls from host — should get B's creds.
+	brokerA.pullFromHost()
+	got := brokerA.Credentials()
+	if got != credsB {
+		t.Errorf("broker A after pull = %q, want %q", got, credsB)
+	}
+
+	// Container A GETs — should get B's creds.
+	resp, err = tcpClient.Get(baseA + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != credsB {
+		t.Errorf("container A GET = %q, want %q", body, credsB)
+	}
+}
+
+func TestBroker_HostSyncAutomatic(t *testing.T) {
+	// Verify that pullFromHost picks up changes written to the host store.
+
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "creds.json")
+	store := &FileCredentialStore{path: storePath}
+
+	sockPath := shortSockPath(t)
+	b := NewCredentialBroker(sockPath, "", []CredentialStore{store})
+
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	client := brokerClient(sockPath)
+	waitForBroker(t, client)
+
+	// Initially empty.
+	resp, _ := client.Get("http://broker/")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("initial GET: status = %d, want 204", resp.StatusCode)
+	}
+
+	// Write creds directly to the host store file (simulating external refresh).
+	freshCreds := `{"accessToken":"external","expiresAt":777}`
+	os.WriteFile(storePath, []byte(freshCreds), 0600)
+
+	// Manually trigger pullFromHost (the hostSync goroutine does this every 5s).
+	b.pullFromHost()
+
+	// GET should now return the fresh creds.
+	resp, _ = client.Get("http://broker/")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET after host write: status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != freshCreds {
+		t.Errorf("GET body = %q, want %q", body, freshCreds)
+	}
+}
+
+func TestBroker_TCP_WriteThroughAndPull(t *testing.T) {
+	// Full TCP-mode test: PUT → write-through → pullFromHost on second broker.
+	// This mirrors the actual production flow.
+
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "host-creds.json")
+	store := &FileCredentialStore{path: storePath}
+
+	tcpClient := &http.Client{Timeout: 2 * time.Second}
+
+	// Broker A (TCP mode).
+	brokerA := NewCredentialBroker("", "", []CredentialStore{store})
+	portA, err := brokerA.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerA.Serve() }()
+	t.Cleanup(func() { _ = brokerA.Close() })
+	baseA := fmt.Sprintf("http://127.0.0.1:%d", portA)
+	waitForTCPBroker(t, tcpClient, baseA)
+
+	// Broker B (TCP mode) with same store.
+	brokerB := NewCredentialBroker("", "", []CredentialStore{store})
+	portB, err := brokerB.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = brokerB.Serve() }()
+	t.Cleanup(func() { _ = brokerB.Close() })
+	baseB := fmt.Sprintf("http://127.0.0.1:%d", portB)
+	waitForTCPBroker(t, tcpClient, baseB)
+
+	// PUT fresh creds to Broker A via TCP.
+	freshCreds := `{"accessToken":"tcp-fresh","expiresAt":5000}`
+	req, _ := http.NewRequest(http.MethodPut, baseA+"/", strings.NewReader(freshCreds))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tcpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT to A: status = %d", resp.StatusCode)
+	}
+
+	// Verify host store has the creds.
+	data, _ := os.ReadFile(storePath)
+	if string(data) != freshCreds {
+		t.Fatalf("host store = %q, want %q", data, freshCreds)
+	}
+
+	// Broker B pulls from host.
+	brokerB.pullFromHost()
+
+	// GET from Broker B via TCP.
+	resp, err = tcpClient.Get(baseB + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET from B: status = %d", resp.StatusCode)
+	}
+	if string(body) != freshCreds {
+		t.Errorf("broker B GET = %q, want %q", body, freshCreds)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OAuth callback interception tests
+// ---------------------------------------------------------------------------
+
+func TestExtractOAuthCallbackPort(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want int
+	}{
+		{
+			name: "real OAuth URL",
+			url:  "https://claude.ai/oauth/authorize?client_id=test&redirect_uri=http%3A%2F%2Flocalhost%3A35167%2Fcallback&state=abc",
+			want: 35167,
+		},
+		{
+			name: "no redirect_uri",
+			url:  "https://claude.ai/oauth/authorize?client_id=test&state=abc",
+			want: 0,
+		},
+		{
+			name: "non-localhost redirect",
+			url:  "https://claude.ai/oauth/authorize?redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+			want: 0,
+		},
+		{
+			name: "regular URL",
+			url:  "https://example.com/page",
+			want: 0,
+		},
+		{
+			name: "localhost without port",
+			url:  "https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%2Fcallback",
+			want: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractOAuthCallbackPort(tc.url)
+			if got != tc.want {
+				t.Errorf("extractOAuthCallbackPort(%q) = %d, want %d", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBroker_OAuthCallbackIntercept(t *testing.T) {
+	// Find a free port for the simulated callback.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // free the port for the broker's interceptor
+
+	var openedURL string
+	b := NewCredentialBroker("", "", nil)
+	b.OnOpen = func(u string) { openedURL = u }
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// POST an OAuth URL with a localhost redirect_uri.
+	oauthURL := fmt.Sprintf(
+		"https://claude.ai/oauth/authorize?client_id=test&redirect_uri=%s&state=teststate",
+		url.QueryEscape(fmt.Sprintf("http://localhost:%d/callback", callbackPort)),
+	)
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(oauthURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /open: status = %d", resp.StatusCode)
+	}
+
+	// OnOpen should have been called with the original URL.
+	if openedURL != oauthURL {
+		t.Errorf("OnOpen URL = %q, want %q", openedURL, oauthURL)
+	}
+
+	// Simulate browser redirect hitting the intercepted callback port.
+	callbackReq := fmt.Sprintf("http://127.0.0.1:%d/callback?code=TESTCODE&state=teststate", callbackPort)
+	resp, err = client.Get(callbackReq)
+	if err != nil {
+		t.Fatalf("browser callback: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("browser callback: status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Login successful") {
+		t.Errorf("success page missing expected text, got %q", body)
+	}
+
+	// GET /login-callback should return the captured URL.
+	resp, err = client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /login-callback: status = %d", resp.StatusCode)
+	}
+
+	want := fmt.Sprintf("http://localhost:%d/callback?code=TESTCODE&state=teststate", callbackPort)
+	if string(body) != want {
+		t.Errorf("login-callback = %q, want %q", body, want)
+	}
+
+	// Second GET should return 204 (consumed).
+	resp, err = client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("second GET /login-callback: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestBroker_LoginCallbackEmpty(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// No pending callback — should return 204.
+	resp, err := client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("GET /login-callback with no pending: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestBroker_OpenNonOAuthStillWorks(t *testing.T) {
+	var openedURL string
+	b := NewCredentialBroker("", "", nil)
+	b.OnOpen = func(u string) { openedURL = u }
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// POST a regular (non-OAuth) URL — should not trigger interception.
+	regularURL := "https://docs.anthropic.com/en/docs"
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(regularURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /open regular URL: status = %d", resp.StatusCode)
+	}
+	if openedURL != regularURL {
+		t.Errorf("OnOpen = %q, want %q", openedURL, regularURL)
+	}
+
+	// /login-callback should still be empty.
+	resp, err = client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("login-callback after regular URL: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// jsonKeys / redactURL tests
+// ---------------------------------------------------------------------------
+
+func TestJsonKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"sorted keys", `{"b":1,"a":2,"c":3}`, "[a, b, c]"},
+		{"nested creds", `{"claudeAiOauth":{"expiresAt":100},"primaryApiKey":"sk"}`, "[claudeAiOauth, primaryApiKey]"},
+		{"empty object", `{}`, "[]"},
+		{"invalid JSON", `not json`, "<invalid JSON>"},
+		{"empty string", ``, "<invalid JSON>"},
+		{"array", `[1,2,3]`, "<invalid JSON>"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := jsonKeys(tc.input)
+			if got != tc.want {
+				t.Errorf("jsonKeys(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			"code param",
+			"http://localhost:42415/callback?code=SECRET&state=abc",
+			"http://localhost:42415/callback?code=REDACTED&state=abc",
+		},
+		{
+			"access_token param",
+			"https://example.com/cb?access_token=tok123&type=bearer",
+			"https://example.com/cb?access_token=REDACTED&type=bearer",
+		},
+		{
+			"multiple sensitive params",
+			"https://example.com/cb?code=C&token=T&refresh_token=R&ok=yes",
+			"https://example.com/cb?code=REDACTED&ok=yes&refresh_token=REDACTED&token=REDACTED",
+		},
+		{
+			"no sensitive params",
+			"https://example.com/page?q=search&page=1",
+			"https://example.com/page?q=search&page=1",
+		},
+		{
+			"no query string",
+			"https://docs.anthropic.com/en/docs",
+			"https://docs.anthropic.com/en/docs",
+		},
+		{
+			"invalid URL passthrough",
+			"://not-a-url",
+			"://not-a-url",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactURL(tc.url)
+			if got != tc.want {
+				t.Errorf("redactURL(%q)\n  got  %q\n  want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+func waitForBroker(t *testing.T, client *http.Client) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://broker/")
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("broker did not start in time")
+}
+
+func waitForTCPBroker(t *testing.T, client *http.Client, base string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(base + "/")
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("TCP broker did not start in time")
+}
 
 func putReq(body string) *http.Request {
 	req, _ := http.NewRequest(http.MethodPut, "http://broker/", strings.NewReader(body))

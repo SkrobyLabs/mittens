@@ -47,6 +47,31 @@ func TestExpiresAt(t *testing.T) {
 			json: `{"expiresAt": "not-a-number"}`,
 			want: 0,
 		},
+		{
+			name: "nested claudeAiOauth",
+			json: `{"claudeAiOauth":{"accessToken":"tok","expiresAt":1772566429991}}`,
+			want: 1772566429991,
+		},
+		{
+			name: "nested with no root expiresAt",
+			json: `{"claudeAiOauth":{"expiresAt":500},"otherKey":"val"}`,
+			want: 500,
+		},
+		{
+			name: "both root and nested — picks highest",
+			json: `{"expiresAt":100,"claudeAiOauth":{"expiresAt":999}}`,
+			want: 999,
+		},
+		{
+			name: "root higher than nested",
+			json: `{"expiresAt":999,"claudeAiOauth":{"expiresAt":100}}`,
+			want: 999,
+		},
+		{
+			name: "nested with non-object siblings",
+			json: `{"claudeAiOauth":{"expiresAt":42},"version":1,"name":"test"}`,
+			want: 42,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

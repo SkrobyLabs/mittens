@@ -25,9 +25,9 @@ GROUP_ID := $(shell id -g)
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
-.DEFAULT_GOAL := all
+.DEFAULT_GOAL := help
 
-all: build ## Build the binary (default)
+all: build ## Build the binary
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 

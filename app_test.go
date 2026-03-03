@@ -202,6 +202,16 @@ func argSliceContains(args []string, substr string) bool {
 	return false
 }
 
+// argExists reports whether args contains the given exact value.
+func argExists(args []string, val string) bool {
+	for _, a := range args {
+		if a == val {
+			return true
+		}
+	}
+	return false
+}
+
 // argPairExists reports whether args contains flag immediately followed by val.
 // e.g. argPairExists(args, "-v", "/path") matches [... "-v" "/path" ...].
 func argPairExists(args []string, flag, val string) bool {
@@ -593,28 +603,24 @@ func TestAssembleDockerArgs_CredBroker(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 
-	brokerDir := t.TempDir()
-
 	a := &App{
 		NoHistory:         true,
 		ContainerName:     "mittens-broker",
 		WorkspaceMountSrc: "/tmp/ws",
 		Credentials:       &CredentialManager{},
-		brokerDir:         brokerDir,
-		brokerSock:        filepath.Join(brokerDir, "broker.sock"),
+		brokerPort:        12345,
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Broker dir mount.
-	wantMount := brokerDir + ":/tmp/mittens-broker"
-	if !argPairExists(args, "-v", wantMount) {
-		t.Errorf("missing broker mount, want -v %s\nargs: %v", wantMount, args)
+	// Broker port env var.
+	if !argPairExists(args, "-e", "MITTENS_BROKER_PORT=12345") {
+		t.Error("missing MITTENS_BROKER_PORT env var")
 	}
 
-	// Broker socket env var.
-	if !argPairExists(args, "-e", "MITTENS_CRED_BROKER_SOCK=/tmp/mittens-broker/broker.sock") {
-		t.Error("missing MITTENS_CRED_BROKER_SOCK env var")
+	// host.docker.internal mapping.
+	if !argExists(args, "--add-host=host.docker.internal:host-gateway") {
+		t.Error("missing --add-host for host.docker.internal")
 	}
 }
 
@@ -628,17 +634,14 @@ func TestAssembleDockerArgs_NoBroker(t *testing.T) {
 		ContainerName:     "mittens-nobroker",
 		WorkspaceMountSrc: "/tmp/ws",
 		Credentials:       &CredentialManager{},
-		// brokerDir is empty — no broker
+		// brokerPort is 0 — no broker
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Should NOT have broker mount or env var.
-	if argPairContains(args, "-v", "mittens-broker") {
-		t.Error("broker mount should not be present without broker")
-	}
-	if argPairContains(args, "-e", "MITTENS_CRED_BROKER_SOCK") {
-		t.Error("MITTENS_CRED_BROKER_SOCK should not be present without broker")
+	// Should NOT have broker env var.
+	if argPairContains(args, "-e", "MITTENS_BROKER_PORT") {
+		t.Error("MITTENS_BROKER_PORT should not be present without broker")
 	}
 }
 

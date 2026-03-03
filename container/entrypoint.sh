@@ -155,13 +155,23 @@ if [[ "$(id -u)" == "0" ]]; then
             $cmd -A OUTPUT -p tcp --dport 22 -j ACCEPT
         done
 
+        # Allow container to reach the host broker (credential sync + URL opening).
+        # Use port-only matching — the broker port is random and ephemeral, so
+        # restricting by destination IP is fragile (IPv4/IPv6 mismatch on macOS)
+        # and the minimal port-based rule is sufficient.
+        if [[ -n "${MITTENS_BROKER_PORT:-}" ]]; then
+            for cmd in iptables ip6tables; do
+                $cmd -A OUTPUT -p tcp --dport "$MITTENS_BROKER_PORT" -j ACCEPT 2>/dev/null || true
+            done
+        fi
+
         # Set proxy env vars — inherited by claude user via gosu
         export HTTP_PROXY=http://127.0.0.1:3128
         export HTTPS_PROXY=http://127.0.0.1:3128
         export http_proxy=http://127.0.0.1:3128
         export https_proxy=http://127.0.0.1:3128
-        export NO_PROXY=localhost,127.0.0.1,::1
-        export no_proxy=localhost,127.0.0.1,::1
+        export NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal
+        export no_proxy=localhost,127.0.0.1,::1,host.docker.internal
 
         echo "[mittens] Firewall active: outbound HTTP(S) restricted to whitelisted domains"
     fi
@@ -280,8 +290,8 @@ if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; 
     } >> "$CLAUDE_DIR/CLAUDE.md"
 fi
 
-# --- Start credential sync daemon (if broker socket is available) ---
-if [[ -n "${MITTENS_CRED_BROKER_SOCK:-}" && -S "$MITTENS_CRED_BROKER_SOCK" ]]; then
+# --- Start credential sync daemon (if broker port is available) ---
+if [[ -n "${MITTENS_BROKER_PORT:-}" ]]; then
     /usr/local/bin/cred-sync.sh &
 fi
 

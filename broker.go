@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +31,14 @@ type CredentialBroker struct {
 	stores   []CredentialStore // host credential stores for bidirectional sync
 	done     chan struct{}     // signals hostSync goroutine to stop
 
+	// pendingCallback holds a captured OAuth callback URL for the container to replay.
+	pendingCallback string
+
 	// OnOpen is called when a container requests a URL to be opened on the host.
 	OnOpen func(url string)
+
+	// LogFile is an optional file for persistent debug logging.
+	LogFile *os.File
 }
 
 // NewCredentialBroker creates a broker that will listen on sockPath.
@@ -42,37 +53,70 @@ func NewCredentialBroker(sockPath, seed string, stores []CredentialStore) *Crede
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/open", b.handleOpen)
+	mux.HandleFunc("/login-callback", b.handleLoginCallback)
 	mux.HandleFunc("/", b.handle)
 	b.srv = &http.Server{Handler: mux}
 	return b
 }
 
-// Serve starts listening on the Unix socket. It blocks until the server is
-// shut down via Close(). Call this in a goroutine.
-func (b *CredentialBroker) Serve() error {
-	// Remove stale socket file.
-	os.Remove(b.sockPath)
+// blog writes a timestamped log entry to the broker's log file (if set).
+func (b *CredentialBroker) blog(format string, args ...interface{}) {
+	if b.LogFile == nil {
+		return
+	}
+	ts := time.Now().Format("15:04:05.000")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(b.LogFile, "%s [broker:%d] %s\n", ts, os.Getpid(), msg)
+}
 
-	ln, err := net.Listen("unix", b.sockPath)
+// ListenTCP binds to a random TCP port on localhost and returns the port.
+// Call this before Serve() to use TCP mode instead of Unix socket.
+func (b *CredentialBroker) ListenTCP() (int, error) {
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	b.ln = ln
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
 
-	// Allow container's claude user to connect.
-	_ = os.Chmod(b.sockPath, 0666)
+// Serve starts the broker. If ListenTCP() was called first, serves on that
+// listener. Otherwise falls back to Unix socket mode using sockPath.
+// Blocks until shut down via Close(). Call in a goroutine.
+func (b *CredentialBroker) Serve() error {
+	if b.ln == nil {
+		// Unix socket mode (tests or when ListenTCP wasn't called).
+		if b.sockPath == "" {
+			return fmt.Errorf("no listener: call ListenTCP() or provide a socket path")
+		}
+		os.Remove(b.sockPath)
+		ln, err := net.Listen("unix", b.sockPath)
+		if err != nil {
+			return err
+		}
+		b.ln = ln
+		_ = os.Chmod(b.sockPath, 0666)
+	}
+
+	seedExp := expiresAt(b.creds)
+	b.blog("listening on %s (seed expiresAt: %d, stores: %d)", b.ln.Addr(), seedExp, len(b.stores))
 
 	// Start bidirectional host sync loop.
 	if len(b.stores) > 0 {
 		go b.hostSync()
 	}
 
-	return b.srv.Serve(ln)
+	return b.srv.Serve(b.ln)
 }
 
 // Close gracefully shuts down the broker and stops the host sync loop.
 func (b *CredentialBroker) Close() error {
+	b.blog("shutting down")
 	close(b.done)
+	if b.LogFile != nil {
+		b.LogFile.Close()
+		b.LogFile = nil
+	}
 	if b.srv != nil {
 		return b.srv.Shutdown(context.Background())
 	}
@@ -104,9 +148,11 @@ func (b *CredentialBroker) handleGet(w http.ResponseWriter) {
 	b.mu.RUnlock()
 
 	if data == "" {
+		b.blog("GET → 204 (no credentials)")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	b.blog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, data)
@@ -128,6 +174,7 @@ func (b *CredentialBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	incoming := string(body)
 	incomingExp := expiresAt(incoming)
 	if incomingExp == 0 {
+		b.blog("PUT → 400 (missing/invalid expiresAt, %d bytes, keys: %s)", len(body), jsonKeys(incoming))
 		http.Error(w, "invalid credentials: missing or invalid expiresAt", http.StatusBadRequest)
 		return
 	}
@@ -137,12 +184,14 @@ func (b *CredentialBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	if incomingExp > currentExp {
 		b.creds = incoming
 		b.mu.Unlock()
+		b.blog("PUT → 204 accepted (incoming: %d, was: %d)", incomingExp, currentExp)
 		// Write-through: persist fresher creds to host stores immediately.
 		b.persistToHost(incoming)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	b.mu.Unlock()
+	b.blog("PUT → 409 stale (incoming: %d, current: %d)", incomingExp, currentExp)
 	http.Error(w, "stale credentials", http.StatusConflict)
 }
 
@@ -187,6 +236,9 @@ func (b *CredentialBroker) pullFromHost() {
 	currentExp := expiresAt(b.creds)
 	if bestExp > currentExp {
 		b.creds = bestJSON
+		b.mu.Unlock()
+		b.blog("hostSync: pulled fresher creds from host (host: %d, was: %d)", bestExp, currentExp)
+		return
 	}
 	b.mu.Unlock()
 }
@@ -195,7 +247,10 @@ func (b *CredentialBroker) pullFromHost() {
 func (b *CredentialBroker) persistToHost(jsonData string) {
 	for _, s := range b.stores {
 		if err := s.Persist(jsonData); err != nil {
+			b.blog("persistToHost: FAILED %s: %v", s.Label(), err)
 			logWarn("Broker: persist to %s: %v", s.Label(), err)
+		} else {
+			b.blog("persistToHost: wrote to %s", s.Label())
 		}
 	}
 }
@@ -217,14 +272,160 @@ func (b *CredentialBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := strings.TrimSpace(string(body))
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+	rawURL := strings.TrimSpace(string(body))
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		http.Error(w, "invalid URL", http.StatusBadRequest)
 		return
 	}
 
+	b.blog("OPEN → %s", redactURL(rawURL))
+
+	// Intercept OAuth login: start a temp listener on the callback port so
+	// the browser redirect lands on the host (not lost inside the container).
+	if port := extractOAuthCallbackPort(rawURL); port > 0 {
+		ready := make(chan struct{})
+		go b.interceptOAuthCallback(port, ready)
+		<-ready // wait for listener to bind before opening the browser
+	}
+
 	if b.OnOpen != nil {
-		b.OnOpen(url)
+		b.OnOpen(rawURL)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleLoginCallback returns the captured OAuth callback URL (if any) so the
+// container can replay it to Claude Code's local callback server.
+func (b *CredentialBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	b.mu.Lock()
+	cb := b.pendingCallback
+	b.pendingCallback = ""
+	b.mu.Unlock()
+
+	if cb == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	b.blog("login-callback → %s", redactURL(cb))
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = io.WriteString(w, cb)
+}
+
+// interceptOAuthCallback starts a temporary HTTP server on the host at the
+// given port to capture the OAuth browser redirect. Once the callback arrives,
+// it stores the full callback URL for the container to pick up via
+// GET /login-callback.
+func (b *CredentialBroker) interceptOAuthCallback(port int, ready chan struct{}) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		b.blog("OAuth intercept: failed to listen on :%d: %v", port, err)
+		close(ready)
+		return
+	}
+	b.blog("OAuth intercept: listening on :%d", port)
+	close(ready)
+
+	callbackCh := make(chan string, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		callbackURL := fmt.Sprintf("http://localhost:%d%s", port, r.URL.RequestURI())
+		select {
+		case callbackCh <- callbackURL:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body style="font-family:system-ui;text-align:center;padding:60px">`+
+			`<h2>Login successful</h2>`+
+			`<p>You can close this tab and return to your terminal.</p>`+
+			`</body></html>`)
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+
+	select {
+	case cb := <-callbackCh:
+		b.mu.Lock()
+		b.pendingCallback = cb
+		b.mu.Unlock()
+		b.blog("OAuth intercept: captured callback")
+	case <-time.After(2 * time.Minute):
+		b.blog("OAuth intercept: timeout")
+	case <-b.done:
+		b.blog("OAuth intercept: broker closing")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+}
+
+// jsonKeys returns the sorted top-level keys of a JSON object as a bracketed
+// list (e.g. `[claudeAiOauth, primaryApiKey]`), or "<invalid JSON>" on failure.
+func jsonKeys(s string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(s), &obj); err != nil {
+		return "<invalid JSON>"
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return "[" + strings.Join(keys, ", ") + "]"
+}
+
+// redactURL replaces the values of sensitive query parameters in a URL with
+// "REDACTED". Falls back to the original string if parsing fails.
+func redactURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	redacted := false
+	for _, param := range []string{"code", "token", "access_token", "refresh_token"} {
+		if q.Has(param) {
+			q.Set(param, "REDACTED")
+			redacted = true
+		}
+	}
+	if !redacted {
+		return rawURL
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// extractOAuthCallbackPort parses an OAuth authorization URL and returns the
+// port from the redirect_uri parameter if it points to localhost.
+// Returns 0 if the URL is not an OAuth redirect or doesn't use localhost.
+func extractOAuthCallbackPort(rawURL string) int {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	redirectURI := u.Query().Get("redirect_uri")
+	if redirectURI == "" {
+		return 0
+	}
+	ru, err := url.Parse(redirectURI)
+	if err != nil {
+		return 0
+	}
+	if ru.Hostname() != "localhost" {
+		return 0
+	}
+	port, err := strconv.Atoi(ru.Port())
+	if err != nil {
+		return 0
+	}
+	return port
 }

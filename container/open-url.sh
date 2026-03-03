@@ -1,13 +1,33 @@
 #!/bin/bash
-# xdg-open shim — forwards URLs to the host via the mittens broker socket.
+# xdg-open shim — forwards URLs to the host via the mittens broker.
 # Inside the container there is no desktop environment, so this shim
 # ensures that browser-open requests (e.g. /login in Claude Code) reach
 # the host and open in the real browser.
+#
+# For OAuth login flows, it also polls the broker for the intercepted
+# callback and replays it to Claude Code's local callback server.
 
 URL="$1"
 [[ -z "$URL" ]] && exit 1
 
-SOCK="${MITTENS_CRED_BROKER_SOCK:-/tmp/mittens-broker/broker.sock}"
-if [[ -S "$SOCK" ]]; then
-    curl -sf --unix-socket "$SOCK" -X POST -d "$URL" http://localhost/open 2>/dev/null || true
+PORT="${MITTENS_BROKER_PORT:-}"
+if [[ -n "$PORT" ]]; then
+    BROKER_URL="http://host.docker.internal:$PORT"
+    curl -sf --noproxy '*' -X POST -d "$URL" "$BROKER_URL/open" 2>/dev/null || true
+
+    # If this is an OAuth URL with a localhost callback, poll the broker for
+    # the intercepted callback and replay it to Claude Code's local server.
+    if [[ "$URL" == *"redirect_uri="*"localhost"* ]]; then
+        (
+            for _ in $(seq 1 120); do
+                sleep 1
+                callback=$(curl -sf --noproxy '*' "$BROKER_URL/login-callback" 2>/dev/null) || continue
+                if [[ -n "$callback" ]]; then
+                    # Replay to Claude Code's callback server inside the container.
+                    curl -sf "$callback" >/dev/null 2>&1 || true
+                    break
+                fi
+            done
+        ) &
+    fi
 fi

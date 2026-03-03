@@ -58,9 +58,8 @@ type App struct {
 	clipboardPID int
 
 	// Credential broker
-	brokerDir  string
-	brokerSock string
 	broker     *CredentialBroker
+	brokerPort int
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -267,25 +266,35 @@ func (a *App) Run() error {
 		logWarn("Credential setup: %v", err)
 	}
 
-	// Start broker (credential sync + host URL opening).
+	// Start broker (credential sync + host URL opening via TCP).
 	{
 		var seed string
 		if a.Credentials.TmpFile() != "" {
 			data, _ := os.ReadFile(a.Credentials.TmpFile())
 			seed = string(data)
 		}
-		dir, err := os.MkdirTemp("", "mittens-broker.*")
+		a.broker = NewCredentialBroker("", seed, a.Credentials.Stores())
+		a.broker.OnOpen = openOnHost
+
+		// Persistent broker log for debugging.
+		logDir := filepath.Join(home, ".mittens", "logs")
+		ensureDir(logDir)
+		if lf, err := os.OpenFile(filepath.Join(logDir, "broker.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			a.broker.LogFile = lf
+		}
+
+		port, err := a.broker.ListenTCP()
 		if err == nil {
-			a.brokerDir = dir
-			a.brokerSock = filepath.Join(dir, "broker.sock")
-			a.broker = NewCredentialBroker(a.brokerSock, seed, a.Credentials.Stores())
-			a.broker.OnOpen = openOnHost
+			a.brokerPort = port
 			go func() {
 				if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
 					logWarn("Broker: %v", err)
 				}
 			}()
-			logInfo("Broker: started")
+			logInfo("Broker: started on port %d", port)
+		} else {
+			logWarn("Broker: failed to start: %v", err)
+			a.broker = nil
 		}
 	}
 
@@ -379,11 +388,6 @@ func (a *App) Cleanup() {
 		}
 	}
 
-	// Clean up credential broker temp dir.
-	if a.brokerDir != "" {
-		os.RemoveAll(a.brokerDir)
-	}
-
 	// Clean up credential temp file.
 	if a.Credentials != nil {
 		a.Credentials.Cleanup()
@@ -469,10 +473,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-v", a.Credentials.TmpFile()+":/mnt/claude-config/.credentials.json:ro")
 	}
 
-	// Credential broker socket mount.
-	if a.brokerDir != "" {
-		args = append(args, "-v", a.brokerDir+":/tmp/mittens-broker")
-		args = append(args, "-e", "MITTENS_CRED_BROKER_SOCK=/tmp/mittens-broker/broker.sock")
+	// Credential broker (TCP).
+	if a.brokerPort > 0 {
+		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
+		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}
 
 	// Channel socket mount (for mittens-ui container communication).
@@ -729,6 +733,10 @@ func printHelp(exts []*registry.Extension) {
 	fmt.Println(`mittens - Run Claude Code in an isolated Docker container
 
 Usage: mittens [flags] [-- claude-args...]
+
+Commands:
+  init              Interactive project setup wizard
+  logs [-f]         Show broker logs (-f to follow)
 
 Core flags:
   --verbose, -v     Show the docker command being run

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -57,6 +58,8 @@ func runMain(args []string) error {
 		switch args[0] {
 		case "init", "--init":
 			return runInit()
+		case "logs":
+			return runLogs(args[1:])
 		case "--version", "-V":
 			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
 			return nil
@@ -123,6 +126,38 @@ func runMain(args []string) error {
 
 	// 7. Run.
 	return app.Run()
+}
+
+// runLogs shows or follows the broker log file.
+// Usage: mittens logs [-f|--follow]
+func runLogs(args []string) error {
+	logPath := filepath.Join(homeDir(), ".mittens", "logs", "broker.log")
+
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		fmt.Println("No logs yet. Start a mittens session first.")
+		return nil
+	}
+
+	follow := false
+	for _, a := range args {
+		if a == "-f" || a == "--follow" {
+			follow = true
+		}
+	}
+
+	if follow {
+		cmd := exec.Command("tail", "-f", logPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return err
+	}
+	_, _ = os.Stdout.Write(data)
+	return nil
 }
 
 // runInit launches the interactive TUI setup wizard.
