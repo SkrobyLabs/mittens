@@ -37,4 +37,4 @@ EOF
 
 # Pre-create GOPATH so Docker bind mounts don't create it as root
 # (ownership is fixed by the chown -R in Dockerfile after useradd)
-mkdir -p /home/claude/go
+mkdir -p /home/claude/go/pkg/mod

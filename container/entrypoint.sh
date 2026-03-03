@@ -186,6 +186,11 @@ fi
 
 mkdir -p "$CLAUDE_DIR"
 
+# --- Source extension environment (Go, .NET, etc.) ---
+for f in /etc/profile.d/*.sh; do
+    [ -r "$f" ] && . "$f"
+done
+
 # --- Ensure ~/.local/bin/claude exists so Claude Code diagnostics are clean ---
 mkdir -p "$CLAUDE_HOME/.local/bin"
 if command -v claude &>/dev/null && [[ ! -e "$CLAUDE_HOME/.local/bin/claude" ]]; then
