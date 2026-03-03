@@ -11,7 +11,8 @@ MESSAGE="${2:-}"
 [[ -z "$PORT" ]] && exit 0
 
 BROKER_URL="http://host.docker.internal:$PORT"
-PAYLOAD=$(printf '{"container":"%s","event":"%s","message":"%s"}' "$NAME" "$EVENT" "$MESSAGE")
+PAYLOAD=$(jq -nc --arg c "$NAME" --arg e "$EVENT" --arg m "$MESSAGE" \
+  '{container: $c, event: $e, message: $m}')
 
 curl -sf --noproxy '*' --max-time 2 \
   -X POST -H 'Content-Type: application/json' \

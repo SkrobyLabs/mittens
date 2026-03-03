@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -1071,6 +1073,80 @@ func TestBroker_TCP_NotifyRejectsInvalidJSON(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("invalid JSON POST /notify: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestBroker_TCP_NotifySpecialCharacters(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{"double quotes", `She said "hello"`},
+		{"backslashes", `path\to\file`},
+		{"mixed special", `He said "it's a \"test\"" with \n newlines`},
+		{"no extraneous quotes", "needs attention"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var gotMessage string
+
+			b := NewCredentialBroker("", "", nil)
+			b.OnNotify = func(_, _, message string) {
+				mu.Lock()
+				gotMessage = message
+				mu.Unlock()
+			}
+
+			port, err := b.ListenTCP()
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { _ = b.Serve() }()
+			t.Cleanup(func() { _ = b.Close() })
+
+			base := fmt.Sprintf("http://127.0.0.1:%d", port)
+			client := &http.Client{Timeout: 2 * time.Second}
+			waitForTCPBroker(t, client, base)
+
+			// Use json.Marshal to build valid JSON regardless of special chars.
+			type notifyPayload struct {
+				Container string `json:"container"`
+				Event     string `json:"event"`
+				Message   string `json:"message"`
+			}
+			data, err := json.Marshal(notifyPayload{
+				Container: "mittens-special",
+				Event:     "notification",
+				Message:   tc.message,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req, _ := http.NewRequest(http.MethodPost, base+"/notify", bytes.NewReader(data))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusNoContent {
+				t.Errorf("POST /notify: status = %d, want 204", resp.StatusCode)
+			}
+
+			mu.Lock()
+			if gotMessage != tc.message {
+				t.Errorf("message = %q, want %q", gotMessage, tc.message)
+			}
+			// Verify no extraneous single-quote wrapping.
+			if len(gotMessage) > 0 && gotMessage[0] == '\'' && gotMessage[len(gotMessage)-1] == '\'' {
+				t.Errorf("message has extraneous single-quote wrapping: %q", gotMessage)
+			}
+			mu.Unlock()
+		})
 	}
 }
 

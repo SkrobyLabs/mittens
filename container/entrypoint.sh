@@ -307,7 +307,7 @@ if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" ]]; then
 {
   "hooks": {
     "Stop": [{"hooks": [{"type": "command", "command": "/usr/local/bin/notify.sh stop"}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "cat /dev/stdin | jq -r '.message // \"needs attention\"' | xargs -I{} /usr/local/bin/notify.sh notification '{}'"}]}]
+    "Notification": [{"hooks": [{"type": "command", "command": "MSG=$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"$MSG\""}]}]
   }
 }
 HOOKEOF

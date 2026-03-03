@@ -336,6 +336,83 @@ func TestDockerRun_EnvVarsPassthrough(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Notification hook tests
+// ---------------------------------------------------------------------------
+
+func TestDockerRun_NotificationHookInjection(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create a minimal .claude config dir.
+	claudeDir := filepath.Join(tmp, ".claude")
+	os.MkdirAll(claudeDir, 0o755)
+	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
+
+	runArgs := []string{
+		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-e", "MITTENS_BROKER_PORT=12345",
+	}
+
+	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
+
+	// Both hooks should be present.
+	if !strings.Contains(out, `"Stop"`) {
+		t.Error("settings.json should contain Stop hook")
+	}
+	if !strings.Contains(out, `"Notification"`) {
+		t.Error("settings.json should contain Notification hook")
+	}
+
+	// The Notification hook command must NOT contain the old xargs '{}' bug.
+	if strings.Contains(out, `'{}'`) {
+		t.Error("Notification hook command should not contain literal '{}' quoting bug")
+	}
+
+	// Verify the command uses notify.sh notification.
+	if !strings.Contains(out, "notify.sh notification") {
+		t.Error("Notification hook should call notify.sh notification")
+	}
+}
+
+func TestDockerRun_NotificationHookNotInjectedWithoutBroker(t *testing.T) {
+	tmp := t.TempDir()
+
+	claudeDir := filepath.Join(tmp, ".claude")
+	os.MkdirAll(claudeDir, 0o755)
+	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
+
+	runArgs := []string{
+		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		// No MITTENS_BROKER_PORT set.
+	}
+
+	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
+
+	if strings.Contains(out, "notify.sh") {
+		t.Error("hooks should not be injected when MITTENS_BROKER_PORT is unset")
+	}
+}
+
+func TestDockerRun_NotificationHookSuppressedByNoNotify(t *testing.T) {
+	tmp := t.TempDir()
+
+	claudeDir := filepath.Join(tmp, ".claude")
+	os.MkdirAll(claudeDir, 0o755)
+	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
+
+	runArgs := []string{
+		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-e", "MITTENS_BROKER_PORT=12345",
+		"-e", "MITTENS_NO_NOTIFY=1",
+	}
+
+	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
+
+	if strings.Contains(out, "notify.sh") {
+		t.Error("hooks should not be injected when MITTENS_NO_NOTIFY is set")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Credential lifecycle tests
 // ---------------------------------------------------------------------------
 

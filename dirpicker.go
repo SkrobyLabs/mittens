@@ -45,7 +45,8 @@ type dirPickerModel struct {
 	selected   map[string]bool
 	done       bool
 	cancelled  bool
-	height     int // visible rows
+	height     int // visible entry rows (terminal height - 4)
+	termHeight int // full terminal height
 	offset     int // scroll offset
 	err        error
 }
@@ -103,6 +104,7 @@ func (m dirPickerModel) Init() tea.Cmd {
 func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.termHeight = msg.Height
 		// Reserve 4 lines for header + footer
 		m.height = msg.Height - 4
 		if m.height < 3 {
@@ -125,6 +127,7 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.entries) > 0 {
 				target := m.entries[m.cursor].path
 				m.loadDir(target)
+				return m, tea.ClearScreen
 			}
 
 		case "up", "k":
@@ -147,6 +150,7 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.entries) > 0 {
 				target := m.entries[m.cursor].path
 				m.loadDir(target)
+				return m, tea.ClearScreen
 			}
 
 		case "left", "h":
@@ -164,6 +168,7 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
+				return m, tea.ClearScreen
 			}
 
 		case " ", "x":
@@ -239,6 +244,13 @@ func (m dirPickerModel) View() string {
 	// Footer
 	b.WriteString("\n")
 	b.WriteString(dpStyleHelp.Render("  ←/→ navigate  space select  d done  esc cancel"))
+
+	// Pad to full terminal height to prevent stale line artifacts.
+	rendered := b.String()
+	lines := strings.Count(rendered, "\n")
+	for i := lines; i < m.termHeight; i++ {
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }
