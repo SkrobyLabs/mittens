@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/Skroby/mittens/extensions/registry"
@@ -32,7 +33,7 @@ type App struct {
 	NetworkHost  bool
 	Worktree     bool
 	Shell        bool
-	NoResume     bool
+	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
 	ExtraDirs    []string
 	InstanceName string // user-provided name via --name
 	ClaudeArgs   []string
@@ -80,7 +81,7 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
-	"--no-resume":    func(a *App) { a.NoResume = true },
+	// --resume is handled specially in ParseFlags (optional argument).
 	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
 }
 
@@ -102,6 +103,18 @@ func (a *App) ParseFlags(args []string) error {
 		if arg == "--" {
 			a.ClaudeArgs = append(a.ClaudeArgs, args[i+1:]...)
 			break
+		}
+
+		// --resume [ID] — optional argument.
+		if arg == "--resume" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				a.ResumeSession = args[i+1]
+				i += 2
+			} else {
+				a.ResumeSession = "latest"
+				i++
+			}
+			continue
 		}
 
 		// Core boolean flags.
@@ -366,8 +379,8 @@ func (a *App) Run() error {
 
 	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
 
-	// Auto-continue last session unless opted out or user already specified resume/continue.
-	if !a.NoResume && !a.Shell && a.HostProjectDir != "" {
+	// Resume session if --resume was given.
+	if a.ResumeSession != "" && !a.Shell && a.HostProjectDir != "" {
 		hasResume := false
 		for _, arg := range a.ClaudeArgs {
 			if a.Provider.IsResumeFlag(arg) {
@@ -376,9 +389,10 @@ func (a *App) Run() error {
 			}
 		}
 		if !hasResume {
-			projDir := filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir)
-			if matches, _ := filepath.Glob(filepath.Join(projDir, "*.jsonl")); len(matches) > 0 {
+			if a.ResumeSession == "latest" {
 				a.ClaudeArgs = append([]string{"--continue"}, a.ClaudeArgs...)
+			} else {
+				a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
 			}
 		}
 	}
@@ -821,53 +835,62 @@ func notifyOnHost(container, event, message, displayName string) {
 
 // ensureNotifierApp creates a minimal macOS .app bundle at ~/.mittens/Mittens.app
 // so that notifications are attributed to "Mittens" instead of "Script Editor".
+// Uses sync.Once so concurrent notifications don't race through the rebuild.
+var (
+	notifierOnce    sync.Once
+	notifierAppPath string
+)
+
 func ensureNotifierApp() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	appPath := filepath.Join(home, ".mittens", "Mittens.app")
-	plistPath := filepath.Join(appPath, "Contents", "Info.plist")
-
-	// Already built — verify bundle ID is ours, not Script Editor's.
-	if _, err := os.Stat(plistPath); err == nil {
-		if data, err := os.ReadFile(plistPath); err == nil {
-			if strings.Contains(string(data), "com.mittens.notifier") {
-				return appPath
-			}
-			// Stale applet from before plist patching — rebuild.
-			logInfo("Rebuilding Mittens.app (stale bundle ID)")
-			_ = os.RemoveAll(appPath)
+	notifierOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
 		}
-	}
+		appPath := filepath.Join(home, ".mittens", "Mittens.app")
+		plistPath := filepath.Join(appPath, "Contents", "Info.plist")
 
-	// Build the applet with osacompile.
-	script := `on run argv
+		// Already built — verify bundle ID is ours, not Script Editor's.
+		if _, err := os.Stat(plistPath); err == nil {
+			if data, err := os.ReadFile(plistPath); err == nil {
+				if strings.Contains(string(data), "com.mittens.notifier") {
+					notifierAppPath = appPath
+					return
+				}
+				// Stale applet from before plist patching — rebuild.
+				_ = os.RemoveAll(appPath)
+			}
+		}
+
+		// Build the applet with osacompile.
+		script := `on run argv
 	set theTitle to item 1 of argv
 	set theBody to item 2 of argv
 	display notification theBody with title theTitle sound name "Glass"
 end run`
-	cmd := exec.Command("osacompile", "-o", appPath, "-e", script)
-	if err := cmd.Run(); err != nil {
-		return ""
-	}
+		cmd := exec.Command("osacompile", "-o", appPath, "-e", script)
+		if err := cmd.Run(); err != nil {
+			return
+		}
 
-	// Patch CFBundleIdentifier so macOS attributes notifications to "Mittens"
-	// instead of grouping them under Script Editor.
-	data, err := os.ReadFile(plistPath)
-	if err != nil {
-		return ""
-	}
-	plist := strings.Replace(string(data),
-		"com.apple.ScriptEditor.id.Mittens", "com.mittens.notifier", 1)
-	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
-		return ""
-	}
+		// Patch CFBundleIdentifier so macOS attributes notifications to "Mittens"
+		// instead of grouping them under Script Editor.
+		data, err := os.ReadFile(plistPath)
+		if err != nil {
+			return
+		}
+		plist := strings.Replace(string(data),
+			"com.apple.ScriptEditor.id.Mittens", "com.mittens.notifier", 1)
+		if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+			return
+		}
 
-	// Ad-hoc codesign the modified bundle so macOS accepts it.
-	_ = exec.Command("codesign", "--force", "--sign", "-", appPath).Run()
+		// Ad-hoc codesign the modified bundle so macOS accepts it.
+		_ = exec.Command("codesign", "--force", "--sign", "-", appPath).Run()
 
-	return appPath
+		notifierAppPath = appPath
+	})
+	return notifierAppPath
 }
 
 // openOnHost opens a URL in the host's default browser.
@@ -924,7 +947,7 @@ Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
   --no-config       Skip project config file loading
   --no-history      Disable session persistence (fully ephemeral)
-  --no-resume       Start a new session (default: continue last)
+  --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --dind            Enable Docker-in-Docker (--privileged)
   --yolo            Skip all permission prompts
@@ -1003,7 +1026,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
-			{Name: "--no-resume", Description: "Start a new session (default: continue last)"},
+			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
 			{Name: "--provider", Description: "AI provider (claude, codex)", ArgType: "string"},

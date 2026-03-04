@@ -28,7 +28,6 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--network-host", func(a *App) bool { return a.NetworkHost }},
 		{"--worktree", func(a *App) bool { return a.Worktree }},
 		{"--shell", func(a *App) bool { return a.Shell }},
-		{"--no-resume", func(a *App) bool { return a.NoResume }},
 		{"--no-notify", func(a *App) bool { return a.NoNotify }},
 	}
 	for _, tc := range tests {
@@ -43,6 +42,54 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ParseFlags — --resume with optional argument
+// ---------------------------------------------------------------------------
+
+func TestParseFlags_ResumeLatest(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--resume"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.ResumeSession != "latest" {
+		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
+	}
+}
+
+func TestParseFlags_ResumeWithID(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--resume", "abc123"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.ResumeSession != "abc123" {
+		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "abc123")
+	}
+}
+
+func TestParseFlags_ResumeBeforeOtherFlags(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--resume", "--verbose"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.ResumeSession != "latest" {
+		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
+	}
+	if !a.Verbose {
+		t.Error("--verbose not set")
+	}
+}
+
+func TestParseFlags_DefaultNoResume(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--verbose"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.ResumeSession != "" {
+		t.Errorf("ResumeSession = %q, want empty", a.ResumeSession)
+	}
+}
+
 
 // ---------------------------------------------------------------------------
 // ParseFlags — --dir with argument
@@ -105,11 +152,11 @@ func TestParseFlags_Separator(t *testing.T) {
 
 func TestParseFlags_UnknownForwarded(t *testing.T) {
 	a := &App{}
-	if err := a.ParseFlags([]string{"--resume", "--model", "opus"}); err != nil {
+	if err := a.ParseFlags([]string{"--print", "--model", "opus"}); err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"--resume", "--model", "opus"}
+	want := []string{"--print", "--model", "opus"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}

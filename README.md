@@ -90,7 +90,7 @@ Extensions declare additional domains (e.g. AWS endpoints when `--aws` is enable
 
 ### Session Persistence
 
-Enabled by default (`--no-history` to disable). Conversation history is persisted at `~/.claude/projects/<id>/` and mounted into the container. Mittens auto-resumes the last session on the next launch (`--no-resume` to start fresh).
+Enabled by default (`--no-history` to disable). Conversation history is persisted at `~/.claude/projects/<id>/` and mounted into the container. Each launch starts a fresh session by default; use `--resume` to continue the last session or `--resume SESSION_ID` to resume a specific one.
 
 ### Clipboard & Image Sync (macOS)
 
@@ -113,10 +113,10 @@ The container's `xdg-open` is replaced with a shim that forwards all URLs to the
 | `--dir PATH` | Mount an additional directory (repeatable) |
 | `--no-config` | Skip loading project config file |
 | `--no-history` | Disable session persistence (fully ephemeral) |
-| `--no-resume` | Start a new session instead of continuing the last |
+| `--resume [ID]` | Resume last session, or a specific session by ID |
 | `--no-build` | Skip the Docker image build step |
 
-Unrecognised flags are forwarded to Claude Code (e.g. `--resume`, `--model`, `--print`).
+Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).
 
 ## Debugging
 

@@ -65,4 +65,4 @@ See [EXTENSIONS.md](EXTENSIONS.md) for the full extension architecture, YAML man
 
 `--verbose`, `--no-config`, `--no-history`, `--no-build`, `--dind`, `--yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
 
-Unrecognised flags are forwarded to Claude Code (e.g. `--resume`, `--model`, `--print`).
+Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).
