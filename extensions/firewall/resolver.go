@@ -27,13 +27,38 @@ func init() {
 // resolver will try the well-known install location as a fallback.
 var DefaultConfPath string
 
+// EmbeddedConf can be set by the main package to provide the embedded
+// firewall.conf content. When the on-disk file cannot be found, the
+// resolver extracts this to a temp file so it can be bind-mounted.
+var EmbeddedConf []byte
+
+// DevMode is set to true when --firewall-dev is passed. It switches the
+// firewall from the strict whitelist to the developer-friendly superset.
+var DevMode bool
+
+// EmbeddedDevConf can be set by the main package to provide the embedded
+// firewall-dev.conf content (developer-friendly whitelist).
+var EmbeddedDevConf []byte
+
 // listDomains reads the firewall.conf file and returns a sorted list of
 // whitelisted domain names (one per line, comments stripped).
 func listDomains() ([]string, error) {
+	// In DevMode, use the developer-friendly conf if available.
+	if DevMode && len(EmbeddedDevConf) > 0 {
+		return parseFirewallDomains(string(EmbeddedDevConf))
+	}
+
 	path := resolveConfPath("")
-	if path == "" {
+
+	// Fall back to parsing the embedded content directly (no temp file
+	// needed here since we only need the domain list, not a mount path).
+	if path == "" || !fileExists(path) {
+		if len(EmbeddedConf) > 0 {
+			return parseFirewallDomains(string(EmbeddedConf))
+		}
 		return nil, fmt.Errorf("firewall.conf not found")
 	}
+
 	domains, err := readFirewallDomains(path)
 	if err != nil {
 		return nil, err
@@ -51,25 +76,37 @@ func listDomains() ([]string, error) {
 func setup(ctx *registry.SetupContext) error {
 	ext := ctx.Extension
 
+	// In DevMode, use the developer-friendly conf directly from the
+	// embedded content (ignore any custom --firewall path).
+	if DevMode && len(EmbeddedDevConf) > 0 {
+		tmp, err := extractEmbedded(EmbeddedDevConf, "mittens-firewall-dev-*.conf")
+		if err != nil {
+			return fmt.Errorf("extracting embedded firewall-dev.conf: %w", err)
+		}
+		return mountFirewall(ctx, tmp)
+	}
+
 	confPath := resolveConfPath(ext.RawArg)
-	if confPath == "" {
-		return fmt.Errorf("firewall.conf not found (set DefaultConfPath or use --firewall /path/to/file)")
+
+	// If the resolved path doesn't exist on disk, try extracting the
+	// embedded default to a temp file. This covers the "make install"
+	// case where the binary lives in /usr/local/bin without the
+	// container/ directory alongside it.
+	if confPath == "" || !fileExists(confPath) {
+		if len(EmbeddedConf) > 0 {
+			tmp, err := extractEmbedded(EmbeddedConf, "mittens-firewall-*.conf")
+			if err != nil {
+				return fmt.Errorf("extracting embedded firewall.conf: %w", err)
+			}
+			confPath = tmp
+		} else if confPath == "" {
+			return fmt.Errorf("firewall.conf not found (set DefaultConfPath or use --firewall /path/to/file)")
+		} else {
+			return fmt.Errorf("firewall config not found: %s", confPath)
+		}
 	}
 
-	// Validate the config file exists.
-	if _, err := os.Stat(confPath); err != nil {
-		return fmt.Errorf("firewall config not found: %s", confPath)
-	}
-
-	// Mount the config file read-only into the container.
-	*ctx.DockerArgs = append(*ctx.DockerArgs,
-		"-v", confPath+":/mnt/claude-config/firewall.conf:ro",
-	)
-
-	// Tell the entrypoint to enable the firewall.
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-e", "MITTENS_FIREWALL=true")
-
-	return nil
+	return mountFirewall(ctx, confPath)
 }
 
 // ---------------------------------------------------------------------------
@@ -100,17 +137,19 @@ func resolveConfPath(customPath string) string {
 // non-comment lines as domain names. Inline comments (# to end of line)
 // are stripped and each line is trimmed of surrounding whitespace.
 func readFirewallDomains(path string) ([]string, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	return parseFirewallDomains(string(data))
+}
 
+// parseFirewallDomains extracts domain names from firewall.conf content.
+func parseFirewallDomains(content string) ([]string, error) {
 	var domains []string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Strip inline comments.
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			line = line[:idx]
 		}
@@ -120,5 +159,41 @@ func readFirewallDomains(path string) ([]string, error) {
 		}
 		domains = append(domains, line)
 	}
+	sort.Strings(domains)
 	return domains, scanner.Err()
+}
+
+// fileExists reports whether path exists on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// mountFirewall adds docker args to mount a firewall config file and enable
+// the firewall in the container entrypoint.
+func mountFirewall(ctx *registry.SetupContext, confPath string) error {
+	*ctx.DockerArgs = append(*ctx.DockerArgs,
+		"-v", confPath+":/mnt/claude-config/firewall.conf:ro",
+		"-e", "MITTENS_FIREWALL=true",
+	)
+	return nil
+}
+
+// extractEmbedded writes the given content to a temp file with the given
+// name pattern and returns its path.
+func extractEmbedded(content []byte, pattern string) (string, error) {
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
