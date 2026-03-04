@@ -10,9 +10,13 @@ AI_CRED_FILE="${MITTENS_AI_CRED_FILE:-.credentials.json}"
 AI_PREFS_FILE="${MITTENS_AI_PREFS_FILE:-.claude.json}"
 AI_SETTINGS_FILE="${MITTENS_AI_SETTINGS_FILE:-settings.json}"
 AI_PROJECT_FILE="${MITTENS_AI_PROJECT_FILE:-CLAUDE.md}"
-AI_TRUSTED_DIRS_KEY="${MITTENS_AI_TRUSTED_DIRS_KEY:-trustedDirectories}"
-AI_YOLO_KEY="${MITTENS_AI_YOLO_KEY:-skipDangerousModePermissionPrompt}"
+AI_TRUSTED_DIRS_KEY="${MITTENS_AI_TRUSTED_DIRS_KEY:-}"
+AI_YOLO_KEY="${MITTENS_AI_YOLO_KEY:-}"
 AI_MCP_SERVERS_KEY="${MITTENS_AI_MCP_SERVERS_KEY:-mcpServers}"
+AI_TRUSTED_DIRS_FILE="${MITTENS_AI_TRUSTED_DIRS_FILE:-}"
+AI_INIT_SETTINGS_JQ="${MITTENS_AI_INIT_SETTINGS_JQ:-}"
+AI_STOP_HOOK_EVENT="${MITTENS_AI_STOP_HOOK_EVENT:-}"
+AI_PERSIST_FILES="${MITTENS_AI_PERSIST_FILES:-}"
 AI_SETTINGS_FORMAT="${MITTENS_AI_SETTINGS_FORMAT:-json}"
 AI_CONFIG_SUBDIRS="${MITTENS_AI_CONFIG_SUBDIRS:-skills,hooks,agents,output-styles}"
 AI_PLUGIN_DIR="${MITTENS_AI_PLUGIN_DIR:-plugins}"
@@ -251,6 +255,16 @@ if [[ -d "$STAGING_CONFIG" ]]; then
 
     # Make statusline executable if copied
     [[ -f "$AI_DIR/statusline.sh" ]] && chmod +x "$AI_DIR/statusline.sh"
+
+    # Persist files: state files that survive between runs (e.g. google_accounts.json, installation_id)
+    if [[ -n "$AI_PERSIST_FILES" ]]; then
+        IFS=',' read -ra _persist <<< "$AI_PERSIST_FILES"
+        for file in "${_persist[@]}"; do
+            if [[ -f "$STAGING_CONFIG/$file" ]]; then
+                cp "$STAGING_CONFIG/$file" "$AI_DIR/$file"
+            fi
+        done
+    fi
 fi
 
 # --- Pre-trust /workspace (and host workspace path + extra dirs if set) ---
@@ -272,9 +286,30 @@ if [[ -n "$AI_TRUSTED_DIRS_KEY" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
     fi
 fi
 
+# --- Write trusted dirs file (providers that use a separate file, e.g. Gemini) ---
+if [[ -n "$AI_TRUSTED_DIRS_FILE" ]]; then
+    TRUST_OBJ='{"/workspace": "TRUST_FOLDER"}'
+    if [[ -n "${MITTENS_HOST_WORKSPACE:-}" && "$MITTENS_HOST_WORKSPACE" != "/workspace" ]]; then
+        TRUST_OBJ=$(echo "$TRUST_OBJ" | jq --arg d "$MITTENS_HOST_WORKSPACE" '. + {($d): "TRUST_FOLDER"}')
+    fi
+    if [[ -n "${MITTENS_EXTRA_DIRS:-}" ]]; then
+        while IFS= read -r _ed; do
+            [[ -n "$_ed" ]] && TRUST_OBJ=$(echo "$TRUST_OBJ" | jq --arg d "$_ed" '. + {($d): "TRUST_FOLDER"}')
+        done < <(echo "$MITTENS_EXTRA_DIRS" | tr ':' '\n')
+    fi
+    echo "$TRUST_OBJ" > "$AI_DIR/${AI_TRUSTED_DIRS_FILE}"
+fi
+
 # --- Auto-accept yolo permission prompt ---
 if [[ "${MITTENS_YOLO:-false}" == "true" && -n "$AI_YOLO_KEY" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
     jq --arg key "$AI_YOLO_KEY" '.[$key] = true' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
+        && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+fi
+
+# --- Provider-specific settings init (e.g. disable auto-update) ---
+if [[ -n "$AI_INIT_SETTINGS_JQ" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
+    [[ -f "$SETTINGS_FILE" ]] || echo '{}' > "$SETTINGS_FILE"
+    jq "$AI_INIT_SETTINGS_JQ" "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
         && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 fi
 
@@ -327,15 +362,14 @@ fi
 
 # --- Inject notification hooks (if broker port is available, JSON settings only) ---
 if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
-    HOOKS_JSON=$(cat <<'HOOKEOF'
-{
-  "hooks": {
-    "Stop": [{"hooks": [{"type": "command", "command": "/usr/local/bin/notify.sh stop"}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "MSG=$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"$MSG\""}]}]
-  }
-}
-HOOKEOF
-    )
+    [[ -f "$SETTINGS_FILE" ]] || echo '{}' > "$SETTINGS_FILE"
+    NOTIFY_CMD="MSG=\$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"\$MSG\""
+    HOOKS_JSON=$(jq -n \
+        --arg stop_event "$AI_STOP_HOOK_EVENT" \
+        --arg notify_cmd "$NOTIFY_CMD" \
+        '{hooks: {
+            "Notification": [{"hooks": [{"type": "command", "command": $notify_cmd}]}]
+        }} | if $stop_event != "" then .hooks[$stop_event] = [{"hooks": [{"type": "command", "command": "/usr/local/bin/notify.sh stop"}]}] else . end')
     jq -s '.[0] * .[1]' "$SETTINGS_FILE" <(echo "$HOOKS_JSON") > "${SETTINGS_FILE}.tmp" \
         && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 fi

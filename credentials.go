@@ -36,11 +36,13 @@ func NewCredentialManager(provider *Provider) *CredentialManager {
 		stores = append(stores, ks)
 	}
 
-	// File-based store is always available.
-	home := os.Getenv("HOME")
-	stores = append(stores, &FileCredentialStore{
-		path: provider.HostCredentialPath(home),
-	})
+	// File-based store only when a credential file is configured.
+	if provider.CredentialFile != "" {
+		home := os.Getenv("HOME")
+		stores = append(stores, &FileCredentialStore{
+			path: provider.HostCredentialPath(home),
+		})
+	}
 
 	return &CredentialManager{stores: stores}
 }
@@ -101,20 +103,33 @@ func (m *CredentialManager) TmpFile() string {
 // stopped container and writes them back to all known stores.
 // containerCredPath is the full path to the credential file inside the container.
 func (m *CredentialManager) PersistFromContainer(containerName, containerCredPath string) error {
-	if m.tmpFile == "" {
+	if containerCredPath == "" || len(m.stores) == 0 {
 		return nil
+	}
+
+	// Use existing tmpFile as destination, or create a temp file for extraction
+	// (e.g. first run where no credentials existed on the host initially).
+	dst := m.tmpFile
+	if dst == "" {
+		tmp, err := os.CreateTemp("", "mittens-cred.*.json")
+		if err != nil {
+			return fmt.Errorf("creating temp file for credential extraction: %w", err)
+		}
+		tmp.Close()
+		dst = tmp.Name()
+		defer os.Remove(dst)
 	}
 
 	// docker cp from the container overlay filesystem (handles atomic writes).
 	cmd := exec.Command("docker", "cp",
 		containerName+":"+containerCredPath,
-		m.tmpFile,
+		dst,
 	)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker cp credentials: %w", err)
 	}
 
-	data, err := os.ReadFile(m.tmpFile)
+	data, err := os.ReadFile(dst)
 	if err != nil {
 		return fmt.Errorf("reading extracted credentials: %w", err)
 	}
@@ -152,10 +167,10 @@ func (m *CredentialManager) Cleanup() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// expiresAt extracts the highest expiresAt timestamp from credential JSON.
-// It checks both the root level and known nested objects (e.g. claudeAiOauth)
-// since Claude Code stores credentials as {"claudeAiOauth": {"expiresAt": ...}}.
-// Returns 0 if no valid expiresAt is found.
+// expiresAt extracts the highest expiry timestamp from credential JSON.
+// Checks root-level fields: expiresAt (Claude), expires_at (Codex), expiry_date (Gemini).
+// Also checks nested objects (e.g. claudeAiOauth.expiresAt).
+// All timestamps are in milliseconds. Returns 0 if no valid expiry is found.
 func expiresAt(jsonData string) int64 {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(jsonData), &obj); err != nil {
@@ -164,11 +179,13 @@ func expiresAt(jsonData string) int64 {
 
 	var best int64
 
-	// Check root-level expiresAt.
-	if raw, ok := obj["expiresAt"]; ok {
-		var ts float64
-		if json.Unmarshal(raw, &ts) == nil && int64(ts) > best {
-			best = int64(ts)
+	// Check root-level expiry fields.
+	for _, field := range []string{"expiresAt", "expires_at", "expiry_date"} {
+		if raw, ok := obj[field]; ok {
+			var ts float64
+			if json.Unmarshal(raw, &ts) == nil && int64(ts) > best {
+				best = int64(ts)
+			}
 		}
 	}
 

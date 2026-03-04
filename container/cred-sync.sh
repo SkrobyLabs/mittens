@@ -17,6 +17,7 @@ CRED_FILE="/home/${AI_USERNAME}/${AI_CONFIG_DIR}/${AI_CRED_FILE}"
 BROKER_PORT="${MITTENS_BROKER_PORT:-}"
 POLL_INTERVAL=5
 CURL_TIMEOUT=3
+REFRESH_THRESHOLD_MS=300000  # trigger proactive refresh when <5 min remain
 
 if [[ -z "$BROKER_PORT" ]]; then
     exit 0
@@ -47,8 +48,8 @@ compute_hash() {
 get_expires_at() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        # Check both expiresAt (Claude) and expires_at (Codex) at root and nested levels.
-        jq -r '[.expiresAt // 0, .expires_at // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' "$file" 2>/dev/null || echo "0"
+        # Check expiresAt (Claude), expires_at (Codex), expiry_date (Gemini) at root and nested levels.
+        jq -r '[.expiresAt // 0, .expires_at // 0, .expiry_date // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' "$file" 2>/dev/null || echo "0"
     else
         echo "0"
     fi
@@ -68,6 +69,41 @@ broker_put() {
         --data-binary @- \
         "$BROKER_URL/" 2>/dev/null) || true
     echo "$http_code"
+}
+
+# Ask the broker whether this container should perform a proactive refresh.
+# Returns "refresh" (this container is the coordinator) or "wait" (another is).
+broker_refresh_request() {
+    local result
+    result=$(curl --silent --max-time "$CURL_TIMEOUT" --noproxy '*' \
+        -X POST "$BROKER_URL/refresh" 2>/dev/null) || echo '{"action":"wait"}'
+    echo "$result" | jq -r '.action // "wait"' 2>/dev/null || echo "wait"
+}
+
+# Trigger proactive token refresh by faking an early expiry in the local
+# credential file. Claude Code checks expiresAt before API calls and will
+# use its internal refreshToken flow when it sees the token as expired.
+# NOTE: Gemini credentials use expiry_date and are managed by Gemini's own
+# OAuth2Client — skip proactive refresh for that format.
+trigger_token_refresh() {
+    # Detect Gemini format: has expiry_date but not claudeAiOauth/expiresAt/expires_at.
+    local is_gemini
+    is_gemini=$(jq -r 'if has("expiry_date") and (has("claudeAiOauth") | not) and (has("expiresAt") | not) and (has("expires_at") | not) then "yes" else "no" end' "$CRED_FILE" 2>/dev/null) || is_gemini="no"
+    if [[ "$is_gemini" == "yes" ]]; then
+        clog "proactive refresh: skipping (Gemini manages its own OAuth refresh)"
+        return
+    fi
+    local tmp="${CRED_FILE}.refresh.$$"
+    jq 'if has("claudeAiOauth") then .claudeAiOauth.expiresAt = 1
+         elif has("expires_at") then .expires_at = 1
+         else .expiresAt = 1 end' \
+        "$CRED_FILE" > "$tmp" 2>/dev/null \
+        && chmod 600 "$tmp" && mv "$tmp" "$CRED_FILE" \
+        || { rm -f "$tmp"; clog "proactive refresh: failed to rewrite expiresAt"; return; }
+    # Update hash so the push phase doesn't send the faked-expiry value to the
+    # broker (which would corrupt credentials for other containers).
+    last_hash=$(compute_hash)
+    clog "proactive refresh: set early expiry, waiting for Claude Code to refresh"
 }
 
 clog "started (broker: $BROKER_URL)"
@@ -114,23 +150,35 @@ while true; do
 
     # --- Pull: check if broker has newer credentials ---
     remote=$(broker_get)
-    if [[ -z "$remote" ]]; then
-        continue
+    if [[ -n "$remote" ]]; then
+        remote_exp=$(echo "$remote" | jq -r '[.expiresAt // 0, .expires_at // 0, .expiry_date // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' 2>/dev/null) || true
+        local_exp=$(get_expires_at "$CRED_FILE")
+
+        if [[ "$remote_exp" =~ ^[0-9]+$ && "$local_exp" =~ ^[0-9]+$ ]]; then
+            if [[ "$remote_exp" -gt "$local_exp" ]]; then
+                # Atomic write: tmp + mv.
+                tmp="${CRED_FILE}.tmp.$$"
+                echo "$remote" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CRED_FILE"
+                # Update hash to prevent re-pushing what we just pulled.
+                last_hash=$(compute_hash)
+                clog "pull: updated local creds (remote: $remote_exp, was: $local_exp)"
+            fi
+        fi
     fi
 
-    remote_exp=$(echo "$remote" | jq -r '[.expiresAt // 0, .expires_at // 0, (.[] | objects | (.expiresAt // 0, .expires_at // 0))] | max' 2>/dev/null) || continue
-    local_exp=$(get_expires_at "$CRED_FILE")
-
-    # Guard: both values must be integers for -gt comparison.
-    [[ "$remote_exp" =~ ^[0-9]+$ ]] || continue
-    [[ "$local_exp" =~ ^[0-9]+$ ]]  || continue
-
-    if [[ "$remote_exp" -gt "$local_exp" ]]; then
-        # Atomic write: tmp + mv.
-        tmp="${CRED_FILE}.tmp.$$"
-        echo "$remote" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CRED_FILE"
-        # Update hash to prevent re-pushing what we just pulled.
-        last_hash=$(compute_hash)
-        clog "pull: updated local creds (remote: $remote_exp, was: $local_exp)"
+    # --- Proactive refresh: trigger before credentials expire ---
+    cur_exp=$(get_expires_at "$CRED_FILE")
+    now_ms=$(date +%s%3N 2>/dev/null || echo "$(( $(date +%s) * 1000 ))")
+    if [[ "$cur_exp" =~ ^[0-9]+$ && "$now_ms" =~ ^[0-9]+$ ]]; then
+        remaining=$(( cur_exp - now_ms ))
+        if [[ "$remaining" -gt 0 && "$remaining" -lt "$REFRESH_THRESHOLD_MS" ]]; then
+            action=$(broker_refresh_request)
+            if [[ "$action" == "refresh" ]]; then
+                clog "proactive refresh: triggering (expires in ${remaining}ms)"
+                trigger_token_refresh
+            else
+                clog "proactive refresh: another container is handling it"
+            fi
+        fi
     fi
 done

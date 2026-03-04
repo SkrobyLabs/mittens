@@ -72,6 +72,21 @@ func TestExpiresAt(t *testing.T) {
 			json: `{"claudeAiOauth":{"expiresAt":42},"version":1,"name":"test"}`,
 			want: 42,
 		},
+		{
+			name: "Gemini expiry_date",
+			json: `{"access_token":"tok","refresh_token":"rtok","expiry_date":1772641701421}`,
+			want: 1772641701421,
+		},
+		{
+			name: "Codex expires_at",
+			json: `{"access_token":"tok","expires_at":1700000999}`,
+			want: 1700000999,
+		},
+		{
+			name: "expiry_date wins over expiresAt",
+			json: `{"expiresAt":100,"expiry_date":200}`,
+			want: 200,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1151,6 +1151,137 @@ func TestBroker_TCP_NotifySpecialCharacters(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// /refresh endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestBroker_RefreshFirstWins(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// First POST — should become coordinator.
+	resp, err := client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /refresh first: status = %d, want 200", resp.StatusCode)
+	}
+	var p struct{ Action string }
+	json.Unmarshal(body, &p)
+	if p.Action != "refresh" {
+		t.Errorf("first POST /refresh: action = %q, want \"refresh\"", p.Action)
+	}
+
+	// Second POST — should wait.
+	resp, err = client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	json.Unmarshal(body, &p)
+	if p.Action != "wait" {
+		t.Errorf("second POST /refresh: action = %q, want \"wait\"", p.Action)
+	}
+}
+
+func TestBroker_RefreshExpiresAfterTimeout(t *testing.T) {
+	b := NewCredentialBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// Appoint a coordinator.
+	resp, err := client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Backdate the deadline to simulate expiry.
+	b.refreshMu.Lock()
+	b.refreshDeadline = time.Now().Add(-time.Second)
+	b.refreshMu.Unlock()
+
+	// Next POST should become coordinator again.
+	resp, err = client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var p struct{ Action string }
+	json.Unmarshal(body, &p)
+	if p.Action != "refresh" {
+		t.Errorf("POST /refresh after timeout: action = %q, want \"refresh\"", p.Action)
+	}
+}
+
+func TestBroker_RefreshResetsOnFreshCreds(t *testing.T) {
+	b := NewCredentialBroker("", `{"expiresAt":10}`, nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	// Appoint a coordinator.
+	resp, err := client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// PUT fresher credentials — should reset the refresh lock.
+	req, _ := http.NewRequest(http.MethodPut, base+"/", strings.NewReader(`{"accessToken":"new","expiresAt":9999}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT fresher: status = %d, want 204", resp.StatusCode)
+	}
+
+	// POST /refresh should get "refresh" again (lock was reset).
+	resp, err = client.Post(base+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var p struct{ Action string }
+	json.Unmarshal(body, &p)
+	if p.Action != "refresh" {
+		t.Errorf("POST /refresh after cred reset: action = %q, want \"refresh\"", p.Action)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // jsonKeys / redactURL tests
 // ---------------------------------------------------------------------------
 

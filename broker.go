@@ -72,6 +72,7 @@ h1{font-size:22px;font-weight:600;margin-bottom:8px}
 // currently stored value, so the freshest token always wins.
 type CredentialBroker struct {
 	sockPath string
+	Name     string // provider name for log identification, e.g. "claude", "gemini"
 	creds    string // latest credential JSON
 	mu       sync.RWMutex
 	srv      *http.Server
@@ -82,6 +83,13 @@ type CredentialBroker struct {
 	// pendingCallback holds a captured OAuth callback URL for the container to replay.
 	pendingCallback string
 
+	// Refresh coordination: only one container should perform a proactive token
+	// refresh at a time. The first to POST /refresh becomes the coordinator;
+	// others receive "wait" until fresh credentials arrive or the deadline expires.
+	refreshInProgress bool
+	refreshDeadline   time.Time
+	refreshMu         sync.Mutex
+
 	// OnOpen is called when a container requests a URL to be opened on the host.
 	OnOpen func(url string)
 
@@ -91,6 +99,10 @@ type CredentialBroker struct {
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 }
+
+// refreshCoordTimeout is how long a refresh coordinator holds the lock before
+// it is considered stale and a new coordinator can be appointed.
+const refreshCoordTimeout = 2 * time.Minute
 
 // NewCredentialBroker creates a broker that will listen on sockPath.
 // seed is the initial credential JSON (may be empty).
@@ -105,6 +117,7 @@ func NewCredentialBroker(sockPath, seed string, stores []CredentialStore) *Crede
 	mux := http.NewServeMux()
 	mux.HandleFunc("/open", b.handleOpen)
 	mux.HandleFunc("/notify", b.handleNotify)
+	mux.HandleFunc("/refresh", b.handleRefresh)
 	mux.HandleFunc("/login-callback", b.handleLoginCallback)
 	mux.HandleFunc("/", b.handle)
 	b.srv = &http.Server{Handler: mux}
@@ -118,7 +131,11 @@ func (b *CredentialBroker) blog(format string, args ...interface{}) {
 	}
 	ts := time.Now().Format("15:04:05.000")
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(b.LogFile, "%s [broker:%d] %s\n", ts, os.Getpid(), msg)
+	name := b.Name
+	if name == "" {
+		name = "?"
+	}
+	fmt.Fprintf(b.LogFile, "%s [broker:%d/%s] %s\n", ts, os.Getpid(), name, msg)
 }
 
 // ListenTCP binds to a random TCP port on localhost and returns the port.
@@ -237,6 +254,11 @@ func (b *CredentialBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 		b.creds = incoming
 		b.mu.Unlock()
 		b.blog("PUT → 204 accepted (incoming: %d, was: %d)", incomingExp, currentExp)
+		// Fresh credentials received — reset refresh coordination so the next
+		// nearing-expiry cycle can appoint a new coordinator.
+		b.refreshMu.Lock()
+		b.refreshInProgress = false
+		b.refreshMu.Unlock()
 		// Write-through: persist fresher creds to host stores immediately.
 		b.persistToHost(incoming)
 		w.WriteHeader(http.StatusNoContent)
@@ -381,6 +403,34 @@ func (b *CredentialBroker) handleNotify(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleRefresh coordinates proactive token refresh across containers.
+// The first container to POST becomes the coordinator (receives "refresh");
+// subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
+func (b *CredentialBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	b.refreshMu.Lock()
+	now := time.Now()
+	inProgress := b.refreshInProgress && now.Before(b.refreshDeadline)
+	if !inProgress {
+		b.refreshInProgress = true
+		b.refreshDeadline = now.Add(refreshCoordTimeout)
+	}
+	b.refreshMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if inProgress {
+		b.blog("REFRESH → wait (coordinator active until %s)", b.refreshDeadline.Format("15:04:05"))
+		_, _ = io.WriteString(w, `{"action":"wait"}`)
+		return
+	}
+	b.blog("REFRESH → refresh (coordinator appointed)")
+	_, _ = io.WriteString(w, `{"action":"refresh"}`)
+}
+
 // handleLoginCallback returns the captured OAuth callback URL (if any) so the
 // container can replay it to Claude Code's local callback server.
 func (b *CredentialBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
@@ -504,7 +554,8 @@ func extractOAuthCallbackPort(rawURL string) int {
 	if err != nil {
 		return 0
 	}
-	if ru.Hostname() != "localhost" {
+	h := ru.Hostname()
+	if h != "localhost" && h != "127.0.0.1" {
 		return 0
 	}
 	port, err := strconv.Atoi(ru.Port())

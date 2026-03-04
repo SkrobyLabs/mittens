@@ -15,9 +15,9 @@ if [[ -n "$PORT" ]]; then
     BROKER_URL="http://host.docker.internal:$PORT"
     curl -sf --noproxy '*' -X POST -d "$URL" "$BROKER_URL/open" 2>/dev/null || true
 
-    # If this is an OAuth URL with a localhost callback, poll the broker for
-    # the intercepted callback and replay it to Claude Code's local server.
-    if [[ "$URL" == *"redirect_uri="*"localhost"* ]]; then
+    # If this is an OAuth URL with a localhost/127.0.0.1 callback, poll the broker
+    # for the intercepted callback and replay it to the AI CLI's local server.
+    if [[ "$URL" == *"redirect_uri="*"localhost"* || "$URL" == *"redirect_uri="*"127.0.0.1"* ]]; then
         (
             for _ in $(seq 1 120); do
                 sleep 1

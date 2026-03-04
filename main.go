@@ -78,8 +78,10 @@ func runMain(args []string) error {
 				provider = ClaudeProvider()
 			case "codex":
 				provider = CodexProvider()
+			case "gemini":
+				provider = GeminiProvider()
 			default:
-				return fmt.Errorf("unknown provider %q (available: claude, codex)", args[i+1])
+				return fmt.Errorf("unknown provider %q (available: claude, codex, gemini)", args[i+1])
 			}
 			break
 		}

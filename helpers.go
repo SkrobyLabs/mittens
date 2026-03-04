@@ -24,21 +24,25 @@ func colorRed(s string) string {
 	return "\033[31m" + s + colorReset
 }
 
+// logTag is set early in Run() to "[mittens:provider container-name]" so all
+// subsequent log lines identify both the provider and the container instance.
+var logTag = "mittens"
+
 func logInfo(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, colorCyan+"[mittens]"+colorReset+" "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, colorCyan+"["+logTag+"]"+colorReset+" "+format+"\n", args...)
 }
 
 func logWarn(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, colorYellow+"[mittens] Warning: "+colorReset+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, colorYellow+"["+logTag+"] Warning: "+colorReset+format+"\n", args...)
 }
 
 func logError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, colorRed("[mittens] Error: ")+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, colorRed("["+logTag+"] Error: ")+format+"\n", args...)
 }
 
 func logVerbose(verbose bool, format string, args ...interface{}) {
 	if verbose {
-		fmt.Fprintf(os.Stderr, colorDim+"[mittens] "+format+colorReset+"\n", args...)
+		fmt.Fprintf(os.Stderr, colorDim+"["+logTag+"] "+format+colorReset+"\n", args...)
 	}
 }
 

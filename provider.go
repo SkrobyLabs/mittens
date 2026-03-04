@@ -40,9 +40,21 @@ type Provider struct {
 	YoloKey        string // e.g. "skipDangerousModePermissionPrompt"
 	MCPServersKey  string // e.g. "mcpServers"
 
+	// Files (relative to ConfigDir) to persist: copied in on start, copied back on exit.
+	// Used for provider state files that must survive between runs (e.g. Gemini auth state).
+	PersistFiles []string
+
 	// CLI flags
-	ResumeFlags   []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
-	SkipPermsFlag string   // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
+	ResumeFlags     []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
+	SkipPermsFlag   string   // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
+	ContinueArgs    []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
+	TrustedDirsFile string   // separate JSON array file for trusted dirs (Gemini); empty = unused
+
+	// Container settings
+	ContainerHostname string            // fixed Docker hostname; empty = Docker default. Required when credential file encryption is hostname-dependent (e.g. Gemini).
+	ContainerEnv      map[string]string // extra env vars injected at docker run time; empty value = unset the var.
+	InitSettingsJQ    string            // jq expression applied to settings.json once after all other setup; empty = unused.
+	StopHookEvent     string            // hook event name for session end, e.g. "Stop" (Claude) or "SessionEnd" (Gemini); empty = skip stop hook.
 }
 
 // HomePath returns the home directory for this provider's user inside the container.
@@ -138,8 +150,11 @@ func ClaudeProvider() *Provider {
 		YoloKey:        "skipDangerousModePermissionPrompt",
 		MCPServersKey:  "mcpServers",
 
-		ResumeFlags:   []string{"--continue", "-c", "--resume", "-r"},
-		SkipPermsFlag: "--dangerously-skip-permissions",
+		ResumeFlags:     []string{"--continue", "-c", "--resume", "-r"},
+		SkipPermsFlag:   "--dangerously-skip-permissions",
+		ContinueArgs:    []string{"--continue"},
+		TrustedDirsFile: "",
+		StopHookEvent:   "Stop",
 	}
 }
 
@@ -179,8 +194,79 @@ func CodexProvider() *Provider {
 		YoloKey:        "",
 		MCPServersKey:  "",
 
-		ResumeFlags:   []string{"--resume", "-r", "--continue", "-l"},
-		SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
+		ResumeFlags:     []string{"--resume", "-r", "--continue", "-l"},
+		SkipPermsFlag:   "--dangerously-bypass-approvals-and-sandbox",
+		ContinueArgs:    []string{"--resume", "latest"},
+		TrustedDirsFile: "",
+	}
+}
+
+// GeminiProvider returns a Provider configured for Google Gemini CLI.
+func GeminiProvider() *Provider {
+	return &Provider{
+		Name:           "gemini",
+		DisplayName:    "Gemini",
+		Binary:         "gemini",
+		Username:       "gemini",
+		// After installing, strip the execute bit from open's bundled xdg-open so
+		// it falls back to the system xdg-open (our broker shim at /usr/local/bin/xdg-open).
+		// Without this, the 'open' npm package bypasses our shim and tries to use
+		// a real desktop browser (fails in container).
+		InstallCmd: `npm install -g @google/gemini-cli && find /usr/local/lib/node_modules -path "*/open/xdg-open" -exec chmod -x {} \; && gemini --version`,
+		APIKeyEnv:      "GEMINI_API_KEY",
+		SettingsFormat: "json",
+
+		ConfigDir:      ".gemini",
+		CredentialFile: "oauth_creds.json",
+		UserPrefsFile:  "",
+		SettingsFile:   "settings.json",
+		ProjectFile:    "GEMINI.md",
+
+		KeychainService: "",
+
+		FirewallDomains: []string{
+			"generativelanguage.googleapis.com",
+			"accounts.google.com",
+			"oauth2.googleapis.com",
+			"www.googleapis.com",
+			"cloudcode-pa.googleapis.com",
+			"codeassist.google.com",
+			"play.googleapis.com",
+		},
+
+		ConfigSubdirs: []string{},
+		ConfigFiles:   []string{"settings.json"},
+
+		PluginDir:   "",
+		PluginFiles: []string{},
+
+		TrustedDirsKey:  "",
+		YoloKey:         "",
+		MCPServersKey:   "mcpServers",
+		TrustedDirsFile: "trustedFolders.json",
+
+		ResumeFlags:   []string{"--resume", "-r"},
+		SkipPermsFlag: "--approval-mode=yolo",
+		ContinueArgs:  []string{"--resume", "latest"},
+
+		ContainerHostname: "gemini-cli",
+		ContainerEnv: map[string]string{
+			// shouldLaunchBrowser() in secure-browser-launcher.js returns false when
+			// DEBIAN_FRONTEND=noninteractive (set by Dockerfile) or when no display
+			// variable is set on Linux. Both must be overridden so Gemini calls xdg-open
+			// (our broker shim) instead of just printing the URL.
+			"DEBIAN_FRONTEND": "",   // unset the Dockerfile build-time value
+			"DISPLAY":         ":0", // fake display → hasDisplay = true on Linux
+		},
+		InitSettingsJQ: `.general.enableAutoUpdate = false | .general.enableAutoUpdateNotification = false`,
+		StopHookEvent:  "SessionEnd",
+
+		// Persist auth state and identity so subsequent runs skip OAuth + re-onboarding.
+		// settings.json: contains security.auth.selectedType (skips auth-type prompt).
+		// google_accounts.json: authenticated Google account identity.
+		// installation_id: unique instance ID used by the onboarding LRO check.
+		// projects.json: workspace → project name mapping (skips project name prompt).
+		PersistFiles: []string{"settings.json", "google_accounts.json", "installation_id", "projects.json"},
 	}
 }
 

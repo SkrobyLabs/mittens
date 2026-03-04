@@ -319,6 +319,7 @@ func (a *App) Run() error {
 			seed = string(data)
 		}
 		a.broker = NewCredentialBroker("", seed, a.Credentials.Stores())
+		a.broker.Name = a.Provider.Name
 		a.broker.OnOpen = openOnHost
 		if !a.NoNotify {
 			displayName := a.Provider.DisplayName
@@ -378,6 +379,7 @@ func (a *App) Run() error {
 		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
 	}
 
+	logTag = a.Provider.Name + " " + a.ContainerName
 	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
 
 	// Resume session if --resume was given.
@@ -391,7 +393,7 @@ func (a *App) Run() error {
 		}
 		if !hasResume {
 			if a.ResumeSession == "latest" {
-				a.ClaudeArgs = append([]string{"--continue"}, a.ClaudeArgs...)
+				a.ClaudeArgs = append(a.Provider.ContinueArgs, a.ClaudeArgs...)
 			} else {
 				a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
 			}
@@ -441,18 +443,33 @@ func (a *App) Cleanup() {
 	// Extract refreshed credentials from the stopped container.
 	if a.ContainerName != "" {
 		if a.Credentials != nil {
+			finalCreds := ""
 			if a.broker != nil {
-				// Broker has the freshest credentials from all containers.
-				finalCreds := a.broker.Credentials()
+				finalCreds = a.broker.Credentials()
 				_ = a.broker.Close()
-				if finalCreds != "" {
-					a.Credentials.PersistAll(finalCreds)
-				}
+			}
+			if finalCreds != "" {
+				a.Credentials.PersistAll(finalCreds)
 			} else {
-				// Fallback: docker cp from the single container.
+				// Broker had nothing (e.g. provider has no cred-sync daemon) — docker cp.
 				_ = a.Credentials.PersistFromContainer(a.ContainerName, a.Provider.ContainerCredentialPath())
 			}
 		}
+		// Copy back provider persist files (e.g. Gemini google_accounts.json, installation_id).
+		if len(a.Provider.PersistFiles) > 0 {
+			home := os.Getenv("HOME")
+			hostConfigDir := a.Provider.HostConfigDir(home)
+			for _, file := range a.Provider.PersistFiles {
+				src := a.Provider.ContainerConfigDir() + "/" + file
+				dst := filepath.Join(hostConfigDir, file)
+				if err := exec.Command("docker", "cp", a.ContainerName+":"+src, dst).Run(); err != nil {
+					logVerbose(a.Verbose, "Persist %s: not found in container", file)
+				} else {
+					logInfo("Persisted %s", file)
+				}
+			}
+		}
+
 		RemoveContainer(a.ContainerName)
 
 		// Remove per-container DinD volume.
@@ -534,6 +551,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		"-it",
 		"--name", a.ContainerName,
 	}
+	if a.Provider.ContainerHostname != "" {
+		args = append(args, "--hostname", a.Provider.ContainerHostname)
+	}
 
 	// Primary workspace mount.
 	args = append(args, "-v", a.WorkspaceMountSrc+":/workspace")
@@ -559,7 +579,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Credential mount.
-	if a.Credentials != nil && a.Credentials.TmpFile() != "" {
+	if a.Credentials != nil && a.Credentials.TmpFile() != "" && a.Provider.CredentialFile != "" {
 		args = append(args, "-v", a.Credentials.TmpFile()+":"+a.Provider.StagingCredentialPath()+":ro")
 	}
 
@@ -579,7 +599,17 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		"-e", "MITTENS_AI_CONFIG_SUBDIRS="+strings.Join(a.Provider.ConfigSubdirs, ","),
 		"-e", "MITTENS_AI_PLUGIN_DIR="+a.Provider.PluginDir,
 		"-e", "MITTENS_AI_PLUGIN_FILES="+strings.Join(a.Provider.PluginFiles, ","),
+		"-e", "MITTENS_AI_TRUSTED_DIRS_FILE="+a.Provider.TrustedDirsFile,
+		"-e", "MITTENS_AI_INIT_SETTINGS_JQ="+a.Provider.InitSettingsJQ,
+		"-e", "MITTENS_AI_STOP_HOOK_EVENT="+a.Provider.StopHookEvent,
+		"-e", "MITTENS_AI_PERSIST_FILES="+strings.Join(a.Provider.PersistFiles, ","),
 	)
+
+	// Provider-specific extra env vars (e.g. DISPLAY for Gemini browser-open detection).
+	// An empty value explicitly overrides the image's ENV (e.g. DEBIAN_FRONTEND=noninteractive).
+	for k, v := range a.Provider.ContainerEnv {
+		args = append(args, "-e", k+"="+v)
+	}
 
 	// Credential broker (TCP).
 	if a.brokerPort > 0 {
@@ -894,7 +924,7 @@ Core flags:
   --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
-  --provider NAME   AI provider to use (claude, codex; default: claude)
+  --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
 
@@ -966,7 +996,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
-			{Name: "--provider", Description: "AI provider (claude, codex)", ArgType: "string"},
+			{Name: "--provider", Description: "AI provider (claude, codex, gemini)", ArgType: "string"},
 		},
 	}
 

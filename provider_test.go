@@ -6,12 +6,22 @@ import (
 )
 
 func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
+	// Fields that are intentionally empty for ClaudeProvider (used by other providers).
+	optionalFields := map[string]bool{
+		"TrustedDirsFile":   true, // Gemini-only: separate trusted dirs file
+		"ContainerHostname": true, // Gemini-only: fixed Docker hostname
+		"InitSettingsJQ":    true, // Gemini-only: post-init settings patch
+		"PersistFiles":      true, // Gemini-only: state files to survive between runs
+	}
 	p := ClaudeProvider()
 	v := reflect.ValueOf(*p)
 	ty := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		name := ty.Field(i).Name
+		if optionalFields[name] {
+			continue
+		}
 		switch f.Kind() {
 		case reflect.String:
 			if f.String() == "" {
