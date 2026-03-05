@@ -31,7 +31,14 @@ func setup(ctx *registry.SetupContext) error {
 			"-v", "/var/run/docker.sock:/var/run/docker.sock",
 			"-e", "MITTENS_DOCKER_HOST=true",
 		)
-		fmt.Fprintln(os.Stderr, "[mittens] docker: host mode — sharing host Docker socket")
+		fmt.Fprintln(os.Stderr, "\033[31m"+
+			"  ┌─────────────────────────────────────────────────────────────┐\n"+
+			"  │                        WARNING                              │\n"+
+			"  │  Docker host mode — the container can control your host     │\n"+
+			"  │  Docker daemon. AI-issued commands (docker rm, docker rmi,  │\n"+
+			"  │  docker run) will affect the HOST, not an isolated engine.  │\n"+
+			"  └─────────────────────────────────────────────────────────────┘"+
+			"\033[0m")
 	}
 	return nil
 }
