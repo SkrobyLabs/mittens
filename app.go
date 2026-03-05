@@ -62,6 +62,9 @@ type App struct {
 	clipboardDir string
 	clipboardPID int
 
+	// Terminal focus (for click-to-focus notifications)
+	terminalFocus TerminalFocus
+
 	// Credential broker
 	broker     *CredentialBroker
 	brokerPort int
@@ -243,6 +246,9 @@ func (a *App) Run() error {
 	logTag = a.Provider.Name + " " + a.ContainerName
 	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
 
+	// Capture terminal identity for click-to-focus notifications.
+	a.terminalFocus = DetectTerminalFocus()
+
 	// Log enabled extensions.
 	{
 		var names []string
@@ -343,8 +349,9 @@ func (a *App) Run() error {
 		a.broker.OnOpen = openOnHost
 		if !a.NoNotify {
 			displayName := a.Provider.DisplayName
+			focus := a.terminalFocus
 			a.broker.OnNotify = func(container, event, message string) {
-				notifyOnHost(container, event, message, displayName)
+				notifyOnHost(container, event, message, displayName, focus)
 			}
 		}
 
@@ -830,7 +837,9 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // ---------------------------------------------------------------------------
 
 // notifyOnHost sends a native desktop notification.
-func notifyOnHost(container, event, message, displayName string) {
+// On macOS, if terminal-notifier is installed, clicking the notification
+// will focus the originating terminal session.
+func notifyOnHost(container, event, message, displayName string, focus TerminalFocus) {
 	var title, body string
 	switch event {
 	case "stop":
@@ -849,8 +858,16 @@ func notifyOnHost(container, event, message, displayName string) {
 	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("osascript", "-e",
-			fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+		if path, err := exec.LookPath("terminal-notifier"); err == nil {
+			args := []string{"-title", title, "-message", body, "-sound", "Glass"}
+			if focusCmd := focus.FocusCommand(); focusCmd != nil {
+				args = append(args, "-execute", shellJoin(focusCmd))
+			}
+			cmd = exec.Command(path, args...)
+		} else {
+			cmd = exec.Command("osascript", "-e",
+				fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+		}
 	} else {
 		cmd = exec.Command("notify-send", title, body)
 	}
