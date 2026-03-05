@@ -24,31 +24,8 @@ var (
 )
 
 // ---------------------------------------------------------------------------
-// Extension wizard descriptors — maps extension names to wizard presentation.
-// ---------------------------------------------------------------------------
-
-// extEntry describes one item in the extension multi-select.
-type extEntry struct {
-	label    string // human-readable label
-	key      string // extension name  (e.g. "aws", "ssh")
-	flag     string // config flag     (e.g. "--ssh", "--aws")
-	needsCfg bool   // needs a follow-up configuration step
-}
-
-// knownExtEntries defines the order and presentation of extensions in the
-// wizard. Only entries whose extension name is present in the loaded set
-// will be shown.
-var knownExtEntries = []extEntry{
-	{label: "SSH agent forwarding (--ssh)", key: "ssh", flag: "--ssh"},
-	{label: "GitHub CLI auth (--gh)", key: "gh", flag: "--gh"},
-	{label: ".NET SDK (--dotnet)", key: "dotnet", flag: "--dotnet", needsCfg: true},
-	{label: "Go SDK (--go)", key: "go", flag: "--go", needsCfg: true},
-	{label: "AWS credentials (--aws)", key: "aws", flag: "--aws", needsCfg: true},
-	{label: "GCP credentials (--gcp)", key: "gcp", flag: "--gcp", needsCfg: true},
-	{label: "Azure credentials (--azure)", key: "azure", flag: "--azure", needsCfg: true},
-	{label: "Kubernetes contexts (--k8s)", key: "kubectl", flag: "--k8s", needsCfg: true},
-	{label: "MCP server passthrough (--mcp)", key: "mcp", flag: "--mcp", needsCfg: true},
-}
+// Extensions with dedicated wizard steps (excluded from the generic multi-select).
+var wizardExcluded = map[string]bool{"firewall": true}
 
 // ---------------------------------------------------------------------------
 // Main entry point
@@ -58,11 +35,6 @@ var knownExtEntries = []extEntry{
 // is the loaded extension list from the embedded YAML manifests (so the wizard
 // knows which extensions are available).
 func runWizard(extensions []*registry.Extension) error {
-	// Build a set of loaded extension names for quick lookup.
-	loaded := make(map[string]bool, len(extensions))
-	for _, ext := range extensions {
-		loaded[ext.Name] = true
-	}
 
 	// 1. Detect workspace.
 	workspace := detectWorkspace()
@@ -132,7 +104,7 @@ func runWizard(extensions []*registry.Extension) error {
 	configLines = append(configLines, dirLines...)
 
 	// ── Step 2+3: Extensions ───────────────────────────────────────────────
-	extLines, err := wizardExtensions(loaded, editMode, existExts)
+	extLines, err := wizardExtensions(extensions, editMode, existExts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
@@ -286,7 +258,7 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 // Step 2+3: Extensions
 // ---------------------------------------------------------------------------
 
-func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string) ([]string, error) {
+func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts []string) ([]string, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Extensions"))
 
 	// In edit mode, offer to keep existing extensions.
@@ -318,25 +290,34 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 		}
 	}
 
-	// Build a set of existing extension keys for pre-selection in edit mode.
+	// Build a set of existing extension names for pre-selection in edit mode.
 	existExtSet := make(map[string]bool)
 	if editMode {
 		for _, line := range existExts {
-			for _, e := range knownExtEntries {
-				if line == e.flag || strings.HasPrefix(line, e.flag+" ") {
-					existExtSet[e.key] = true
+			for _, ext := range extensions {
+				if wizardExcluded[ext.Name] {
+					continue
+				}
+				flag := extPrimaryFlag(ext)
+				if flag != "" && (line == flag || strings.HasPrefix(line, flag+" ")) {
+					existExtSet[ext.Name] = true
 					break
 				}
 			}
 		}
 	}
 
-	// Build options from the known entries, filtered by what is loaded.
+	// Build options from loaded extensions (excluding those with dedicated wizard steps).
 	var opts []huh.Option[string]
-	for _, e := range knownExtEntries {
-		if loaded[e.key] {
-			opts = append(opts, huh.NewOption(e.label, e.key).Selected(existExtSet[e.key]))
+	var available []*registry.Extension
+	for _, ext := range extensions {
+		if wizardExcluded[ext.Name] {
+			continue
 		}
+		flag := extPrimaryFlag(ext)
+		label := flag + "  " + ext.Description
+		available = append(available, ext)
+		opts = append(opts, huh.NewOption(label, ext.Name).Selected(existExtSet[ext.Name]))
 	}
 
 	if len(opts) == 0 {
@@ -348,9 +329,9 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 	// Pre-populate chosen with existing extension keys so Value() matches.
 	var chosen []string
 	if editMode {
-		for _, e := range knownExtEntries {
-			if loaded[e.key] && existExtSet[e.key] {
-				chosen = append(chosen, e.key)
+		for _, ext := range available {
+			if existExtSet[ext.Name] {
+				chosen = append(chosen, ext.Name)
 			}
 		}
 	}
@@ -364,22 +345,31 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 	fmt.Fprintln(os.Stderr)
 
 	// Separate simple flags from those needing configuration.
-	var configLines []string
-	var needsCfg []string
-
 	chosenSet := make(map[string]bool, len(chosen))
 	for _, k := range chosen {
 		chosenSet[k] = true
 	}
 
-	for _, e := range knownExtEntries {
-		if !chosenSet[e.key] {
+	// Build extension lookup for configuration step.
+	extMap := make(map[string]*registry.Extension, len(available))
+	for _, ext := range available {
+		extMap[ext.Name] = ext
+	}
+
+	var configLines []string
+	var needsCfg []*registry.Extension
+
+	for _, ext := range available {
+		if !chosenSet[ext.Name] {
 			continue
 		}
-		if e.needsCfg {
-			needsCfg = append(needsCfg, e.key)
+		if extNeedsCfg(ext) {
+			needsCfg = append(needsCfg, ext)
 		} else {
-			configLines = append(configLines, e.flag)
+			flag := extPrimaryFlag(ext)
+			if flag != "" {
+				configLines = append(configLines, flag)
+			}
 		}
 	}
 
@@ -388,8 +378,8 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 		fmt.Fprintln(os.Stderr, wizardBold.Render("Step 3: Configure selected extensions"))
 		fmt.Fprintln(os.Stderr)
 
-		for _, key := range needsCfg {
-			lines, err := configureExtension(key)
+		for _, ext := range needsCfg {
+			lines, err := configureExtension(ext)
 			if err != nil {
 				return nil, err
 			}
@@ -400,26 +390,110 @@ func wizardExtensions(loaded map[string]bool, editMode bool, existExts []string)
 	return configLines, nil
 }
 
-// configureExtension runs the sub-configuration step for a single extension.
-func configureExtension(key string) ([]string, error) {
-	switch key {
-	case "dotnet":
-		return configureDotnet()
-	case "go":
-		return configureGo()
-	case "aws":
-		return configureCloud("aws", "--aws", "--aws-all")
-	case "gcp":
-		return configureCloud("gcp", "--gcp", "--gcp-all")
-	case "azure":
-		return configureCloud("azure", "--azure", "--azure-all")
-	case "kubectl":
-		return configureKubectl()
-	case "mcp":
-		return configureMCP()
-	default:
-		return nil, nil
+// extPrimaryFlag returns the first non-negation flag name for an extension.
+func extPrimaryFlag(ext *registry.Extension) string {
+	for _, f := range ext.Flags {
+		if !strings.HasPrefix(f.Name, "--no-") {
+			return f.Name
+		}
 	}
+	return ""
+}
+
+// extNeedsCfg returns true if the extension has any flag that requires an argument.
+func extNeedsCfg(ext *registry.Extension) bool {
+	for _, f := range ext.Flags {
+		if f.Arg != "" && f.Arg != "none" {
+			return true
+		}
+	}
+	return false
+}
+
+// customConfigurers maps extension names to custom wizard configuration functions.
+// Extensions not in this map get auto-generated prompts from their flag metadata.
+var customConfigurers = map[string]func(*registry.Extension) ([]string, error){
+	"dotnet":  func(_ *registry.Extension) ([]string, error) { return configureDotnet() },
+	"aws":     func(_ *registry.Extension) ([]string, error) { return configureCloud("aws", "--aws", "--aws-all") },
+	"gcp":     func(_ *registry.Extension) ([]string, error) { return configureCloud("gcp", "--gcp", "--gcp-all") },
+	"azure":   func(_ *registry.Extension) ([]string, error) { return configureCloud("azure", "--azure", "--azure-all") },
+	"kubectl": func(_ *registry.Extension) ([]string, error) { return configureKubectl() },
+	"mcp":     func(_ *registry.Extension) ([]string, error) { return configureMCP() },
+}
+
+// configureExtension runs the sub-configuration step for a single extension.
+// Uses custom handlers where registered, otherwise auto-generates prompts from flag metadata.
+func configureExtension(ext *registry.Extension) ([]string, error) {
+	if fn, ok := customConfigurers[ext.Name]; ok {
+		return fn(ext)
+	}
+	return configureExtensionGeneric(ext)
+}
+
+// configureExtensionGeneric auto-generates wizard prompts from extension flag metadata.
+func configureExtensionGeneric(ext *registry.Extension) ([]string, error) {
+	var lines []string
+	for _, f := range ext.Flags {
+		switch f.Arg {
+		case "enum":
+			if f.Multi {
+				var vals []string
+				var opts []huh.Option[string]
+				for _, v := range f.EnumValues {
+					opts = append(opts, huh.NewOption(v, v))
+				}
+				if err := huh.NewMultiSelect[string]().
+					Title(ext.Description).
+					Options(opts...).
+					Value(&vals).
+					Run(); err != nil {
+					return nil, err
+				}
+				if len(vals) > 0 {
+					lines = append(lines, f.Name+" "+strings.Join(vals, ","))
+				}
+			} else {
+				var val string
+				var opts []huh.Option[string]
+				for _, v := range f.EnumValues {
+					opts = append(opts, huh.NewOption(v, v))
+				}
+				if err := huh.NewSelect[string]().
+					Title(ext.Description).
+					Options(opts...).
+					Value(&val).
+					Run(); err != nil {
+					return nil, err
+				}
+				lines = append(lines, f.Name+" "+val)
+			}
+		case "csv":
+			var val string
+			if err := huh.NewInput().
+				Title(ext.Description + " (comma-separated)").
+				Value(&val).
+				Run(); err != nil {
+				return nil, err
+			}
+			val = strings.TrimSpace(val)
+			if val != "" {
+				lines = append(lines, f.Name+" "+val)
+			}
+		case "path":
+			var val string
+			if err := huh.NewInput().
+				Title(ext.Description + " (path)").
+				Value(&val).
+				Run(); err != nil {
+				return nil, err
+			}
+			val = strings.TrimSpace(val)
+			if val != "" {
+				lines = append(lines, f.Name+" "+val)
+			}
+		}
+	}
+	return lines, nil
 }
 
 func configureDotnet() ([]string, error) {
@@ -747,14 +821,6 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		optSet[o] = true
 	}
 
-	dind := optSet["--dind"]
-	if err := huh.NewConfirm().
-		Title("Docker-in-Docker? (--dind)").
-		Value(&dind).
-		Run(); err != nil {
-		return nil, err
-	}
-
 	yolo := optSet["--yolo"]
 	if err := huh.NewConfirm().
 		Title("YOLO mode (skip permission prompts)? (--yolo)").
@@ -787,9 +853,6 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 	}
 
 	var lines []string
-	if dind {
-		lines = append(lines, "--dind")
-	}
 	if yolo {
 		lines = append(lines, "--yolo")
 	}
@@ -815,7 +878,7 @@ func parseExistingConfig(lines []string) (dirs, exts, firewall, opts []string) {
 		switch {
 		case strings.HasPrefix(line, "--dir "):
 			dirs = append(dirs, line)
-		case line == "--dind" || line == "--yolo" || line == "--network-host" || line == "--worktree":
+		case line == "--yolo" || line == "--network-host" || line == "--worktree":
 			opts = append(opts, line)
 		case line == "--firewall-dev" || line == "--no-firewall" || strings.HasPrefix(line, "--firewall "):
 			firewall = append(firewall, line)

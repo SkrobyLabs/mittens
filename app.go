@@ -27,7 +27,6 @@ type App struct {
 	NoConfig     bool
 	NoHistory    bool
 	NoBuild      bool
-	DinD         bool
 	Yolo         bool
 	NoNotify     bool
 	NetworkHost  bool
@@ -75,7 +74,6 @@ var coreFlags = map[string]func(*App){
 	"--no-config":    func(a *App) { a.NoConfig = true },
 	"--no-history":   func(a *App) { a.NoHistory = true },
 	"--no-build":     func(a *App) { a.NoBuild = true },
-	"--dind":         func(a *App) { a.DinD = true },
 	"--yolo":         func(a *App) { a.Yolo = true },
 	"--no-notify":    func(a *App) { a.NoNotify = true },
 	"--network-host": func(a *App) { a.NetworkHost = true },
@@ -183,13 +181,6 @@ func (a *App) Run() error {
 		return fmt.Errorf("docker is not installed or not in PATH")
 	}
 
-	// Mutual exclusion: --dind and --docker are redundant.
-	for _, ext := range a.Extensions {
-		if ext.Name == "docker" && ext.Enabled && a.DinD {
-			return fmt.Errorf("--dind and --docker are mutually exclusive; use --docker dind instead of --dind")
-		}
-	}
-
 	home := os.Getenv("HOME")
 	ensureDir(a.Provider.HostConfigDir(home))
 
@@ -231,6 +222,27 @@ func (a *App) Run() error {
 		logInfo("Worktree: %s", wtPath)
 	}
 
+	// Container name (must be set before resolvers so SetupContext carries it).
+	if a.InstanceName != "" {
+		if !isValidContainerName(a.InstanceName) {
+			return fmt.Errorf("invalid --name %q: must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", a.InstanceName)
+		}
+		a.ContainerName = "mittens-" + a.InstanceName
+
+		// Remove stale (stopped) container with the same name, or error if running.
+		if exists, running := InspectContainerRunning(a.ContainerName); exists {
+			if running {
+				return fmt.Errorf("container %q is already running; stop it first or use a different --name", a.ContainerName)
+			}
+			logInfo("Removed stale container: %s", a.ContainerName)
+			_ = RemoveContainer(a.ContainerName)
+		}
+	} else {
+		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
+	}
+	logTag = a.Provider.Name + " " + a.ContainerName
+	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
+
 	// Log enabled extensions.
 	{
 		var names []string
@@ -265,6 +277,7 @@ func (a *App) Run() error {
 
 		ctx := &registry.SetupContext{
 			Home:          home,
+			ContainerName: a.ContainerName,
 			Extension:     ext,
 			DockerArgs:    &resolverDockerArgs,
 			FirewallExtra: &resolverFirewallExtra,
@@ -367,28 +380,6 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Container name.
-	if a.InstanceName != "" {
-		if !isValidContainerName(a.InstanceName) {
-			return fmt.Errorf("invalid --name %q: must match [a-zA-Z0-9][a-zA-Z0-9_.-]*", a.InstanceName)
-		}
-		a.ContainerName = "mittens-" + a.InstanceName
-
-		// Remove stale (stopped) container with the same name, or error if running.
-		if exists, running := InspectContainerRunning(a.ContainerName); exists {
-			if running {
-				return fmt.Errorf("container %q is already running; stop it first or use a different --name", a.ContainerName)
-			}
-			logInfo("Removed stale container: %s", a.ContainerName)
-			_ = RemoveContainer(a.ContainerName)
-		}
-	} else {
-		a.ContainerName = fmt.Sprintf("mittens-%d", os.Getpid())
-	}
-
-	logTag = a.Provider.Name + " " + a.ContainerName
-	logVerbose(a.Verbose, "Container: %s", a.ContainerName)
-
 	// Resume session if --resume was given.
 	if a.ResumeSession != "" && !a.Shell && a.HostProjectDir != "" {
 		hasResume := false
@@ -479,10 +470,8 @@ func (a *App) Cleanup() {
 
 		RemoveContainer(a.ContainerName)
 
-		// Remove per-container DinD volume.
-		if a.dockerMode() == "dind" {
-			_ = exec.Command("docker", "volume", "rm", a.ContainerName+"-docker").Run()
-		}
+		// Remove per-container DinD volume (no-op if it doesn't exist).
+		_ = exec.Command("docker", "volume", "rm", a.ContainerName+"-docker").Run()
 	}
 
 	// Clean up credential temp file.
@@ -573,9 +562,6 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
-	if a.DinD {
-		args = append(args, "-e", "MITTENS_DIND=true")
-	}
 	if a.Yolo {
 		args = append(args, "-e", "MITTENS_YOLO=true")
 	}
@@ -768,13 +754,15 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", "MITTENS_FIREWALL_EXTRA="+strings.Join(firewallDomains, ","))
 	}
 
-	// Security hardening — depends on Docker engine mode.
-	switch a.dockerMode() {
-	case "dind":
-		args = append(args, "--privileged")
-		args = append(args, "-v", a.ContainerName+"-docker:/var/lib/docker")
-		logWarn("Docker-in-Docker enabled (--privileged)")
-	default:
+	// Security hardening: apply unless a resolver (e.g. docker dind) already requested --privileged.
+	isPrivileged := false
+	for _, arg := range resolverArgs {
+		if arg == "--privileged" {
+			isPrivileged = true
+			break
+		}
+	}
+	if !isPrivileged {
 		args = append(args,
 			"--cap-drop", "ALL",
 			"--cap-add", "SETUID",
@@ -835,19 +823,6 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 	a.worktreeOrigins[wtPath] = headSHA
 	a.worktreeRepos[wtPath] = repoRoot
 	return wtPath, nil
-}
-
-// dockerMode returns "dind", "host", or "" based on the docker extension or legacy --dind flag.
-func (a *App) dockerMode() string {
-	if a.DinD {
-		return "dind"
-	}
-	for _, ext := range a.Extensions {
-		if ext.Name == "docker" && ext.Enabled && len(ext.Args) > 0 {
-			return ext.Args[0]
-		}
-	}
-	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -940,7 +915,6 @@ Core flags:
   --no-build        Skip the Docker image build step
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
   --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
-  --dind            [deprecated] Alias for --docker dind
   --yolo            Skip all permission prompts
   --no-notify       Disable desktop notifications
   --network-host    Use host networking (default: bridge)
@@ -1011,7 +985,6 @@ func printJSONCaps(exts []*registry.Extension) {
 		Extensions: make([]jsonCapsExtension, 0, len(exts)),
 		CoreFlags: []jsonCapsFlag{
 			{Name: "--docker", Description: "Docker engine mode: dind or host", ArgType: "string"},
-		{Name: "--dind", Description: "[deprecated] Alias for --docker dind"},
 			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
 			{Name: "--yolo", Description: "Skip all permission prompts"},
 			{Name: "--no-notify", Description: "Disable desktop notifications"},

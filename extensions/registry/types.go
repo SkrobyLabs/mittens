@@ -63,6 +63,7 @@ type ResolvedMount struct {
 // SetupContext is passed to setup resolvers.
 type SetupContext struct {
 	Home          string
+	ContainerName string    // docker container name for this invocation
 	Extension     *Extension
 	DockerArgs    *[]string // append docker run flags
 	FirewallExtra *[]string // append extra domains

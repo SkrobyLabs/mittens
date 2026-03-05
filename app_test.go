@@ -23,7 +23,6 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--no-config", func(a *App) bool { return a.NoConfig }},
 		{"--no-history", func(a *App) bool { return a.NoHistory }},
 		{"--no-build", func(a *App) bool { return a.NoBuild }},
-		{"--dind", func(a *App) bool { return a.DinD }},
 		{"--yolo", func(a *App) bool { return a.Yolo }},
 		{"--network-host", func(a *App) bool { return a.NetworkHost }},
 		{"--worktree", func(a *App) bool { return a.Worktree }},
@@ -438,30 +437,36 @@ func TestAssembleDockerArgs_DinD(t *testing.T) {
 	a := &App{
 		Provider:          DefaultProvider(),
 		NoHistory:         true,
-		DinD:              true,
 		ContainerName:     "mittens-dind",
 		WorkspaceMountSrc: "/tmp/ws",
 		Credentials:       &CredentialManager{},
 	}
 
-	args := a.assembleDockerArgs(nil, nil)
+	// Simulate what the docker resolver contributes for dind mode.
+	resolverArgs := []string{
+		"--privileged",
+		"-v", "mittens-dind-docker:/var/lib/docker",
+		"-e", "MITTENS_DIND=true",
+	}
 
-	// Should have --privileged.
+	args := a.assembleDockerArgs(resolverArgs, nil)
+
+	// Should have --privileged (from resolver).
 	if !argSliceContains(args, "--privileged") {
 		t.Error("missing --privileged for DinD")
 	}
 
-	// Docker volume mount.
+	// Docker volume mount (from resolver).
 	if !argPairExists(args, "-v", "mittens-dind-docker:/var/lib/docker") {
 		t.Error("missing docker volume mount for DinD")
 	}
 
-	// MITTENS_DIND should be true.
+	// MITTENS_DIND should be true (from resolver).
 	if !argPairExists(args, "-e", "MITTENS_DIND=true") {
 		t.Error("missing MITTENS_DIND=true")
 	}
 
-	// Security hardening should be ABSENT (mutually exclusive with privileged).
+	// Security hardening should be ABSENT (--privileged in resolverArgs suppresses it).
 	if argPairExists(args, "--cap-drop", "ALL") {
 		t.Error("--cap-drop ALL should not be present with DinD")
 	}

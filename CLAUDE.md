@@ -63,6 +63,6 @@ See [EXTENSIONS.md](EXTENSIONS.md) for the full extension architecture, YAML man
 
 ## Core Flags
 
-`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--dind`, `--yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
+`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--docker MODE`, `--yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
 
 Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).

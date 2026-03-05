@@ -20,7 +20,11 @@ func setup(ctx *registry.SetupContext) error {
 	}
 	switch mode {
 	case "dind":
-		*ctx.DockerArgs = append(*ctx.DockerArgs, "-e", "MITTENS_DIND=true")
+		*ctx.DockerArgs = append(*ctx.DockerArgs,
+			"--privileged",
+			"-v", ctx.ContainerName+"-docker:/var/lib/docker",
+			"-e", "MITTENS_DIND=true",
+		)
 		fmt.Fprintln(os.Stderr, "[mittens] docker: dind mode — isolated Docker daemon (--privileged)")
 	case "host":
 		*ctx.DockerArgs = append(*ctx.DockerArgs,

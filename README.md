@@ -26,7 +26,7 @@ mittens              # run Claude Code in a container
 mittens init         # interactive setup wizard
 mittens --ssh        # forward SSH keys
 mittens --aws prod   # mount specific AWS profile
-mittens --dind       # enable Docker-in-Docker
+mittens --docker dind  # enable Docker-in-Docker
 mittens --yolo       # skip all permission prompts
 mittens --help       # see all flags
 ```
@@ -37,7 +37,7 @@ Project configs are saved to `~/.mittens/projects/` — one flag per line, loade
 
 ### Container Isolation
 
-Claude Code runs inside a Docker container with `--cap-drop ALL` (unless `--dind` is used). The workspace is mounted at `/workspace` and Claude's config is copied from the host at startup.
+Claude Code runs inside a Docker container with `--cap-drop ALL` (unless `--docker dind` is used). The workspace is mounted at `/workspace` and Claude's config is copied from the host at startup.
 
 The container starts as root for initial setup (firewall rules, Docker daemon), then drops to a non-root `claude` user via `gosu`. Containers are force-removed on exit — each invocation is ephemeral.
 
@@ -82,7 +82,7 @@ Extensions declare additional domains (e.g. AWS endpoints when `--aws` is enable
 
 ### Docker-in-Docker
 
-`--dind` runs the container in `--privileged` mode with a dedicated Docker volume. A separate `dockerd` starts inside the container, allowing Claude to build and run containers as part of its work. The DinD volume is named `<container>-docker` and cleaned up on exit.
+`--docker dind` runs the container in `--privileged` mode with a dedicated Docker volume. A separate `dockerd` starts inside the container, allowing Claude to build and run containers as part of its work. The DinD volume is named `<container>-docker` and cleaned up on exit.
 
 ### Worktree Isolation
 
@@ -105,7 +105,8 @@ The container's `xdg-open` is replaced with a shim that forwards all URLs to the
 | Flag | Description |
 |------|-------------|
 | `--verbose`, `-v` | Show the full docker command being run |
-| `--dind` | Enable Docker-in-Docker (`--privileged`) |
+| `--docker dind` | Enable Docker-in-Docker (`--privileged`) |
+| `--docker host` | Share host Docker socket |
 | `--yolo` | Skip all Claude Code permission prompts |
 | `--network-host` | Use host networking instead of bridge + firewall |
 | `--worktree` | Git worktree isolation per invocation |

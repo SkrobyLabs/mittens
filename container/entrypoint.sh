@@ -54,6 +54,10 @@ if [[ "$(id -u)" == "0" ]]; then
     # ── Host Docker socket ────────────────────────────────
     if [[ "${MITTENS_DOCKER_HOST:-false}" == "true" ]]; then
         echo "[mittens] Using host Docker socket"
+        SOCK="/var/run/docker.sock"
+        if [[ -S "$SOCK" ]]; then
+            chmod 666 "$SOCK"
+        fi
         if docker info &>/dev/null 2>&1; then
             echo "[mittens] Host Docker daemon accessible"
         else
