@@ -13,6 +13,7 @@ import (
 	// Blank imports trigger init() registration for extensions with resolvers.
 	_ "github.com/Skroby/mittens/extensions/aws"
 	_ "github.com/Skroby/mittens/extensions/azure"
+	_ "github.com/Skroby/mittens/extensions/docker"
 	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	_ "github.com/Skroby/mittens/extensions/gcp"
 	_ "github.com/Skroby/mittens/extensions/gh"

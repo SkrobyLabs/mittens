@@ -51,6 +51,16 @@ if [[ "$(id -u)" == "0" ]]; then
         fi
     fi
 
+    # ── Host Docker socket ────────────────────────────────
+    if [[ "${MITTENS_DOCKER_HOST:-false}" == "true" ]]; then
+        echo "[mittens] Using host Docker socket"
+        if docker info &>/dev/null 2>&1; then
+            echo "[mittens] Host Docker daemon accessible"
+        else
+            echo "[mittens] Warning: host Docker socket not accessible" >&2
+        fi
+    fi
+
     # ── Network firewall (Squid proxy + iptables) ────────
     if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f "$FIREWALL_CONF" ]]; then
         echo "[mittens] Applying network firewall..."

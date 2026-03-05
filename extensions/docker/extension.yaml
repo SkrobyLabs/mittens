@@ -1,0 +1,8 @@
+name: docker
+description: Connect the container to a Docker engine (dind or host socket)
+
+flags:
+  - name: "--docker"
+    description: "Docker engine: dind (isolated daemon) or host (share host socket)"
+    arg: "enum"
+    enum_values: ["dind", "host"]

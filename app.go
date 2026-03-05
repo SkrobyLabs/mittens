@@ -183,6 +183,13 @@ func (a *App) Run() error {
 		return fmt.Errorf("docker is not installed or not in PATH")
 	}
 
+	// Mutual exclusion: --dind and --docker are redundant.
+	for _, ext := range a.Extensions {
+		if ext.Name == "docker" && ext.Enabled && a.DinD {
+			return fmt.Errorf("--dind and --docker are mutually exclusive; use --docker dind instead of --dind")
+		}
+	}
+
 	home := os.Getenv("HOME")
 	ensureDir(a.Provider.HostConfigDir(home))
 
@@ -473,7 +480,7 @@ func (a *App) Cleanup() {
 		RemoveContainer(a.ContainerName)
 
 		// Remove per-container DinD volume.
-		if a.DinD {
+		if a.dockerMode() == "dind" {
 			_ = exec.Command("docker", "volume", "rm", a.ContainerName+"-docker").Run()
 		}
 	}
@@ -566,7 +573,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
-	args = append(args, "-e", fmt.Sprintf("MITTENS_DIND=%v", a.DinD))
+	if a.DinD {
+		args = append(args, "-e", "MITTENS_DIND=true")
+	}
 	if a.Yolo {
 		args = append(args, "-e", "MITTENS_YOLO=true")
 	}
@@ -759,12 +768,13 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", "MITTENS_FIREWALL_EXTRA="+strings.Join(firewallDomains, ","))
 	}
 
-	// Security hardening.
-	if a.DinD {
+	// Security hardening — depends on Docker engine mode.
+	switch a.dockerMode() {
+	case "dind":
 		args = append(args, "--privileged")
 		args = append(args, "-v", a.ContainerName+"-docker:/var/lib/docker")
 		logWarn("Docker-in-Docker enabled (--privileged)")
-	} else {
+	default:
 		args = append(args,
 			"--cap-drop", "ALL",
 			"--cap-add", "SETUID",
@@ -825,6 +835,19 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 	a.worktreeOrigins[wtPath] = headSHA
 	a.worktreeRepos[wtPath] = repoRoot
 	return wtPath, nil
+}
+
+// dockerMode returns "dind", "host", or "" based on the docker extension or legacy --dind flag.
+func (a *App) dockerMode() string {
+	if a.DinD {
+		return "dind"
+	}
+	for _, ext := range a.Extensions {
+		if ext.Name == "docker" && ext.Enabled && len(ext.Args) > 0 {
+			return ext.Args[0]
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -916,7 +939,8 @@ Core flags:
   --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
-  --dind            Enable Docker-in-Docker (--privileged)
+  --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
+  --dind            [deprecated] Alias for --docker dind
   --yolo            Skip all permission prompts
   --no-notify       Disable desktop notifications
   --network-host    Use host networking (default: bridge)
@@ -986,7 +1010,8 @@ func printJSONCaps(exts []*registry.Extension) {
 	out := jsonCapsOutput{
 		Extensions: make([]jsonCapsExtension, 0, len(exts)),
 		CoreFlags: []jsonCapsFlag{
-			{Name: "--dind", Description: "Enable Docker-in-Docker (--privileged)"},
+			{Name: "--docker", Description: "Docker engine mode: dind or host", ArgType: "string"},
+		{Name: "--dind", Description: "[deprecated] Alias for --docker dind"},
 			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
 			{Name: "--yolo", Description: "Skip all permission prompts"},
 			{Name: "--no-notify", Description: "Disable desktop notifications"},

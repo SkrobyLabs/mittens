@@ -331,8 +331,9 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	if !argPairContains(args, "-e", "TERM=") {
 		t.Error("missing TERM env")
 	}
-	if !argPairExists(args, "-e", "MITTENS_DIND=false") {
-		t.Error("missing MITTENS_DIND env")
+	// MITTENS_DIND is only set when DinD is active; no env var in baseline.
+	if argPairExists(args, "-e", "MITTENS_DIND=false") {
+		t.Error("MITTENS_DIND=false should not be set in baseline (non-DinD) mode")
 	}
 
 	// Security hardening (non-DinD).
