@@ -17,6 +17,7 @@ import (
 	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	_ "github.com/Skroby/mittens/extensions/gcp"
 	_ "github.com/Skroby/mittens/extensions/gh"
+	_ "github.com/Skroby/mittens/extensions/helm"
 	_ "github.com/Skroby/mittens/extensions/kubectl"
 	_ "github.com/Skroby/mittens/extensions/mcp"
 )

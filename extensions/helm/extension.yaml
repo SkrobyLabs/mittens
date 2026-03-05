@@ -1,0 +1,21 @@
+# helm extension for mittens
+# Installs Helm 3 CLI and optionally mounts chart repository configuration.
+# Dynamic resolver parses repositories.yaml to whitelist custom repo domains.
+
+name: helm
+description: Install Helm CLI and mount chart repository configuration
+
+flags:
+  - name: "--helm"
+    description: "Install Helm CLI and mount config"
+    arg: "none"
+
+mounts:
+  - src: "~/.config/helm"
+    dst: "/home/claude/.config/helm"
+    mode: "ro"
+    when: "dir_exists"
+
+build:
+  script: "helm.sh"
+  image_tag: "helm"
