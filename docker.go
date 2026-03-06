@@ -80,7 +80,7 @@ func BuildImage(ctx BuildContext) error {
 // RunContainer executes `docker run` with the provided arguments and returns
 // the container's exit code. The binary parameter specifies the AI CLI binary
 // name to invoke (e.g. "claude").
-func RunContainer(args []string, imageName, imageTag string, shell bool, binary string, cliArgs []string) (int, error) {
+func RunContainer(args []string, imageName, imageTag string, shell bool, binary string, cliArgs []string, stdin *os.File) (int, error) {
 	dockerArgs := []string{"run"}
 	dockerArgs = append(dockerArgs, args...)
 	dockerArgs = append(dockerArgs, imageName+":"+imageTag)
@@ -92,8 +92,12 @@ func RunContainer(args []string, imageName, imageTag string, shell bool, binary 
 		dockerArgs = append(dockerArgs, cliArgs...)
 	}
 
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+
 	cmd := exec.Command("docker", dockerArgs...)
-	cmd.Stdin = os.Stdin
+	cmd.Stdin = stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

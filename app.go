@@ -62,6 +62,9 @@ type App struct {
 	clipboardDir string
 	clipboardPID int
 
+	// Drop zone for drag-and-drop file translation
+	dropDir string
+
 	// Terminal focus (for click-to-focus notifications)
 	terminalFocus TerminalFocus
 
@@ -350,8 +353,9 @@ func (a *App) Run() error {
 		if !a.NoNotify {
 			displayName := a.Provider.DisplayName
 			focus := a.terminalFocus
+			blogFn := a.broker.blog
 			a.broker.OnNotify = func(container, event, message string) {
-				notifyOnHost(container, event, message, displayName, focus)
+				notifyOnHost(container, event, message, displayName, focus, blogFn)
 			}
 		}
 
@@ -798,12 +802,25 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		}
 	}
 
+	// Drop zone for drag-and-drop path translation.
+	if dir, err := os.MkdirTemp("", "mittens-drop.*"); err == nil {
+		a.dropDir = dir
+		a.tempDirs = append(a.tempDirs, dir)
+		args = append(args, "-v", dir+":/tmp/mittens-drops:ro")
+		logInfo("Drag-and-drop path translation: enabled")
+	}
+
 	return args
 }
 
 // runContainer runs docker run with the assembled args.
 func (a *App) runContainer(dockerArgs []string) error {
-	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.Provider.Binary, a.ClaudeArgs)
+	stdin, cleanup := a.newStdinProxy()
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.Provider.Binary, a.ClaudeArgs, stdin)
 	if err != nil {
 		return fmt.Errorf("docker run failed: %w", err)
 	}
@@ -811,6 +828,57 @@ func (a *App) runContainer(dockerArgs []string) error {
 		os.Exit(code)
 	}
 	return nil
+}
+
+// newStdinProxy builds a PTY-based stdin proxy that translates host paths in
+// pasted content while preserving the TTY for Docker's -it flags.
+// Returns (nil, nil) if the drop zone was not created or PTY setup fails.
+func (a *App) newStdinProxy() (stdin *os.File, cleanup func()) {
+	if a.dropDir == "" {
+		return nil, nil
+	}
+
+	mapper := &PathMapper{
+		dropDir:          a.dropDir,
+		containerDropDir: "/tmp/mittens-drops",
+	}
+
+	// Primary workspace mapping.
+	if a.WorkspaceMountSrc != "" {
+		mapper.mappings = append(mapper.mappings, pathMapping{
+			hostPrefix:      a.WorkspaceMountSrc,
+			containerPrefix: "/workspace",
+		})
+	}
+
+	// EffectiveWorkspace (worktree) if different and mounted at its own path.
+	if a.EffectiveWorkspace != "" && a.EffectiveWorkspace != a.WorkspaceMountSrc {
+		mapper.mappings = append(mapper.mappings, pathMapping{
+			hostPrefix:      a.EffectiveWorkspace,
+			containerPrefix: a.EffectiveWorkspace,
+		})
+	}
+
+	// Extra directory mappings (mounted at their own absolute path).
+	for _, dir := range a.ExtraDirs {
+		resolved, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		mapper.mappings = append(mapper.mappings, pathMapping{
+			hostPrefix:      resolved,
+			containerPrefix: resolved,
+		})
+	}
+
+	proxy := NewDropProxy(os.Stdin, mapper)
+	slave, cleanupFn, err := StartPTYProxy(proxy)
+	if err != nil {
+		logVerbose(a.Verbose, "PTY proxy setup failed, using direct stdin: %v", err)
+		return nil, nil
+	}
+
+	return slave, cleanupFn
 }
 
 // createWorktree creates a detached-HEAD git worktree as a sibling directory.
@@ -839,7 +907,14 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // notifyOnHost sends a native desktop notification.
 // On macOS, if terminal-notifier is installed, clicking the notification
 // will focus the originating terminal session.
-func notifyOnHost(container, event, message, displayName string, focus TerminalFocus) {
+// logFn is an optional logger (broker.blog); pass nil to skip logging.
+func notifyOnHost(container, event, message, displayName string, focus TerminalFocus, logFn func(string, ...interface{})) {
+	log := func(format string, args ...interface{}) {
+		if logFn != nil {
+			logFn(format, args...)
+		}
+	}
+
 	var title, body string
 	switch event {
 	case "stop":
@@ -856,22 +931,41 @@ func notifyOnHost(container, event, message, displayName string, focus TerminalF
 		title = "mittens"
 		body = container + ": " + event
 	}
+
+	log("notify: event=%s terminal=%s/%s", event, focus.Kind, focus.ID)
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "darwin" {
 		if path, err := exec.LookPath("terminal-notifier"); err == nil {
 			args := []string{"-title", title, "-message", body, "-sound", "Glass"}
+			if focus.BundleID != "" {
+				args = append(args, "-activate", focus.BundleID)
+				log("notify: terminal-notifier -activate %s", focus.BundleID)
+			}
 			if focusCmd := focus.FocusCommand(); focusCmd != nil {
-				args = append(args, "-execute", shellJoin(focusCmd))
+				executeStr := shellJoin(focusCmd)
+				args = append(args, "-execute", executeStr)
+				log("notify: terminal-notifier -execute %s", executeStr)
 			}
 			cmd = exec.Command(path, args...)
 		} else {
-			cmd = exec.Command("osascript", "-e",
-				fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title))
+			log("notify: terminal-notifier not found, using osascript via stdin")
+			// Pass script via stdin to avoid Script Editor activation.
+			script := fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title)
+			cmd = exec.Command("osascript")
+			cmd.Stdin = strings.NewReader(script)
 		}
 	} else {
 		cmd = exec.Command("notify-send", title, body)
 	}
-	_ = cmd.Start()
+
+	if cmd != nil {
+		if err := cmd.Start(); err != nil {
+			log("notify: failed to start: %v", err)
+		} else {
+			log("notify: sent %q", body)
+		}
+	}
 }
 
 // openOnHost opens a URL in the host's default browser.
