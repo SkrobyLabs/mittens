@@ -44,10 +44,10 @@ func shortSockPath(t *testing.T) string {
 // startBroker creates and starts a broker in a background goroutine.
 // Returns the broker and a cleanup function. The broker is ready to
 // accept connections when this function returns.
-func startBroker(t *testing.T, seed string) (*CredentialBroker, *http.Client) {
+func startBroker(t *testing.T, seed string) (*HostBroker, *http.Client) {
 	t.Helper()
 	sockPath := shortSockPath(t)
-	b := NewCredentialBroker(sockPath, seed, nil)
+	b := NewHostBroker(sockPath, seed, nil)
 
 	go func() { _ = b.Serve() }()
 
@@ -221,7 +221,7 @@ func TestBroker_MethodNotAllowed(t *testing.T) {
 
 func TestBroker_Lifecycle(t *testing.T) {
 	sockPath := shortSockPath(t)
-	b := NewCredentialBroker(sockPath, "", nil)
+	b := NewHostBroker(sockPath, "", nil)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- b.Serve() }()
@@ -247,7 +247,7 @@ func TestBroker_PUT_WritesThrough(t *testing.T) {
 	store := &FileCredentialStore{path: storePath}
 
 	sockPath := shortSockPath(t)
-	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
+	b := NewHostBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
 	go func() { _ = b.Serve() }()
 	t.Cleanup(func() { _ = b.Close() })
 
@@ -281,7 +281,7 @@ func TestBroker_PullFromHost(t *testing.T) {
 	store := &FileCredentialStore{path: storePath}
 
 	sockPath := shortSockPath(t)
-	b := NewCredentialBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
+	b := NewHostBroker(sockPath, `{"expiresAt":10}`, []CredentialStore{store})
 
 	// Write fresher creds to the host store file.
 	fresher := `{"accessToken":"host-refreshed","expiresAt":500}`
@@ -303,7 +303,7 @@ func TestBroker_PullFromHost_StaleIgnored(t *testing.T) {
 
 	sockPath := shortSockPath(t)
 	seed := `{"accessToken":"current","expiresAt":500}`
-	b := NewCredentialBroker(sockPath, seed, []CredentialStore{store})
+	b := NewHostBroker(sockPath, seed, []CredentialStore{store})
 
 	// Write staler creds to host store.
 	os.WriteFile(storePath, []byte(`{"expiresAt":100}`), 0600)
@@ -321,7 +321,7 @@ func TestBroker_PullFromHost_StaleIgnored(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBroker_TCP_GetPut(t *testing.T) {
-	b := NewCredentialBroker("", `{"expiresAt":10}`, nil)
+	b := NewHostBroker("", `{"expiresAt":10}`, nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -376,7 +376,7 @@ func TestBroker_TCP_OpenEndpoint(t *testing.T) {
 	var opened string
 	var mu sync.Mutex
 
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	b.OnOpen = func(url string) {
 		mu.Lock()
 		opened = url
@@ -414,7 +414,7 @@ func TestBroker_TCP_OpenEndpoint(t *testing.T) {
 }
 
 func TestBroker_TCP_OpenRejectsNonHTTP(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -456,7 +456,7 @@ func TestBroker_CrossBrokerSync(t *testing.T) {
 	tcpClient := &http.Client{Timeout: 2 * time.Second}
 
 	// Start Broker A (for "container A") with no initial creds.
-	brokerA := NewCredentialBroker("", "", []CredentialStore{storeA})
+	brokerA := NewHostBroker("", "", []CredentialStore{storeA})
 	portA, err := brokerA.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -467,7 +467,7 @@ func TestBroker_CrossBrokerSync(t *testing.T) {
 	waitForTCPBroker(t, tcpClient, baseA)
 
 	// Start Broker B (for "container B") with no initial creds.
-	brokerB := NewCredentialBroker("", "", []CredentialStore{storeB})
+	brokerB := NewHostBroker("", "", []CredentialStore{storeB})
 	portB, err := brokerB.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -527,7 +527,7 @@ func TestBroker_CrossBrokerSync_BidirectionalFreshest(t *testing.T) {
 
 	tcpClient := &http.Client{Timeout: 2 * time.Second}
 
-	brokerA := NewCredentialBroker("", "", []CredentialStore{store})
+	brokerA := NewHostBroker("", "", []CredentialStore{store})
 	portA, err := brokerA.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +537,7 @@ func TestBroker_CrossBrokerSync_BidirectionalFreshest(t *testing.T) {
 	baseA := fmt.Sprintf("http://127.0.0.1:%d", portA)
 	waitForTCPBroker(t, tcpClient, baseA)
 
-	brokerB := NewCredentialBroker("", "", []CredentialStore{store})
+	brokerB := NewHostBroker("", "", []CredentialStore{store})
 	portB, err := brokerB.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -600,7 +600,7 @@ func TestBroker_HostSyncAutomatic(t *testing.T) {
 	store := &FileCredentialStore{path: storePath}
 
 	sockPath := shortSockPath(t)
-	b := NewCredentialBroker(sockPath, "", []CredentialStore{store})
+	b := NewHostBroker(sockPath, "", []CredentialStore{store})
 
 	go func() { _ = b.Serve() }()
 	t.Cleanup(func() { _ = b.Close() })
@@ -646,7 +646,7 @@ func TestBroker_TCP_WriteThroughAndPull(t *testing.T) {
 	tcpClient := &http.Client{Timeout: 2 * time.Second}
 
 	// Broker A (TCP mode).
-	brokerA := NewCredentialBroker("", "", []CredentialStore{store})
+	brokerA := NewHostBroker("", "", []CredentialStore{store})
 	portA, err := brokerA.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -657,7 +657,7 @@ func TestBroker_TCP_WriteThroughAndPull(t *testing.T) {
 	waitForTCPBroker(t, tcpClient, baseA)
 
 	// Broker B (TCP mode) with same store.
-	brokerB := NewCredentialBroker("", "", []CredentialStore{store})
+	brokerB := NewHostBroker("", "", []CredentialStore{store})
 	portB, err := brokerB.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -761,7 +761,7 @@ func TestBroker_OAuthCallbackIntercept(t *testing.T) {
 	ln.Close() // free the port for the broker's interceptor
 
 	var openedURL string
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	b.OnOpen = func(u string) { openedURL = u }
 
 	port, err := b.ListenTCP()
@@ -840,7 +840,7 @@ func TestBroker_OAuthCallbackIntercept(t *testing.T) {
 }
 
 func TestBroker_LoginCallbackEmpty(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -865,7 +865,7 @@ func TestBroker_LoginCallbackEmpty(t *testing.T) {
 
 func TestBroker_OpenNonOAuthStillWorks(t *testing.T) {
 	var openedURL string
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	b.OnOpen = func(u string) { openedURL = u }
 
 	port, err := b.ListenTCP()
@@ -913,7 +913,7 @@ func TestBroker_TCP_NotifyEndpoint(t *testing.T) {
 	var mu sync.Mutex
 	var gotContainer, gotEvent string
 
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	b.OnNotify = func(container, event, _ string) {
 		mu.Lock()
 		gotContainer = container
@@ -960,7 +960,7 @@ func TestBroker_TCP_NotifyWithMessage(t *testing.T) {
 	var mu sync.Mutex
 	var gotMessage string
 
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	b.OnNotify = func(_, _, message string) {
 		mu.Lock()
 		gotMessage = message
@@ -999,7 +999,7 @@ func TestBroker_TCP_NotifyWithMessage(t *testing.T) {
 }
 
 func TestBroker_TCP_NotifyRejectsGET(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -1023,7 +1023,7 @@ func TestBroker_TCP_NotifyRejectsGET(t *testing.T) {
 }
 
 func TestBroker_TCP_NotifyRejectsOversized(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -1051,7 +1051,7 @@ func TestBroker_TCP_NotifyRejectsOversized(t *testing.T) {
 }
 
 func TestBroker_TCP_NotifyRejectsInvalidJSON(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -1092,7 +1092,7 @@ func TestBroker_TCP_NotifySpecialCharacters(t *testing.T) {
 			var mu sync.Mutex
 			var gotMessage string
 
-			b := NewCredentialBroker("", "", nil)
+			b := NewHostBroker("", "", nil)
 			b.OnNotify = func(_, _, message string) {
 				mu.Lock()
 				gotMessage = message
@@ -1155,7 +1155,7 @@ func TestBroker_TCP_NotifySpecialCharacters(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBroker_RefreshFirstWins(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -1197,7 +1197,7 @@ func TestBroker_RefreshFirstWins(t *testing.T) {
 }
 
 func TestBroker_RefreshExpiresAfterTimeout(t *testing.T) {
-	b := NewCredentialBroker("", "", nil)
+	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)
@@ -1236,7 +1236,7 @@ func TestBroker_RefreshExpiresAfterTimeout(t *testing.T) {
 }
 
 func TestBroker_RefreshResetsOnFreshCreds(t *testing.T) {
-	b := NewCredentialBroker("", `{"expiresAt":10}`, nil)
+	b := NewHostBroker("", `{"expiresAt":10}`, nil)
 	port, err := b.ListenTCP()
 	if err != nil {
 		t.Fatal(err)

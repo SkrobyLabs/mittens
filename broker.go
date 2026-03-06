@@ -66,13 +66,14 @@ h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#111827}
 </body>
 </html>`
 
-// CredentialBroker is an HTTP server on a Unix socket that acts as the single
-// source of truth for OAuth credentials across multiple mittens containers.
+// HostBroker is an HTTP server that bridges communication between the host and
+// mittens containers. It handles credential sync (freshest-wins), OAuth login
+// interception, URL forwarding, notifications, and token refresh coordination.
 //
 // Containers push refreshed tokens via PUT and pull the latest via GET.
 // The broker accepts a PUT only when the incoming expiresAt exceeds the
 // currently stored value, so the freshest token always wins.
-type CredentialBroker struct {
+type HostBroker struct {
 	sockPath string
 	Name     string // provider name for log identification, e.g. "claude", "gemini"
 	creds    string // latest credential JSON
@@ -106,11 +107,11 @@ type CredentialBroker struct {
 // it is considered stale and a new coordinator can be appointed.
 const refreshCoordTimeout = 2 * time.Minute
 
-// NewCredentialBroker creates a broker that will listen on sockPath.
+// NewHostBroker creates a broker that will listen on sockPath.
 // seed is the initial credential JSON (may be empty).
 // stores are host credential stores used for bidirectional sync.
-func NewCredentialBroker(sockPath, seed string, stores []CredentialStore) *CredentialBroker {
-	b := &CredentialBroker{
+func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker {
+	b := &HostBroker{
 		sockPath: sockPath,
 		creds:    seed,
 		stores:   stores,
@@ -127,7 +128,7 @@ func NewCredentialBroker(sockPath, seed string, stores []CredentialStore) *Crede
 }
 
 // blog writes a timestamped log entry to the broker's log file (if set).
-func (b *CredentialBroker) blog(format string, args ...interface{}) {
+func (b *HostBroker) blog(format string, args ...interface{}) {
 	if b.LogFile == nil {
 		return
 	}
@@ -142,7 +143,7 @@ func (b *CredentialBroker) blog(format string, args ...interface{}) {
 
 // ListenTCP binds to a random TCP port on localhost and returns the port.
 // Call this before Serve() to use TCP mode instead of Unix socket.
-func (b *CredentialBroker) ListenTCP() (int, error) {
+func (b *HostBroker) ListenTCP() (int, error) {
 	ln, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		return 0, err
@@ -154,7 +155,7 @@ func (b *CredentialBroker) ListenTCP() (int, error) {
 // Serve starts the broker. If ListenTCP() was called first, serves on that
 // listener. Otherwise falls back to Unix socket mode using sockPath.
 // Blocks until shut down via Close(). Call in a goroutine.
-func (b *CredentialBroker) Serve() error {
+func (b *HostBroker) Serve() error {
 	if b.ln == nil {
 		// Unix socket mode (tests or when ListenTCP wasn't called).
 		if b.sockPath == "" {
@@ -181,7 +182,7 @@ func (b *CredentialBroker) Serve() error {
 }
 
 // Close gracefully shuts down the broker and stops the host sync loop.
-func (b *CredentialBroker) Close() error {
+func (b *HostBroker) Close() error {
 	b.blog("shutting down")
 	close(b.done)
 	if b.LogFile != nil {
@@ -195,13 +196,13 @@ func (b *CredentialBroker) Close() error {
 }
 
 // Credentials returns the current credential JSON held by the broker.
-func (b *CredentialBroker) Credentials() string {
+func (b *HostBroker) Credentials() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.creds
 }
 
-func (b *CredentialBroker) handle(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		b.handleGet(w)
@@ -213,7 +214,7 @@ func (b *CredentialBroker) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (b *CredentialBroker) handleGet(w http.ResponseWriter) {
+func (b *HostBroker) handleGet(w http.ResponseWriter) {
 	b.mu.RLock()
 	data := b.creds
 	b.mu.RUnlock()
@@ -231,7 +232,7 @@ func (b *CredentialBroker) handleGet(w http.ResponseWriter) {
 
 const maxCredentialSize = 64 * 1024 // 64KB
 
-func (b *CredentialBroker) handlePut(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxCredentialSize+1))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
@@ -273,7 +274,7 @@ func (b *CredentialBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 
 // hostSync polls host credential stores every 5 seconds.
 // If the host has fresher creds, the broker's in-memory state is updated.
-func (b *CredentialBroker) hostSync() {
+func (b *HostBroker) hostSync() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -288,7 +289,7 @@ func (b *CredentialBroker) hostSync() {
 
 // pullFromHost reads from all host stores, picks the freshest, and updates
 // the broker if the host has newer credentials.
-func (b *CredentialBroker) pullFromHost() {
+func (b *HostBroker) pullFromHost() {
 	var bestJSON string
 	var bestExp int64
 
@@ -320,7 +321,7 @@ func (b *CredentialBroker) pullFromHost() {
 }
 
 // persistToHost writes credentials to all host stores (fire-and-forget).
-func (b *CredentialBroker) persistToHost(jsonData string) {
+func (b *HostBroker) persistToHost(jsonData string) {
 	for _, s := range b.stores {
 		if err := s.Persist(jsonData); err != nil {
 			b.blog("persistToHost: FAILED %s: %v", s.Label(), err)
@@ -333,7 +334,7 @@ func (b *CredentialBroker) persistToHost(jsonData string) {
 
 const maxOpenURLSize = 4096
 
-func (b *CredentialBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -372,7 +373,7 @@ func (b *CredentialBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 
 const maxNotifySize = 4096
 
-func (b *CredentialBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -408,7 +409,7 @@ func (b *CredentialBroker) handleNotify(w http.ResponseWriter, r *http.Request) 
 // handleRefresh coordinates proactive token refresh across containers.
 // The first container to POST becomes the coordinator (receives "refresh");
 // subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
-func (b *CredentialBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -435,7 +436,7 @@ func (b *CredentialBroker) handleRefresh(w http.ResponseWriter, r *http.Request)
 
 // handleLoginCallback returns the captured OAuth callback URL (if any) so the
 // container can replay it to Claude Code's local callback server.
-func (b *CredentialBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
+func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -460,7 +461,7 @@ func (b *CredentialBroker) handleLoginCallback(w http.ResponseWriter, r *http.Re
 // given port to capture the OAuth browser redirect. Once the callback arrives,
 // it stores the full callback URL for the container to pick up via
 // GET /login-callback.
-func (b *CredentialBroker) interceptOAuthCallback(port int, ready chan struct{}) {
+func (b *HostBroker) interceptOAuthCallback(port int, ready chan struct{}) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		b.blog("OAuth intercept: failed to listen on :%d: %v", port, err)

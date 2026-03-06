@@ -8,12 +8,15 @@ Run Claude Code in isolated Docker containers with credential forwarding, networ
 mittens              # compiled binary (Go)
 main.go                  # CLI entry point (cobra, flag routing)
 app.go                   # core orchestration (ParseFlags, Run, Cleanup)
+broker.go                # HostBroker — host↔container communication (creds, URLs, notifications, OAuth)
 config.go                # per-project config (~/.mittens/projects/...)
 wizard.go                # TUI setup wizard (charmbracelet/huh)
 docker.go                # docker build/run/cp operations
+drop.go                  # DropProxy — stdin PTY proxy for drag-and-drop path translation
 credentials.go           # credential extraction and persistence
 credentials_darwin.go    # macOS Keychain credential source
 credentials_other.go     # non-macOS stub
+terminal_focus.go        # detect terminal and re-focus on notification
 helpers.go               # logging, scriptDir, captureCommand
 embed.go                 # go:embed for extension YAMLs
 container/               # Docker image files (not embedded, must ship with binary)
@@ -23,6 +26,9 @@ container/               # Docker image files (not embedded, must ship with bina
   firewall.conf          # default domain whitelist
   mcp-domains.conf       # MCP server name -> domain mappings
   clipboard-*.sh         # clipboard image sync (macOS)
+  open-url.sh            # xdg-open shim — forwards URLs + OAuth callbacks via broker
+  notify.sh              # notification shim — sends events to broker
+  cred-sync.sh           # credential sync daemon (push/pull tokens via broker)
 extensions/              # pluggable extension system
   registry/              # shared types + registration (registry.Register, LoadExtensions)
     types.go             # Extension, SetupContext, SetupResult, ParseFlag
@@ -59,6 +65,8 @@ See [EXTENSIONS.md](EXTENSIONS.md) for the full extension architecture, YAML man
 - Config files: one flag per line at `~/.mittens/projects/<project>/config`, loaded and split with `strings.Fields`
 - Docker image tags derived from enabled extensions (e.g. `mittens:aws-dotnet9`)
 - Credentials: compare Keychain + file freshness, mount read-only, extract via `docker cp` after exit
+- `HostBroker` (broker.go): single TCP server bridging host↔container for creds, URLs, OAuth, notifications, refresh coordination
+- `DropProxy` (drop.go): wraps stdin through a PTY to translate host paths in bracketed paste sequences
 - Container runs as root initially (for iptables/DinD), drops to claude user via gosu
 
 ## Core Flags

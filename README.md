@@ -41,9 +41,17 @@ Claude Code runs inside a Docker container with `--cap-drop ALL` (unless `--dock
 
 The container starts as root for initial setup (firewall rules, Docker daemon), then drops to a non-root `claude` user via `gosu`. Containers are force-removed on exit — each invocation is ephemeral.
 
-### Credential Syncing
+### Host Broker
 
-Mittens runs a TCP credential broker on the host that keeps OAuth tokens synchronized between the host and all running containers.
+Mittens runs a host-side TCP server (`HostBroker`) that bridges all communication between the host and containers. It handles:
+
+- **Credential sync** — bidirectional OAuth token synchronization
+- **OAuth login** — intercepts browser callbacks and replays them into the container
+- **URL forwarding** — opens URLs from the container in the host browser
+- **Notifications** — relays container events to host desktop notifications
+- **Refresh coordination** — ensures only one container triggers a proactive token refresh
+
+#### Credential Syncing
 
 ```
 Host                              Container
@@ -54,14 +62,14 @@ Host                              Container
        │                                 │
        ▼                                 ▼
 ┌──────────────┐   PUT (fresher)  ┌──────────────┐
-│   Broker     │◄────────────────►│ .credentials │
+│ HostBroker   │◄────────────────►│ .credentials │
 │   (TCP)      │   GET (latest)   │    .json     │
 └──────────────┘                  └──────────────┘
 ```
 
 The broker uses a **freshest-wins** model: each credential set has an `expiresAt` timestamp, and only newer tokens replace older ones. When Claude Code refreshes a token inside the container, the daemon pushes it to the broker, which writes it through to the host's credential stores. The host side polls its stores (Keychain on macOS, file stores everywhere) and updates the broker if the host has fresher credentials.
 
-### OAuth Login
+#### OAuth Login
 
 When Claude Code opens an OAuth URL inside the container:
 
@@ -71,6 +79,15 @@ When Claude Code opens an OAuth URL inside the container:
 4. The container polls `GET /login-callback` and replays the callback URL to Claude Code's local server
 
 Result: seamless `/login` without manual copy-paste between host and container.
+
+### Stdin Path Translation
+
+When you drag-and-drop files from macOS Finder into the terminal, the pasted paths refer to the host filesystem. Mittens wraps stdin through a PTY proxy (`DropProxy`) that intercepts bracketed paste sequences and:
+
+- Translates host paths to their container mount points (e.g. `/Users/you/project/file.go` → `/workspace/file.go`)
+- Copies files outside any mount into a drop zone (`/tmp/mittens-drops`) so the container can access them
+
+This works transparently — the AI CLI sees container-valid paths.
 
 ### Network Firewall
 
@@ -95,6 +112,10 @@ Enabled by default (`--no-history` to disable). Conversation history is persiste
 ### Clipboard & Image Sync (macOS)
 
 On macOS, a host-side script polls the clipboard for images every second and writes PNGs to a temp directory mounted into the container. An `xclip` shim inside the container reads these images, allowing Claude Code to access clipboard images.
+
+### Notifications
+
+When the AI CLI triggers a hook event (e.g. task completion, permission prompt), the container sends a notification to the broker via `POST /notify`. The host displays a desktop notification and re-focuses the terminal window that launched mittens.
 
 ### URL Forwarding
 

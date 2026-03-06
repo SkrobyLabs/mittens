@@ -68,8 +68,8 @@ type App struct {
 	// Terminal focus (for click-to-focus notifications)
 	terminalFocus TerminalFocus
 
-	// Credential broker
-	broker     *CredentialBroker
+	// Host broker (credentials, URLs, notifications, OAuth)
+	broker     *HostBroker
 	brokerPort int
 }
 
@@ -347,7 +347,7 @@ func (a *App) Run() error {
 			data, _ := os.ReadFile(a.Credentials.TmpFile())
 			seed = string(data)
 		}
-		a.broker = NewCredentialBroker("", seed, a.Credentials.Stores())
+		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
 		a.broker.OnOpen = openOnHost
 		if !a.NoNotify {
