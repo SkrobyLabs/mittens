@@ -1,0 +1,31 @@
+# python extension for mittens
+# Installs a specific Python version into the Docker image at build time.
+# The base image (node:22-bookworm) ships Python 3.11; this extension
+# installs an additional pinned version as the primary python3/python.
+
+name: python
+description: Install Python runtime into the container image
+
+flags:
+  - name: "--python"
+    description: "Install Python (VERSION: 3.9; default: 3.9)"
+    arg: "enum"
+    enum_values: ["3.9"]
+
+firewall:
+  - "pypi.org"
+  - "files.pythonhosted.org"
+
+mounts:
+  - src: "~/.cache/pip"
+    dst: "/home/claude/.cache/pip-host"
+    mode: "ro"
+    when: "dir_exists"
+    env:
+      PIP_FIND_LINKS: "/home/claude/.cache/pip-host"
+
+build:
+  script: "python.sh"
+  image_tag: "python{{.Arg}}"
+  args:
+    PYTHON_VERSION: "{{.Arg}}"
