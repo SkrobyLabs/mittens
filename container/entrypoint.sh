@@ -205,6 +205,10 @@ if [[ "$(id -u)" == "0" ]]; then
         export NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal
         export no_proxy=localhost,127.0.0.1,::1,host.docker.internal
 
+        # Node 22+ native fetch (undici) ignores HTTP_PROXY by default.
+        # --use-env-proxy makes it honour the proxy env vars above.
+        export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--use-env-proxy"
+
         echo "[mittens] Firewall active: outbound HTTP(S) restricted to whitelisted domains"
     fi
 

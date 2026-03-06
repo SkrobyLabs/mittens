@@ -212,7 +212,15 @@ func GeminiProvider() *Provider {
 		// it falls back to the system xdg-open (our broker shim at /usr/local/bin/xdg-open).
 		// Without this, the 'open' npm package bypasses our shim and tries to use
 		// a real desktop browser (fails in container).
-		InstallCmd: `npm install -g @google/gemini-cli && find /usr/local/lib/node_modules -path "*/open/xdg-open" -exec chmod -x {} \; && gemini --version`,
+		// Post-install: prune non-linux prebuilds (~65MB) and TS artifacts (~20MB),
+		// then pre-warm the V8 compile cache for ~3-4x faster cold start.
+		InstallCmd: `npm install -g @google/gemini-cli` +
+			` && find /usr/local/lib/node_modules -path "*/open/xdg-open" -exec chmod -x {} \;` +
+			` && find /usr/local/lib/node_modules/@google/gemini-cli/node_modules -path "*/prebuilds/darwin*" -exec rm -rf {} + 2>/dev/null;` +
+			` find /usr/local/lib/node_modules/@google/gemini-cli/node_modules -path "*/prebuilds/win32*" -exec rm -rf {} + 2>/dev/null;` +
+			` find /usr/local/lib/node_modules/@google/gemini-cli/node_modules \( -name "*.d.ts" -o -name "*.d.mts" -o -name "*.map" \) -delete 2>/dev/null;` +
+			` mkdir -p /usr/local/lib/node_modules/@google/gemini-cli/.v8-compile-cache` +
+			` && NODE_COMPILE_CACHE=/usr/local/lib/node_modules/@google/gemini-cli/.v8-compile-cache gemini --version`,
 		APIKeyEnv:      "GEMINI_API_KEY",
 		SettingsFormat: "json",
 
@@ -255,8 +263,16 @@ func GeminiProvider() *Provider {
 			// DEBIAN_FRONTEND=noninteractive (set by Dockerfile) or when no display
 			// variable is set on Linux. Both must be overridden so Gemini calls xdg-open
 			// (our broker shim) instead of just printing the URL.
-			"DEBIAN_FRONTEND": "",   // unset the Dockerfile build-time value
-			"DISPLAY":         ":0", // fake display → hasDisplay = true on Linux
+			"DEBIAN_FRONTEND":    "",   // unset the Dockerfile build-time value
+			"DISPLAY":            ":0", // fake display → hasDisplay = true on Linux
+			"COLORTERM":          "truecolor",
+			"NODE_COMPILE_CACHE": "/usr/local/lib/node_modules/@google/gemini-cli/.v8-compile-cache",
+			// Skip sandbox detection and child-process relaunch. Without this,
+			// Gemini always forks a child process, loading 506MB of modules twice.
+			"SANDBOX": "true",
+			// Disable OpenTelemetry SDK to prevent gRPC connections that bypass
+			// the HTTP proxy and cause iptables-blocked SYN timeouts (~60s each).
+			"OTEL_SDK_DISABLED": "true",
 		},
 		InitSettingsJQ: `.general.enableAutoUpdate = false | .general.enableAutoUpdateNotification = false`,
 		StopHookEvent:  "SessionEnd",
