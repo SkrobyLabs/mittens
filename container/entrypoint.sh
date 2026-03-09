@@ -378,8 +378,8 @@ if [[ "${MITTENS_FIREWALL:-false}" == "true" && -f /etc/squid/whitelist.txt ]]; 
     } >> "$AI_DIR/${AI_PROJECT_FILE}"
 fi
 
-# --- Inject notification hooks (if broker port is available, JSON settings only) ---
-if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
+# --- Inject notification hooks (if broker is available, JSON settings only) ---
+if [[ (-n "${MITTENS_BROKER_PORT:-}" || -n "${MITTENS_BROKER_SOCK:-}") && -z "${MITTENS_NO_NOTIFY:-}" && "$AI_SETTINGS_FORMAT" == "json" ]]; then
     [[ -f "$SETTINGS_FILE" ]] || echo '{}' > "$SETTINGS_FILE"
     NOTIFY_CMD="MSG=\$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"\$MSG\""
     HOOKS_JSON=$(jq -n \
@@ -392,8 +392,8 @@ if [[ -n "${MITTENS_BROKER_PORT:-}" && -z "${MITTENS_NO_NOTIFY:-}" && "$AI_SETTI
         && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 fi
 
-# --- Start credential sync daemon (if broker port is available) ---
-if [[ -n "${MITTENS_BROKER_PORT:-}" ]]; then
+# --- Start credential sync daemon (if broker is available) ---
+if [[ -n "${MITTENS_BROKER_PORT:-}" || -n "${MITTENS_BROKER_SOCK:-}" ]]; then
     /usr/local/bin/cred-sync.sh &
 fi
 

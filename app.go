@@ -71,6 +71,7 @@ type App struct {
 	// Host broker (credentials, URLs, notifications, OAuth)
 	broker     *HostBroker
 	brokerPort int
+	brokerSock string // Unix socket path (Linux mode)
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -367,18 +368,42 @@ func (a *App) Run() error {
 			a.broker.LogFile = lf
 		}
 
-		port, err := a.broker.ListenTCP()
-		if err == nil {
-			a.brokerPort = port
-			go func() {
-				if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
-					logWarn("Broker: %v", err)
-				}
-			}()
-			logInfo("Broker: started on port %d", port)
+		if runtime.GOOS == "linux" {
+			// On Linux, use a Unix socket mounted into the container.
+			// This avoids host firewall issues (UFW/iptables with default INPUT DROP
+			// blocks traffic from the Docker bridge subnet to host ports).
+			sockDir, err := os.MkdirTemp("", "mittens-broker.*")
+			if err == nil {
+				a.tempDirs = append(a.tempDirs, sockDir)
+				sockPath := filepath.Join(sockDir, "broker.sock")
+				a.broker.sockPath = sockPath
+				go func() {
+					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
+						logWarn("Broker: %v", err)
+					}
+				}()
+				a.brokerSock = sockPath
+				logInfo("Broker: started on unix socket")
+			} else {
+				logWarn("Broker: failed to create socket dir: %v", err)
+				a.broker = nil
+			}
 		} else {
-			logWarn("Broker: failed to start: %v", err)
-			a.broker = nil
+			// On macOS/Windows, Docker Desktop provides transparent host→container
+			// networking via host.docker.internal, so TCP works reliably.
+			port, err := a.broker.ListenTCP()
+			if err == nil {
+				a.brokerPort = port
+				go func() {
+					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
+						logWarn("Broker: %v", err)
+					}
+				}()
+				logInfo("Broker: started on port %d", port)
+			} else {
+				logWarn("Broker: failed to start: %v", err)
+				a.broker = nil
+			}
 		}
 	}
 
@@ -617,8 +642,16 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", k+"="+v)
 	}
 
-	// Credential broker (TCP).
-	if a.brokerPort > 0 {
+	// Credential broker.
+	if a.brokerSock != "" {
+		// Unix socket mode (Linux): mount the socket directory into the container.
+		sockDir := filepath.Dir(a.brokerSock)
+		containerSockDir := "/tmp/mittens-broker"
+		containerSockPath := containerSockDir + "/broker.sock"
+		args = append(args, "-v", sockDir+":"+containerSockDir)
+		args = append(args, "-e", "MITTENS_BROKER_SOCK="+containerSockPath)
+	} else if a.brokerPort > 0 {
+		// TCP mode (macOS/Windows): use host.docker.internal.
 		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
 		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}

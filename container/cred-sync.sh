@@ -1,10 +1,11 @@
 #!/bin/bash
 # cred-sync.sh — Container-side credential sync daemon.
-# Communicates with the host-side credential broker over TCP.
+# Communicates with the host-side credential broker over TCP or Unix socket.
 # Pushes refreshed tokens up (on file change) and pulls newer tokens down.
 #
 # Environment:
-#   MITTENS_BROKER_PORT — TCP port of the host broker
+#   MITTENS_BROKER_PORT — TCP port of the host broker (macOS/Windows)
+#   MITTENS_BROKER_SOCK — Unix socket path (Linux)
 #
 # Dependencies: curl, jq, md5sum (all present in the base image).
 set -euo pipefail
@@ -15,15 +16,23 @@ AI_CONFIG_DIR="${MITTENS_AI_CONFIG_DIR:-.claude}"
 AI_CRED_FILE="${MITTENS_AI_CRED_FILE:-.credentials.json}"
 CRED_FILE="/home/${AI_USERNAME}/${AI_CONFIG_DIR}/${AI_CRED_FILE}"
 BROKER_PORT="${MITTENS_BROKER_PORT:-}"
+BROKER_SOCK="${MITTENS_BROKER_SOCK:-}"
 POLL_INTERVAL=5
 CURL_TIMEOUT=3
 REFRESH_THRESHOLD_MS=300000  # trigger proactive refresh when <5 min remain
 
-if [[ -z "$BROKER_PORT" ]]; then
+if [[ -z "$BROKER_PORT" && -z "$BROKER_SOCK" ]]; then
     exit 0
 fi
 
-BROKER_URL="http://host.docker.internal:$BROKER_PORT"
+# Build curl args for broker access (TCP vs Unix socket).
+if [[ -n "$BROKER_SOCK" ]]; then
+    BROKER_URL="http://broker"
+    CURL_BROKER=(curl --unix-socket "$BROKER_SOCK")
+else
+    BROKER_URL="http://host.docker.internal:$BROKER_PORT"
+    CURL_BROKER=(curl --noproxy '*')
+fi
 
 # Log file inside the container.
 LOGFILE="/tmp/cred-sync.log"
@@ -56,15 +65,15 @@ get_expires_at() {
 }
 
 broker_get() {
-    curl --silent --fail --max-time "$CURL_TIMEOUT" --noproxy '*' \
+    "${CURL_BROKER[@]}" --silent --fail --max-time "$CURL_TIMEOUT" \
         "$BROKER_URL/" 2>/dev/null || true
 }
 
 broker_put() {
     local data="$1"
     local http_code
-    http_code=$(echo "$data" | curl --silent --output /dev/null --write-out '%{http_code}' \
-        --max-time "$CURL_TIMEOUT" --noproxy '*' \
+    http_code=$(echo "$data" | "${CURL_BROKER[@]}" --silent --output /dev/null --write-out '%{http_code}' \
+        --max-time "$CURL_TIMEOUT" \
         -X PUT -H 'Content-Type: application/json' \
         --data-binary @- \
         "$BROKER_URL/" 2>/dev/null) || true
@@ -75,7 +84,7 @@ broker_put() {
 # Returns "refresh" (this container is the coordinator) or "wait" (another is).
 broker_refresh_request() {
     local result
-    result=$(curl --silent --max-time "$CURL_TIMEOUT" --noproxy '*' \
+    result=$("${CURL_BROKER[@]}" --silent --max-time "$CURL_TIMEOUT" \
         -X POST "$BROKER_URL/refresh" 2>/dev/null) || echo '{"action":"wait"}'
     echo "$result" | jq -r '.action // "wait"' 2>/dev/null || echo "wait"
 }
@@ -109,7 +118,7 @@ trigger_token_refresh() {
 clog "started (broker: $BROKER_URL)"
 
 # Connectivity check — log whether we can reach the broker at all.
-if curl --silent --max-time 2 --noproxy '*' -o /dev/null "$BROKER_URL/" 2>/dev/null; then
+if "${CURL_BROKER[@]}" --silent --max-time 2 -o /dev/null "$BROKER_URL/" 2>/dev/null; then
     clog "broker reachable"
 else
     clog "WARNING: broker NOT reachable at $BROKER_URL"

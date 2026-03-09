@@ -159,7 +159,6 @@ func parseFirewallDomains(content string) ([]string, error) {
 		}
 		domains = append(domains, line)
 	}
-	sort.Strings(domains)
 	return domains, scanner.Err()
 }
 
@@ -180,7 +179,9 @@ func mountFirewall(ctx *registry.SetupContext, confPath string) error {
 }
 
 // extractEmbedded writes the given content to a temp file with the given
-// name pattern and returns its path.
+// name pattern and returns its path. The file is made world-readable so
+// that the container root process can read it even when DAC_OVERRIDE is
+// dropped (--cap-drop ALL).
 func extractEmbedded(content []byte, pattern string) (string, error) {
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
@@ -192,6 +193,10 @@ func extractEmbedded(content []byte, pattern string) (string, error) {
 		return "", err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := os.Chmod(f.Name(), 0644); err != nil {
 		os.Remove(f.Name())
 		return "", err
 	}
