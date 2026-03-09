@@ -14,8 +14,13 @@ LDFLAGS  := -s -w \
 	-X '$(MODULE).commit=$(COMMIT)' \
 	-X '$(MODULE).date=$(DATE)'
 
-# Install destination (go install uses GOPATH/bin by default)
+# Install destination: ~/.local on Linux (no sudo), /usr/local on macOS
+UNAME_S  := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+PREFIX   ?= $(HOME)/.local
+else
 PREFIX   ?= /usr/local
+endif
 
 # Docker image
 IMAGE    := mittens

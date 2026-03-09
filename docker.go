@@ -28,7 +28,11 @@ type BuildContext struct {
 func BuildImage(ctx BuildContext) error {
 	args := []string{"build"}
 	if ctx.Verbose {
-		args = append(args, "--progress=plain")
+		// --progress=plain requires BuildKit. Check if buildx is available
+		// to avoid failing on the legacy builder.
+		if err := exec.Command("docker", "buildx", "version").Run(); err == nil {
+			args = append(args, "--progress=plain")
+		}
 	}
 
 	// Dockerfile path
