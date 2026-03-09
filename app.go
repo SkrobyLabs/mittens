@@ -1129,6 +1129,17 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if len(a.ExtraDirs) > 0 {
 		wtSuffix := fmt.Sprintf("wt-%d", os.Getpid())
 		var extraPaths []string
+
+		// Collect stat info for dedup (os.SameFile handles case-insensitive filesystems).
+		type mountedDir struct {
+			info os.FileInfo
+			path string
+		}
+		var mountedDirs []mountedDir
+		if wsInfo, err := os.Stat(a.WorkspaceMountSrc); err == nil {
+			mountedDirs = append(mountedDirs, mountedDir{info: wsInfo, path: a.WorkspaceMountSrc})
+		}
+
 		for _, dirSpec := range a.ExtraDirs {
 			spec := parseExtraDirSpec(dirSpec)
 			resolved, err := filepath.Abs(spec.Path)
@@ -1136,10 +1147,25 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 				logWarn("--dir path not resolvable: %s", spec.Path)
 				continue
 			}
-			if _, err := os.Stat(resolved); err != nil {
+			resolvedInfo, err := os.Stat(resolved)
+			if err != nil {
 				logError("--dir path does not exist: %s", spec.Path)
 				continue
 			}
+
+			// Deduplicate against workspace and previously added extra dirs.
+			duplicate := false
+			for _, m := range mountedDirs {
+				if os.SameFile(m.info, resolvedInfo) {
+					logVerbose(a.Verbose, "Skipping duplicate mount: %s (same as %s)", spec.Path, m.path)
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			mountedDirs = append(mountedDirs, mountedDir{info: resolvedInfo, path: resolved})
 
 			var extraPath string
 			mountMode := ""
