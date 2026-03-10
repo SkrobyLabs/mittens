@@ -184,8 +184,8 @@ func CodexProvider() *Provider {
 			"ab.chatgpt.com",
 		},
 
-		ConfigSubdirs: []string{},
-		ConfigFiles:   []string{"config.toml"},
+		ConfigSubdirs: []string{"skills", "hooks", "agents", "output-styles"},
+		ConfigFiles:   []string{"config.toml", "AGENTS.md"},
 
 		PluginDir:   "",
 		PluginFiles: []string{},
@@ -242,8 +242,8 @@ func GeminiProvider() *Provider {
 			"play.googleapis.com",
 		},
 
-		ConfigSubdirs: []string{},
-		ConfigFiles:   []string{"settings.json"},
+		ConfigSubdirs: []string{"skills", "hooks", "agents", "output-styles"},
+		ConfigFiles:   []string{"settings.json", "GEMINI.md"},
 
 		PluginDir:   "",
 		PluginFiles: []string{},

@@ -70,6 +70,7 @@ COPY extensions/ /tmp/ext-builds/
 ARG INSTALL_EXTENSIONS=""
 ARG DOTNET_CHANNEL="LTS"
 ARG GO_VERSION=""
+ARG PYTHON_VERSION=""
 RUN if [ -n "$INSTALL_EXTENSIONS" ]; then \
     IFS=','; for ext in $INSTALL_EXTENSIONS; do \
         script="/tmp/ext-builds/${ext}/build.sh"; \

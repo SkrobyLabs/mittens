@@ -25,8 +25,7 @@ apt-get install -y --no-install-recommends \
 # Find latest patch version for the requested minor version
 PATCH_URL="https://www.python.org/ftp/python/"
 LATEST_PATCH=$(curl -fsSL "${PATCH_URL}" \
-    | grep -oP "href=\"${PYTHON_VERSION}\.\d+/\"" \
-    | sed 's/href="//;s/\///' \
+    | grep -oP "href=\"\K${PYTHON_VERSION}\.\d+(?=/)" \
     | sort -t. -k3 -n \
     | tail -1)
 
@@ -70,11 +69,12 @@ EOF
 # Pre-create pip cache so Docker bind mounts don't create it as root
 mkdir -p /home/claude/.cache/pip
 
-# Clean up build artifacts and dependencies to keep image lean
+# Clean up build artifacts and -dev headers.
+# NOTE: Do NOT purge build-essential — the base Dockerfile installs it
+# intentionally. Only remove the -dev libraries we added above.
 cd /
 rm -rf /tmp/Python-* /tmp/*.tgz
 apt-get purge -y --auto-remove \
-    build-essential \
     libssl-dev \
     zlib1g-dev \
     libbz2-dev \

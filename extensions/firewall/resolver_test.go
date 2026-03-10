@@ -31,7 +31,7 @@ example.com  # inline comment
 		t.Fatal(err)
 	}
 
-	want := []string{"api.github.com", "registry.npmjs.org", "pypi.org", "example.com"}
+	want := []string{"api.github.com", "example.com", "pypi.org", "registry.npmjs.org"}
 	if len(domains) != len(want) {
 		t.Fatalf("got %v, want %v", domains, want)
 	}

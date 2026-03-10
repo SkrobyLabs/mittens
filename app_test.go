@@ -1024,7 +1024,7 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 		"MITTENS_AI_SETTINGS_FILE=config.toml",
 		"MITTENS_AI_PROJECT_FILE=AGENTS.md",
 		"MITTENS_AI_SETTINGS_FORMAT=toml",
-		"MITTENS_AI_CONFIG_SUBDIRS=",
+		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
 		"MITTENS_AI_PLUGIN_DIR=",
 		"MITTENS_AI_PLUGIN_FILES=",
 	}
@@ -1038,6 +1038,49 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 	if argPairContains(args, "-v", "StagingUserPrefsPath") {
 		t.Error("user prefs mount should not be present for Codex (empty UserPrefsFile)")
 	}
+}
+
+func TestAssembleDockerArgs_GeminiProvider(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("GEMINI_API_KEY", "sk-gemini-test")
+
+	p := GeminiProvider()
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-gemini",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Gemini-specific provider env vars.
+	geminiEnvVars := []string{
+		"MITTENS_AI_BINARY=gemini",
+		"MITTENS_AI_CONFIG_DIR=.gemini",
+		"MITTENS_AI_CRED_FILE=oauth_creds.json",
+		"MITTENS_AI_SETTINGS_FILE=settings.json",
+		"MITTENS_AI_PROJECT_FILE=GEMINI.md",
+		"MITTENS_AI_SETTINGS_FORMAT=json",
+		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
+		"MITTENS_AI_TRUSTED_DIRS_FILE=trustedFolders.json",
+	}
+	for _, env := range geminiEnvVars {
+		if !argPairExists(args, "-e", env) {
+			t.Errorf("missing env var %s", env)
+		}
+	}
+
+	// ContainerHostname for Gemini.
+	if !argPairExists(args, "--hostname", "gemini-cli") {
+		t.Error("missing --hostname gemini-cli for Gemini provider")
+	}
+
+	// PersistFiles mount/env check (logic exists in assembly but no direct env var for full list).
 }
 
 func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
