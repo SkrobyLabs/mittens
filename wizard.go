@@ -52,7 +52,7 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	editMode := false
-	var existDirs, existExts, existFirewall, existOpts []string
+	var existDirs, existProviders, existExts, existFirewall, existOpts []string
 
 	if len(existing) > 0 {
 		configPath := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
@@ -89,28 +89,35 @@ func runWizard(extensions []*registry.Extension) error {
 			return nil
 		case "edit":
 			editMode = true
-			existDirs, existExts, existFirewall, existOpts = parseExistingConfig(existing)
+			existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
 
 	var configLines []string
 
-	// ── Step 1: Extra directories ──────────────────────────────────────────
+	// ── Step 1: Provider ───────────────────────────────────────────────────
+	providerLines, err := wizardProvider(editMode, existProviders)
+	if err != nil {
+		return gracefulAbort(err)
+	}
+	configLines = append(configLines, providerLines...)
+
+	// ── Step 2: Extra directories ──────────────────────────────────────────
 	dirLines, err := wizardDirs(workspace, editMode, existDirs)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 	configLines = append(configLines, dirLines...)
 
-	// ── Step 2+3: Extensions ───────────────────────────────────────────────
+	// ── Step 3+4: Extensions ───────────────────────────────────────────────
 	extLines, err := wizardExtensions(extensions, editMode, existExts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 	configLines = append(configLines, extLines...)
 
-	// ── Step 3: Firewall ───────────────────────────────────────────────────
+	// ── Step 5: Firewall ───────────────────────────────────────────────────
 	fwLines, err := wizardFirewall(editMode, existFirewall)
 	if err != nil {
 		return gracefulAbort(err)
@@ -143,7 +150,7 @@ func runWizard(extensions []*registry.Extension) error {
 	fmt.Fprintln(os.Stderr)
 
 	// ── Offer to run now ───────────────────────────────────────────────────
-	var runNow bool
+	runNow := true
 	if err := huh.NewConfirm().
 		Title("Run mittens now?").
 		Value(&runNow).
@@ -164,11 +171,11 @@ func runWizard(extensions []*registry.Extension) error {
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: Directories
+// Step 2: Directories
 // ---------------------------------------------------------------------------
 
 func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Directories"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Directories"))
 	fmt.Fprintf(os.Stderr, "Primary workspace: %s\n", workspace)
 
 	// In edit mode, offer to keep existing directories.
@@ -255,11 +262,146 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 }
 
 // ---------------------------------------------------------------------------
-// Step 2+3: Extensions
+// Step 1: Provider
+// ---------------------------------------------------------------------------
+
+func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Provider"))
+
+	if editMode {
+		if len(existProviders) > 0 {
+			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
+			for _, p := range existProviders {
+				fmt.Fprintln(os.Stderr, "  "+p)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "  --provider claude (default)")
+		}
+		fmt.Fprintln(os.Stderr)
+
+		var action string
+		if err := huh.NewSelect[string]().
+			Title("Provider").
+			Options(
+				huh.NewOption("Keep", "keep"),
+				huh.NewOption("Change", "change"),
+			).
+			Value(&action).
+			Run(); err != nil {
+			return nil, err
+		}
+		if action == "keep" {
+			fmt.Fprintln(os.Stderr)
+			return existProviders, nil
+		}
+	}
+
+	selectedSet, defaultProvider := parseProviderLines(existProviders)
+	if defaultProvider == "" {
+		defaultProvider = "claude"
+	}
+
+	var selected []string
+	providerOptions := []struct {
+		name        string
+		label       string
+		description string
+	}{
+		{name: "claude", label: "Claude", description: "Anthropic Claude Code CLI"},
+		{name: "codex", label: "Codex", description: "OpenAI Codex CLI"},
+		{name: "gemini", label: "Gemini", description: "Google Gemini CLI"},
+	}
+	var opts []huh.Option[string]
+	for _, p := range providerOptions {
+		opts = append(opts, huh.NewOption(p.label+"  "+p.description, p.name).Selected(selectedSet[p.name]))
+	}
+
+	if err := huh.NewMultiSelect[string]().
+		Title("Select AI CLI providers to support").
+		Options(opts...).
+		Value(&selected).
+		Run(); err != nil {
+		return nil, err
+	}
+
+	if len(selected) == 0 {
+		selected = []string{"claude"}
+	}
+
+	defaultChoice := defaultProvider
+	containsDefault := false
+	for _, p := range selected {
+		if p == defaultChoice {
+			containsDefault = true
+			break
+		}
+	}
+	if !containsDefault {
+		defaultChoice = selected[0]
+	}
+
+	if len(selected) > 1 {
+		var defaultOpts []huh.Option[string]
+		for _, p := range selected {
+			label := p
+			switch p {
+			case "claude":
+				label = "Claude"
+			case "codex":
+				label = "Codex"
+			case "gemini":
+				label = "Gemini"
+			}
+			defaultOpts = append(defaultOpts, huh.NewOption(label, p))
+		}
+		if err := huh.NewSelect[string]().
+			Title("Pick default provider").
+			Options(defaultOpts...).
+			Value(&defaultChoice).
+			Run(); err != nil {
+			return nil, err
+		}
+	}
+
+	var lines []string
+	for _, p := range selected {
+		if p == defaultChoice {
+			continue
+		}
+		lines = append(lines, "--provider "+p)
+	}
+	lines = append(lines, "--provider "+defaultChoice)
+
+	fmt.Fprintln(os.Stderr)
+	return lines, nil
+}
+
+func parseProviderLines(lines []string) (selected map[string]bool, defaultProvider string) {
+	selected = make(map[string]bool)
+	defaultProvider = ""
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "--provider ") {
+			continue
+		}
+		p := strings.TrimSpace(strings.TrimPrefix(line, "--provider "))
+		if p == "" {
+			continue
+		}
+		switch p {
+		case "claude", "codex", "gemini":
+			selected[p] = true
+			defaultProvider = p
+		}
+	}
+	return selected, defaultProvider
+}
+
+// ---------------------------------------------------------------------------
+// Step 3+4: Extensions
 // ---------------------------------------------------------------------------
 
 func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Extensions"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 3: Extensions"))
 
 	// In edit mode, offer to keep existing extensions.
 	if editMode {
@@ -413,10 +555,12 @@ func extNeedsCfg(ext *registry.Extension) bool {
 // customConfigurers maps extension names to custom wizard configuration functions.
 // Extensions not in this map get auto-generated prompts from their flag metadata.
 var customConfigurers = map[string]func(*registry.Extension) ([]string, error){
-	"dotnet":  func(_ *registry.Extension) ([]string, error) { return configureDotnet() },
-	"aws":     func(_ *registry.Extension) ([]string, error) { return configureCloud("aws", "--aws", "--aws-all") },
-	"gcp":     func(_ *registry.Extension) ([]string, error) { return configureCloud("gcp", "--gcp", "--gcp-all") },
-	"azure":   func(_ *registry.Extension) ([]string, error) { return configureCloud("azure", "--azure", "--azure-all") },
+	"dotnet": func(_ *registry.Extension) ([]string, error) { return configureDotnet() },
+	"aws":    func(_ *registry.Extension) ([]string, error) { return configureCloud("aws", "--aws", "--aws-all") },
+	"gcp":    func(_ *registry.Extension) ([]string, error) { return configureCloud("gcp", "--gcp", "--gcp-all") },
+	"azure": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("azure", "--azure", "--azure-all")
+	},
 	"kubectl": func(_ *registry.Extension) ([]string, error) { return configureKubectl() },
 	"mcp":     func(_ *registry.Extension) ([]string, error) { return configureMCP() },
 }
@@ -546,7 +690,7 @@ func configureGo() ([]string, error) {
 func configureCloud(name, flag, allFlag string) ([]string, error) {
 	var action string
 	if err := huh.NewSelect[string]().
-		Title(strings.ToUpper(name) + " credentials").
+		Title(strings.ToUpper(name)+" credentials").
 		Options(
 			huh.NewOption("Select profiles", "select"),
 			huh.NewOption("All ("+allFlag+")", "all"),
@@ -872,12 +1016,14 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 // ---------------------------------------------------------------------------
 
 // parseExistingConfig categorises existing config lines into directories,
-// extensions, firewall, and options.
-func parseExistingConfig(lines []string) (dirs, exts, firewall, opts []string) {
+// providers, extensions, firewall, and options.
+func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts []string) {
 	for _, line := range lines {
 		switch {
 		case strings.HasPrefix(line, "--dir "):
 			dirs = append(dirs, line)
+		case strings.HasPrefix(line, "--provider "):
+			providers = append(providers, line)
 		case line == "--yolo" || line == "--network-host" || line == "--worktree":
 			opts = append(opts, line)
 		case line == "--firewall-dev" || line == "--no-firewall" || strings.HasPrefix(line, "--firewall "):

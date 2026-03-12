@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -71,26 +72,8 @@ func runMain(args []string) error {
 		}
 	}
 
-	// Pre-scan for --provider before constructing App (needs to be resolved early).
-	provider := DefaultProvider()
-	for i, a := range args {
-		if a == "--provider" && i+1 < len(args) {
-			switch args[i+1] {
-			case "claude":
-				provider = ClaudeProvider()
-			case "codex":
-				provider = CodexProvider()
-			case "gemini":
-				provider = GeminiProvider()
-			default:
-				return fmt.Errorf("unknown provider %q (available: claude, codex, gemini)", args[i+1])
-			}
-			break
-		}
-	}
-
 	app := &App{
-		Provider:        provider,
+		Provider:        DefaultProvider(),
 		ImageName:       "mittens",
 		ImageTag:        "latest",
 		worktreeOrigins: make(map[string]string),
@@ -145,15 +128,54 @@ func runMain(args []string) error {
 	// 5. Merge: config flags first, then CLI flags (last-wins semantics).
 	merged := append(configArgs, args...)
 
-	// 6. Parse all flags from the merged list.
+	// 6. Resolve provider from merged flags (project config first, then CLI).
+	provider, err := resolveProviderFromArgs(merged)
+	if err != nil {
+		return err
+	}
+	app.Provider = provider
+
+	// 7. Parse all flags from the merged list.
 	if err := app.ParseFlags(merged); err != nil {
 		return err
 	}
 
 	app.NoConfig = noConfig
 
-	// 7. Run.
+	// 8. Run.
 	return app.Run()
+}
+
+func resolveProviderFromArgs(args []string) (*Provider, error) {
+	provider := DefaultProvider()
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--provider" {
+			continue
+		}
+		if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+			return nil, fmt.Errorf("--provider requires an argument")
+		}
+		p, err := providerByName(args[i+1])
+		if err != nil {
+			return nil, err
+		}
+		provider = p
+		i++
+	}
+	return provider, nil
+}
+
+func providerByName(name string) (*Provider, error) {
+	switch name {
+	case "claude":
+		return ClaudeProvider(), nil
+	case "codex":
+		return CodexProvider(), nil
+	case "gemini":
+		return GeminiProvider(), nil
+	default:
+		return nil, fmt.Errorf("unknown provider %q (available: claude, codex, gemini)", name)
+	}
 }
 
 // runLogs shows or follows the broker log file.
