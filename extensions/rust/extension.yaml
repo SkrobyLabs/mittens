@@ -1,0 +1,33 @@
+# rust extension for mittens
+# Installs the Rust toolchain (rustup + cargo) into the Docker image at build time.
+# Optionally pins a toolchain channel (stable, nightly, or a specific version like 1.85);
+# defaults to stable.
+
+name: rust
+description: Install Rust toolchain (rustup + cargo) into the container image
+
+flags:
+  - name: "--rust"
+    description: "Install Rust toolchain (CHANNEL: stable, nightly, or version e.g. 1.85; default: stable)"
+    arg: "enum"
+    enum_values: ["stable", "nightly", "1.83", "1.84", "1.85"]
+
+firewall:
+  - "static.rust-lang.org"
+  - "crates.io"
+  - "index.crates.io"
+  - "static.crates.io"
+
+mounts:
+  - src: "~/.cargo/registry"
+    dst: "/home/claude/.cargo/host-registry"
+    mode: "ro"
+    when: "dir_exists"
+    env:
+      CARGO_REGISTRIES_CRATES_IO_LOCAL_MIRROR: "/home/claude/.cargo/host-registry"
+
+build:
+  script: "rust.sh"
+  image_tag: "rust{{.Arg}}"
+  args:
+    RUST_TOOLCHAIN: "{{if .Arg}}{{.Arg}}{{else}}stable{{end}}"
