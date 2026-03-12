@@ -249,6 +249,38 @@ func TestDockerRun_ConfigCopy(t *testing.T) {
 	}
 }
 
+func TestDockerRun_ConfigSubdirCopyDoesNotNest(t *testing.T) {
+	tmp := t.TempDir()
+
+	codexDir := filepath.Join(tmp, ".codex")
+	skillsDir := filepath.Join(codexDir, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte("test skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runArgs := []string{
+		"-v", codexDir + ":/mnt/claude-config/.codex:ro",
+		"-e", "MITTENS_AI_CONFIG_DIR=.codex",
+	}
+
+	out := dockerRun(t, testImage, runArgs, "bash", "-c", `
+set -e
+test -f ~/.codex/skills/SKILL.md
+if [[ -e ~/.codex/skills/skills ]]; then
+    echo "NESTED=bug"
+else
+    echo "NESTED=ok"
+fi
+`)
+
+	if !strings.Contains(out, "NESTED=ok") {
+		t.Fatalf("config subdir copy should not create nested skills dir: %s", out)
+	}
+}
+
 func TestDockerRun_FirewallWhitelist(t *testing.T) {
 	tmp := t.TempDir()
 
