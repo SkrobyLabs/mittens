@@ -207,15 +207,20 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		}
 	}
 
-	// Build a set of existing dir paths for pre-selection in edit mode.
+	// Build a map of existing dir paths for pre-selection in edit mode.
 	existPathSet := make(map[string]bool, len(existDirs))
 	if editMode {
 		for _, d := range existDirs {
-			existPathSet[strings.TrimPrefix(d, "--dir ")] = true
+			switch {
+			case strings.HasPrefix(d, "--dir-ro "):
+				existPathSet[strings.TrimPrefix(d, "--dir-ro ")] = true
+			case strings.HasPrefix(d, "--dir "):
+				existPathSet[strings.TrimPrefix(d, "--dir ")] = false
+			}
 		}
 	}
 
-	var selectedDirs []string
+	var selectedDirs []dirMountSelection
 
 	// Interactive directory browser starting at the workspace's parent.
 	parentDir := filepath.Dir(workspace)
@@ -249,12 +254,24 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 			fmt.Fprintf(os.Stderr, "  Directory not found: %s\n", abs)
 			continue
 		}
-		selectedDirs = append(selectedDirs, abs)
+
+		readOnly := false
+		if err := huh.NewConfirm().
+			Title("Mount custom directory as read-only? (--dir-ro)").
+			Value(&readOnly).
+			Run(); err != nil {
+			return nil, err
+		}
+		selectedDirs = append(selectedDirs, dirMountSelection{Path: abs, ReadOnly: readOnly})
 	}
 
 	var lines []string
 	for _, d := range selectedDirs {
-		lines = append(lines, "--dir "+d)
+		if d.ReadOnly {
+			lines = append(lines, "--dir-ro "+d.Path)
+		} else {
+			lines = append(lines, "--dir "+d.Path)
+		}
 	}
 
 	fmt.Fprintln(os.Stderr)
@@ -1020,7 +1037,7 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts []string) {
 	for _, line := range lines {
 		switch {
-		case strings.HasPrefix(line, "--dir "):
+		case strings.HasPrefix(line, "--dir ") || strings.HasPrefix(line, "--dir-ro "):
 			dirs = append(dirs, line)
 		case strings.HasPrefix(line, "--provider "):
 			providers = append(providers, line)

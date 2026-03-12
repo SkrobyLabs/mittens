@@ -5,6 +5,7 @@ import "testing"
 func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 	dirs, providers, exts, firewall, opts := parseExistingConfig([]string{
 		"--dir /tmp/a",
+		"--dir-ro /tmp/b",
 		"--provider codex",
 		"--provider claude",
 		"--aws dev",
@@ -12,7 +13,7 @@ func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 		"--yolo",
 	})
 
-	if len(dirs) != 1 || dirs[0] != "--dir /tmp/a" {
+	if len(dirs) != 2 || dirs[0] != "--dir /tmp/a" || dirs[1] != "--dir-ro /tmp/b" {
 		t.Fatalf("unexpected dirs: %v", dirs)
 	}
 	if len(providers) != 2 || providers[0] != "--provider codex" || providers[1] != "--provider claude" {

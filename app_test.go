@@ -89,7 +89,6 @@ func TestParseFlags_DefaultNoResume(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // ParseFlags — --dir with argument
 // ---------------------------------------------------------------------------
@@ -101,6 +100,16 @@ func TestParseFlags_Dir(t *testing.T) {
 	}
 	if len(a.ExtraDirs) != 1 || a.ExtraDirs[0] != "/extra/path" {
 		t.Errorf("ExtraDirs = %v, want [/extra/path]", a.ExtraDirs)
+	}
+}
+
+func TestParseFlags_DirReadOnly(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--dir-ro", "/readonly/path"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.ExtraDirs) != 1 || a.ExtraDirs[0] != "ro:/readonly/path" {
+		t.Errorf("ExtraDirs = %v, want [ro:/readonly/path]", a.ExtraDirs)
 	}
 }
 
@@ -117,6 +126,14 @@ func TestParseFlags_DirMissingArgNextIsFlag(t *testing.T) {
 	err := a.ParseFlags([]string{"--dir", "--verbose"})
 	if err == nil {
 		t.Error("expected error for --dir followed by another flag")
+	}
+}
+
+func TestParseFlags_DirReadOnlyMissingArg(t *testing.T) {
+	a := &App{}
+	err := a.ParseFlags([]string{"--dir-ro"})
+	if err == nil {
+		t.Error("expected error for --dir-ro without argument")
 	}
 }
 
@@ -725,7 +742,7 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 		NoHistory:         true,
 		ContainerName:     "mittens-extra",
 		WorkspaceMountSrc: "/tmp/ws",
-		ExtraDirs:         []string{dir1, dir2},
+		ExtraDirs:         []string{dir1, "ro:" + dir2},
 		Credentials:       &CredentialManager{},
 	}
 
@@ -735,8 +752,8 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 	if !argPairExists(args, "-v", dir1+":"+dir1) {
 		t.Errorf("missing mount for extra dir %s", dir1)
 	}
-	if !argPairExists(args, "-v", dir2+":"+dir2) {
-		t.Errorf("missing mount for extra dir %s", dir2)
+	if !argPairExists(args, "-v", dir2+":"+dir2+":ro") {
+		t.Errorf("missing read-only mount for extra dir %s", dir2)
 	}
 
 	// MITTENS_EXTRA_DIRS env var with colon-separated paths.
@@ -767,6 +784,18 @@ func TestParseFlags_Name(t *testing.T) {
 	}
 	if a.InstanceName != "my-instance" {
 		t.Errorf("InstanceName = %q, want %q", a.InstanceName, "my-instance")
+	}
+}
+
+func TestParseExtraDirSpec(t *testing.T) {
+	got := parseExtraDirSpec("ro:/tmp/a")
+	if got.Path != "/tmp/a" || !got.ReadOnly {
+		t.Fatalf("parseExtraDirSpec(ro:/tmp/a) = %+v", got)
+	}
+
+	got = parseExtraDirSpec("/tmp/b")
+	if got.Path != "/tmp/b" || got.ReadOnly {
+		t.Fatalf("parseExtraDirSpec(/tmp/b) = %+v", got)
 	}
 }
 

@@ -34,6 +34,11 @@ type dirEntry struct {
 	isGit bool   // has .git subdirectory
 }
 
+type dirMountSelection struct {
+	Path     string
+	ReadOnly bool
+}
+
 // ---------------------------------------------------------------------------
 // Bubbletea model
 // ---------------------------------------------------------------------------
@@ -42,7 +47,7 @@ type dirPickerModel struct {
 	currentDir string
 	entries    []dirEntry
 	cursor     int
-	selected   map[string]bool
+	selected   map[string]dirMountSelection
 	done       bool
 	cancelled  bool
 	height     int // visible entry rows (terminal height - 7)
@@ -53,9 +58,9 @@ type dirPickerModel struct {
 }
 
 func newDirPickerModel(startDir string, preSelected map[string]bool) dirPickerModel {
-	sel := make(map[string]bool, len(preSelected))
-	for k, v := range preSelected {
-		sel[k] = v
+	sel := make(map[string]dirMountSelection, len(preSelected))
+	for path, readOnly := range preSelected {
+		sel[path] = dirMountSelection{Path: path, ReadOnly: readOnly}
 	}
 	m := dirPickerModel{
 		currentDir: startDir,
@@ -176,10 +181,22 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case " ", "x":
 			if len(m.entries) > 0 {
 				p := m.entries[m.cursor].path
-				if m.selected[p] {
+				if _, ok := m.selected[p]; ok {
 					delete(m.selected, p)
 				} else {
-					m.selected[p] = true
+					m.selected[p] = dirMountSelection{Path: p}
+				}
+			}
+
+		case "r":
+			if len(m.entries) > 0 {
+				p := m.entries[m.cursor].path
+				cur, ok := m.selected[p]
+				if !ok {
+					m.selected[p] = dirMountSelection{Path: p, ReadOnly: true}
+				} else {
+					cur.ReadOnly = !cur.ReadOnly
+					m.selected[p] = cur
 				}
 			}
 		}
@@ -207,8 +224,12 @@ func (m dirPickerModel) View() string {
 
 			// Checkbox
 			check := "[ ]"
-			if m.selected[e.path] {
-				check = dpStyleSelected.Render("[x]")
+			if sel, ok := m.selected[e.path]; ok {
+				if sel.ReadOnly {
+					check = dpStyleSelected.Render("[r]")
+				} else {
+					check = dpStyleSelected.Render("[x]")
+				}
 			}
 
 			// Name with trailing slash
@@ -239,13 +260,19 @@ func (m dirPickerModel) View() string {
 
 	// Selected count
 	if len(m.selected) > 0 {
-		b.WriteString(dpStyleSelected.Render(fmt.Sprintf("\n  %d selected", len(m.selected))))
+		roCount := 0
+		for _, sel := range m.selected {
+			if sel.ReadOnly {
+				roCount++
+			}
+		}
+		b.WriteString(dpStyleSelected.Render(fmt.Sprintf("\n  %d selected (%d read-only)", len(m.selected), roCount)))
 		b.WriteString("\n")
 	}
 
 	// Footer
 	b.WriteString("\n")
-	b.WriteString(dpStyleHelp.Render("  ←/→ navigate  space select  d done  esc cancel"))
+	b.WriteString(dpStyleHelp.Render("  ←/→ navigate  space toggle rw  r toggle read-only  d done  esc cancel"))
 
 	// Place content in a fixed-size box to overwrite stale lines on navigation.
 	if m.termWidth > 0 && m.termHeight > 0 {
@@ -260,8 +287,9 @@ func (m dirPickerModel) View() string {
 
 // runDirPicker launches the interactive directory browser starting at startDir.
 // preSelected contains absolute paths that should be pre-checked.
-// Returns the list of selected paths, or nil if cancelled.
-func runDirPicker(startDir string, preSelected map[string]bool) ([]string, error) {
+// PreSelected value indicates read-only mode.
+// Returns selected paths with read-only mode, or nil if cancelled.
+func runDirPicker(startDir string, preSelected map[string]bool) ([]dirMountSelection, error) {
 	model := newDirPickerModel(startDir, preSelected)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	result, err := p.Run()
@@ -275,9 +303,14 @@ func runDirPicker(startDir string, preSelected map[string]bool) ([]string, error
 	}
 
 	var paths []string
-	for p := range m.selected {
-		paths = append(paths, p)
+	for path := range m.selected {
+		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	return paths, nil
+
+	out := make([]dirMountSelection, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, m.selected[path])
+	}
+	return out, nil
 }

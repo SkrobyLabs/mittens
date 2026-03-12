@@ -23,19 +23,19 @@ type App struct {
 	Provider *Provider
 
 	// Core flags
-	Verbose      bool
-	NoConfig     bool
-	NoHistory    bool
-	NoBuild      bool
-	Yolo         bool
-	NoNotify     bool
-	NetworkHost  bool
-	Worktree     bool
-	Shell        bool
+	Verbose       bool
+	NoConfig      bool
+	NoHistory     bool
+	NoBuild       bool
+	Yolo          bool
+	NoNotify      bool
+	NetworkHost   bool
+	Worktree      bool
+	Shell         bool
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
-	ExtraDirs    []string
-	InstanceName string // user-provided name via --name
-	ClaudeArgs   []string
+	ExtraDirs     []string
+	InstanceName  string // user-provided name via --name
+	ClaudeArgs    []string
 
 	// Computed state
 	Workspace          string // git root or cwd
@@ -92,9 +92,10 @@ var coreFlags = map[string]func(*App){
 
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
-	"--dir":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
-	"--name":         func(a *App, val string) { a.InstanceName = val },
-	"--provider":     func(a *App, val string) {}, // already applied in main.go pre-scan
+	"--dir":      func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--dir-ro":   func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
+	"--name":     func(a *App, val string) { a.InstanceName = val },
+	"--provider": func(a *App, val string) {}, // already applied in main.go pre-scan
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -542,7 +543,7 @@ func (a *App) buildImage() error {
 		Extensions: enabledExts,
 		ExtraBuildArgs: map[string]string{
 			"AI_USERNAME":    a.Provider.Username,
-			"AI_BINARY":     a.Provider.Binary,
+			"AI_BINARY":      a.Provider.Binary,
 			"AI_INSTALL_CMD": a.Provider.InstallCmd,
 			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
 		},
@@ -649,18 +650,23 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if len(a.ExtraDirs) > 0 {
 		wtSuffix := fmt.Sprintf("wt-%d", os.Getpid())
 		var extraPaths []string
-		for _, dir := range a.ExtraDirs {
-			resolved, err := filepath.Abs(dir)
+		for _, dirSpec := range a.ExtraDirs {
+			spec := parseExtraDirSpec(dirSpec)
+			resolved, err := filepath.Abs(spec.Path)
 			if err != nil {
-				logWarn("--dir path not resolvable: %s", dir)
+				logWarn("--dir path not resolvable: %s", spec.Path)
 				continue
 			}
 			if _, err := os.Stat(resolved); err != nil {
-				logError("--dir path does not exist: %s", dir)
+				logError("--dir path does not exist: %s", spec.Path)
 				continue
 			}
 
 			var extraPath string
+			mountMode := ""
+			if spec.ReadOnly {
+				mountMode = ":ro"
+			}
 			if a.Worktree {
 				gitRoot, err := captureCommand("git", "-C", resolved, "rev-parse", "--show-toplevel")
 				if err == nil && gitRoot != "" {
@@ -673,23 +679,27 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 						} else {
 							extraPath = wtPath
 						}
-						args = append(args, "-v", wtPath+":"+wtPath)
+						args = append(args, "-v", wtPath+":"+wtPath+mountMode)
 						logInfo("Extra directory worktree: %s", wtPath)
 					} else {
 						logWarn("Failed to create worktree for %s, mounting shared", gitRoot)
 						extraPath = resolved
-						args = append(args, "-v", resolved+":"+resolved)
+						args = append(args, "-v", resolved+":"+resolved+mountMode)
 					}
 				} else {
 					extraPath = resolved
-					args = append(args, "-v", resolved+":"+resolved)
+					args = append(args, "-v", resolved+":"+resolved+mountMode)
 				}
 			} else {
 				extraPath = resolved
-				args = append(args, "-v", resolved+":"+resolved)
+				args = append(args, "-v", resolved+":"+resolved+mountMode)
 			}
 			extraPaths = append(extraPaths, extraPath)
-			logInfo("Extra directory: %s", extraPath)
+			if spec.ReadOnly {
+				logInfo("Extra directory (read-only): %s", extraPath)
+			} else {
+				logInfo("Extra directory: %s", extraPath)
+			}
 		}
 		if len(extraPaths) > 0 {
 			args = append(args, "-e", "MITTENS_EXTRA_DIRS="+strings.Join(extraPaths, ":"))
@@ -868,8 +878,9 @@ func (a *App) newStdinProxy() (stdin *os.File, cleanup func()) {
 	}
 
 	// Extra directory mappings (mounted at their own absolute path).
-	for _, dir := range a.ExtraDirs {
-		resolved, err := filepath.Abs(dir)
+	for _, dirSpec := range a.ExtraDirs {
+		spec := parseExtraDirSpec(dirSpec)
+		resolved, err := filepath.Abs(spec.Path)
 		if err != nil {
 			continue
 		}
@@ -1012,6 +1023,21 @@ func ensureDir(path string) {
 	_ = os.MkdirAll(path, 0o755)
 }
 
+type extraDirSpec struct {
+	Path     string
+	ReadOnly bool
+}
+
+func parseExtraDirSpec(s string) extraDirSpec {
+	if strings.HasPrefix(s, "ro:") {
+		return extraDirSpec{
+			Path:     strings.TrimPrefix(s, "ro:"),
+			ReadOnly: true,
+		}
+	}
+	return extraDirSpec{Path: s}
+}
+
 // ---------------------------------------------------------------------------
 // Help text
 // ---------------------------------------------------------------------------
@@ -1041,6 +1067,7 @@ Core flags:
   --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
+  --dir-ro PATH     Mount an additional directory as read-only (repeatable)
   --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
@@ -1113,6 +1140,8 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
+			{Name: "--dir", Description: "Mount an additional directory (repeatable)", ArgType: "path"},
+			{Name: "--dir-ro", Description: "Mount an additional directory read-only (repeatable)", ArgType: "path"},
 			{Name: "--provider", Description: "AI provider (claude, codex, gemini)", ArgType: "string"},
 		},
 	}
