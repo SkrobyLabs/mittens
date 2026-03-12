@@ -446,6 +446,33 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 	}
 }
 
+func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	p := CodexProvider()
+	os.MkdirAll(p.HostConfigDir(home), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         false,
+		ContainerName:     "mittens-codex-session",
+		WorkspaceMountSrc: "/tmp/ws",
+		Workspace:         "/Users/test/project",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.ContainerConfigDir()) {
+		t.Fatalf("missing whole-config history mount for codex")
+	}
+	if argPairContains(args, "-v", "/projects/") {
+		t.Fatalf("did not expect project-only history mount for codex")
+	}
+}
+
 func TestAssembleDockerArgs_DinD(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

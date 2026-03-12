@@ -199,8 +199,12 @@ func (a *App) Run() error {
 
 	// Session persistence setup.
 	if !a.NoHistory {
-		a.HostProjectDir = ProjectDir(a.Workspace)
-		ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
+		if a.Provider.HistoryMountsWholeConfig {
+			ensureDir(a.Provider.HostConfigDir(home))
+		} else {
+			a.HostProjectDir = ProjectDir(a.Workspace)
+			ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
+		}
 	}
 
 	// Worktree setup for primary workspace.
@@ -625,7 +629,12 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Session persistence mounts.
-	if !a.NoHistory && a.HostProjectDir != "" {
+	if !a.NoHistory && a.Provider.HistoryMountsWholeConfig {
+		hostConfigDir := a.Provider.HostConfigDir(home)
+		containerConfigDir := a.Provider.ContainerConfigDir()
+		ensureDir(hostConfigDir)
+		args = append(args, "-v", hostConfigDir+":"+containerConfigDir)
+	} else if !a.NoHistory && a.HostProjectDir != "" {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		projDir := filepath.Join(hostConfigDir, "projects", a.HostProjectDir)

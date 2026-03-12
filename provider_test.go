@@ -8,10 +8,11 @@ import (
 func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 	// Fields that are intentionally empty for ClaudeProvider (used by other providers).
 	optionalFields := map[string]bool{
-		"TrustedDirsFile":   true, // Gemini-only: separate trusted dirs file
-		"ContainerHostname": true, // Gemini-only: fixed Docker hostname
-		"InitSettingsJQ":    true, // Gemini-only: post-init settings patch
-		"PersistFiles":      true, // Gemini-only: state files to survive between runs
+		"TrustedDirsFile":          true, // Gemini-only: separate trusted dirs file
+		"ContainerHostname":        true, // Gemini-only: fixed Docker hostname
+		"InitSettingsJQ":           true, // Gemini-only: post-init settings patch
+		"PersistFiles":             true, // Gemini-only: state files to survive between runs
+		"HistoryMountsWholeConfig": true, // Codex-only: mount whole config dir for history
 	}
 	p := ClaudeProvider()
 	v := reflect.ValueOf(*p)
@@ -145,7 +146,7 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 		"Username":       p.Username,
 		"InstallCmd":     p.InstallCmd,
 		"APIKeyEnv":      p.APIKeyEnv,
-		"SettingsFormat":  p.SettingsFormat,
+		"SettingsFormat": p.SettingsFormat,
 		"ConfigDir":      p.ConfigDir,
 		"CredentialFile": p.CredentialFile,
 		"SettingsFile":   p.SettingsFile,

@@ -6,12 +6,12 @@ import "path/filepath"
 // layout, settings keys, and install command. Swapping the Provider lets
 // mittens drive a different AI CLI without touching orchestration code.
 type Provider struct {
-	Name         string // short machine name, e.g. "claude"
-	DisplayName  string // human-facing name, e.g. "Claude"
-	Binary       string // CLI binary name, e.g. "claude"
-	Username     string // container username, e.g. "claude"
-	InstallCmd   string // shell command to install the CLI in the image
-	APIKeyEnv    string // env var name for the API key, e.g. "ANTHROPIC_API_KEY"
+	Name           string // short machine name, e.g. "claude"
+	DisplayName    string // human-facing name, e.g. "Claude"
+	Binary         string // CLI binary name, e.g. "claude"
+	Username       string // container username, e.g. "claude"
+	InstallCmd     string // shell command to install the CLI in the image
+	APIKeyEnv      string // env var name for the API key, e.g. "ANTHROPIC_API_KEY"
 	SettingsFormat string // config file format: "json" or "toml"
 
 	// Config layout
@@ -45,10 +45,11 @@ type Provider struct {
 	PersistFiles []string
 
 	// CLI flags
-	ResumeFlags     []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
-	SkipPermsFlag   string   // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
-	ContinueArgs    []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
-	TrustedDirsFile string   // separate JSON array file for trusted dirs (Gemini); empty = unused
+	ResumeFlags              []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
+	SkipPermsFlag            string   // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
+	ContinueArgs             []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
+	TrustedDirsFile          string   // separate JSON array file for trusted dirs (Gemini); empty = unused
+	HistoryMountsWholeConfig bool     // mount the provider config dir directly when history is enabled
 
 	// Container settings
 	ContainerHostname string            // fixed Docker hostname; empty = Docker default. Required when credential file encryption is hostname-dependent (e.g. Gemini).
@@ -116,10 +117,10 @@ func (p *Provider) IsResumeFlag(arg string) bool {
 // current hardcoded values. This is the only provider implemented today.
 func ClaudeProvider() *Provider {
 	return &Provider{
-		Name:        "claude",
-		DisplayName: "Claude",
-		Binary:      "claude",
-		Username:    "claude",
+		Name:           "claude",
+		DisplayName:    "Claude",
+		Binary:         "claude",
+		Username:       "claude",
 		InstallCmd:     `curl -fsSL https://claude.ai/install.sh | bash && cp -L /root/.local/bin/claude /usr/local/bin/claude && chmod +x /usr/local/bin/claude && /usr/local/bin/claude --version`,
 		APIKeyEnv:      "ANTHROPIC_API_KEY",
 		SettingsFormat: "json",
@@ -194,20 +195,21 @@ func CodexProvider() *Provider {
 		YoloKey:        "",
 		MCPServersKey:  "",
 
-		ResumeFlags:     []string{"--resume", "-r", "--continue", "-l"},
-		SkipPermsFlag:   "--dangerously-bypass-approvals-and-sandbox",
-		ContinueArgs:    []string{"--resume", "latest"},
-		TrustedDirsFile: "",
+		ResumeFlags:              []string{"--resume", "-r", "--continue", "-l"},
+		SkipPermsFlag:            "--dangerously-bypass-approvals-and-sandbox",
+		ContinueArgs:             []string{"--resume", "latest"},
+		TrustedDirsFile:          "",
+		HistoryMountsWholeConfig: true,
 	}
 }
 
 // GeminiProvider returns a Provider configured for Google Gemini CLI.
 func GeminiProvider() *Provider {
 	return &Provider{
-		Name:           "gemini",
-		DisplayName:    "Gemini",
-		Binary:         "gemini",
-		Username:       "gemini",
+		Name:        "gemini",
+		DisplayName: "Gemini",
+		Binary:      "gemini",
+		Username:    "gemini",
 		// After installing, strip the execute bit from open's bundled xdg-open so
 		// it falls back to the system xdg-open (our broker shim at /usr/local/bin/xdg-open).
 		// Without this, the 'open' npm package bypasses our shim and tries to use
