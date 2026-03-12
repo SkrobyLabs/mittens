@@ -113,6 +113,8 @@ Enabled by default (`--no-history` to disable). Conversation history is persiste
 
 On macOS, a host-side script polls the clipboard for images every second and writes PNGs to a temp directory mounted into the container. An `xclip` shim inside the container reads these images, allowing Claude Code to access clipboard images.
 
+For `--provider codex` on macOS, mittens also starts a local `Xvfb` display inside the container and mirrors the synced PNG into the X11 clipboard using a real `xclip` process. This gives Codex's Linux clipboard backend an in-container display/clipboard to read from, so image paste works without modifying Codex itself.
+
 ### Notifications
 
 When the AI CLI triggers a hook event (e.g. task completion, permission prompt), the container sends a notification to the broker via `POST /notify`. The host displays a desktop notification and re-focuses the terminal window that launched mittens.

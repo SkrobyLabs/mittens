@@ -30,6 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     # gosu for privilege de-escalation in entrypoint
     gosu \
+    # X11 clipboard bridge for Codex image paste
+    xclip \
+    xvfb \
     # Network firewall (--firewall mode)
     iptables \
     squid \
@@ -119,6 +122,11 @@ RUN mkdir -p /run/squid && chown proxy:proxy /run/squid
 
 COPY container/clipboard-shim.sh /usr/local/bin/xclip
 RUN chmod +x /usr/local/bin/xclip
+
+RUN cp /usr/bin/xclip /usr/local/bin/xclip-real && chmod +x /usr/local/bin/xclip-real
+
+COPY container/clipboard-x11-sync.sh /usr/local/bin/clipboard-x11-sync.sh
+RUN chmod +x /usr/local/bin/clipboard-x11-sync.sh
 
 COPY container/open-url.sh /usr/local/bin/xdg-open
 RUN chmod +x /usr/local/bin/xdg-open

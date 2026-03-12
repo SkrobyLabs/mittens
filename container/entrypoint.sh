@@ -235,6 +235,14 @@ if command -v "$AI_BINARY" &>/dev/null && [[ ! -e "$AI_HOME/.local/bin/$AI_BINAR
 fi
 export PATH="$AI_HOME/.local/bin:$PATH"
 
+# --- Local X11 clipboard bridge for Codex image paste on macOS hosts ---
+if [[ "${MITTENS_ENABLE_X11_CLIPBOARD:-false}" == "true" ]]; then
+    export DISPLAY="${DISPLAY:-:99}"
+    X11_CLIPBOARD_IMAGE="${MITTENS_X11_CLIPBOARD_IMAGE:-/tmp/mittens-clipboard/clipboard.png}"
+    Xvfb "$DISPLAY" -screen 0 1024x768x24 -nolisten tcp >/tmp/mittens-xvfb.log 2>&1 &
+    /usr/local/bin/clipboard-x11-sync.sh "$X11_CLIPBOARD_IMAGE" >/tmp/mittens-x11-clipboard.log 2>&1 &
+fi
+
 # --- Copy read-only config into writable home ---
 STAGING_CONFIG="${CONFIG_MOUNT}/${AI_CONFIG_DIR}"
 if [[ -d "$STAGING_CONFIG" ]]; then

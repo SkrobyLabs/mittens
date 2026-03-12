@@ -798,6 +798,14 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 				a.clipboardPID = cmd.Process.Pid
 				args = append(args, "-v", dir+":/tmp/mittens-clipboard:ro")
 				logInfo("Clipboard image sync: enabled")
+				if a.Provider != nil && a.Provider.Name == "codex" {
+					args = append(args,
+						"-e", "MITTENS_ENABLE_X11_CLIPBOARD=true",
+						"-e", "MITTENS_X11_CLIPBOARD_IMAGE=/tmp/mittens-clipboard/clipboard.png",
+						"-e", "DISPLAY=:99",
+					)
+					logInfo("Codex X11 clipboard bridge: enabled")
+				}
 			}
 		}
 	}
