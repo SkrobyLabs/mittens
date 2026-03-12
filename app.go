@@ -10,8 +10,10 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	"github.com/Skroby/mittens/extensions/registry"
@@ -57,10 +59,8 @@ type App struct {
 	worktreeDirs    []string
 	worktreeOrigins map[string]string // worktree path -> original HEAD sha
 	worktreeRepos   map[string]string // worktree path -> original repo root
-
-	// Clipboard sync
-	clipboardDir string
-	clipboardPID int
+	clipboardDir    string
+	clipboardReg    string
 
 	// Drop zone for drag-and-drop file translation
 	dropDir string
@@ -451,15 +451,11 @@ func (a *App) maybeApplyResumeArgs() {
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
 func (a *App) Cleanup() {
-	// Stop clipboard sync.
-	if a.clipboardPID > 0 {
-		if p, err := os.FindProcess(a.clipboardPID); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-			_, _ = p.Wait()
-		}
+	if a.clipboardReg != "" {
+		_ = os.Remove(a.clipboardReg)
 	}
 	if a.clipboardDir != "" {
-		os.RemoveAll(a.clipboardDir)
+		_ = os.RemoveAll(a.clipboardDir)
 	}
 
 	// Extract refreshed credentials from the stopped container.
@@ -525,6 +521,246 @@ func (a *App) Cleanup() {
 	for _, d := range a.tempDirs {
 		os.RemoveAll(d)
 	}
+}
+
+func sharedClipboardDir() string {
+	return filepath.Join(os.TempDir(), "mittens-clipboard-shared")
+}
+
+func sharedClipboardPIDFile(dir string) string {
+	return filepath.Join(dir, "clipboard-sync.pid")
+}
+
+func sharedClipboardHeartbeatFile(dir string) string {
+	return filepath.Join(dir, "clipboard.heartbeat")
+}
+
+func sharedClipboardLockFile(dir string) string {
+	return filepath.Join(dir, "clipboard-sync.lock")
+}
+
+func sharedClipboardLogFile(dir string) string {
+	return filepath.Join(dir, "clipboard-sync.log")
+}
+
+func sharedClipboardClientsDir(dir string) string {
+	return filepath.Join(dir, "clients")
+}
+
+func sharedClipboardStateFile(dir string) string {
+	return filepath.Join(dir, "clipboard.state")
+}
+
+func sharedClipboardUpdatedAtFile(dir string) string {
+	return filepath.Join(dir, "clipboard.updated_at")
+}
+
+func sharedClipboardImageFile(dir string) string {
+	return filepath.Join(dir, "clipboard.png")
+}
+
+func sharedClipboardErrorFile(dir string) string {
+	return filepath.Join(dir, "clipboard.error")
+}
+
+func sharedClipboardPID(dir string) (int, error) {
+	data, err := os.ReadFile(sharedClipboardPIDFile(dir))
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
+func sharedClipboardSyncHealthy(dir string) bool {
+	pid, err := sharedClipboardPID(dir)
+	if err != nil || pid <= 0 {
+		return false
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+
+	heartbeatInfo, err := os.Stat(sharedClipboardHeartbeatFile(dir))
+	if err != nil {
+		pidInfo, pidErr := os.Stat(sharedClipboardPIDFile(dir))
+		if pidErr != nil {
+			return false
+		}
+		return time.Since(pidInfo.ModTime()) <= 5*time.Second
+	}
+	return time.Since(heartbeatInfo.ModTime()) <= 5*time.Second
+}
+
+func startSharedClipboardSync(dir string) error {
+	logFile, err := os.OpenFile(sharedClipboardLogFile(dir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+
+	syncScript := filepath.Join(containerDir(), "clipboard-sync.sh")
+	cmd := exec.Command("bash", syncScript, dir)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func staleClipboardLock(lockPath string) bool {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return false
+	}
+
+	data, err := os.ReadFile(lockPath)
+	if err == nil {
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && pid > 0 {
+			if err := syscall.Kill(pid, 0); err == nil {
+				return false
+			}
+			return true
+		}
+	}
+
+	return time.Since(info.ModTime()) > 5*time.Second
+}
+
+func ensureSharedClipboardSync() (string, error) {
+	dir := sharedClipboardDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(sharedClipboardClientsDir(dir), 0o700); err != nil {
+		return "", err
+	}
+
+	if sharedClipboardSyncHealthy(dir) {
+		return dir, nil
+	}
+
+	lockPath := sharedClipboardLockFile(dir)
+	for attempt := 0; attempt < 50; attempt++ {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			if _, err := lockFile.WriteString(strconv.Itoa(os.Getpid()) + "\n"); err != nil {
+				_ = lockFile.Close()
+				_ = os.Remove(lockPath)
+				return "", err
+			}
+			_ = lockFile.Close()
+			defer os.Remove(lockPath)
+
+			if sharedClipboardSyncHealthy(dir) {
+				return dir, nil
+			}
+			if err := startSharedClipboardSync(dir); err != nil {
+				return "", err
+			}
+
+			for wait := 0; wait < 20; wait++ {
+				if sharedClipboardSyncHealthy(dir) {
+					return dir, nil
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			return "", fmt.Errorf("clipboard sync did not become healthy")
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+		if staleClipboardLock(lockPath) {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		time.Sleep(100 * time.Millisecond)
+		if sharedClipboardSyncHealthy(dir) {
+			return dir, nil
+		}
+	}
+
+	if sharedClipboardSyncHealthy(dir) {
+		return dir, nil
+	}
+	return "", fmt.Errorf("timed out waiting for shared clipboard sync")
+}
+
+func copyFileAtomic(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if info, err := os.Stat(src); err == nil {
+		_ = os.Chmod(tmpName, info.Mode().Perm())
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+func copySharedClipboardSnapshot(sharedDir, clientDir string) error {
+	optionalFiles := [][2]string{
+		{sharedClipboardStateFile(sharedDir), sharedClipboardStateFile(clientDir)},
+		{sharedClipboardUpdatedAtFile(sharedDir), sharedClipboardUpdatedAtFile(clientDir)},
+		{sharedClipboardImageFile(sharedDir), sharedClipboardImageFile(clientDir)},
+		{sharedClipboardErrorFile(sharedDir), sharedClipboardErrorFile(clientDir)},
+	}
+
+	for _, pair := range optionalFiles {
+		if _, err := os.Stat(pair[0]); err == nil {
+			if err := copyFileAtomic(pair[0], pair[1]); err != nil {
+				return err
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(pair[1])
+	}
+
+	return nil
+}
+
+func registerClipboardClient(sharedDir, clientDir string) (string, error) {
+	regFile, err := os.CreateTemp(sharedClipboardClientsDir(sharedDir), "client-*.path")
+	if err != nil {
+		return "", err
+	}
+	if _, err := regFile.WriteString(clientDir + "\n"); err != nil {
+		_ = regFile.Close()
+		_ = os.Remove(regFile.Name())
+		return "", err
+	}
+	if err := regFile.Close(); err != nil {
+		_ = os.Remove(regFile.Name())
+		return "", err
+	}
+	if err := copySharedClipboardSnapshot(sharedDir, clientDir); err != nil {
+		_ = os.Remove(regFile.Name())
+		return "", err
+	}
+	return regFile.Name(), nil
 }
 
 // buildImage runs docker build.
@@ -823,24 +1059,34 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Clipboard image sync (macOS only).
 	if runtime.GOOS == "darwin" {
-		dir, err := os.MkdirTemp("", "mittens-clipboard.*")
+		sharedDir, err := ensureSharedClipboardSync()
 		if err == nil {
-			a.clipboardDir = dir
-			syncScript := filepath.Join(containerDir(), "clipboard-sync.sh")
-			cmd := exec.Command("bash", syncScript, dir)
-			if err := cmd.Start(); err == nil {
-				a.clipboardPID = cmd.Process.Pid
-				args = append(args, "-v", dir+":/tmp/mittens-clipboard:ro")
-				logInfo("Clipboard image sync: enabled")
-				if a.Provider != nil && a.Provider.Name == "codex" {
-					args = append(args,
-						"-e", "MITTENS_ENABLE_X11_CLIPBOARD=true",
-						"-e", "MITTENS_X11_CLIPBOARD_IMAGE=/tmp/mittens-clipboard/clipboard.png",
-						"-e", "DISPLAY=:99",
-					)
-					logInfo("Codex X11 clipboard bridge: enabled")
+			clientDir, clientErr := os.MkdirTemp("", "mittens-clipboard.*")
+			if clientErr != nil {
+				logWarn("Clipboard image sync: disabled: %v", clientErr)
+			} else {
+				regFile, regErr := registerClipboardClient(sharedDir, clientDir)
+				if regErr != nil {
+					_ = os.RemoveAll(clientDir)
+					logWarn("Clipboard image sync: disabled: %v", regErr)
+				} else {
+					a.clipboardDir = clientDir
+					a.clipboardReg = regFile
+					args = append(args, "-v", clientDir+":/tmp/mittens-clipboard:ro")
+					logInfo("Clipboard image sync: enabled via %s", sharedDir)
 				}
 			}
+			if a.clipboardDir != "" && a.Provider != nil && a.Provider.Name == "codex" {
+				args = append(args,
+					"-e", "MITTENS_ENABLE_X11_CLIPBOARD=true",
+					"-e", "MITTENS_X11_CLIPBOARD_IMAGE=/tmp/mittens-clipboard/clipboard.png",
+					"-e", "MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS=5",
+					"-e", "DISPLAY=:99",
+				)
+				logInfo("Codex X11 clipboard bridge: enabled")
+			}
+		} else {
+			logWarn("Clipboard image sync: disabled: %v", err)
 		}
 	}
 
