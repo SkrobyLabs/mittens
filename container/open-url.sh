@@ -11,9 +11,14 @@ URL="$1"
 [[ -z "$URL" ]] && exit 1
 
 PORT="${MITTENS_BROKER_PORT:-}"
+TOKEN="${MITTENS_BROKER_TOKEN:-}"
 if [[ -n "$PORT" ]]; then
     BROKER_URL="http://host.docker.internal:$PORT"
-    curl -sf --noproxy '*' -X POST -d "$URL" "$BROKER_URL/open" 2>/dev/null || true
+    if [[ -n "$TOKEN" ]]; then
+        curl -sf --noproxy '*' -H "X-Mittens-Token: $TOKEN" -X POST -d "$URL" "$BROKER_URL/open" 2>/dev/null || true
+    else
+        curl -sf --noproxy '*' -X POST -d "$URL" "$BROKER_URL/open" 2>/dev/null || true
+    fi
 
     # If this is an OAuth URL with a localhost/127.0.0.1 callback, poll the broker
     # for the intercepted callback and replay it to the AI CLI's local server.
@@ -21,7 +26,11 @@ if [[ -n "$PORT" ]]; then
         (
             for _ in $(seq 1 120); do
                 sleep 1
-                callback=$(curl -sf --noproxy '*' "$BROKER_URL/login-callback" 2>/dev/null) || continue
+                if [[ -n "$TOKEN" ]]; then
+                    callback=$(curl -sf --noproxy '*' -H "X-Mittens-Token: $TOKEN" "$BROKER_URL/login-callback" 2>/dev/null) || continue
+                else
+                    callback=$(curl -sf --noproxy '*' "$BROKER_URL/login-callback" 2>/dev/null) || continue
+                fi
                 if [[ -n "$callback" ]]; then
                     # Replay to Claude Code's callback server inside the container.
                     curl -sf "$callback" >/dev/null 2>&1 || true

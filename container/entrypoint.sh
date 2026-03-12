@@ -55,9 +55,6 @@ if [[ "$(id -u)" == "0" ]]; then
     if [[ "${MITTENS_DOCKER_HOST:-false}" == "true" ]]; then
         echo "[mittens] Using host Docker socket"
         SOCK="/var/run/docker.sock"
-        if [[ -S "$SOCK" ]]; then
-            chmod 666 "$SOCK"
-        fi
         if docker info &>/dev/null 2>&1; then
             echo "[mittens] Host Docker daemon accessible"
         else
@@ -245,13 +242,14 @@ fi
 
 # --- Copy read-only config into writable home ---
 STAGING_CONFIG="${CONFIG_MOUNT}/${AI_CONFIG_DIR}"
-if [[ -d "$STAGING_CONFIG" ]]; then
+if [[ -d "$STAGING_CONFIG" && ! "$STAGING_CONFIG" -ef "$AI_DIR" ]]; then
     # Config subdirectories (provider-defined, e.g. skills,hooks,agents,output-styles)
     if [[ -n "$AI_CONFIG_SUBDIRS" ]]; then
         IFS=',' read -ra _subdirs <<< "$AI_CONFIG_SUBDIRS"
         for item in "${_subdirs[@]}"; do
             if [[ -d "$STAGING_CONFIG/$item" ]]; then
-                cp -a "$STAGING_CONFIG/$item" "$AI_DIR/$item"
+                mkdir -p "$AI_DIR/$item"
+                cp -a "$STAGING_CONFIG/$item"/. "$AI_DIR/$item"/
             fi
         done
     fi
@@ -268,7 +266,8 @@ if [[ -d "$STAGING_CONFIG" ]]; then
             done
         fi
         if [[ -d "$STAGING_CONFIG/$AI_PLUGIN_DIR/marketplaces" ]]; then
-            cp -a "$STAGING_CONFIG/$AI_PLUGIN_DIR/marketplaces" "$AI_DIR/$AI_PLUGIN_DIR/marketplaces"
+            mkdir -p "$AI_DIR/$AI_PLUGIN_DIR/marketplaces"
+            cp -a "$STAGING_CONFIG/$AI_PLUGIN_DIR/marketplaces"/. "$AI_DIR/$AI_PLUGIN_DIR/marketplaces"/
         fi
     fi
 

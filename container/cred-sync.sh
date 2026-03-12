@@ -15,6 +15,7 @@ AI_CONFIG_DIR="${MITTENS_AI_CONFIG_DIR:-.claude}"
 AI_CRED_FILE="${MITTENS_AI_CRED_FILE:-.credentials.json}"
 CRED_FILE="/home/${AI_USERNAME}/${AI_CONFIG_DIR}/${AI_CRED_FILE}"
 BROKER_PORT="${MITTENS_BROKER_PORT:-}"
+BROKER_TOKEN="${MITTENS_BROKER_TOKEN:-}"
 POLL_INTERVAL=5
 CURL_TIMEOUT=3
 REFRESH_THRESHOLD_MS=300000  # trigger proactive refresh when <5 min remain
@@ -24,6 +25,14 @@ if [[ -z "$BROKER_PORT" ]]; then
 fi
 
 BROKER_URL="http://host.docker.internal:$BROKER_PORT"
+
+broker_curl() {
+    if [[ -n "$BROKER_TOKEN" ]]; then
+        curl -H "X-Mittens-Token: $BROKER_TOKEN" "$@"
+    else
+        curl "$@"
+    fi
+}
 
 # Log file inside the container.
 LOGFILE="/tmp/cred-sync.log"
@@ -56,14 +65,14 @@ get_expires_at() {
 }
 
 broker_get() {
-    curl --silent --fail --max-time "$CURL_TIMEOUT" --noproxy '*' \
+    broker_curl --silent --fail --max-time "$CURL_TIMEOUT" --noproxy '*' \
         "$BROKER_URL/" 2>/dev/null || true
 }
 
 broker_put() {
     local data="$1"
     local http_code
-    http_code=$(echo "$data" | curl --silent --output /dev/null --write-out '%{http_code}' \
+    http_code=$(echo "$data" | broker_curl --silent --output /dev/null --write-out '%{http_code}' \
         --max-time "$CURL_TIMEOUT" --noproxy '*' \
         -X PUT -H 'Content-Type: application/json' \
         --data-binary @- \
@@ -75,7 +84,7 @@ broker_put() {
 # Returns "refresh" (this container is the coordinator) or "wait" (another is).
 broker_refresh_request() {
     local result
-    result=$(curl --silent --max-time "$CURL_TIMEOUT" --noproxy '*' \
+    result=$(broker_curl --silent --max-time "$CURL_TIMEOUT" --noproxy '*' \
         -X POST "$BROKER_URL/refresh" 2>/dev/null) || echo '{"action":"wait"}'
     echo "$result" | jq -r '.action // "wait"' 2>/dev/null || echo "wait"
 }
@@ -109,7 +118,7 @@ trigger_token_refresh() {
 clog "started (broker: $BROKER_URL)"
 
 # Connectivity check — log whether we can reach the broker at all.
-if curl --silent --max-time 2 --noproxy '*' -o /dev/null "$BROKER_URL/" 2>/dev/null; then
+if broker_curl --silent --max-time 2 --noproxy '*' -o /dev/null "$BROKER_URL/" 2>/dev/null; then
     clog "broker reachable"
 else
     clog "WARNING: broker NOT reachable at $BROKER_URL"

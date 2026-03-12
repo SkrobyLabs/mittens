@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,14 +75,15 @@ h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#111827}
 // The broker accepts a PUT only when the incoming expiresAt exceeds the
 // currently stored value, so the freshest token always wins.
 type HostBroker struct {
-	sockPath string
-	Name     string // provider name for log identification, e.g. "claude", "gemini"
-	creds    string // latest credential JSON
-	mu       sync.RWMutex
-	srv      *http.Server
-	ln       net.Listener
-	stores   []CredentialStore // host credential stores for bidirectional sync
-	done     chan struct{}     // signals hostSync goroutine to stop
+	sockPath  string
+	Name      string // provider name for log identification, e.g. "claude", "gemini"
+	AuthToken string
+	creds     string // latest credential JSON
+	mu        sync.RWMutex
+	srv       *http.Server
+	ln        net.Listener
+	stores    []CredentialStore // host credential stores for bidirectional sync
+	done      chan struct{}     // signals hostSync goroutine to stop
 
 	// pendingCallback holds a captured OAuth callback URL for the container to replay.
 	pendingCallback string
@@ -144,7 +146,7 @@ func (b *HostBroker) blog(format string, args ...interface{}) {
 // ListenTCP binds to a random TCP port on localhost and returns the port.
 // Call this before Serve() to use TCP mode instead of Unix socket.
 func (b *HostBroker) ListenTCP() (int, error) {
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
 	}
@@ -203,6 +205,9 @@ func (b *HostBroker) Credentials() string {
 }
 
 func (b *HostBroker) handle(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		b.handleGet(w)
@@ -335,6 +340,9 @@ func (b *HostBroker) persistToHost(jsonData string) {
 const maxOpenURLSize = 4096
 
 func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -374,6 +382,9 @@ func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 const maxNotifySize = 4096
 
 func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -410,6 +421,9 @@ func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
 // The first container to POST becomes the coordinator (receives "refresh");
 // subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
 func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -437,6 +451,9 @@ func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
 // handleLoginCallback returns the captured OAuth callback URL (if any) so the
 // container can replay it to Claude Code's local callback server.
 func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -455,6 +472,17 @@ func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request)
 	b.blog("login-callback → %s", redactURL(cb))
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = io.WriteString(w, cb)
+}
+
+func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if b.AuthToken == "" {
+		return true
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Mittens-Token")), []byte(b.AuthToken)) == 1 {
+		return true
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
 }
 
 // interceptOAuthCallback starts a temporary HTTP server on the host at the

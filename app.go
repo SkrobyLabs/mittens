@@ -69,8 +69,9 @@ type App struct {
 	terminalFocus TerminalFocus
 
 	// Host broker (credentials, URLs, notifications, OAuth)
-	broker     *HostBroker
-	brokerPort int
+	broker      *HostBroker
+	brokerPort  int
+	brokerToken string
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -354,6 +355,12 @@ func (a *App) Run() error {
 		}
 		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
+		if token, err := randomHex(16); err == nil {
+			a.brokerToken = token
+			a.broker.AuthToken = token
+		} else {
+			return fmt.Errorf("generate broker token: %w", err)
+		}
 		a.broker.OnOpen = openOnHost
 		if !a.NoNotify {
 			displayName := a.Provider.DisplayName
@@ -397,22 +404,7 @@ func (a *App) Run() error {
 	}
 
 	// Resume session if --resume was given.
-	if a.ResumeSession != "" && !a.Shell && a.HostProjectDir != "" {
-		hasResume := false
-		for _, arg := range a.ClaudeArgs {
-			if a.Provider.IsResumeFlag(arg) {
-				hasResume = true
-				break
-			}
-		}
-		if !hasResume {
-			if a.ResumeSession == "latest" {
-				a.ClaudeArgs = append(a.Provider.ContinueArgs, a.ClaudeArgs...)
-			} else {
-				a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
-			}
-		}
-	}
+	a.maybeApplyResumeArgs()
 
 	// Yolo mode: prepend skip-permissions flag.
 	if a.Yolo {
@@ -435,10 +427,26 @@ func (a *App) Run() error {
 	}
 
 	if a.Verbose {
-		logInfo("Command: docker run %s", strings.Join(dockerArgs, " "))
+		logInfo("Command: docker run %s", strings.Join(sanitizeDockerArgsForLog(dockerArgs), " "))
 	}
 
 	return a.runContainer(dockerArgs)
+}
+
+func (a *App) maybeApplyResumeArgs() {
+	if a.ResumeSession == "" || a.Shell {
+		return
+	}
+	for _, arg := range a.ClaudeArgs {
+		if a.Provider.IsResumeFlag(arg) {
+			return
+		}
+	}
+	if a.ResumeSession == "latest" {
+		a.ClaudeArgs = append(a.Provider.ContinueArgs, a.ClaudeArgs...)
+		return
+	}
+	a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
 }
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
@@ -570,8 +578,12 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Primary workspace mount.
 	args = append(args, "-v", a.WorkspaceMountSrc+":/workspace")
 
-	// AI config staging (read-only).
-	args = append(args, "-v", a.Provider.HostConfigDir(home)+":"+a.Provider.StagingConfigDir()+":ro")
+	// AI config staging (read-only). Providers that mount the whole config
+	// directory for session persistence should not also mount the same host
+	// path into the staging location.
+	if a.NoHistory || !a.Provider.HistoryMountsWholeConfig {
+		args = append(args, "-v", a.Provider.HostConfigDir(home)+":"+a.Provider.StagingConfigDir()+":ro")
+	}
 
 	// Environment variables.
 	if a.Provider.APIKeyEnv != "" {
@@ -625,6 +637,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Credential broker (TCP).
 	if a.brokerPort > 0 {
 		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
+		if a.brokerToken != "" {
+			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
+		}
 		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}
 

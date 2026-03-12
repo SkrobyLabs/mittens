@@ -468,6 +468,9 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 	if !argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.ContainerConfigDir()) {
 		t.Fatalf("missing whole-config history mount for codex")
 	}
+	if argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.StagingConfigDir()+":ro") {
+		t.Fatalf("did not expect staging config mount when whole-config history is enabled")
+	}
 	if argPairContains(args, "-v", "/projects/") {
 		t.Fatalf("did not expect project-only history mount for codex")
 	}
@@ -718,6 +721,7 @@ func TestAssembleDockerArgs_CredBroker(t *testing.T) {
 		WorkspaceMountSrc: "/tmp/ws",
 		Credentials:       &CredentialManager{},
 		brokerPort:        12345,
+		brokerToken:       "broker-secret",
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
@@ -725,6 +729,9 @@ func TestAssembleDockerArgs_CredBroker(t *testing.T) {
 	// Broker port env var.
 	if !argPairExists(args, "-e", "MITTENS_BROKER_PORT=12345") {
 		t.Error("missing MITTENS_BROKER_PORT env var")
+	}
+	if !argPairExists(args, "-e", "MITTENS_BROKER_TOKEN=broker-secret") {
+		t.Error("missing MITTENS_BROKER_TOKEN env var")
 	}
 
 	// host.docker.internal mapping.
@@ -752,6 +759,9 @@ func TestAssembleDockerArgs_NoBroker(t *testing.T) {
 	// Should NOT have broker env var.
 	if argPairContains(args, "-e", "MITTENS_BROKER_PORT") {
 		t.Error("MITTENS_BROKER_PORT should not be present without broker")
+	}
+	if argPairContains(args, "-e", "MITTENS_BROKER_TOKEN") {
+		t.Error("MITTENS_BROKER_TOKEN should not be present without broker")
 	}
 }
 
@@ -1156,6 +1166,63 @@ func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
 
 	if !argPairExists(args, "-e", "MITTENS_AI_SETTINGS_FORMAT=json") {
 		t.Error("missing MITTENS_AI_SETTINGS_FORMAT=json for Claude provider")
+	}
+}
+
+func TestMaybeApplyResumeArgs_CodexLatest(t *testing.T) {
+	a := &App{
+		Provider:      CodexProvider(),
+		ResumeSession: "latest",
+		ClaudeArgs:    []string{"--model", "gpt-5"},
+	}
+
+	a.maybeApplyResumeArgs()
+
+	want := []string{"--resume", "latest", "--model", "gpt-5"}
+	if len(a.ClaudeArgs) != len(want) {
+		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
+	}
+	for i := range want {
+		if a.ClaudeArgs[i] != want[i] {
+			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
+		}
+	}
+}
+
+func TestMaybeApplyResumeArgs_DoesNotDuplicate(t *testing.T) {
+	a := &App{
+		Provider:      CodexProvider(),
+		ResumeSession: "latest",
+		ClaudeArgs:    []string{"--resume", "abc123"},
+	}
+
+	a.maybeApplyResumeArgs()
+
+	if len(a.ClaudeArgs) != 2 {
+		t.Fatalf("ClaudeArgs = %v, want existing args unchanged", a.ClaudeArgs)
+	}
+}
+
+func TestSanitizeDockerArgsForLog_RedactsSecrets(t *testing.T) {
+	args := []string{
+		"-e", "OPENAI_API_KEY=sk-live",
+		"-e", "MITTENS_BROKER_TOKEN=secret",
+		"-e", "TERM=xterm-256color",
+	}
+
+	got := sanitizeDockerArgsForLog(args)
+
+	if got[1] != "OPENAI_API_KEY=REDACTED" {
+		t.Fatalf("OPENAI_API_KEY not redacted: %v", got)
+	}
+	if got[3] != "MITTENS_BROKER_TOKEN=REDACTED" {
+		t.Fatalf("MITTENS_BROKER_TOKEN not redacted: %v", got)
+	}
+	if got[5] != "TERM=xterm-256color" {
+		t.Fatalf("non-secret env should remain visible: %v", got)
+	}
+	if args[1] != "OPENAI_API_KEY=sk-live" {
+		t.Fatal("sanitizeDockerArgsForLog should not mutate input slice")
 	}
 }
 

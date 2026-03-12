@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -108,4 +110,40 @@ func homeDir() string {
 		return os.Getenv("USERPROFILE")
 	}
 	return os.Getenv("HOME")
+}
+
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func sanitizeDockerArgsForLog(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i < len(out)-1; i++ {
+		if out[i] != "-e" {
+			continue
+		}
+		key, _, ok := strings.Cut(out[i+1], "=")
+		if !ok {
+			continue
+		}
+		if isSensitiveEnvKey(key) {
+			out[i+1] = key + "=REDACTED"
+		}
+	}
+	return out
+}
+
+func isSensitiveEnvKey(key string) bool {
+	upper := strings.ToUpper(key)
+	for _, marker := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }

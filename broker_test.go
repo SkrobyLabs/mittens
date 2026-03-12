@@ -372,6 +372,76 @@ func TestBroker_TCP_GetPut(t *testing.T) {
 	}
 }
 
+func TestBroker_ListenTCP_BindsLoopback(t *testing.T) {
+	b := NewHostBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	addr, ok := b.ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr type = %T, want *net.TCPAddr", b.ln.Addr())
+	}
+	if !addr.IP.IsLoopback() {
+		t.Fatalf("listener IP = %v, want loopback", addr.IP)
+	}
+	if addr.Port != port {
+		t.Fatalf("listener port = %d, want %d", addr.Port, port)
+	}
+}
+
+func TestBroker_TCP_RequiresAuthTokenWhenConfigured(t *testing.T) {
+	b := NewHostBroker("", `{"expiresAt":10}`, nil)
+	b.AuthToken = "test-token"
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	resp, err := client.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET without token: status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+	req.Header.Set("X-Mittens-Token", "wrong")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET with wrong token: status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, base+"/", nil)
+	req.Header.Set("X-Mittens-Token", "test-token")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET with valid token: status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"expiresAt":10`) {
+		t.Fatalf("GET with valid token body = %q, want seed", body)
+	}
+}
+
 func TestBroker_TCP_OpenEndpoint(t *testing.T) {
 	var opened string
 	var mu sync.Mutex
