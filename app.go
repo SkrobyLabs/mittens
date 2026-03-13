@@ -343,14 +343,22 @@ func (a *App) Run() error {
 	}
 
 	// Setup credentials.
-	a.Credentials = NewCredentialManager(a.Provider)
-	if err := a.Credentials.Setup(); err != nil {
-		logWarn("Credential setup: %v", err)
-	}
-	if a.Credentials.TmpFile() != "" {
-		logVerbose(a.Verbose, "Credentials staged: %s", a.Credentials.TmpFile())
+	// Skip OAuth credential staging when using a custom base URL (local/third-party
+	// provider) — the stored tokens belong to the original provider and will cause
+	// refresh failures that block the CLI.
+	if a.Provider.UsingCustomBaseURL() {
+		logInfo("Custom base URL detected (%s), skipping OAuth credential staging", a.Provider.BaseURLEnv)
+		a.Credentials = &CredentialManager{}
 	} else {
-		logVerbose(a.Verbose, "No credentials found")
+		a.Credentials = NewCredentialManager(a.Provider)
+		if err := a.Credentials.Setup(); err != nil {
+			logWarn("Credential setup: %v", err)
+		}
+		if a.Credentials.TmpFile() != "" {
+			logVerbose(a.Verbose, "Credentials staged: %s", a.Credentials.TmpFile())
+		} else {
+			logVerbose(a.Verbose, "No credentials found")
+		}
 	}
 
 	// Start broker (credential sync + host URL opening via TCP).
@@ -1035,6 +1043,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// Environment variables.
 	if a.Provider.APIKeyEnv != "" {
 		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
+	}
+	if a.Provider.BaseURLEnv != "" && os.Getenv(a.Provider.BaseURLEnv) != "" {
+		args = append(args, "-e", a.Provider.BaseURLEnv+"="+os.Getenv(a.Provider.BaseURLEnv))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	if a.Yolo {
