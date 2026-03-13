@@ -59,9 +59,10 @@ func main() {
 func runMain(args []string) error {
 	// Handle subcommands and special flags manually since DisableFlagParsing is true.
 	if len(args) > 0 {
-		switch args[0] {
-		case "init", "--init":
+		if hasInitCommand(args) {
 			return runInit()
+		}
+		switch args[0] {
 		case "logs":
 			return runLogs(args[1:])
 		case "clean":
@@ -144,6 +145,18 @@ func runMain(args []string) error {
 
 	// 8. Run.
 	return app.Run()
+}
+
+func hasInitCommand(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "init" || arg == "--init" {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveProviderFromArgs(args []string) (*Provider, error) {
