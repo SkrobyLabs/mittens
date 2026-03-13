@@ -10,9 +10,11 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 	optionalFields := map[string]bool{
 		"TrustedDirsFile":          true, // Gemini-only: separate trusted dirs file
 		"ContainerHostname":        true, // Gemini-only: fixed Docker hostname
+		"ContainerEnv":             true, // optional runtime env overrides
 		"InitSettingsJQ":           true, // Gemini-only: post-init settings patch
 		"PersistFiles":             true, // Gemini-only: state files to survive between runs
 		"HistoryMountsWholeConfig": true, // Codex-only: mount whole config dir for history
+		"EffortTemplate":          true, // some providers don't use template mode
 	}
 	p := ClaudeProvider()
 	v := reflect.ValueOf(*p)
@@ -28,11 +30,22 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 			if f.String() == "" {
 				t.Errorf("field %s is empty", name)
 			}
+		case reflect.Map:
+			if f.Len() == 0 && name != "RoleDefaults" {
+				t.Errorf("field %s is empty map", name)
+			}
 		case reflect.Slice:
 			if f.Len() == 0 {
 				t.Errorf("field %s is empty slice", name)
 			}
 		}
+	}
+
+	if got := p.RoleDefaults["worker"]; got.Model == "" {
+		t.Error("ClaudeProvider().RoleDefaults[\"worker\"] missing model")
+	}
+	if p.ModelFlag == "" {
+		t.Error("ClaudeProvider ModelFlag should be set")
 	}
 }
 
@@ -179,6 +192,12 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 	}
 	if len(p.ResumeFlags) == 0 {
 		t.Error("CodexProvider().ResumeFlags is empty")
+	}
+	if p.EffortFlag != "" {
+		t.Fatalf("CodexProvider().EffortFlag = %q, want empty", p.EffortFlag)
+	}
+	if p.EffortTemplate != "-c model_reasoning_effort=%s" {
+		t.Fatalf("CodexProvider().EffortTemplate = %q, want %q", p.EffortTemplate, "-c model_reasoning_effort=%s")
 	}
 }
 

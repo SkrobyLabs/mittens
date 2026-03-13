@@ -2,6 +2,12 @@ package main
 
 import "path/filepath"
 
+// RolePreset defines a provider-specific model + effort combination for a role.
+type RolePreset struct {
+	Model  string
+	Effort string
+}
+
 // Provider holds all values that identify an AI assistant binary, its config
 // layout, settings keys, and install command. Swapping the Provider lets
 // mittens drive a different AI CLI without touching orchestration code.
@@ -50,6 +56,10 @@ type Provider struct {
 	ContinueArgs             []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
 	TrustedDirsFile          string   // separate JSON array file for trusted dirs (Gemini); empty = unused
 	HistoryMountsWholeConfig bool     // mount the provider config dir directly when history is enabled
+	RoleDefaults             map[string]RolePreset
+	ModelFlag                string
+	EffortFlag               string
+	EffortTemplate           string
 
 	// Container settings
 	ContainerHostname string            // fixed Docker hostname; empty = Docker default. Required when credential file encryption is hostname-dependent (e.g. Gemini).
@@ -156,6 +166,12 @@ func ClaudeProvider() *Provider {
 		ContinueArgs:    []string{"--continue"},
 		TrustedDirsFile: "",
 		StopHookEvent:   "Stop",
+		RoleDefaults: map[string]RolePreset{
+			"worker":  {Model: "claude-haiku-4-6", Effort: ""},
+			"planner": {Model: "claude-opus-4-6", Effort: ""},
+		},
+		ModelFlag:  "--model",
+		EffortFlag: "--effort",
 	}
 }
 
@@ -200,6 +216,14 @@ func CodexProvider() *Provider {
 		ContinueArgs:             []string{"--resume", "latest"},
 		TrustedDirsFile:          "",
 		HistoryMountsWholeConfig: true,
+		RoleDefaults: map[string]RolePreset{
+			"worker":  {Model: "gpt-5.3-codex-spark", Effort: ""},
+			"planner": {Model: "gpt-5.4", Effort: "high"},
+		},
+		ModelFlag:  "--model",
+		EffortFlag: "",
+		// Codex expects reasoning effort via -c key-value configuration.
+		EffortTemplate: "-c model_reasoning_effort=%s",
 	}
 }
 
@@ -258,6 +282,11 @@ func GeminiProvider() *Provider {
 		ResumeFlags:   []string{"--resume", "-r"},
 		SkipPermsFlag: "--approval-mode=yolo",
 		ContinueArgs:  []string{"--resume", "latest"},
+		RoleDefaults: map[string]RolePreset{
+			"worker":  {Model: "gemini-2.5-flash", Effort: ""},
+			"planner": {Model: "gemini-2.5-pro", Effort: ""},
+		},
+		ModelFlag: "--model",
 
 		ContainerHostname: "gemini-cli",
 		ContainerEnv: map[string]string{

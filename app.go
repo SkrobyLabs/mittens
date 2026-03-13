@@ -15,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/huh"
+	"golang.org/x/term"
+
 	firewallext "github.com/Skroby/mittens/extensions/firewall"
 	"github.com/Skroby/mittens/extensions/registry"
 )
@@ -35,6 +38,7 @@ type App struct {
 	Worktree      bool
 	Shell         bool
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
+	Role          string // "worker", "planner", or ""
 	ExtraDirs     []string
 	InstanceName  string // user-provided name via --name
 	ClaudeArgs    []string
@@ -86,6 +90,8 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
+	"--worker":       func(a *App) { a.Role = "worker" },
+	"--planner":      func(a *App) { a.Role = "planner" },
 	// --resume is handled specially in ParseFlags (optional argument).
 	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
@@ -396,6 +402,15 @@ func (a *App) Run() error {
 
 	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
 
+	// Resolve role preset before Docker build so interactive choice happens first.
+	if err := a.maybeApplyRolePreset(); err != nil {
+		if err == huh.ErrUserAborted {
+			fmt.Fprintln(os.Stderr, "\nCancelled.")
+			return nil
+		}
+		return err
+	}
+
 	// Build Docker image.
 	if !a.NoBuild {
 		if err := a.buildImage(); err != nil {
@@ -447,6 +462,177 @@ func (a *App) maybeApplyResumeArgs() {
 		return
 	}
 	a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
+}
+
+func (a *App) maybeApplyRolePreset() error {
+	if a.Role == "" {
+		if a.Shell {
+			return nil
+		}
+		if argExists(a.ClaudeArgs, "--print") {
+			return nil
+		}
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return nil
+		}
+
+		role, err := promptForRole()
+		if err != nil {
+			return err
+		}
+		if role == "custom" {
+			return nil
+		}
+		a.Role = role
+	}
+
+	preset, ok := rolePreset(a.Workspace, a.Provider, a.Role)
+	if !ok {
+		return nil
+	}
+
+	extras := make([]string, 0, 4)
+
+	if a.Provider.ModelFlag != "" && preset.Model != "" && !argExists(a.ClaudeArgs, a.Provider.ModelFlag) {
+		extras = append(extras, a.Provider.ModelFlag, preset.Model)
+	}
+	if effortEnabled(a.Provider) && preset.Effort != "" && !effortArgExists(a.Provider, a.ClaudeArgs) {
+		extras = append(extras, effortArgs(a.Provider, preset.Effort)...)
+	}
+	if len(extras) > 0 {
+		a.ClaudeArgs = append(extras, a.ClaudeArgs...)
+	}
+	return nil
+}
+
+func promptForRole() (string, error) {
+	var role string
+	if err := createRolePrompt(&role); err != nil {
+		return "", err
+	}
+
+	switch role {
+	case "Worker":
+		return "worker", nil
+	case "Planner":
+		return "planner", nil
+	default:
+		return "custom", nil
+	}
+}
+
+func createRolePrompt(role *string) error {
+	return huh.NewSelect[string]().
+		Title("Planner, Worker, or Custom (no preset)").
+		Options(
+			huh.NewOption("Planner", "Planner"),
+			huh.NewOption("Worker", "Worker"),
+			huh.NewOption("Custom (no preset)", "Custom (no preset)"),
+		).
+		Value(role).
+		Run()
+}
+
+func rolePreset(workspace string, provider *Provider, role string) (RolePreset, bool) {
+	if provider == nil {
+		return RolePreset{}, false
+	}
+	base, ok := provider.RoleDefaults[role]
+	if !ok {
+		return RolePreset{}, false
+	}
+
+	if workspace == "" {
+		return base, true
+	}
+
+	rc, err := LoadRoleConfig(workspace)
+	if err != nil {
+		return base, true
+	}
+
+	if rc == nil || len(rc.Roles) == 0 {
+		return base, true
+	}
+
+	if providerRoles, ok := rc.Roles[provider.Name]; ok {
+		if override, ok := providerRoles[role]; ok {
+			preset := base
+			if override.Model != "" {
+				preset.Model = override.Model
+			}
+			if override.Effort != "" {
+				preset.Effort = override.Effort
+			}
+			return preset, true
+		}
+	}
+
+	return base, true
+}
+
+func effortEnabled(p *Provider) bool {
+	return p != nil && (p.EffortFlag != "" || p.EffortTemplate != "")
+}
+
+func effortArgExists(p *Provider, args []string) bool {
+	if p == nil {
+		return false
+	}
+
+	if p.EffortFlag != "" && argExists(args, p.EffortFlag) {
+		return true
+	}
+
+	key := effortTemplateKey(p)
+	if key == "" {
+		return false
+	}
+	for i, arg := range args {
+		if strings.HasPrefix(arg, key+"=") {
+			return true
+		}
+		if arg == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func effortTemplateKey(p *Provider) string {
+	if p == nil || p.EffortTemplate == "" {
+		return ""
+	}
+
+	template := strings.ReplaceAll(p.EffortTemplate, "%s", "")
+	for _, arg := range strings.Fields(template) {
+		if eq := strings.Index(arg, "="); eq > -1 {
+			return arg[:eq]
+		}
+	}
+	return ""
+}
+
+func effortArgs(p *Provider, effort string) []string {
+	if p == nil {
+		return nil
+	}
+	if p.EffortTemplate != "" {
+		return strings.Fields(fmt.Sprintf(p.EffortTemplate, effort))
+	}
+	if p.EffortFlag != "" {
+		return []string{p.EffortFlag, effort}
+	}
+	return nil
+}
+
+func argExists(args []string, val string) bool {
+	for _, arg := range args {
+		if arg == val {
+			return true
+		}
+	}
+	return false
 }
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
@@ -1338,6 +1524,8 @@ Core flags:
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
   --dir-ro PATH     Mount an additional directory as read-only (repeatable)
+  --worker          Use worker role preset (model + effort)
+  --planner         Use planner role preset (model + effort)
   --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
   --extensions      List loaded extensions and their flags
   --help, -h        Show this help message`)
@@ -1412,6 +1600,8 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
 			{Name: "--dir", Description: "Mount an additional directory (repeatable)", ArgType: "path"},
 			{Name: "--dir-ro", Description: "Mount an additional directory read-only (repeatable)", ArgType: "path"},
+			{Name: "--worker", Description: "Use worker role preset (model + effort)"},
+			{Name: "--planner", Description: "Use planner role preset (model + effort)"},
 			{Name: "--provider", Description: "AI provider (claude, codex, gemini)", ArgType: "string"},
 		},
 	}

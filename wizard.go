@@ -103,21 +103,37 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 	configLines = append(configLines, providerLines...)
 
-	// ── Step 2: Extra directories ──────────────────────────────────────────
+	// ── Step 2: Roles (stored in roles.json) ─────────────────────────────
+	selectedMap, _ := parseProviderLines(providerLines)
+	selectedProviders := make([]string, 0, len(selectedMap))
+	for provider := range selectedMap {
+		selectedProviders = append(selectedProviders, provider)
+	}
+	if len(selectedProviders) == 0 {
+		selectedProviders = []string{"claude"}
+	}
+
+	rolesLines, err := wizardRoles(workspace, selectedProviders, editMode)
+	if err != nil {
+		return gracefulAbort(err)
+	}
+	configLines = append(configLines, rolesLines...)
+
+	// ── Step 3: Extra directories ──────────────────────────────────────────
 	dirLines, err := wizardDirs(workspace, editMode, existDirs)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 	configLines = append(configLines, dirLines...)
 
-	// ── Step 3+4: Extensions ───────────────────────────────────────────────
+	// ── Step 4+5: Extensions ───────────────────────────────────────────────
 	extLines, err := wizardExtensions(extensions, editMode, existExts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 	configLines = append(configLines, extLines...)
 
-	// ── Step 5: Firewall ───────────────────────────────────────────────────
+	// ── Step 6: Firewall ───────────────────────────────────────────────────
 	fwLines, err := wizardFirewall(editMode, existFirewall)
 	if err != nil {
 		return gracefulAbort(err)
@@ -171,11 +187,125 @@ func runWizard(extensions []*registry.Extension) error {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Directories
+// Step 2: Roles
+// ---------------------------------------------------------------------------
+
+func wizardRoles(workspace string, providerNames []string, editMode bool) ([]string, error) {
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Roles"))
+
+	rc, err := LoadRoleConfig(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("loading roles config: %w", err)
+	}
+
+	if rc.Roles == nil {
+		rc.Roles = map[string]map[string]RolePreset{}
+	}
+
+	for _, name := range providerNames {
+		provider, err := providerByName(name)
+		if err != nil {
+			continue
+		}
+
+		existingRoles := rc.Roles[provider.Name]
+		providerDefaults := map[string]RolePreset{
+			"worker":  provider.RoleDefaults["worker"],
+			"planner": provider.RoleDefaults["planner"],
+		}
+
+		if len(existingRoles) == 0 {
+			existingRoles = map[string]RolePreset{}
+		}
+
+		for _, roleName := range []string{"worker", "planner"} {
+			preset := providerDefaults[roleName]
+			if v, ok := existingRoles[roleName]; ok {
+				if v.Model != "" {
+					preset.Model = v.Model
+				}
+				if v.Effort != "" {
+					preset.Effort = v.Effort
+				}
+			}
+
+			configure := true
+			if editMode {
+				var action string
+				if err := huh.NewSelect[string]().
+					Title(fmt.Sprintf("%s %s role", strings.Title(provider.DisplayName), strings.Title(roleName))).
+					Options(
+						huh.NewOption("Keep", "keep"),
+						huh.NewOption("Change", "change"),
+					).
+					Value(&action).
+					Run(); err != nil {
+					return nil, err
+				}
+				configure = action == "change"
+			}
+
+			if !configure {
+				continue
+			}
+
+			model := preset.Model
+			if err := huh.NewInput().
+				Title(fmt.Sprintf("%s model for %s", strings.Title(roleName), provider.DisplayName)).
+				Placeholder(preset.Model).
+				Value(&model).
+				Run(); err != nil {
+				return nil, err
+			}
+			model = strings.TrimSpace(model)
+			if model != "" {
+				preset.Model = model
+			}
+
+			if provider.EffortFlag != "" || provider.EffortTemplate != "" {
+				effort := preset.Effort
+				if err := huh.NewSelect[string]().
+					Title(fmt.Sprintf("%s effort for %s", strings.Title(roleName), provider.DisplayName)).
+					Options(
+						huh.NewOption("low", "low"),
+						huh.NewOption("medium", "medium"),
+						huh.NewOption("high", "high"),
+						huh.NewOption("max", "max"),
+						huh.NewOption("(none)", ""),
+					).
+					Value(&effort).
+					Run(); err != nil {
+					return nil, err
+				}
+				preset.Effort = effort
+			}
+
+			if existingRoles == nil {
+				existingRoles = map[string]RolePreset{}
+			}
+			existingRoles[roleName] = preset
+		}
+
+		if len(existingRoles) == 0 {
+			delete(rc.Roles, provider.Name)
+		} else {
+			rc.Roles[provider.Name] = existingRoles
+		}
+	}
+
+	if err := SaveRoleConfig(workspace, rc); err != nil {
+		return nil, fmt.Errorf("saving roles config: %w", err)
+	}
+
+	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// Step 3: Directories
 // ---------------------------------------------------------------------------
 
 func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Directories"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 3: Directories"))
 	fmt.Fprintf(os.Stderr, "Primary workspace: %s\n", workspace)
 
 	// In edit mode, offer to keep existing directories.
@@ -1043,6 +1173,9 @@ func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts 
 			providers = append(providers, line)
 		case line == "--yolo" || line == "--network-host" || line == "--worktree":
 			opts = append(opts, line)
+		case line == "--worker" || line == "--planner":
+			// Role flags are not persisted in config; they are stored in roles.json.
+			continue
 		case line == "--firewall-dev" || line == "--no-firewall" || strings.HasPrefix(line, "--firewall "):
 			firewall = append(firewall, line)
 		default:

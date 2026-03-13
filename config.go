@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -92,6 +93,55 @@ func SaveProjectConfig(workspace string, lines []string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
+// RoleConfig holds per-provider role overrides for a project.
+type RoleConfig struct {
+	Roles map[string]map[string]RolePreset `json:"roles"`
+}
+
+// LoadRoleConfig reads role overrides for the given workspace.
+func LoadRoleConfig(workspace string) (*RoleConfig, error) {
+	path := roleConfigPath(workspace)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &RoleConfig{Roles: map[string]map[string]RolePreset{}}, nil
+		}
+		return nil, fmt.Errorf("reading role config %s: %w", path, err)
+	}
+
+	var cfg RoleConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing role config %s: %w", path, err)
+	}
+	if cfg.Roles == nil {
+		cfg.Roles = map[string]map[string]RolePreset{}
+	}
+	return &cfg, nil
+}
+
+// SaveRoleConfig persists role overrides for the given workspace.
+func SaveRoleConfig(workspace string, cfg *RoleConfig) error {
+	if cfg == nil {
+		cfg = &RoleConfig{Roles: map[string]map[string]RolePreset{}}
+	}
+	if cfg.Roles == nil {
+		cfg.Roles = map[string]map[string]RolePreset{}
+	}
+
+	path := roleConfigPath(workspace)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating role config dir %s: %w", dir, err)
+	}
+
+	payload, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, append(payload, '\n'), 0o644)
+}
+
 // loadProjectConfigRaw reads the per-project config file and returns the
 // non-comment, non-blank lines as-is (without splitting into words). This is
 // used for display and for edit-mode categorisation where line structure matters
@@ -121,6 +171,10 @@ func loadProjectConfigRaw(workspace string) ([]string, error) {
 // workspace directory.
 func projectConfigPath(workspace string) string {
 	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
+}
+
+func roleConfigPath(workspace string) string {
+	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "roles.json")
 }
 
 // javaHashCode computes the hash using Java's String.hashCode() algorithm:

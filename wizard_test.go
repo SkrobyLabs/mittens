@@ -10,6 +10,8 @@ func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 		"--provider claude",
 		"--aws dev",
 		"--firewall-dev",
+		"--worker",
+		"--planner",
 		"--yolo",
 	})
 
