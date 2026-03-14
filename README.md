@@ -224,6 +224,23 @@ External plugins: drop an executable at `~/.mittens/extensions/<name>/plugin` â€
 
 See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension system docs.
 
+## Support the Project
+
+If this project helps your work, consider supporting its continued development.
+
+Individual supporters can join here:
+[Buy Me a Coffee](https://buymeacoffee.com/skrobylabs)
+
+Companies using this project can sponsor development and have their logo displayed in this repository.
+
+Sponsorship inquiries: ![sponsor email](./assets/sponsor-email.svg)
+
 ## License
 
 MIT â€” see [TRADEMARK.md](TRADEMARK.md) for name/logo usage.
+
+## Sponsors
+
+Companies supporting this project:
+
+<a href="https://quix.io/"><img src="https://avatars.githubusercontent.com/u/79305112?s=200&v=4" alt="Quix" width="80"></a>
