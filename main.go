@@ -9,18 +9,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 
 	// Blank imports trigger init() registration for extensions with resolvers.
-	_ "github.com/Skroby/mittens/extensions/aws"
-	_ "github.com/Skroby/mittens/extensions/azure"
-	_ "github.com/Skroby/mittens/extensions/docker"
-	firewallext "github.com/Skroby/mittens/extensions/firewall"
-	_ "github.com/Skroby/mittens/extensions/gcp"
-	_ "github.com/Skroby/mittens/extensions/gh"
-	_ "github.com/Skroby/mittens/extensions/helm"
-	_ "github.com/Skroby/mittens/extensions/kubectl"
-	_ "github.com/Skroby/mittens/extensions/mcp"
+	_ "github.com/SkrobyLabs/mittens/extensions/aws"
+	_ "github.com/SkrobyLabs/mittens/extensions/azure"
+	_ "github.com/SkrobyLabs/mittens/extensions/docker"
+	firewallext "github.com/SkrobyLabs/mittens/extensions/firewall"
+	_ "github.com/SkrobyLabs/mittens/extensions/gcp"
+	_ "github.com/SkrobyLabs/mittens/extensions/gh"
+	_ "github.com/SkrobyLabs/mittens/extensions/helm"
+	_ "github.com/SkrobyLabs/mittens/extensions/kubectl"
+	_ "github.com/SkrobyLabs/mittens/extensions/mcp"
 )
 
 // Set by -ldflags at build time (see Makefile).

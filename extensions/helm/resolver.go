@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 func init() {

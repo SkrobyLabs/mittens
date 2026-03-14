@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 // BuildContext holds the parameters needed to build a Docker image.

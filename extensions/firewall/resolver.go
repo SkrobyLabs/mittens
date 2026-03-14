@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 func init() {

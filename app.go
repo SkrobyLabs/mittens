@@ -18,8 +18,8 @@ import (
 	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
 
-	firewallext "github.com/Skroby/mittens/extensions/firewall"
-	"github.com/Skroby/mittens/extensions/registry"
+	firewallext "github.com/SkrobyLabs/mittens/extensions/firewall"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 // App holds all state for a single mittens invocation.

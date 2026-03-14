@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 // ---------------------------------------------------------------------------
