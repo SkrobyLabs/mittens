@@ -3,7 +3,17 @@
 # firewall, DinD, and pluggable extensions.
 
 BINARY   := mittens
-MODULE   := github.com/Skroby/mittens
+MODULE   := github.com/SkrobyLabs/mittens
+
+# ─── Windows detection ───────────────────────────────────────────────────────
+# On Windows (detected via the OS env var), all Go commands run inside WSL.
+# The build produces mittens.exe (a thin shim) + mittens-linux (the real binary).
+
+ifeq ($(OS),Windows_NT)
+  GO     := wsl.exe go
+else
+  GO     := go
+endif
 
 # Version info injected via -ldflags (override with: make build VERSION=v1.2.3)
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -20,8 +30,6 @@ PREFIX   ?= /usr/local
 # Docker image
 IMAGE    := mittens
 TAG      ?= latest
-USER_ID  := $(shell id -u)
-GROUP_ID := $(shell id -g)
 
 # ─── Default ──────────────────────────────────────────────────────────────────
 
@@ -31,47 +39,103 @@ all: build ## Build the binary
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
+ifeq ($(OS),Windows_NT)
+# On Windows: build both the Linux binary and a .exe shim via WSL.
+#   mittens.exe       - Windows shim (run this from PowerShell/cmd)
+#   mittens-linux     - real binary (executed inside WSL by the shim)
+build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux .
+	wsl.exe env GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY).exe ./cmd/shim
+	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux"
+	@echo "Run mittens.exe - it transparently uses WSL under the hood."
+else
 build: tidy ## Build the mittens binary
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
-	@echo "Built ./$(BINARY) — run 'make help' to see all targets"
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
+endif
 
 install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
 	ln -sf $(CURDIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
 
+# ─── Setup ────────────────────────────────────────────────────────────────────
+
+ifeq ($(OS),Windows_NT)
+init: init-windows # Set up development environment
+
+init-windows: # (internal) Set up Windows development environment (WSL + Go + Docker)
+	@echo "Checking Windows development prerequisites..."
+	@echo ""
+	@echo "1. WSL"
+	@wsl.exe echo ok >/dev/null 2>&1 && echo "   [OK] WSL is running" \
+		|| (echo "   [MISSING] WSL is required - install with: wsl --install" && exit 1)
+	@echo ""
+	@echo "2. Go (in WSL)"
+	@wsl.exe which go >/dev/null 2>&1 && echo "   [OK] $$(wsl.exe go version)" \
+		|| (echo "   [MISSING] Go is not installed in WSL - run: wsl sudo apt install golang-go" && exit 1)
+	@echo ""
+	@echo "3. Docker"
+	@wsl.exe which docker >/dev/null 2>&1 && echo "   [OK] docker found" \
+		|| (echo "   [MISSING] Docker Desktop is required - https://docs.docker.com/desktop/install/windows-install/" && exit 1)
+	@wsl.exe docker info >/dev/null 2>&1 && echo "   [OK] Docker daemon is running" \
+		|| echo "   [WARNING] Docker daemon is not running - start Docker Desktop"
+	@echo ""
+	@echo "4. Dependencies"
+	@wsl.exe go mod tidy
+	@echo "   [OK] go mod tidy complete"
+	@echo ""
+	@echo "All checks passed. Run 'make build' to build mittens."
+else
+init: ## Set up development environment
+	@echo "Checking development prerequisites..."
+	@echo ""
+	@echo "1. Go"
+	@command -v go >/dev/null 2>&1 && echo "   [OK] $$(go version)" \
+		|| (echo "   [MISSING] Go 1.23+ is required - https://go.dev/dl/" && exit 1)
+	@echo ""
+	@echo "2. Docker"
+	@command -v docker >/dev/null 2>&1 && echo "   [OK] docker found" \
+		|| (echo "   [MISSING] Docker is required - https://docs.docker.com/engine/install/" && exit 1)
+	@docker info >/dev/null 2>&1 && echo "   [OK] Docker daemon is running" \
+		|| echo "   [WARNING] Docker daemon is not running"
+	@echo ""
+	@echo "3. Dependencies"
+	@go mod tidy
+	@echo "   [OK] go mod tidy complete"
+	@echo ""
+	@echo "All checks passed. Run 'make build' to build mittens."
+endif
+
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 
 tidy: ## Run go mod tidy
-	go mod tidy
+	$(GO) mod tidy
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 docker: ## Build the Docker base image (no extensions)
-	docker build -f container/Dockerfile -t $(IMAGE):$(TAG) \
-		--build-arg USER_ID=$(USER_ID) \
-		--build-arg GROUP_ID=$(GROUP_ID) \
-		.
+	docker build -f container/Dockerfile -t $(IMAGE):$(TAG) .
 
 # ─── Quality ──────────────────────────────────────────────────────────────────
 
 test: ## Run all tests
-	go test ./...
+	$(GO) test ./...
 
 test-v: ## Run tests with verbose output
-	go test -v ./...
+	$(GO) test -v ./...
 
 test-race: ## Run tests with race detector
-	go test -race ./...
+	$(GO) test -race ./...
 
 lint: ## Run golangci-lint (install: https://golangci-lint.run/welcome/install)
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not found – install from https://golangci-lint.run"; exit 1; }
 	golangci-lint run ./...
 
 fmt: ## Format Go source files
-	gofmt -s -w .
+	$(GO) fmt ./...
 
 vet: ## Run go vet
-	go vet ./...
+	$(GO) vet ./...
 
 check: fmt vet lint test ## Run fmt, vet, lint, and test
 
@@ -81,10 +145,10 @@ DIST := dist
 
 release: tidy ## Cross-compile for common platforms into dist/
 	@mkdir -p $(DIST)
-	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  .
-	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  .
-	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   .
-	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   .
+	GOOS=darwin  GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  .
+	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  .
+	GOOS=linux   GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   .
+	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   .
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -106,16 +170,16 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 	done
 	@echo ""
 	@echo "Distribution ready in $(DIST)/"
-	@echo "  $(DIST)/mittens        — CLI"
-	@echo "  $(DIST)/container/     — Docker image files"
-	@echo "  $(DIST)/extensions/    — Extension build scripts"
+	@echo "  $(DIST)/mittens        - CLI"
+	@echo "  $(DIST)/container/     - Docker image files"
+	@echo "  $(DIST)/extensions/    - Extension build scripts"
 
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
 clean: ## Remove build artifacts
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux
 	rm -rf $(DIST)
-	go clean
+	$(GO) clean
 
 # ─── Dev helpers ──────────────────────────────────────────────────────────────
 
@@ -129,4 +193,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build install tidy docker test test-v test-race lint fmt vet check release dist clean run help
+.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help

@@ -91,7 +91,7 @@ For extensions that need logic beyond what YAML can express (credential filterin
 ```go
 package aws
 
-import "github.com/Skroby/mittens/extensions/registry"
+import "github.com/SkrobyLabs/mittens/extensions/registry"
 
 func init() {
     registry.Register("aws", &registry.Registration{
@@ -120,8 +120,8 @@ Extensions self-register via Go's `init()` mechanism. The main package uses blan
 
 ```go
 import (
-    _ "github.com/Skroby/mittens/extensions/aws"
-    _ "github.com/Skroby/mittens/extensions/gcp"
+    _ "github.com/SkrobyLabs/mittens/extensions/aws"
+    _ "github.com/SkrobyLabs/mittens/extensions/gcp"
 )
 ```
 

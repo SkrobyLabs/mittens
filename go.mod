@@ -1,4 +1,4 @@
-module github.com/Skroby/mittens
+module github.com/SkrobyLabs/mittens
 
 go 1.23
 

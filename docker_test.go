@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 // ---------------------------------------------------------------------------
