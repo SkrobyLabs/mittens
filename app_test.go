@@ -1191,6 +1191,45 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 	}
 }
 
+func TestAssembleDockerArgs_ExtraDirsDedupWorkspace(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	// Use a real temp dir as both workspace and extra dir.
+	wsDir := t.TempDir()
+
+	a := &App{
+		Provider:          DefaultProvider(),
+		NoHistory:         true,
+		ContainerName:     "mittens-dedup",
+		WorkspaceMountSrc: wsDir,
+		ExtraDirs:         []string{wsDir},
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// The extra dir should be skipped since it matches the workspace mount.
+	mountCount := 0
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-v" && strings.Contains(args[i+1], wsDir) {
+			mountCount++
+		}
+	}
+	// Expect exactly 1 mount (the primary workspace mount at /workspace), not 2.
+	if mountCount != 1 {
+		t.Errorf("expected 1 mount for workspace dir, got %d", mountCount)
+	}
+
+	// MITTENS_EXTRA_DIRS should not be set (no extra dirs after dedup).
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_EXTRA_DIRS=") {
+			t.Error("MITTENS_EXTRA_DIRS should not be set when extra dir matches workspace")
+		}
+	}
+}
+
 func TestParseFlags_Name(t *testing.T) {
 	a := &App{}
 	if err := a.ParseFlags([]string{"--name", "my-instance"}); err != nil {

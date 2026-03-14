@@ -76,6 +76,7 @@ type App struct {
 	broker      *HostBroker
 	brokerPort  int
 	brokerToken string
+	brokerSock  string // Unix socket path (Linux mode)
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -342,14 +343,22 @@ func (a *App) Run() error {
 	}
 
 	// Setup credentials.
-	a.Credentials = NewCredentialManager(a.Provider)
-	if err := a.Credentials.Setup(); err != nil {
-		logWarn("Credential setup: %v", err)
-	}
-	if a.Credentials.TmpFile() != "" {
-		logVerbose(a.Verbose, "Credentials staged: %s", a.Credentials.TmpFile())
+	// Skip OAuth credential staging when using a custom base URL (local/third-party
+	// provider) — the stored tokens belong to the original provider and will cause
+	// refresh failures that block the CLI.
+	if a.Provider.UsingCustomBaseURL() {
+		logInfo("Custom base URL detected (%s), skipping OAuth credential staging", a.Provider.BaseURLEnv)
+		a.Credentials = &CredentialManager{}
 	} else {
-		logVerbose(a.Verbose, "No credentials found")
+		a.Credentials = NewCredentialManager(a.Provider)
+		if err := a.Credentials.Setup(); err != nil {
+			logWarn("Credential setup: %v", err)
+		}
+		if a.Credentials.TmpFile() != "" {
+			logVerbose(a.Verbose, "Credentials staged: %s", a.Credentials.TmpFile())
+		} else {
+			logVerbose(a.Verbose, "No credentials found")
+		}
 	}
 
 	// Start broker (credential sync + host URL opening via TCP).
@@ -385,18 +394,42 @@ func (a *App) Run() error {
 			a.broker.LogFile = lf
 		}
 
-		port, err := a.broker.ListenTCP()
-		if err == nil {
-			a.brokerPort = port
-			go func() {
-				if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
-					logWarn("Broker: %v", err)
-				}
-			}()
-			logInfo("Broker: started on port %d", port)
+		if runtime.GOOS == "linux" {
+			// On Linux, use a Unix socket mounted into the container.
+			// This avoids host firewall issues (UFW/iptables with default INPUT DROP
+			// blocks traffic from the Docker bridge subnet to host ports).
+			sockDir, err := os.MkdirTemp("", "mittens-broker.*")
+			if err == nil {
+				a.tempDirs = append(a.tempDirs, sockDir)
+				sockPath := filepath.Join(sockDir, "broker.sock")
+				a.broker.sockPath = sockPath
+				go func() {
+					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
+						logWarn("Broker: %v", err)
+					}
+				}()
+				a.brokerSock = sockPath
+				logInfo("Broker: started on unix socket")
+			} else {
+				logWarn("Broker: failed to create socket dir: %v", err)
+				a.broker = nil
+			}
 		} else {
-			logWarn("Broker: failed to start: %v", err)
-			a.broker = nil
+			// On macOS/Windows, Docker Desktop provides transparent host→container
+			// networking via host.docker.internal, so TCP works reliably.
+			port, err := a.broker.ListenTCP()
+			if err == nil {
+				a.brokerPort = port
+				go func() {
+					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
+						logWarn("Broker: %v", err)
+					}
+				}()
+				logInfo("Broker: started on port %d", port)
+			} else {
+				logWarn("Broker: failed to start: %v", err)
+				a.broker = nil
+			}
 		}
 	}
 
@@ -1011,6 +1044,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if a.Provider.APIKeyEnv != "" {
 		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
 	}
+	if a.Provider.BaseURLEnv != "" && os.Getenv(a.Provider.BaseURLEnv) != "" {
+		args = append(args, "-e", a.Provider.BaseURLEnv+"="+os.Getenv(a.Provider.BaseURLEnv))
+	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	if a.Yolo {
 		args = append(args, "-e", "MITTENS_YOLO=true")
@@ -1056,8 +1092,16 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", k+"="+v)
 	}
 
-	// Credential broker (TCP).
-	if a.brokerPort > 0 {
+	// Credential broker.
+	if a.brokerSock != "" {
+		// Unix socket mode (Linux): mount the socket directory into the container.
+		sockDir := filepath.Dir(a.brokerSock)
+		containerSockDir := "/tmp/mittens-broker"
+		containerSockPath := containerSockDir + "/broker.sock"
+		args = append(args, "-v", sockDir+":"+containerSockDir)
+		args = append(args, "-e", "MITTENS_BROKER_SOCK="+containerSockPath)
+	} else if a.brokerPort > 0 {
+		// TCP mode (macOS/Windows): use host.docker.internal.
 		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
 		if a.brokerToken != "" {
 			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
@@ -1096,6 +1140,17 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if len(a.ExtraDirs) > 0 {
 		wtSuffix := fmt.Sprintf("wt-%d", os.Getpid())
 		var extraPaths []string
+
+		// Collect stat info for dedup (os.SameFile handles case-insensitive filesystems).
+		type mountedDir struct {
+			info os.FileInfo
+			path string
+		}
+		var mountedDirs []mountedDir
+		if wsInfo, err := os.Stat(a.WorkspaceMountSrc); err == nil {
+			mountedDirs = append(mountedDirs, mountedDir{info: wsInfo, path: a.WorkspaceMountSrc})
+		}
+
 		for _, dirSpec := range a.ExtraDirs {
 			spec := parseExtraDirSpec(dirSpec)
 			resolved, err := filepath.Abs(spec.Path)
@@ -1103,10 +1158,25 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 				logWarn("--dir path not resolvable: %s", spec.Path)
 				continue
 			}
-			if _, err := os.Stat(resolved); err != nil {
+			resolvedInfo, err := os.Stat(resolved)
+			if err != nil {
 				logError("--dir path does not exist: %s", spec.Path)
 				continue
 			}
+
+			// Deduplicate against workspace and previously added extra dirs.
+			duplicate := false
+			for _, m := range mountedDirs {
+				if os.SameFile(m.info, resolvedInfo) {
+					logVerbose(a.Verbose, "Skipping duplicate mount: %s (same as %s)", spec.Path, m.path)
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			mountedDirs = append(mountedDirs, mountedDir{info: resolvedInfo, path: resolved})
 
 			var extraPath string
 			mountMode := ""

@@ -1,6 +1,9 @@
 package main
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+)
 
 // RolePreset defines a provider-specific model + effort combination for a role.
 type RolePreset struct {
@@ -18,6 +21,7 @@ type Provider struct {
 	Username       string // container username, e.g. "claude"
 	InstallCmd     string // shell command to install the CLI in the image
 	APIKeyEnv      string // env var name for the API key, e.g. "ANTHROPIC_API_KEY"
+	BaseURLEnv     string // env var for custom base URL, e.g. "OPENAI_BASE_URL"; when set, skip OAuth credential staging
 	SettingsFormat string // config file format: "json" or "toml"
 
 	// Config layout
@@ -113,6 +117,14 @@ func (p *Provider) StagingUserPrefsPath() string {
 	return filepath.Join("/mnt/claude-config", p.UserPrefsFile)
 }
 
+// UsingCustomBaseURL reports whether the user has set a custom base URL via
+// the provider's BaseURLEnv (e.g. OPENAI_BASE_URL), indicating a local or
+// third-party endpoint. When true, OAuth credential staging should be skipped
+// since the tokens are for the original provider and will cause refresh failures.
+func (p *Provider) UsingCustomBaseURL() bool {
+	return p.BaseURLEnv != "" && os.Getenv(p.BaseURLEnv) != ""
+}
+
 // IsResumeFlag reports whether the given CLI argument is a resume/continue flag.
 func (p *Provider) IsResumeFlag(arg string) bool {
 	for _, f := range p.ResumeFlags {
@@ -133,6 +145,7 @@ func ClaudeProvider() *Provider {
 		Username:       "claude",
 		InstallCmd:     `curl -fsSL https://claude.ai/install.sh | bash && cp -L /root/.local/bin/claude /usr/local/bin/claude && chmod +x /usr/local/bin/claude && /usr/local/bin/claude --version`,
 		APIKeyEnv:      "ANTHROPIC_API_KEY",
+		BaseURLEnv:     "ANTHROPIC_BASE_URL",
 		SettingsFormat: "json",
 
 		ConfigDir:      ".claude",
@@ -184,6 +197,7 @@ func CodexProvider() *Provider {
 		Username:       "codex",
 		InstallCmd:     `npm install -g @openai/codex && codex --version`,
 		APIKeyEnv:      "OPENAI_API_KEY",
+		BaseURLEnv:     "OPENAI_BASE_URL",
 		SettingsFormat: "toml",
 
 		ConfigDir:      ".codex",
@@ -248,6 +262,7 @@ func GeminiProvider() *Provider {
 			` mkdir -p /usr/local/lib/node_modules/@google/gemini-cli/.v8-compile-cache` +
 			` && NODE_COMPILE_CACHE=/usr/local/lib/node_modules/@google/gemini-cli/.v8-compile-cache gemini --version`,
 		APIKeyEnv:      "GEMINI_API_KEY",
+		BaseURLEnv:     "",
 		SettingsFormat: "json",
 
 		ConfigDir:      ".gemini",
