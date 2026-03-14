@@ -5,42 +5,44 @@ Run Claude Code in isolated Docker containers with credential forwarding, networ
 ## Project Structure
 
 ```
-mittens              # compiled binary (Go)
-main.go                  # CLI entry point (cobra, flag routing)
-app.go                   # core orchestration (ParseFlags, Run, Cleanup)
-broker.go                # HostBroker — host↔container communication (creds, URLs, notifications, OAuth)
-config.go                # per-project config (~/.mittens/projects/...)
-wizard.go                # TUI setup wizard (charmbracelet/huh)
-docker.go                # docker build/run/cp operations
-drop.go                  # DropProxy — stdin PTY proxy for drag-and-drop path translation
-credentials.go           # credential extraction and persistence
-credentials_darwin.go    # macOS Keychain credential source
-credentials_other.go     # non-macOS stub
-terminal_focus.go        # detect terminal and re-focus on notification
-helpers.go               # logging, scriptDir, captureCommand
-embed.go                 # go:embed for extension YAMLs
-container/               # Docker image files (not embedded, must ship with binary)
-  Dockerfile
-  entrypoint.sh          # two-phase: root (firewall/DinD) then gosu to claude
-  squid.conf             # proxy config for firewall mode
-  firewall.conf          # default domain whitelist
-  mcp-domains.conf       # MCP server name -> domain mappings
-  clipboard-*.sh         # clipboard image sync (macOS)
-  open-url.sh            # xdg-open shim — forwards URLs + OAuth callbacks via broker
-  notify.sh              # notification shim — sends events to broker
-  cred-sync.sh           # credential sync daemon (push/pull tokens via broker)
-extensions/              # pluggable extension system
-  registry/              # shared types + registration (registry.Register, LoadExtensions)
-    types.go             # Extension, SetupContext, SetupResult, ParseFlag
-    registry.go          # Register, GetListResolver, GetSetupResolver, LoadExternalExtensions
-  <name>/                # one directory per extension
-    extension.yaml       # manifest (embedded at compile time)
-    resolver.go          # Go resolver with init() registration (optional)
-    build.sh             # Docker build-time install script (optional)
-internal/
-  fileutil/              # CopyFile, CopyDir helpers
+cmd/
+  mittens/                   # main binary source
+    main.go                  # CLI entry point (cobra, flag routing)
+    app.go                   # core orchestration (ParseFlags, Run, Cleanup)
+    broker.go                # HostBroker — host↔container communication (creds, URLs, notifications, OAuth)
+    config.go                # per-project config (~/.mittens/projects/...)
+    wizard.go                # TUI setup wizard (charmbracelet/huh)
+    docker.go                # docker build/run/cp operations
+    drop.go                  # DropProxy — stdin PTY proxy for drag-and-drop path translation
+    credentials.go           # credential extraction and persistence
+    credentials_darwin.go    # macOS Keychain credential source
+    credentials_other.go     # non-macOS stub
+    terminal_focus.go        # detect terminal and re-focus on notification
+    helpers.go               # logging, scriptDir, captureCommand
+    embed.go                 # go:embed for extension YAMLs
+    container/               # Docker image files (not embedded, must ship with binary)
+      Dockerfile
+      entrypoint.sh          # two-phase: root (firewall/DinD) then gosu to claude
+      squid.conf             # proxy config for firewall mode
+      firewall.conf          # default domain whitelist
+      mcp-domains.conf       # MCP server name -> domain mappings
+      clipboard-*.sh         # clipboard image sync (macOS)
+      open-url.sh            # xdg-open shim — forwards URLs + OAuth callbacks via broker
+      notify.sh              # notification shim — sends events to broker
+      cred-sync.sh           # credential sync daemon (push/pull tokens via broker)
+    extensions/              # pluggable extension system
+      registry/              # shared types + registration (registry.Register, LoadExtensions)
+        types.go             # Extension, SetupContext, SetupResult, ParseFlag
+        registry.go          # Register, GetListResolver, GetSetupResolver, LoadExternalExtensions
+      <name>/                # one directory per extension
+        extension.yaml       # manifest (embedded at compile time)
+        resolver.go          # Go resolver with init() registration (optional)
+        build.sh             # Docker build-time install script (optional)
+    internal/
+      fileutil/              # CopyFile, CopyDir helpers
+  shim/                      # Windows WSL shim
 examples/
-  redis-extension/       # example external extension (Python subprocess protocol)
+  redis-extension/           # example external extension (Python subprocess protocol)
 ```
 
 ## Build
@@ -51,11 +53,11 @@ make install             # install to /usr/local/bin (or PREFIX=~/.local)
 make help                # all targets
 ```
 
-Requires Go 1.23+. The binary embeds extension YAMLs but needs `container/` and `extensions/*/build.sh` at runtime (resolved relative to binary location).
+Requires Go 1.23+. The binary embeds extension YAMLs but needs `cmd/mittens/container/` and `cmd/mittens/extensions/*/build.sh` at runtime (resolved relative to binary location).
 
 ## Extension System
 
-See [EXTENSIONS.md](EXTENSIONS.md) for the full extension architecture, YAML manifest schema, Go resolver API, and external subprocess protocol.
+See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAML manifest schema, Go resolver API, and external subprocess protocol.
 
 ## Key Patterns
 

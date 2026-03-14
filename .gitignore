@@ -8,10 +8,10 @@
 !.claude/skills/
 
 # Go build artifacts
-mittens
-mittens-*
+/mittens
+/mittens-*
 dist/
 
 .vscode/settings.json
 
-mittens.exe
+/mittens.exe*

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="mittens.png" alt="Mittens" width="200">
+  <img src="./assets/mittens.png" alt="Mittens" width="200">
 </p>
 
 <h3 align="center">Mittens on. Let it cook.</h3>
@@ -222,7 +222,7 @@ Built-in: `--ssh`, `--gh`, `--aws`, `--azure`, `--gcp`, `--k8s`, `--helm`, `--do
 
 External plugins: drop an executable at `~/.mittens/extensions/<name>/plugin` — no recompilation needed.
 
-See [EXTENSIONS.md](EXTENSIONS.md) for the full extension system docs.
+See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension system docs.
 
 ## License
 

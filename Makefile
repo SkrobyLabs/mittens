@@ -20,9 +20,9 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  := -s -w \
-	-X '$(MODULE).version=$(VERSION)' \
-	-X '$(MODULE).commit=$(COMMIT)' \
-	-X '$(MODULE).date=$(DATE)'
+	-X '$(MODULE)/cmd/mittens.version=$(VERSION)' \
+	-X '$(MODULE)/cmd/mittens.commit=$(COMMIT)' \
+	-X '$(MODULE)/cmd/mittens.date=$(DATE)'
 
 # Install destination: ~/.local on Linux (no sudo), /usr/local on macOS
 UNAME_S  := $(shell uname -s)
@@ -49,13 +49,13 @@ ifeq ($(OS),Windows_NT)
 #   mittens.exe       - Windows shim (run this from PowerShell/cmd)
 #   mittens-linux     - real binary (executed inside WSL by the shim)
 build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim)
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux .
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux ./cmd/mittens
 	wsl.exe env GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY).exe ./cmd/shim
 	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux"
 	@echo "Run mittens.exe - it transparently uses WSL under the hood."
 else
 build: tidy ## Build the mittens binary
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/mittens
 	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
 endif
 
@@ -119,7 +119,7 @@ tidy: ## Run go mod tidy
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 docker: ## Build the Docker base image (no extensions)
-	docker build -f container/Dockerfile -t $(IMAGE):$(TAG) .
+	docker build -f cmd/mittens/container/Dockerfile -t $(IMAGE):$(TAG) cmd/mittens
 
 # ─── Quality ──────────────────────────────────────────────────────────────────
 
@@ -150,10 +150,10 @@ DIST := dist
 
 release: tidy ## Cross-compile for common platforms into dist/
 	@mkdir -p $(DIST)
-	GOOS=darwin  GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  .
-	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  .
-	GOOS=linux   GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   .
-	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   .
+	GOOS=darwin  GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  ./cmd/mittens
+	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  ./cmd/mittens
+	GOOS=linux   GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   ./cmd/mittens
+	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   ./cmd/mittens
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -163,9 +163,9 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 	@# Binaries
 	cp $(BINARY) $(DIST)/
 	@# Container runtime files (Dockerfile, entrypoint, configs, scripts)
-	cp container/* $(DIST)/container/
+	cp cmd/mittens/container/* $(DIST)/container/
 	@# Extension build scripts (YAML manifests are embedded in the binary)
-	@for ext in extensions/*/; do \
+	@for ext in cmd/mittens/extensions/*/; do \
 		name=$$(basename "$$ext"); \
 		[ "$$name" = "registry" ] && continue; \
 		if ls "$$ext"build.sh >/dev/null 2>&1; then \

@@ -1,0 +1,44 @@
+package docker
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+)
+
+func init() {
+	registry.Register("docker", &registry.Registration{
+		Setup: setup,
+	})
+}
+
+func setup(ctx *registry.SetupContext) error {
+	mode := ""
+	if len(ctx.Extension.Args) > 0 {
+		mode = ctx.Extension.Args[0]
+	}
+	switch mode {
+	case "dind":
+		*ctx.DockerArgs = append(*ctx.DockerArgs,
+			"--privileged",
+			"-v", ctx.ContainerName+"-docker:/var/lib/docker",
+			"-e", "MITTENS_DIND=true",
+		)
+		fmt.Fprintln(os.Stderr, "[mittens] docker: dind mode — isolated Docker daemon (--privileged)")
+	case "host":
+		*ctx.DockerArgs = append(*ctx.DockerArgs,
+			"-v", "/var/run/docker.sock:/var/run/docker.sock",
+			"-e", "MITTENS_DOCKER_HOST=true",
+		)
+		fmt.Fprintln(os.Stderr, "\033[31m"+
+			"  ┌─────────────────────────────────────────────────────────────┐\n"+
+			"  │                        WARNING                              │\n"+
+			"  │  Docker host mode — the container can control your host     │\n"+
+			"  │  Docker daemon. AI-issued commands (docker rm, docker rmi,  │\n"+
+			"  │  docker run) will affect the HOST, not an isolated engine.  │\n"+
+			"  └─────────────────────────────────────────────────────────────┘"+
+			"\033[0m")
+	}
+	return nil
+}
