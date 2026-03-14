@@ -140,6 +140,11 @@ RUN chmod +x /usr/local/bin/cred-sync.sh
 COPY container/notify.sh /usr/local/bin/notify.sh
 RUN chmod +x /usr/local/bin/notify.sh
 
+# Strip Windows CRLF line endings from all copied scripts (safety net for
+# Windows checkouts where .gitattributes eol=lf was not applied).
+RUN find /usr/local/bin -name '*.sh' -exec sed -i 's/\r$//' {} + && \
+    sed -i 's/\r$//' /usr/local/bin/xclip /usr/local/bin/xdg-open
+
 # NOTE: No USER directive here — entrypoint.sh handles the root→claude
 # privilege drop via gosu, which is needed for optional DinD (dockerd
 # must start as root). When DinD is disabled the entrypoint still drops

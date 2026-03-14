@@ -11,3 +11,7 @@
 mittens
 mittens-*
 dist/
+
+.vscode/settings.json
+
+mittens.exe

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Skroby/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/extensions/registry"
 )
 
 func init() {
