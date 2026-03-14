@@ -1,4 +1,7 @@
-# Force LF line endings for files that run inside Linux containers/WSL.
+# Normalise all text files to LF in the repository.
+* text=auto eol=lf
+
+# Ensure files that run inside Linux containers/WSL are always LF.
 *.sh        text eol=lf
 *.conf      text eol=lf
 Dockerfile  text eol=lf
