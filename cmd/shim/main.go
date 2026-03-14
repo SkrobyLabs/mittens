@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +44,66 @@ var flagsWithPathArg = map[string]bool{
 	"--dir-ro": true,
 }
 
+// relocateSelf renames the running .exe so the original path is unlocked
+// for in-place updates while a session is active.  A fresh copy is placed
+// back at the original path for new invocations.  The returned function
+// cleans up the renamed file and should be deferred.
+func relocateSelf() func() {
+	exe, err := os.Executable()
+	if err != nil {
+		return func() {}
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return func() {}
+	}
+
+	// Use a per-PID suffix so multiple concurrent sessions don't collide.
+	oldPath := fmt.Sprintf("%s.%d.old", exe, os.Getpid())
+
+	// Clean up stale .old files from previous runs that didn't get to
+	// their deferred cleanup (e.g. crash, forced kill).
+	if matches, _ := filepath.Glob(exe + ".*.old"); len(matches) > 0 {
+		for _, m := range matches {
+			os.Remove(m) // fails silently for files still locked by other sessions
+		}
+	}
+
+	if err := os.Rename(exe, oldPath); err != nil {
+		return func() {} // can't rename — continue without relocation
+	}
+
+	// Copy the renamed file back to the original path so new invocations
+	// still work.  The new copy is not locked by this process.
+	if err := copyExe(oldPath, exe); err != nil {
+		os.Rename(oldPath, exe) // rollback
+		return func() {}
+	}
+
+	return func() { os.Remove(oldPath) }
+}
+
+func copyExe(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
 func main() {
+	cleanup := relocateSelf()
+	defer cleanup()
+
 	// Translate working directory.
 	cwd, err := os.Getwd()
 	if err != nil {
