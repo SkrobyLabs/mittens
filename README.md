@@ -14,6 +14,12 @@
 
 Mittens wraps [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli) so they run containerised, firewalled, with only the credentials you choose to pass in.
 
+## Why
+
+AI coding agents work best when you stop babysitting them and let them run autonomously — but giving an agent full permission on your host machine is a terrible idea. Mittens creates a sandboxed environment where agents can do anything they need to, while the blast radius is limited to only what you explicitly give them access to.
+
+You could spin up a VM or a remote box, but then you lose everything that makes local development comfortable: clipboard access, drag-and-drop, desktop notifications, browser-based OAuth login, and instant access to your credentials. You'd also be paying for cloud compute and waiting for VMs to boot. Mittens containers start in seconds, run on your own machine, and handle all the host integration transparently — credential syncing, URL forwarding, path translation — so it feels like working locally, just sandboxed.
+
 ## Supported Platforms
 
 | Platform | How it works |
