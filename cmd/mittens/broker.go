@@ -43,7 +43,8 @@ body{
   background:#fff;border-radius:16px;padding:48px 40px;max-width:420px;width:90%;
   text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.08);
 }
-.logo{font-size:48px;margin-bottom:8px}
+.logo{margin-bottom:8px}
+.logo img{width:96px;height:auto}
 .brand{font-size:14px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:#374151;margin-bottom:28px}
 .check{
   width:56px;height:56px;border-radius:50%;
@@ -57,7 +58,7 @@ h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#111827}
 </head>
 <body>
 <div class="card">
-  <div class="logo">🐱</div>
+  <div class="logo"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAA0CAMAAABCWc3rAAAAY1BMVEX///+qqpnMzLu7qqqqmZm7qpnMu7vd3cy7u6rdzLvu7t3u3d3dzMzMu6r/7u7//+7////u7u7d3d3u3cyqmYi7mYiqiHf/7t2ZiHe7qoiqmXfMu5nMzKqZiGaqqoiId2aqiIiR4ZqfAAAAAXRSTlMAQObYZgAABElJREFUWMPtV8uS4zYMlGlTEMAHRJNry96ZJP//lWlQk8PUOimbrtyWh7HKnkIT3Y2Hpun3GT8H5575t+NpFMBP/wlwnMl+Xw6HwyDA8Xha5n/9lSUwkfen6ak8H6dwiJHo+OinRFk1kyGk4fjTFDmsa3lww0Si66qlxMf4Tx5HQRAkuOXb13MkJBZyEcFvtAxGxyFGCFWKLpzjHucYqeiqIoDQLJqBME6QC1ryWshV8JHJtYPDzVewJivICSp4FhcH44MJ0CyKPHJRIYrRcM4kBrAWeAgfmpkHbcQuGwARFwkxFqWyAmEFIoUiWRIQ7EQekmFmzlqE4lyLONw1x7IWgwSck/7XWApEaR4BYCchSIbCMGNQ1UK82oeuICwSQouDW+0j+SGAEBQSznQG+zCsUEPUTpKAJ0fVyEJ8id639CpNKcUsWR2pXbtzVVNjAACiFNQAUhTHhszpx2Xyr2SxLIfk6QqacdeSwbz58Ty3S5JQTHnzT4BMyXGtzm8+pRdKGpdp3nMVPqOQdd0RCurWcshCJUuH5ITA7F5WwPvFT4cEg++cr2Z7KI5nKAHr4LP7qQaHZjeisJ2WkpmnA+BYg8CTonmYzlVzpV4EbrgZLbPp2V1DnSSAQIKvpGo1PI5m1LFSJkWrWDOCVtzUguZgieROUaVOEioB2uhILZ/R5frtOzsWVOueCMSAjQynAyhYo9dzmHHLuH450mDwFHbNM1kJAqeXm30R4+vNwozutAe2QlMKNZvaoKhyXXvTU0mxM8Wvz7XFKJm/nImeHPocMPPApxpyB0CfomwUOXp5sXBoaRKT2RT8C/rOP+YxyqRqb+QVMxvFQANTzWUUa/F8BQIiFau0fTrsI0FQBdkkhlOlDIycaENrtc4gPShSAV+BStmbhA1MDVguzMJhYPBjCFj7ObTEVMAIzt4k+lyDzhAGHnJm4Toy94/aJ3ptW3NVYr1mqX3sAMesC7XVmrV5qKaRsQ8FChxPy7YhC67EIYP5bOucSRwCNhbOoWgZ60bwqVjvL+zbtl1unoP0IV+Z9kQwccjaCKXYBgDgo73FoZr8vbXtfvvJ1sGpUL1eIT0njCNT+7kt/9eTsD9jr8OKxUdcE5nc7+2HZ+aPWkEZhpmtFKEO9+uTI0w1cBFSlxYDEnR9Xu4NcyxhWbHdVeLMg/FxWjtgYjF7wMCb4N9v7Q9oAuVvfkEZ4Kuxrej7+XPhGbpq/blhWPt2gyaXCxJhMJWGJP523Hn291SZb7j5fi5w1rZ9Gpzf3gwfbU8R5y2udx9oHli3kz9A9O0TkuDbt+KjEZVer1gQUdSCZY7kyvOCNwROrU3+5N94B0HP2FcUVfRmtFip6SPCT9iHuuh+Wtz0TgpLn2rr/sZHjDSMqm37y+8HCi/tLZnR2Arsjsbw4X+NtG33twSwEEfu937sFf8WPU8d/8577BNnPv3PIbz0WvD7PDx/A5FRT23ffejWAAAAAElFTkSuQmCC" alt="mittens"></div>
   <div class="brand">mittens</div>
   <div class="check">✓</div>
   <h1>Login successful</h1>
