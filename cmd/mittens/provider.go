@@ -180,8 +180,8 @@ func ClaudeProvider() *Provider {
 		TrustedDirsFile: "",
 		StopHookEvent:   "Stop",
 		RoleDefaults: map[string]RolePreset{
-			"worker":  {Model: "claude-haiku-4-6", Effort: ""},
-			"planner": {Model: "claude-opus-4-6", Effort: ""},
+			"worker":  {Model: "haiku", Effort: ""},
+			"planner": {Model: "opus", Effort: ""},
 		},
 		ModelFlag:  "--model",
 		EffortFlag: "--effort",

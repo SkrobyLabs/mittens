@@ -128,7 +128,7 @@ func TestMaybeApplyRolePreset_EffortInjected(t *testing.T) {
 	t.Setenv("MITTENS_HOME", tmp)
 	workspace := ""
 	provider := ClaudeProvider()
-	provider.RoleDefaults["worker"] = RolePreset{Model: "claude-haiku-4-6", Effort: "high"}
+	provider.RoleDefaults["worker"] = RolePreset{Model: "haiku", Effort: "high"}
 
 	a := &App{
 		Workspace:  workspace,
@@ -141,7 +141,7 @@ func TestMaybeApplyRolePreset_EffortInjected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"--model", "claude-haiku-4-6", "--effort", "high"}
+	want := []string{"--model", "haiku", "--effort", "high"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}
@@ -176,7 +176,7 @@ func TestMaybeApplyRolePreset_EffortInjectedFromOverrideConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"--model", "claude-opus-4-6", "--effort", "high"}
+	want := []string{"--model", "opus", "--effort", "high"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}
@@ -312,7 +312,7 @@ func TestMaybeApplyRolePreset_EffortSkippedWhenExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"--model", "claude-opus-4-6", "--effort", "max"}
+	want := []string{"--model", "opus", "--effort", "max"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}
