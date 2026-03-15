@@ -30,6 +30,7 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--worktree", func(a *App) bool { return a.Worktree }},
 		{"--shell", func(a *App) bool { return a.Shell }},
 		{"--no-notify", func(a *App) bool { return a.NoNotify }},
+		{"--rebuild", func(a *App) bool { return a.Rebuild }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.flag, func(t *testing.T) {

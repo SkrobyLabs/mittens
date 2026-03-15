@@ -23,6 +23,7 @@ type BuildContext struct {
 	Extensions     []*registry.Extension // enabled extensions with build configs
 	ExtraBuildArgs map[string]string    // additional --build-arg key=value pairs (e.g. provider args)
 	Verbose        bool                 // pass --progress=plain to docker build
+	NoCache        bool                 // pass --no-cache to docker build
 }
 
 // ensureBaseImages reads the Dockerfile, extracts all FROM images, and pulls
@@ -100,6 +101,10 @@ func BuildImage(ctx BuildContext) error {
 		if err := exec.Command("docker", "buildx", "version").Run(); err == nil {
 			args = append(args, "--progress=plain")
 		}
+	}
+
+	if ctx.NoCache {
+		args = append(args, "--no-cache")
 	}
 
 	// Dockerfile path

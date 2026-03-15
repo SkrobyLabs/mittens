@@ -39,6 +39,7 @@ type App struct {
 	NoConfig      bool
 	NoHistory     bool
 	NoBuild       bool
+	Rebuild       bool
 	Yolo          bool
 	NoNotify      bool
 	NetworkHost   bool
@@ -94,6 +95,7 @@ var coreFlags = map[string]func(*App){
 	"--no-config":    func(a *App) { a.NoConfig = true },
 	"--no-history":   func(a *App) { a.NoHistory = true },
 	"--no-build":     func(a *App) { a.NoBuild = true },
+	"--rebuild":      func(a *App) { a.Rebuild = true },
 	"--no-yolo":      func(a *App) { a.Yolo = false },
 	"--no-notify":    func(a *App) { a.NoNotify = true },
 	"--network-host": func(a *App) { a.NetworkHost = true },
@@ -1011,6 +1013,7 @@ func (a *App) buildImage() error {
 			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
 		},
 		Verbose: a.Verbose,
+		NoCache: a.Rebuild,
 	})
 }
 
@@ -1534,6 +1537,7 @@ Core flags:
   --no-history      Disable session persistence (fully ephemeral)
   --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
+  --rebuild         Rebuild image without layer cache
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
   --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
   --no-yolo         Restore permission prompts (YOLO is the default)
@@ -1620,6 +1624,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
+			{Name: "--rebuild", Description: "Rebuild image without layer cache"},
 			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
