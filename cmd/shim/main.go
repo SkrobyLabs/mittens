@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // linuxBinaryPath returns the WSL path to the Linux mittens binary,
@@ -127,6 +129,11 @@ func copyExe(src, dst string) error {
 }
 
 func main() {
+	// Capture the exe directory BEFORE relocateSelf renames the binary,
+	// so we get the original Windows path (not a .old or resolved path).
+	shimExe, _ := os.Executable()
+	shimDir := filepath.Dir(shimExe)
+
 	cleanup := relocateSelf()
 	defer cleanup()
 
@@ -167,10 +174,23 @@ func main() {
 		translated = append(translated, arg)
 	}
 
-	// Build: wsl --cd <wsl-cwd> env MITTENS_WSL_CWD=<path> <linux-binary> <args...>
+	// Start mittens-clipboard-helper.exe on the Windows side (can't run .exe
+	// from WSL when Docker Desktop's bind-mounts break binfmt_misc PE handling).
+	clipboardSharedDir := ensureClipboardSync(shimDir)
+
+	// Build: wsl --cd <wsl-cwd> env MITTENS_WSL_CWD=<path>
+	//   MITTENS_CLIPBOARD_DIR=<path> <linux-binary> <args...>
 	// The env prefix is needed because WSL does not reliably forward
 	// environment variables set on the Windows side.
-	wslArgs := []string{"--cd", wslCwd, "env", "MITTENS_WSL_CWD=" + wslCwd, binPath}
+	envVars := []string{
+		"MITTENS_WSL_CWD=" + wslCwd,
+	}
+	if clipboardSharedDir != "" {
+		envVars = append(envVars, "MITTENS_CLIPBOARD_DIR="+clipboardSharedDir)
+	}
+	wslArgs := []string{"--cd", wslCwd, "env"}
+	wslArgs = append(wslArgs, envVars...)
+	wslArgs = append(wslArgs, binPath)
 	wslArgs = append(wslArgs, translated...)
 
 	cmd := exec.Command("wsl", wslArgs...)
@@ -184,6 +204,114 @@ func main() {
 		}
 		fatal("%v", err)
 	}
+}
+
+// ensureClipboardSync starts mittens-clipboard-helper.exe if it exists next to
+// the shim and no healthy daemon is already running. Returns the WSL-side shared
+// directory path or empty string on failure.
+func ensureClipboardSync(shimDir string) string {
+	exePath := filepath.Join(shimDir, "mittens-clipboard-helper.exe")
+	if _, err := os.Stat(exePath); err != nil {
+		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not found at %s\n", exePath)
+		return ""
+	}
+
+	// Use a UNC path into the WSL filesystem so that:
+	// 1. The Windows exe can write to it (via \\wsl.localhost\<distro>\...)
+	// 2. The WSL mittens binary can read it (at /tmp/...)
+	// 3. Docker Desktop can mount it into a container
+	// Using Windows %TEMP% doesn't work because Docker Desktop's WSL
+	// integration only exposes specific /mnt/c/ paths, not the full drive.
+	distro := wslDistroName()
+	if distro == "" {
+		fmt.Fprintf(os.Stderr, "[mittens] cannot determine WSL distro name for clipboard sync\n")
+		return ""
+	}
+	sharedDir := `\\wsl.localhost\` + distro + `\tmp\mittens-clipboard-shared`
+	if err := os.MkdirAll(filepath.Join(sharedDir, "clients"), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "[mittens] cannot create clipboard dir: %v\n", err)
+		return ""
+	}
+
+	// The WSL-side path for the env var (the mittens binary reads from here).
+	wslSharedDir := "/tmp/mittens-clipboard-shared"
+
+	// Check if already healthy (heartbeat file fresh).
+	if clipboardSyncHealthy(sharedDir) {
+		return wslSharedDir
+	}
+
+	// Start the daemon.
+	logPath := filepath.Join(sharedDir, "clipboard-sync.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[mittens] cannot open clipboard log: %v\n", err)
+		return ""
+	}
+
+	cmd := exec.Command(exePath, sharedDir)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[mittens] cannot start mittens-clipboard-helper.exe: %v\n", err)
+		logFile.Close()
+		return ""
+	}
+	logFile.Close()
+
+	// Wait for healthy.
+	for i := 0; i < 50; i++ {
+		if clipboardSyncHealthy(sharedDir) {
+			return wslSharedDir
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Read log for diagnostics.
+	if logData, err := os.ReadFile(logPath); err == nil && len(logData) > 0 {
+		tail := string(logData)
+		if len(tail) > 300 {
+			tail = tail[len(tail)-300:]
+		}
+		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not healthy (log: %s)\n", strings.TrimSpace(tail))
+	} else {
+		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not healthy (no log output)\n")
+	}
+	return ""
+}
+
+// clipboardSyncHealthy checks if the clipboard-sync daemon is running
+// by verifying the heartbeat file is fresh.
+func clipboardSyncHealthy(dir string) bool {
+	hbPath := filepath.Join(dir, "clipboard.heartbeat")
+	info, err := os.Stat(hbPath)
+	if err != nil {
+		// No heartbeat — check PID file age.
+		pidPath := filepath.Join(dir, "clipboard-sync.pid")
+		pidInfo, pidErr := os.Stat(pidPath)
+		if pidErr != nil {
+			return false
+		}
+		pidData, _ := os.ReadFile(pidPath)
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidData))); err == nil && pid > 0 {
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				return false
+			}
+			_ = proc
+		}
+		return time.Since(pidInfo.ModTime()) <= 5*time.Second
+	}
+	return time.Since(info.ModTime()) <= 5*time.Second
+}
+
+// wslDistroName returns the name of the default WSL distribution.
+func wslDistroName() string {
+	out, err := exec.Command("wsl", "-e", "bash", "-c", "echo $WSL_DISTRO_NAME").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func fatal(format string, a ...any) {

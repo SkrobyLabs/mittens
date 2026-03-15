@@ -63,8 +63,9 @@ type App struct {
 	worktreeDirs    []string
 	worktreeOrigins map[string]string // worktree path -> original HEAD sha
 	worktreeRepos   map[string]string // worktree path -> original repo root
-	clipboardDir    string
-	clipboardReg    string
+	clipboardDir       string
+	clipboardReg       string
+	clipboardClientHB  string // WSL client heartbeat file in shared dir
 
 	// Drop zone for drag-and-drop file translation
 	dropDir string
@@ -674,6 +675,10 @@ func argExists(args []string, val string) bool {
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
 func (a *App) Cleanup() {
+	if a.clipboardClientHB != "" {
+		_ = os.Remove(a.clipboardClientHB)
+		a.clipboardClientHB = ""
+	}
 	if a.clipboardReg != "" {
 		_ = os.Remove(a.clipboardReg)
 	}
@@ -784,6 +789,10 @@ func sharedClipboardImageFile(dir string) string {
 
 func sharedClipboardErrorFile(dir string) string {
 	return filepath.Join(dir, "clipboard.error")
+}
+
+func writeClipboardClientHeartbeat(path string) {
+	_ = os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0o600)
 }
 
 func sharedClipboardPID(dir string) (int, error) {
@@ -1320,8 +1329,33 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "--network", "host")
 	}
 
-	// Clipboard image sync (macOS only).
-	if runtime.GOOS == "darwin" {
+	// Clipboard image sync.
+	if isWSL() {
+		sharedDir, err := ensureWSLClipboardSync()
+		if err == nil {
+			args = append(args,
+				"-v", sharedDir+":/tmp/mittens-clipboard:ro",
+				"-e", "DISPLAY=:0",
+				"-e", "MITTENS_WSL_CLIPBOARD=true",
+			)
+			// Write a client heartbeat so the helper knows we're alive.
+			hbFile := filepath.Join(sharedDir, "clients", fmt.Sprintf("%d.heartbeat", os.Getpid()))
+			a.clipboardClientHB = hbFile
+			writeClipboardClientHeartbeat(hbFile)
+			go func() {
+				for {
+					time.Sleep(30 * time.Second)
+					if a.clipboardClientHB == "" {
+						return
+					}
+					writeClipboardClientHeartbeat(hbFile)
+				}
+			}()
+			logInfo("Clipboard image sync: enabled via %s (WSL)", sharedDir)
+		} else {
+			logWarn("Clipboard image sync: disabled: %v", err)
+		}
+	} else if runtime.GOOS == "darwin" {
 		sharedDir, err := ensureSharedClipboardSync()
 		if err == nil {
 			clientDir, clientErr := os.MkdirTemp("", "mittens-clipboard.*")

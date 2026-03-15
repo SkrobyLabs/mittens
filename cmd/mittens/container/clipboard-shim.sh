@@ -3,6 +3,11 @@
 CLIPBOARD_IMAGE="/tmp/mittens-clipboard/clipboard.png"
 CLIPBOARD_UPDATED_AT="/tmp/mittens-clipboard/clipboard.updated_at"
 CLIPBOARD_MAX_AGE="${MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS:-5}"
+CLIPBOARD_LOG="/tmp/mittens-clipboard-shim.log"
+
+log() {
+    echo "[$(date +%H:%M:%S)] $*" >> "$CLIPBOARD_LOG" 2>/dev/null
+}
 
 TARGET="" OUTPUT=false
 while [[ $# -gt 0 ]]; do
@@ -14,16 +19,33 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-$OUTPUT || exit 0
+log "called: output=$OUTPUT target=$TARGET args=$*"
+
+$OUTPUT || { log "not output mode, exit 0"; exit 0; }
 
 has_fresh_clipboard_image() {
     local now updated age
-    [[ -f "$CLIPBOARD_IMAGE" && -f "$CLIPBOARD_UPDATED_AT" ]] || return 1
+    if [[ ! -f "$CLIPBOARD_IMAGE" ]]; then
+        log "MISS: $CLIPBOARD_IMAGE does not exist"
+        return 1
+    fi
+    if [[ ! -f "$CLIPBOARD_UPDATED_AT" ]]; then
+        log "MISS: $CLIPBOARD_UPDATED_AT does not exist"
+        return 1
+    fi
     updated="$(tr -d '[:space:]' < "$CLIPBOARD_UPDATED_AT" 2>/dev/null)"
-    [[ "$updated" =~ ^[0-9]+$ ]] || return 1
+    if [[ ! "$updated" =~ ^[0-9]+$ ]]; then
+        log "MISS: updated_at not numeric: '$updated'"
+        return 1
+    fi
     now="$(date +%s)"
     age=$((now - updated))
-    (( age <= CLIPBOARD_MAX_AGE ))
+    if (( age > CLIPBOARD_MAX_AGE )); then
+        log "MISS: image too old: age=${age}s > max=${CLIPBOARD_MAX_AGE}s (updated=$updated now=$now)"
+        return 1
+    fi
+    log "HIT: fresh image, age=${age}s"
+    return 0
 }
 
 case "$TARGET" in
@@ -37,6 +59,7 @@ case "$TARGET" in
         echo ""
         ;;
     *)
+        log "unknown target: $TARGET"
         exit 1
         ;;
 esac

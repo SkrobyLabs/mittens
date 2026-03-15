@@ -240,6 +240,16 @@ if [[ "${MITTENS_ENABLE_X11_CLIPBOARD:-false}" == "true" ]]; then
     /usr/local/bin/clipboard-x11-sync.sh "$X11_CLIPBOARD_IMAGE" >/tmp/mittens-x11-clipboard.log 2>&1 &
 fi
 
+# --- WSL clipboard: rebind image-paste to Alt+V (Windows Terminal eats Ctrl+V) ---
+if [[ "${MITTENS_WSL_CLIPBOARD:-false}" == "true" ]]; then
+    KB_FILE="$AI_DIR/keybindings.json"
+    if [[ ! -f "$KB_FILE" ]]; then
+        cat > "$KB_FILE" <<'KEYBINDINGS'
+{"bindings":[{"context":"Chat","bindings":{"meta+v":"chat:imagePaste"}}]}
+KEYBINDINGS
+    fi
+fi
+
 # --- Copy read-only config into writable home ---
 STAGING_CONFIG="${CONFIG_MOUNT}/${AI_CONFIG_DIR}"
 if [[ -d "$STAGING_CONFIG" && ! "$STAGING_CONFIG" -ef "$AI_DIR" ]]; then

@@ -15,3 +15,7 @@ dist/
 .vscode/settings.json
 
 /mittens.exe*
+
+clipboard-sync.exe
+
+*.exe

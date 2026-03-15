@@ -48,10 +48,12 @@ ifeq ($(OS),Windows_NT)
 # On Windows: build both the Linux binary and a .exe shim via WSL.
 #   mittens.exe       - Windows shim (run this from PowerShell/cmd)
 #   mittens-linux     - real binary (executed inside WSL by the shim)
-build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim)
+build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim + clipboard helper)
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux ./cmd/mittens
 	wsl.exe env GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY).exe ./cmd/shim
-	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux"
+	-@powershell -NoProfile -c "Stop-Process -Name '$(BINARY)-clipboard-helper' -Force -EA 0; sleep 1"
+	wsl.exe env GOOS=windows GOARCH=amd64 go build -o $(BINARY)-clipboard-helper.exe ./cmd/mittens-clipboard-helper
+	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux + $(BINARY)-clipboard-helper.exe"
 	@echo "Run mittens.exe - it transparently uses WSL under the hood."
 else
 build: tidy ## Build the mittens binary
@@ -154,6 +156,8 @@ release: tidy ## Cross-compile for common platforms into dist/
 	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  ./cmd/mittens
 	GOOS=linux   GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   ./cmd/mittens
 	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   ./cmd/mittens
+	GOOS=windows GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe ./cmd/shim
+	GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST)/$(BINARY)-clipboard-helper-windows-amd64.exe ./cmd/mittens-clipboard-helper
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -182,7 +186,7 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
 clean: ## Remove build artifacts
-	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux
+	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux $(BINARY)-clipboard-helper.exe
 	rm -rf $(DIST)
 	$(GO) clean
 
