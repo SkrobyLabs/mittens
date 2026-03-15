@@ -26,10 +26,36 @@ func linuxBinaryPath() (string, error) {
 	return wslPath(winPath)
 }
 
-// wslPath converts a Windows path to a WSL path using wslpath.
+// wslPath converts a Windows path to a WSL path.
+//
+// Drive-letter and UNC WSL paths are converted mechanically to avoid
+// wslpath resolving junctions/symlinks through Docker Desktop's internal
+// bind-mount tree (/mnt/wsl/docker-desktop-bind-mounts/...).
 func wslPath(winPath string) (string, error) {
-	// Convert backslashes to forward slashes so wslpath doesn't choke.
 	cleaned := strings.ReplaceAll(winPath, `\`, `/`)
+
+	// Drive letter: C:/foo → /mnt/c/foo
+	if len(cleaned) >= 2 && cleaned[1] == ':' &&
+		((cleaned[0] >= 'A' && cleaned[0] <= 'Z') || (cleaned[0] >= 'a' && cleaned[0] <= 'z')) {
+		drive := strings.ToLower(string(cleaned[0]))
+		return "/mnt/" + drive + cleaned[2:], nil
+	}
+
+	// UNC WSL path: //wsl$/Ubuntu/home/user → /home/user
+	//               //wsl.localhost/Ubuntu/home/user → /home/user
+	lower := strings.ToLower(cleaned)
+	for _, prefix := range []string{"//wsl$/", "//wsl.localhost/"} {
+		if strings.HasPrefix(lower, prefix) {
+			// Skip prefix + distro name
+			rest := cleaned[len(prefix):]
+			if idx := strings.Index(rest, "/"); idx >= 0 {
+				return rest[idx:], nil
+			}
+			return "/", nil
+		}
+	}
+
+	// Fallback to wslpath for unknown formats.
 	out, err := exec.Command("wsl", "wslpath", "-u", cleaned).Output()
 	if err != nil {
 		return "", fmt.Errorf("wslpath failed for %q: %w", winPath, err)
@@ -141,8 +167,10 @@ func main() {
 		translated = append(translated, arg)
 	}
 
-	// Build: wsl --cd <wsl-cwd> <linux-binary> <args...>
-	wslArgs := []string{"--cd", wslCwd, binPath}
+	// Build: wsl --cd <wsl-cwd> env MITTENS_WSL_CWD=<path> <linux-binary> <args...>
+	// The env prefix is needed because WSL does not reliably forward
+	// environment variables set on the Windows side.
+	wslArgs := []string{"--cd", wslCwd, "env", "MITTENS_WSL_CWD=" + wslCwd, binPath}
 	wslArgs = append(wslArgs, translated...)
 
 	cmd := exec.Command("wsl", wslArgs...)

@@ -48,6 +48,7 @@ type dirPickerModel struct {
 	entries    []dirEntry
 	cursor     int
 	selected   map[string]dirMountSelection
+	exclude    string // absolute path to hide (primary workspace)
 	done       bool
 	cancelled  bool
 	height     int // visible entry rows (terminal height - 7)
@@ -57,7 +58,7 @@ type dirPickerModel struct {
 	err        error
 }
 
-func newDirPickerModel(startDir string, preSelected map[string]bool) dirPickerModel {
+func newDirPickerModel(startDir string, preSelected map[string]bool, exclude string) dirPickerModel {
 	sel := make(map[string]dirMountSelection, len(preSelected))
 	for path, readOnly := range preSelected {
 		sel[path] = dirMountSelection{Path: path, ReadOnly: readOnly}
@@ -65,6 +66,7 @@ func newDirPickerModel(startDir string, preSelected map[string]bool) dirPickerMo
 	m := dirPickerModel{
 		currentDir: startDir,
 		selected:   sel,
+		exclude:    exclude,
 		height:     15,
 	}
 	m.loadDir(startDir)
@@ -92,6 +94,9 @@ func (m *dirPickerModel) loadDir(path string) {
 			continue
 		}
 		full := filepath.Join(path, name)
+		if m.exclude != "" && full == m.exclude {
+			continue
+		}
 		isGit := false
 		if info, err := os.Stat(filepath.Join(full, ".git")); err == nil && info.IsDir() {
 			isGit = true
@@ -288,9 +293,10 @@ func (m dirPickerModel) View() string {
 // runDirPicker launches the interactive directory browser starting at startDir.
 // preSelected contains absolute paths that should be pre-checked.
 // PreSelected value indicates read-only mode.
+// exclude is hidden from the listing (the primary workspace, already mounted).
 // Returns selected paths with read-only mode, or nil if cancelled.
-func runDirPicker(startDir string, preSelected map[string]bool) ([]dirMountSelection, error) {
-	model := newDirPickerModel(startDir, preSelected)
+func runDirPicker(startDir string, preSelected map[string]bool, exclude string) ([]dirMountSelection, error) {
+	model := newDirPickerModel(startDir, preSelected, exclude)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	result, err := p.Run()
 	if err != nil {

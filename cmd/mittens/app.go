@@ -202,7 +202,7 @@ func (a *App) Run() error {
 	// Detect workspace.
 	a.Workspace = detectWorkspace()
 	a.EffectiveWorkspace = a.Workspace
-	cwd, _ := os.Getwd()
+	cwd := effectiveCwd()
 	a.WorkspaceMountSrc = cwd
 
 	// Session persistence setup.
@@ -376,7 +376,10 @@ func (a *App) Run() error {
 		} else {
 			return fmt.Errorf("generate broker token: %w", err)
 		}
-		a.broker.OnOpen = openOnHost
+		blogFnOpen := a.broker.blog
+		a.broker.OnOpen = func(url string) {
+			openOnHost(url, blogFnOpen)
+		}
 		if !a.NoNotify {
 			displayName := a.Provider.DisplayName
 			focus := a.terminalFocus
@@ -395,9 +398,10 @@ func (a *App) Run() error {
 		}
 
 		if runtime.GOOS == "linux" {
-			// On Linux, use a Unix socket mounted into the container.
+			// On Linux (including WSL), use a Unix socket mounted into the container.
 			// This avoids host firewall issues (UFW/iptables with default INPUT DROP
 			// blocks traffic from the Docker bridge subnet to host ports).
+			// On WSL, Docker Desktop's WSL2 integration mounts the socket correctly.
 			sockDir, err := os.MkdirTemp("", "mittens-broker.*")
 			if err == nil {
 				a.tempDirs = append(a.tempDirs, sockDir)
@@ -1100,6 +1104,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		containerSockPath := containerSockDir + "/broker.sock"
 		args = append(args, "-v", sockDir+":"+containerSockDir)
 		args = append(args, "-e", "MITTENS_BROKER_SOCK="+containerSockPath)
+		if a.brokerToken != "" {
+			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
+		}
 	} else if a.brokerPort > 0 {
 		// TCP mode (macOS/Windows): use host.docker.internal.
 		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
@@ -1514,17 +1521,45 @@ func notifyOnHost(container, event, message, displayName string, focus TerminalF
 }
 
 // openOnHost opens a URL in the host's default browser.
-func openOnHost(url string) {
+// logFn is an optional logger (broker.blog); pass nil to skip logging.
+func openOnHost(url string, logFn func(string, ...interface{})) {
+	log := func(format string, args ...interface{}) {
+		if logFn != nil {
+			logFn(format, args...)
+		}
+	}
+
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
 		cmd = exec.Command("open", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		// On WSL, try wslview first, then fall back to explorer.exe
+		if isWSL() {
+			if _, err := exec.LookPath("wslview"); err == nil {
+				cmd = exec.Command("wslview", url)
+			} else {
+				// PowerShell Start-Process reliably opens URLs in the default browser.
+			// explorer.exe sometimes opens File Explorer instead.
+			escaped := strings.ReplaceAll(url, "'", "''")
+			cmd = exec.Command("powershell.exe", "-NoProfile", "-Command", "Start-Process '"+escaped+"'")
+			}
+		} else {
+			cmd = exec.Command("xdg-open", url)
+		}
 	}
+	log("open: %s %v", cmd.Path, cmd.Args[1:])
 	if err := cmd.Start(); err != nil {
 		logWarn("Failed to open URL on host: %v", err)
+		log("open: start failed: %v", err)
+		return
 	}
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			logWarn("URL open command exited with error: %v (%s)", err, cmd.Path)
+			log("open: %s exited: %v", filepath.Base(cmd.Path), err)
+		}
+	}()
 }
 
 var validContainerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)

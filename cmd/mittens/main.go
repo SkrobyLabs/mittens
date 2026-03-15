@@ -233,12 +233,26 @@ func runInit() error {
 	return runWizard(exts)
 }
 
+// effectiveCwd returns the working directory, preferring the shim-provided
+// MITTENS_WSL_CWD over os.Getwd(). On WSL2 with Docker Desktop, the kernel
+// can resolve the cwd through internal bind-mount paths that lose the
+// original location; the shim knows the correct WSL path.  When no shim
+// is involved, bind-mount paths are resolved via /proc/self/mountinfo.
+func effectiveCwd() string {
+	if v := os.Getenv("MITTENS_WSL_CWD"); v != "" {
+		return v
+	}
+	cwd, _ := os.Getwd()
+	return resolveWSLBindMount(cwd)
+}
+
 // detectWorkspace returns the git root of the current directory, or cwd.
+// The result is passed through resolveWSLBindMount so that Docker Desktop's
+// internal bind-mount paths are mapped back to stable WSL paths.
 func detectWorkspace() string {
 	out, err := captureCommand("git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		cwd, _ := os.Getwd()
-		return cwd
+		return effectiveCwd()
 	}
-	return out
+	return resolveWSLBindMount(out)
 }

@@ -355,7 +355,7 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 	// Interactive directory browser starting at the workspace's parent.
 	parentDir := filepath.Dir(workspace)
 	fmt.Fprintln(os.Stderr)
-	chosen, err := runDirPicker(parentDir, existPathSet)
+	chosen, err := runDirPicker(parentDir, existPathSet, workspace)
 	if err != nil {
 		return nil, err
 	}

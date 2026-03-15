@@ -143,15 +143,20 @@ func (b *HostBroker) blog(format string, args ...interface{}) {
 	fmt.Fprintf(b.LogFile, "%s [broker:%d/%s] %s\n", ts, os.Getpid(), name, msg)
 }
 
-// ListenTCP binds to a random TCP port on localhost and returns the port.
-// Call this before Serve() to use TCP mode instead of Unix socket.
-func (b *HostBroker) ListenTCP() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// ListenTCPAddr binds to a random TCP port on the given address and returns the port.
+func (b *HostBroker) ListenTCPAddr(addr string) (int, error) {
+	ln, err := net.Listen("tcp", addr+":0")
 	if err != nil {
 		return 0, err
 	}
 	b.ln = ln
 	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+// ListenTCP binds to a random TCP port on localhost and returns the port.
+// Call this before Serve() to use TCP mode instead of Unix socket.
+func (b *HostBroker) ListenTCP() (int, error) {
+	return b.ListenTCPAddr("127.0.0.1")
 }
 
 // Serve starts the broker. If ListenTCP() was called first, serves on that
