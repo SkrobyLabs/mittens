@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -118,15 +117,16 @@ func captureCommand(name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// platformHomeDirFallbackEnv is the environment variable to use as a fallback
+// when os.UserHomeDir() fails. Overridden to "USERPROFILE" on Windows.
+var platformHomeDirFallbackEnv = "HOME"
+
 // homeDir returns the current user's home directory.
 func homeDir() string {
 	if h, err := os.UserHomeDir(); err == nil {
 		return h
 	}
-	if runtime.GOOS == "windows" {
-		return os.Getenv("USERPROFILE")
-	}
-	return os.Getenv("HOME")
+	return os.Getenv(platformHomeDirFallbackEnv)
 }
 
 func randomHex(n int) (string, error) {

@@ -3,12 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +18,15 @@ import (
 
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+)
+
+// Platform function variables — defaults in platform_default.go,
+// overridden via init() in app_darwin.go / app_windows.go.
+var (
+	platformStartBroker  = startBrokerDefault
+	platformOpenURL      = openURLDefault
+	platformNotify       = notifyDefault
+	platformClipboardSync = clipboardSyncDefault
 )
 
 // App holds all state for a single mittens invocation.
@@ -398,44 +405,7 @@ func (a *App) Run() error {
 			a.broker.LogFile = lf
 		}
 
-		if runtime.GOOS == "linux" {
-			// On Linux (including WSL), use a Unix socket mounted into the container.
-			// This avoids host firewall issues (UFW/iptables with default INPUT DROP
-			// blocks traffic from the Docker bridge subnet to host ports).
-			// On WSL, Docker Desktop's WSL2 integration mounts the socket correctly.
-			sockDir, err := os.MkdirTemp("", "mittens-broker.*")
-			if err == nil {
-				a.tempDirs = append(a.tempDirs, sockDir)
-				sockPath := filepath.Join(sockDir, "broker.sock")
-				a.broker.sockPath = sockPath
-				go func() {
-					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
-						logWarn("Broker: %v", err)
-					}
-				}()
-				a.brokerSock = sockPath
-				logInfo("Broker: started on unix socket")
-			} else {
-				logWarn("Broker: failed to create socket dir: %v", err)
-				a.broker = nil
-			}
-		} else {
-			// On macOS/Windows, Docker Desktop provides transparent host→container
-			// networking via host.docker.internal, so TCP works reliably.
-			port, err := a.broker.ListenTCP()
-			if err == nil {
-				a.brokerPort = port
-				go func() {
-					if err := a.broker.Serve(); err != nil && err != http.ErrServerClosed {
-						logWarn("Broker: %v", err)
-					}
-				}()
-				logInfo("Broker: started on port %d", port)
-			} else {
-				logWarn("Broker: failed to start: %v", err)
-				a.broker = nil
-			}
-		}
+		platformStartBroker(a)
 	}
 
 	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
@@ -1330,61 +1300,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Clipboard image sync.
-	if isWSL() {
-		sharedDir, err := ensureWSLClipboardSync()
-		if err == nil {
-			args = append(args,
-				"-v", sharedDir+":/tmp/mittens-clipboard:ro",
-				"-e", "DISPLAY=:0",
-				"-e", "MITTENS_WSL_CLIPBOARD=true",
-			)
-			// Write a client heartbeat so the helper knows we're alive.
-			hbFile := filepath.Join(sharedDir, "clients", fmt.Sprintf("%d.heartbeat", os.Getpid()))
-			a.clipboardClientHB = hbFile
-			writeClipboardClientHeartbeat(hbFile)
-			go func() {
-				for {
-					time.Sleep(30 * time.Second)
-					if a.clipboardClientHB == "" {
-						return
-					}
-					writeClipboardClientHeartbeat(hbFile)
-				}
-			}()
-			logInfo("Clipboard image sync: enabled via %s (WSL)", sharedDir)
-		} else {
-			logWarn("Clipboard image sync: disabled: %v", err)
-		}
-	} else if runtime.GOOS == "darwin" {
-		sharedDir, err := ensureSharedClipboardSync()
-		if err == nil {
-			clientDir, clientErr := os.MkdirTemp("", "mittens-clipboard.*")
-			if clientErr != nil {
-				logWarn("Clipboard image sync: disabled: %v", clientErr)
-			} else {
-				regFile, regErr := registerClipboardClient(sharedDir, clientDir)
-				if regErr != nil {
-					_ = os.RemoveAll(clientDir)
-					logWarn("Clipboard image sync: disabled: %v", regErr)
-				} else {
-					a.clipboardDir = clientDir
-					a.clipboardReg = regFile
-					args = append(args, "-v", clientDir+":/tmp/mittens-clipboard:ro")
-					logInfo("Clipboard image sync: enabled via %s", sharedDir)
-				}
-			}
-			if a.clipboardDir != "" && a.Provider != nil && a.Provider.Name == "codex" {
-				args = append(args,
-					"-e", "MITTENS_ENABLE_X11_CLIPBOARD=true",
-					"-e", "MITTENS_X11_CLIPBOARD_IMAGE=/tmp/mittens-clipboard/clipboard.png",
-					"-e", "MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS=5",
-					"-e", "DISPLAY=:99",
-				)
-				logInfo("Codex X11 clipboard bridge: enabled")
-			}
-		} else {
-			logWarn("Clipboard image sync: disabled: %v", err)
-		}
+	if extraArgs := platformClipboardSync(a); len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
 	}
 
 	// Drop zone for drag-and-drop path translation.
@@ -1520,38 +1437,7 @@ func notifyOnHost(container, event, message, displayName string, focus TerminalF
 
 	log("notify: event=%s terminal=%s/%s", event, focus.Kind, focus.ID)
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		if path, err := exec.LookPath("terminal-notifier"); err == nil {
-			args := []string{"-title", title, "-message", body, "-sound", "Glass"}
-			if focus.BundleID != "" {
-				args = append(args, "-activate", focus.BundleID)
-				log("notify: terminal-notifier -activate %s", focus.BundleID)
-			}
-			if focusCmd := focus.FocusCommand(); focusCmd != nil {
-				executeStr := shellJoin(focusCmd)
-				args = append(args, "-execute", executeStr)
-				log("notify: terminal-notifier -execute %s", executeStr)
-			}
-			cmd = exec.Command(path, args...)
-		} else {
-			log("notify: terminal-notifier not found, using osascript via stdin")
-			// Pass script via stdin to avoid Script Editor activation.
-			script := fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title)
-			cmd = exec.Command("osascript")
-			cmd.Stdin = strings.NewReader(script)
-		}
-	} else {
-		cmd = exec.Command("notify-send", title, body)
-	}
-
-	if cmd != nil {
-		if err := cmd.Start(); err != nil {
-			log("notify: failed to start: %v", err)
-		} else {
-			log("notify: sent %q", body)
-		}
-	}
+	platformNotify(title, body, focus, log)
 }
 
 // openOnHost opens a URL in the host's default browser.
@@ -1563,25 +1449,7 @@ func openOnHost(url string, logFn func(string, ...interface{})) {
 		}
 	}
 
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		// On WSL, try wslview first, then fall back to explorer.exe
-		if isWSL() {
-			if _, err := exec.LookPath("wslview"); err == nil {
-				cmd = exec.Command("wslview", url)
-			} else {
-				// PowerShell Start-Process reliably opens URLs in the default browser.
-			// explorer.exe sometimes opens File Explorer instead.
-			escaped := strings.ReplaceAll(url, "'", "''")
-			cmd = exec.Command("powershell.exe", "-NoProfile", "-Command", "Start-Process '"+escaped+"'")
-			}
-		} else {
-			cmd = exec.Command("xdg-open", url)
-		}
-	}
+	cmd := platformOpenURL(url)
 	log("open: %s %v", cmd.Path, cmd.Args[1:])
 	if err := cmd.Start(); err != nil {
 		logWarn("Failed to open URL on host: %v", err)

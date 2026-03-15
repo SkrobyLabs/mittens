@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -81,13 +80,15 @@ func ensureBaseImages(dockerfile string) {
 	}
 }
 
+// platformPreBuildHook is called before `docker build` to perform platform-specific
+// setup. On Windows, it pre-pulls base images to work around BuildKit credential
+// helper issues. Default is a no-op.
+var platformPreBuildHook = func(dockerfile string) {}
+
 // BuildImage runs `docker build` with the given context and returns any error.
 func BuildImage(ctx BuildContext) error {
-	// On Windows (Docker Desktop + WSL2), BuildKit can fail to execute the
-	// credential helper (docker-credential-desktop.exe). Pre-pull base images
-	// so BuildKit finds them cached and skips the credential lookup.
-	if runtime.GOOS == "windows" && ctx.Dockerfile != "" {
-		ensureBaseImages(ctx.Dockerfile)
+	if ctx.Dockerfile != "" {
+		platformPreBuildHook(ctx.Dockerfile)
 	}
 
 	args := []string{"build"}
@@ -228,11 +229,14 @@ func ComputeImageTag(extensions []*registry.Extension) string {
 	return strings.Join(parts, "-")
 }
 
-// CurrentUserIDs returns the current user's UID and GID.
-// On Windows (where os.Getuid() returns -1), it returns 1000, 1000 as defaults.
-func CurrentUserIDs() (uid int, gid int) {
-	if runtime.GOOS == "windows" {
-		return 1000, 1000
-	}
+// platformCurrentUserIDs returns the current user's UID and GID.
+// On Windows (where os.Getuid() returns -1), the _windows.go init() overrides
+// this to return 1000, 1000.
+var platformCurrentUserIDs = func() (int, int) {
 	return os.Getuid(), os.Getgid()
+}
+
+// CurrentUserIDs returns the current user's UID and GID.
+func CurrentUserIDs() (uid int, gid int) {
+	return platformCurrentUserIDs()
 }
