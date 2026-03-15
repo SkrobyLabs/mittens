@@ -73,6 +73,6 @@ See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAM
 
 ## Core Flags
 
-`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--docker MODE`, `--yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
+`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--docker MODE`, `--no-yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
 
 Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).

@@ -56,7 +56,7 @@ mittens init                   # interactive setup wizard
 mittens --ssh                  # forward SSH keys
 mittens --aws prod             # mount specific AWS profile
 mittens --docker dind          # enable Docker-in-Docker
-mittens --yolo                 # skip all permission prompts
+mittens --no-yolo              # restore permission prompts
 mittens --worker               # use fast model preset (e.g. Haiku for Claude)
 mittens --planner              # use strong model preset (e.g. Opus for Claude)
 mittens --help                 # see all flags
@@ -187,7 +187,7 @@ The container's `xdg-open` is replaced with a shim that forwards all URLs to the
 | `--verbose`, `-v` | Show the full docker command being run |
 | `--docker dind` | Enable Docker-in-Docker (`--privileged`) |
 | `--docker host` | Share host Docker socket |
-| `--yolo` | Skip all permission prompts |
+| `--no-yolo` | Restore permission prompts (YOLO is the default) |
 | `--worker` | Use fast model preset |
 | `--planner` | Use strong model preset |
 | `--network-host` | Use host networking instead of bridge + firewall |

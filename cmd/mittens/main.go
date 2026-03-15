@@ -77,6 +77,7 @@ func runMain(args []string) error {
 		Provider:        DefaultProvider(),
 		ImageName:       "mittens",
 		ImageTag:        "latest",
+		Yolo:            true,
 		worktreeOrigins: make(map[string]string),
 		worktreeRepos:   make(map[string]string),
 	}

@@ -86,7 +86,7 @@ var coreFlags = map[string]func(*App){
 	"--no-config":    func(a *App) { a.NoConfig = true },
 	"--no-history":   func(a *App) { a.NoHistory = true },
 	"--no-build":     func(a *App) { a.NoBuild = true },
-	"--yolo":         func(a *App) { a.Yolo = true },
+	"--no-yolo":      func(a *App) { a.Yolo = false },
 	"--no-notify":    func(a *App) { a.NoNotify = true },
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
@@ -1586,7 +1586,7 @@ Core flags:
   --no-build        Skip the Docker image build step
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
   --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
-  --yolo            Skip all permission prompts
+  --no-yolo         Restore permission prompts (YOLO is the default)
   --no-notify       Disable desktop notifications
   --network-host    Use host networking (default: bridge)
   --worktree        Git worktree isolation per invocation
@@ -1660,7 +1660,7 @@ func printJSONCaps(exts []*registry.Extension) {
 		CoreFlags: []jsonCapsFlag{
 			{Name: "--docker", Description: "Docker engine mode: dind or host", ArgType: "string"},
 			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
-			{Name: "--yolo", Description: "Skip all permission prompts"},
+			{Name: "--no-yolo", Description: "Restore permission prompts (YOLO is the default)"},
 			{Name: "--no-notify", Description: "Disable desktop notifications"},
 			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},

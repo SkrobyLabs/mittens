@@ -25,7 +25,7 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--no-config", func(a *App) bool { return a.NoConfig }},
 		{"--no-history", func(a *App) bool { return a.NoHistory }},
 		{"--no-build", func(a *App) bool { return a.NoBuild }},
-		{"--yolo", func(a *App) bool { return a.Yolo }},
+		{"--no-yolo", func(a *App) bool { return !a.Yolo }},
 		{"--network-host", func(a *App) bool { return a.NetworkHost }},
 		{"--worktree", func(a *App) bool { return a.Worktree }},
 		{"--shell", func(a *App) bool { return a.Shell }},

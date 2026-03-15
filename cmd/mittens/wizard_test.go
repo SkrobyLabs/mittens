@@ -12,7 +12,7 @@ func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 		"--firewall-dev",
 		"--worker",
 		"--planner",
-		"--yolo",
+		"--no-yolo",
 	})
 
 	if len(dirs) != 2 || dirs[0] != "--dir /tmp/a" || dirs[1] != "--dir-ro /tmp/b" {
@@ -27,7 +27,7 @@ func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 	if len(firewall) != 1 || firewall[0] != "--firewall-dev" {
 		t.Fatalf("unexpected firewall: %v", firewall)
 	}
-	if len(opts) != 1 || opts[0] != "--yolo" {
+	if len(opts) != 1 || opts[0] != "--no-yolo" {
 		t.Fatalf("unexpected opts: %v", opts)
 	}
 }

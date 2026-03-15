@@ -1112,9 +1112,9 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		optSet[o] = true
 	}
 
-	yolo := optSet["--yolo"]
+	yolo := !optSet["--no-yolo"]
 	if err := huh.NewConfirm().
-		Title("YOLO mode (skip permission prompts)? (--yolo)").
+		Title("YOLO mode (skip permission prompts)? (default: yes, --no-yolo to disable)").
 		Value(&yolo).
 		Run(); err != nil {
 		return nil, err
@@ -1144,8 +1144,8 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 	}
 
 	var lines []string
-	if yolo {
-		lines = append(lines, "--yolo")
+	if !yolo {
+		lines = append(lines, "--no-yolo")
 	}
 	if networkMode == "host" {
 		lines = append(lines, "--network-host")
@@ -1171,7 +1171,7 @@ func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts 
 			dirs = append(dirs, line)
 		case strings.HasPrefix(line, "--provider "):
 			providers = append(providers, line)
-		case line == "--yolo" || line == "--network-host" || line == "--worktree":
+		case line == "--yolo" || line == "--no-yolo" || line == "--network-host" || line == "--worktree":
 			opts = append(opts, line)
 		case line == "--worker" || line == "--planner":
 			// Role flags are not persisted in config; they are stored in roles.json.
