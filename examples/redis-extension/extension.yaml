@@ -1,0 +1,16 @@
+name: redis
+description: Mount Redis credentials and add redis-cli
+
+flags:
+  - name: "--redis"
+    description: "Mount Redis credentials (specify instance or 'all')"
+    arg: csv
+  - name: "--redis-all"
+    description: "Mount all Redis credentials"
+    arg: none
+
+firewall: []
+
+build:
+  script: "build.sh"
+  image_tag: "redis"

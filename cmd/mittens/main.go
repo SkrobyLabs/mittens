@@ -67,6 +67,8 @@ func runMain(args []string) error {
 			return runLogs(args[1:])
 		case "clean":
 			return runClean(args[1:])
+		case "extension":
+			return runExtension(args[1:])
 		case "--version", "-V":
 			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
 			return nil
@@ -82,20 +84,14 @@ func runMain(args []string) error {
 		worktreeRepos:   make(map[string]string),
 	}
 
-	// 1. Load built-in extensions from embedded YAML.
-	exts, err := registry.LoadExtensions(extensionYAMLs)
+	// Load all extensions: bundled (disk-first, embed fallback) + user-installed.
+	home := homeDir()
+	bundledDir := filepath.Join(runtimeRoot(), "extensions")
+	userExtDir := filepath.Join(home, ".mittens", "extensions")
+	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
 	if err != nil {
 		return fmt.Errorf("loading extensions: %w", err)
 	}
-
-	// 2. Load external (subprocess) extensions from ~/.mittens/extensions/.
-	home := homeDir()
-	extDir := filepath.Join(home, ".mittens", "extensions")
-	externals, err := registry.LoadExternalExtensions(extDir)
-	if err != nil {
-		logWarn("Loading external extensions: %v", err)
-	}
-	exts = append(exts, externals...)
 	app.Extensions = exts
 
 	// Set the default firewall.conf path for the firewall extension.
@@ -226,7 +222,10 @@ func runLogs(args []string) error {
 
 // runInit launches the interactive TUI setup wizard.
 func runInit() error {
-	exts, err := registry.LoadExtensions(extensionYAMLs)
+	home := homeDir()
+	bundledDir := filepath.Join(runtimeRoot(), "extensions")
+	userExtDir := filepath.Join(home, ".mittens", "extensions")
+	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
 	if err != nil {
 		return fmt.Errorf("loading extensions for wizard: %w", err)
 	}

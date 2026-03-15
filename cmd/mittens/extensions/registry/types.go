@@ -25,6 +25,7 @@ type Extension struct {
 	Args    []string `yaml:"-"` // csv values or enum choice
 	RawArg  string   `yaml:"-"` // first arg as string (for templates)
 	AllMode bool     `yaml:"-"` // --ext-all was used
+	Source  string   `yaml:"-" json:"source,omitempty"` // "built-in" or "user"
 }
 
 // ExtensionFlag describes a CLI flag contributed by an extension.

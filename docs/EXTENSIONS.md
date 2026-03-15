@@ -151,13 +151,31 @@ External extensions are standalone executables that communicate via JSON over st
 
 ### Installation
 
-Place your plugin executable at:
+Use the `mittens extension` command to install, list, or remove extensions:
 
-```
-~/.mittens/extensions/<name>/plugin
+```bash
+# Install from a local directory
+mittens extension install ./examples/redis-extension/
+
+# Install from a git repository
+mittens extension install https://github.com/user/mittens-ext-redis.git
+
+# List all loaded extensions (built-in + user-installed)
+mittens extension list
+
+# Remove a user-installed extension
+mittens extension remove redis
 ```
 
-mittens discovers these at startup via `LoadExternalExtensions()`.
+Extensions are installed to `~/.mittens/extensions/<name>/`. Each extension directory can contain:
+
+- `extension.yaml` — YAML manifest (defines flags, mounts, env, firewall, build config)
+- `plugin` — executable implementing the subprocess protocol (for custom resolver logic)
+- `build.sh` — shell script run during `docker build` to install tools in the container
+
+An extension needs at least one of `extension.yaml` or `plugin`. YAML-only extensions work for simple mount/env/build configurations. Add a `plugin` executable when you need custom logic (credential filtering, dynamic firewall rules, etc.).
+
+mittens discovers user-installed extensions at startup alongside built-in ones.
 
 ### Protocol
 
@@ -239,16 +257,21 @@ See `examples/redis-extension/plugin` for a complete Python implementation demon
 
 ```
 1. Binary starts
-2. LoadExtensions() reads embedded YAML manifests
-3. init() registers Go resolvers for built-in extensions
-4. LoadExternalExtensions() discovers ~/.mittens/extensions/*/plugin
-   - Calls `plugin manifest` for each, registers subprocess resolvers
-5. CLI flags parsed -- extensions claim their flags, set Enabled/Args/AllMode
-6. For each enabled extension with a setup resolver:
+2. init() registers Go resolvers for built-in extensions
+3. LoadAllExtensions() loads extension YAMLs:
+   a. Bundled: from disk (next to binary) first, go:embed fallback
+   b. User: from ~/.mittens/extensions/ (YAML-only or plugin-based)
+   c. User extensions with the same name shadow built-in ones
+   d. Plugin-based extensions register subprocess resolvers
+4. CLI flags parsed -- extensions claim their flags, set Enabled/Args/AllMode
+5. For each enabled extension with a setup resolver:
    a. Create temp staging directory
    b. Call setup resolver (Go function or `plugin setup` subprocess)
    c. Resolver appends docker args, firewall domains
-7. Docker image built (extensions with build scripts get installed)
-8. Container launched with all mounts, env vars, capabilities
-9. On exit: cleanup staging dirs, extract credentials, remove container
+6. Docker image built:
+   a. If external extensions have build.sh, a temp build context is created
+      with both built-in and external extension directories
+   b. Extensions with build scripts get installed via INSTALL_EXTENSIONS
+7. Container launched with all mounts, env vars, capabilities
+8. On exit: cleanup staging dirs, extract credentials, remove container
 ```

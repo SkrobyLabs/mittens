@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/cmd/mittens/internal/fileutil"
 )
 
 // BuildContext holds the parameters needed to build a Docker image.
@@ -227,6 +229,72 @@ func ComputeImageTag(extensions []*registry.Extension) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "-")
+}
+
+// PrepareExtendedBuildContext creates a temporary build context directory that
+// includes both bundled and external extension directories. This allows external
+// extensions with build.sh scripts to be COPY'd into the Docker image alongside
+// built-in extensions. Returns the temp dir path and a cleanup function.
+// If no external extensions have build scripts, returns ("", nil, nil) — the
+// caller should use the original context dir.
+func PrepareExtendedBuildContext(sourceContextDir, externalExtDir string, enabledExts []*registry.Extension) (string, func(), error) {
+	// Check if any enabled external extensions have build scripts.
+	hasExternalBuild := false
+	for _, ext := range enabledExts {
+		if ext.Source != "built-in" && ext.Build != nil && ext.Build.Script != "" {
+			extDir := filepath.Join(externalExtDir, ext.Name)
+			if fileutil.FileExists(filepath.Join(extDir, "build.sh")) {
+				hasExternalBuild = true
+				break
+			}
+		}
+	}
+	if !hasExternalBuild {
+		return "", nil, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "mittens-build.*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	// Copy container/ directory (Dockerfile, entrypoint, scripts).
+	srcContainer := filepath.Join(sourceContextDir, "container")
+	dstContainer := filepath.Join(tmpDir, "container")
+	if err := fileutil.CopyDir(srcContainer, dstContainer); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("copying container dir: %w", err)
+	}
+
+	// Copy built-in extensions/ directory.
+	srcExts := filepath.Join(sourceContextDir, "extensions")
+	dstExts := filepath.Join(tmpDir, "extensions")
+	if fileutil.DirExists(srcExts) {
+		if err := fileutil.CopyDir(srcExts, dstExts); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("copying extensions dir: %w", err)
+		}
+	} else {
+		_ = os.MkdirAll(dstExts, 0755)
+	}
+
+	// Copy external extension directories that have build.sh.
+	for _, ext := range enabledExts {
+		if ext.Source == "built-in" || ext.Build == nil || ext.Build.Script == "" {
+			continue
+		}
+		srcDir := filepath.Join(externalExtDir, ext.Name)
+		if !fileutil.FileExists(filepath.Join(srcDir, "build.sh")) {
+			continue
+		}
+		destDir := filepath.Join(dstExts, ext.Name)
+		if err := fileutil.CopyDir(srcDir, destDir); err != nil {
+			logWarn("Failed to copy external extension %s to build context: %v", ext.Name, err)
+		}
+	}
+
+	return tmpDir, cleanup, nil
 }
 
 // platformCurrentUserIDs returns the current user's UID and GID.

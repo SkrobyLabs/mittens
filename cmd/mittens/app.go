@@ -983,8 +983,21 @@ func (a *App) buildImage() error {
 		}
 	}
 
+	// If external extensions have build scripts, create a temp context that
+	// includes them alongside built-in extensions.
+	contextDir := projectRoot
+	home := homeDir()
+	userExtDir := filepath.Join(home, ".mittens", "extensions")
+	if tmpCtx, cleanup, err := PrepareExtendedBuildContext(projectRoot, userExtDir, enabledExts); err != nil {
+		logWarn("Failed to prepare extended build context: %v", err)
+	} else if tmpCtx != "" {
+		contextDir = tmpCtx
+		defer cleanup()
+		dockerfile = filepath.Join(tmpCtx, "container", "Dockerfile")
+	}
+
 	return BuildImage(BuildContext{
-		ContextDir: projectRoot,
+		ContextDir: contextDir,
 		Dockerfile: dockerfile,
 		ImageName:  a.ImageName,
 		ImageTag:   a.ImageTag,
@@ -1559,7 +1572,11 @@ func printExtensions(exts []*registry.Extension) {
 	fmt.Println("Loaded extensions:")
 	fmt.Println()
 	for _, ext := range exts {
-		fmt.Printf("  %s: %s\n", ext.Name, ext.Description)
+		source := ext.Source
+		if source == "" {
+			source = "built-in"
+		}
+		fmt.Printf("  %s [%s]: %s\n", ext.Name, source, ext.Description)
 		for _, f := range ext.Flags {
 			desc := f.Description
 			if desc == "" {
@@ -1580,6 +1597,7 @@ type jsonCapsExtension struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	DefaultOn   bool           `json:"defaultOn"`
+	Source      string         `json:"source,omitempty"`
 	Flags       []jsonCapsFlag `json:"flags"`
 }
 
@@ -1618,6 +1636,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			Name:        ext.Name,
 			Description: ext.Description,
 			DefaultOn:   ext.DefaultOn,
+			Source:      ext.Source,
 			Flags:       make([]jsonCapsFlag, 0, len(ext.Flags)),
 		}
 		for _, f := range ext.Flags {
