@@ -55,6 +55,20 @@ if [[ "$(id -u)" == "0" ]]; then
     if [[ "${MITTENS_DOCKER_HOST:-false}" == "true" ]]; then
         echo "[mittens] Using host Docker socket"
         SOCK="/var/run/docker.sock"
+        if [[ -S "$SOCK" ]]; then
+            # The bind-mounted socket is typically root:root. On Docker
+            # Desktop (macOS/Windows) chgrp silently no-ops on the
+            # VM-backed socket, so fall back to world-readable.
+            # This is safe — the socket is only exposed inside the
+            # container, not on the host.
+            chgrp docker "$SOCK" 2>/dev/null || true
+            chmod g+rw "$SOCK" 2>/dev/null || true
+            # Verify the group change actually took effect; if not,
+            # widen permissions as a fallback (macOS Docker Desktop).
+            if ! su -s /bin/sh -c "test -w $SOCK" "$AI_USERNAME" 2>/dev/null; then
+                chmod 666 "$SOCK" 2>/dev/null || true
+            fi
+        fi
         if docker info &>/dev/null 2>&1; then
             echo "[mittens] Host Docker daemon accessible"
         else
