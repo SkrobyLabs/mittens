@@ -11,9 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"strings"
-	"time"
+)
+
+const (
+	colorYellow = "\033[33m"
+	colorReset  = "\033[0m"
 )
 
 // linuxBinaryPath returns the WSL path to the Linux mittens binary,
@@ -87,13 +91,19 @@ func relocateSelf() func() {
 	}
 
 	// Use a per-PID suffix so multiple concurrent sessions don't collide.
-	oldPath := fmt.Sprintf("%s.%d.old", exe, os.Getpid())
+	oldPath := fmt.Sprintf("%s.%d", exe, os.Getpid())
 
-	// Clean up stale .old files from previous runs that didn't get to
+	// Clean up stale relocated files from previous runs that didn't get to
 	// their deferred cleanup (e.g. crash, forced kill).
-	if matches, _ := filepath.Glob(exe + ".*.old"); len(matches) > 0 {
+	if matches, _ := filepath.Glob(exe + ".[0-9]*"); len(matches) > 0 {
 		for _, m := range matches {
 			os.Remove(m) // fails silently for files still locked by other sessions
+		}
+	}
+	// Also clean up legacy .old files from prior versions. //legacy-delete-after:2026-04-21
+	if matches, _ := filepath.Glob(exe + ".*.old"); len(matches) > 0 {
+		for _, m := range matches {
+			os.Remove(m)
 		}
 	}
 
@@ -128,6 +138,178 @@ func copyExe(src, dst string) error {
 	return err
 }
 
+// readUserDefaultsPasteKey reads ~/.mittens/defaults via WSL and returns the
+// --image-paste-key value, or empty string if not set.
+func readUserDefaultsPasteKey() string {
+	out, err := exec.Command("wsl", "bash", "-c", "cat ~/.mittens/defaults 2>/dev/null").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "--image-paste-key" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// mittens-managed action lines injected into WT settings.json.
+const mittensMarker = "// __mittens"
+
+var mittensActions = []string{
+	`        { "command": "paste", "keys": "alt+v" }, ` + mittensMarker,
+	`        { "command": "unbound", "keys": "ctrl+v" }, ` + mittensMarker,
+}
+
+// mittensLineRe matches lines tagged with the mittens marker comment.
+var mittensLineRe = regexp.MustCompile(`(?i)//\s*__mittens`)
+
+// ensureWTKeybindings modifies Windows Terminal's settings.json to rebind
+// paste from Ctrl+V to Alt+V (freeing Ctrl+V for the app), or reverts the
+// change when paste key is meta+v.
+//
+// WT settings.json is JSONC (JSON with comments), so we use line-based
+// manipulation instead of json.Unmarshal to preserve comments and formatting.
+func ensureWTKeybindings(pasteKey string) {
+	settingsPath := findWTSettings()
+	if settingsPath == "" {
+		return
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	// Step 1: Remove any existing mittens-managed lines.
+	var cleaned []string
+	for _, line := range lines {
+		if mittensLineRe.MatchString(line) {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+
+	// Step 2a: If meta+v (default) mode, warn if paste has been moved off ctrl+v
+	// (e.g. leftover from a previous ctrl+v config or manual change).
+	if pasteKey != "ctrl+v" && !wtHasCtrlVPaste(content) {
+		fmt.Fprintln(os.Stderr, colorYellow+"[mittens] Warning: Windows Terminal paste is not on Ctrl+V."+colorReset)
+		fmt.Fprintln(os.Stderr, colorYellow+"[mittens]   Image paste is set to Alt+V, but WT may be using Alt+V for text paste."+colorReset)
+		fmt.Fprintln(os.Stderr, colorYellow+"[mittens]   Restore Ctrl+V as paste in Windows Terminal settings, or run: mittens init --defaults"+colorReset)
+	}
+
+	// Step 2b: If ctrl+v mode, inject mittens actions into the "actions" array.
+	if pasteKey == "ctrl+v" {
+		// If ctrl+v is already not bound to paste (mittens-managed, manually
+		// rebound, or never bound), there's nothing to do.
+		if !wtHasCtrlVPaste(content) {
+			return
+		}
+		injected := injectMittensActions(cleaned)
+		if injected != nil {
+			cleaned = injected
+		} else {
+			printWTManualInstructions()
+			return
+		}
+	}
+
+	result := strings.Join(cleaned, "\n")
+	if result == content {
+		return // no changes needed
+	}
+
+	if err := os.WriteFile(settingsPath, []byte(result), 0o644); err != nil {
+		printWTManualInstructions()
+	}
+}
+
+// injectMittensActions finds the "actions" array in settings.json lines and
+// inserts the mittens keybinding entries after the opening bracket.
+// Returns nil if the actions array cannot be found.
+func injectMittensActions(lines []string) []string {
+	// Find the "actions": [ line.
+	actionsRe := regexp.MustCompile(`^\s*"actions"\s*:\s*\[`)
+	for i, line := range lines {
+		if actionsRe.MatchString(line) {
+			// Insert mittens actions right after the opening bracket.
+			var result []string
+			result = append(result, lines[:i+1]...)
+			result = append(result, mittensActions...)
+			result = append(result, lines[i+1:]...)
+			return result
+		}
+	}
+	return nil
+}
+
+// findWTSettings returns the path to Windows Terminal's settings.json,
+// checking the Store install first, then the standalone install.
+func findWTSettings() string {
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		return ""
+	}
+
+	// Store install (most common).
+	candidates := []string{
+		filepath.Join(localAppData, "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState", "settings.json"),
+		// Preview/Canary variants.
+		filepath.Join(localAppData, "Packages", "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe", "LocalState", "settings.json"),
+		filepath.Join(localAppData, "Packages", "Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe", "LocalState", "settings.json"),
+		// Standalone (scoop, GitHub release, etc.).
+		filepath.Join(localAppData, "Microsoft", "Windows Terminal", "settings.json"),
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// wtHasCtrlVPaste returns true if Windows Terminal still has ctrl+v bound to
+// paste (the default). It returns false if ctrl+v has been explicitly unbound,
+// rebound to something else, or if paste has been moved to another key.
+func wtHasCtrlVPaste(content string) bool {
+	// If ctrl+v appears with "unbound", mittens or the user already freed it.
+	// If ctrl+v doesn't appear at all in keybindings/actions AND paste is
+	// bound to another key (like alt+v), ctrl+v is free by WT default override.
+	// The simplest heuristic: if "ctrl+v" doesn't appear anywhere in the
+	// settings, check if paste has been rebound to another key.
+	hasCtrlV := strings.Contains(strings.ToLower(content), `"ctrl+v"`)
+	if hasCtrlV {
+		// ctrl+v is explicitly mentioned — check if it's unbound.
+		return !strings.Contains(strings.ToLower(content), `"unbound"`)
+	}
+	// ctrl+v not mentioned. If paste is rebound to another key, ctrl+v
+	// reverts to WT default (paste). Check if PasteFromClipboard or paste
+	// action is bound to a non-ctrl+v key.
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "pastefromclipboard") || strings.Contains(lower, `"paste"`) {
+		// Paste is explicitly configured on some other key — ctrl+v is free.
+		return false
+	}
+	// No paste override at all — WT default has ctrl+v as paste.
+	return true
+}
+
+// printWTManualInstructions prints fallback instructions if settings.json write fails.
+func printWTManualInstructions() {
+	fmt.Fprintln(os.Stderr, colorYellow+"[mittens] Warning: Could not update Windows Terminal settings automatically."+colorReset)
+	fmt.Fprintln(os.Stderr, colorYellow+"[mittens]   To use Ctrl+V for image paste, add these to your WT settings.json actions array:"+colorReset)
+	fmt.Fprintln(os.Stderr, colorYellow+`[mittens]   {"command":"paste","keys":"alt+v"}, {"command":"unbound","keys":"ctrl+v"}`+colorReset)
+}
+
 func main() {
 	// Capture the exe directory BEFORE relocateSelf renames the binary,
 	// so we get the original Windows path (not a .old or resolved path).
@@ -136,6 +318,15 @@ func main() {
 
 	cleanup := relocateSelf()
 	defer cleanup()
+
+	// Sync Windows Terminal keybindings based on user defaults.
+	pasteKey := readUserDefaultsPasteKey()
+	ensureWTKeybindings(pasteKey)
+	// Clean up old fragment directory from previous versions.
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		oldFragment := filepath.Join(localAppData, "Microsoft", "Windows Terminal", "Fragments", "mittens")
+		os.RemoveAll(oldFragment)
+	}
 
 	// Translate working directory.
 	cwd, err := os.Getwd()
@@ -174,19 +365,25 @@ func main() {
 		translated = append(translated, arg)
 	}
 
-	// Start mittens-clipboard-helper.exe on the Windows side (can't run .exe
-	// from WSL when Docker Desktop's bind-mounts break binfmt_misc PE handling).
-	clipboardSharedDir := ensureClipboardSync(shimDir)
+	// Locate the clipboard helper next to the shim so the WSL-side broker can
+	// invoke it on demand (no background daemon — reads clipboard only when pasted).
+	clipboardHelper := locateClipboardHelper(shimDir)
 
 	// Build: wsl --cd <wsl-cwd> env MITTENS_WSL_CWD=<path>
-	//   MITTENS_CLIPBOARD_DIR=<path> <linux-binary> <args...>
+	//   MITTENS_CLIPBOARD_HELPER=<path> <linux-binary> <args...>
 	// The env prefix is needed because WSL does not reliably forward
 	// environment variables set on the Windows side.
 	envVars := []string{
 		"MITTENS_WSL_CWD=" + wslCwd,
 	}
-	if clipboardSharedDir != "" {
-		envVars = append(envVars, "MITTENS_CLIPBOARD_DIR="+clipboardSharedDir)
+	if clipboardHelper != "" {
+		// Convert Windows path to WSL path so exec.Command works in Linux.
+		wslHelper, err := wslPath(clipboardHelper)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[mittens] cannot translate clipboard helper path: %v\n", err)
+		} else {
+			envVars = append(envVars, "MITTENS_CLIPBOARD_HELPER="+wslHelper)
+		}
 	}
 	wslArgs := []string{"--cd", wslCwd, "env"}
 	wslArgs = append(wslArgs, envVars...)
@@ -206,112 +403,15 @@ func main() {
 	}
 }
 
-// ensureClipboardSync starts mittens-clipboard-helper.exe if it exists next to
-// the shim and no healthy daemon is already running. Returns the WSL-side shared
-// directory path or empty string on failure.
-func ensureClipboardSync(shimDir string) string {
+// locateClipboardHelper returns the Windows path to mittens-clipboard-helper.exe
+// if it exists next to the shim, or empty string otherwise.
+func locateClipboardHelper(shimDir string) string {
 	exePath := filepath.Join(shimDir, "mittens-clipboard-helper.exe")
 	if _, err := os.Stat(exePath); err != nil {
 		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not found at %s\n", exePath)
 		return ""
 	}
-
-	// Use a UNC path into the WSL filesystem so that:
-	// 1. The Windows exe can write to it (via \\wsl.localhost\<distro>\...)
-	// 2. The WSL mittens binary can read it (at /tmp/...)
-	// 3. Docker Desktop can mount it into a container
-	// Using Windows %TEMP% doesn't work because Docker Desktop's WSL
-	// integration only exposes specific /mnt/c/ paths, not the full drive.
-	distro := wslDistroName()
-	if distro == "" {
-		fmt.Fprintf(os.Stderr, "[mittens] cannot determine WSL distro name for clipboard sync\n")
-		return ""
-	}
-	sharedDir := `\\wsl.localhost\` + distro + `\tmp\mittens-clipboard-shared`
-	if err := os.MkdirAll(filepath.Join(sharedDir, "clients"), 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "[mittens] cannot create clipboard dir: %v\n", err)
-		return ""
-	}
-
-	// The WSL-side path for the env var (the mittens binary reads from here).
-	wslSharedDir := "/tmp/mittens-clipboard-shared"
-
-	// Check if already healthy (heartbeat file fresh).
-	if clipboardSyncHealthy(sharedDir) {
-		return wslSharedDir
-	}
-
-	// Start the daemon.
-	logPath := filepath.Join(sharedDir, "clipboard-sync.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[mittens] cannot open clipboard log: %v\n", err)
-		return ""
-	}
-
-	cmd := exec.Command(exePath, sharedDir)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "[mittens] cannot start mittens-clipboard-helper.exe: %v\n", err)
-		logFile.Close()
-		return ""
-	}
-	logFile.Close()
-
-	// Wait for healthy.
-	for i := 0; i < 50; i++ {
-		if clipboardSyncHealthy(sharedDir) {
-			return wslSharedDir
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Read log for diagnostics.
-	if logData, err := os.ReadFile(logPath); err == nil && len(logData) > 0 {
-		tail := string(logData)
-		if len(tail) > 300 {
-			tail = tail[len(tail)-300:]
-		}
-		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not healthy (log: %s)\n", strings.TrimSpace(tail))
-	} else {
-		fmt.Fprintf(os.Stderr, "[mittens] mittens-clipboard-helper.exe not healthy (no log output)\n")
-	}
-	return ""
-}
-
-// clipboardSyncHealthy checks if the clipboard-sync daemon is running
-// by verifying the heartbeat file is fresh.
-func clipboardSyncHealthy(dir string) bool {
-	hbPath := filepath.Join(dir, "clipboard.heartbeat")
-	info, err := os.Stat(hbPath)
-	if err != nil {
-		// No heartbeat — check PID file age.
-		pidPath := filepath.Join(dir, "clipboard-sync.pid")
-		pidInfo, pidErr := os.Stat(pidPath)
-		if pidErr != nil {
-			return false
-		}
-		pidData, _ := os.ReadFile(pidPath)
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidData))); err == nil && pid > 0 {
-			proc, err := os.FindProcess(pid)
-			if err != nil {
-				return false
-			}
-			_ = proc
-		}
-		return time.Since(pidInfo.ModTime()) <= 5*time.Second
-	}
-	return time.Since(info.ModTime()) <= 5*time.Second
-}
-
-// wslDistroName returns the name of the default WSL distribution.
-func wslDistroName() string {
-	out, err := exec.Command("wsl", "-e", "bash", "-c", "echo $WSL_DISTRO_NAME").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return exePath
 }
 
 func fatal(format string, a ...any) {

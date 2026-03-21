@@ -254,12 +254,14 @@ if [[ "${MITTENS_ENABLE_X11_CLIPBOARD:-false}" == "true" ]]; then
     /usr/local/bin/clipboard-x11-sync.sh "$X11_CLIPBOARD_IMAGE" >/tmp/mittens-x11-clipboard.log 2>&1 &
 fi
 
-# --- WSL clipboard: rebind image-paste to Alt+V (Windows Terminal eats Ctrl+V) ---
+# --- WSL clipboard: bind paste key to image-paste ---
+# Default is meta+v (Alt+V); can be overridden to ctrl+v via --image-paste-key.
 if [[ "${MITTENS_WSL_CLIPBOARD:-false}" == "true" ]]; then
+    PASTE_KEY="${MITTENS_IMAGE_PASTE_KEY:-meta+v}"
     KB_FILE="$AI_DIR/keybindings.json"
     if [[ ! -f "$KB_FILE" ]]; then
-        cat > "$KB_FILE" <<'KEYBINDINGS'
-{"bindings":[{"context":"Chat","bindings":{"meta+v":"chat:imagePaste"}}]}
+        cat > "$KB_FILE" <<KEYBINDINGS
+{"bindings":[{"context":"Chat","bindings":{"${PASTE_KEY}":"chat:imagePaste"}}]}
 KEYBINDINGS
     fi
 fi

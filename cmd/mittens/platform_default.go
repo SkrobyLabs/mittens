@@ -1,13 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // startBrokerDefault is the Linux default broker setup.
@@ -83,34 +81,35 @@ func notifyDefault(title, body string, _ TerminalFocus, log func(string, ...inte
 }
 
 // clipboardSyncDefault is the Linux default clipboard sync.
-// On WSL, sets up the shared clipboard directory from the Windows helper.
+// On WSL, wires up on-demand clipboard reading via the broker.
 // On native Linux, clipboard sync is not supported (no-op).
 func clipboardSyncDefault(a *App) []string {
 	if !isWSL() {
 		return nil
 	}
-	sharedDir, err := ensureWSLClipboardSync()
-	if err != nil {
-		logWarn("Clipboard image sync: disabled: %v", err)
+	helperPath := os.Getenv("MITTENS_CLIPBOARD_HELPER")
+	if helperPath == "" {
+		logWarn("Clipboard image sync: disabled: MITTENS_CLIPBOARD_HELPER not set")
 		return nil
 	}
-	extraArgs := []string{
-		"-v", sharedDir + ":/tmp/mittens-clipboard:ro",
-		"-e", "DISPLAY=:0",
-		"-e", "MITTENS_WSL_CLIPBOARD=true",
+
+	// Wire up the broker to read the Windows clipboard on demand.
+	if a.broker != nil {
+		a.broker.OnClipboardRead = readWSLClipboardImage
 	}
-	hbFile := filepath.Join(sharedDir, "clients", fmt.Sprintf("%d.heartbeat", os.Getpid()))
-	a.clipboardClientHB = hbFile
-	writeClipboardClientHeartbeat(hbFile)
-	go func() {
-		for {
-			time.Sleep(30 * time.Second)
-			if a.clipboardClientHB == "" {
-				return
-			}
-			writeClipboardClientHeartbeat(hbFile)
-		}
-	}()
-	logInfo("Clipboard image sync: enabled via %s (WSL)", sharedDir)
-	return extraArgs
+
+	pasteKey := a.ImagePasteKey
+	if pasteKey == "" {
+		pasteKey = "meta+v"
+	}
+	if pasteKey == "ctrl+v" {
+		logWarn("Image paste: Ctrl+V — Windows Terminal must rebind paste to another key (e.g. Alt+V). Use --image-paste-key meta+v if paste doesn't work.")
+	} else {
+		logInfo("Image paste: Alt+V (use --image-paste-key ctrl+v to change)")
+	}
+	envArgs := []string{"-e", "MITTENS_WSL_CLIPBOARD=true"}
+	if a.ImagePasteKey != "" {
+		envArgs = append(envArgs, "-e", "MITTENS_IMAGE_PASTE_KEY="+a.ImagePasteKey)
+	}
+	return envArgs
 }

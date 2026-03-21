@@ -2,30 +2,21 @@ package main
 
 import "testing"
 
-func TestHasInitCommand_FirstArg(t *testing.T) {
-	if !hasInitCommand([]string{"--init"}) {
-		t.Fatal("expected --init to trigger init")
+func TestHasSubFlag_Init(t *testing.T) {
+	if !hasSubFlag([]string{"--init"}, "--init") {
+		t.Fatal("expected --init to match")
 	}
-	if !hasInitCommand([]string{"init"}) {
-		t.Fatal("expected init to trigger init")
-	}
-}
-
-func TestHasInitCommand_NonFirstArg(t *testing.T) {
-	if !hasInitCommand([]string{"--verbose", "--init"}) {
-		t.Fatal("expected non-leading --init to trigger init")
-	}
-	if !hasInitCommand([]string{"--provider", "codex", "init"}) {
-		t.Fatal("expected non-leading init to trigger init")
+	if !hasSubFlag([]string{"--verbose", "--init"}, "--init") {
+		t.Fatal("expected non-leading --init to match")
 	}
 }
 
-func TestHasInitCommand_AfterSeparator(t *testing.T) {
-	if hasInitCommand([]string{"--", "--init"}) {
-		t.Fatal("did not expect --init after -- to trigger init")
+func TestHasSubFlag_AfterSeparator(t *testing.T) {
+	if hasSubFlag([]string{"--", "--init"}, "--init") {
+		t.Fatal("did not expect --init after -- to match")
 	}
-	if hasInitCommand([]string{"--verbose", "--", "init"}) {
-		t.Fatal("did not expect init after -- to trigger init")
+	if hasSubFlag([]string{"--verbose", "--", "--init"}, "--init") {
+		t.Fatal("did not expect --init after -- to match")
 	}
 }
 

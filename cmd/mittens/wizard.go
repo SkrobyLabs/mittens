@@ -36,6 +36,13 @@ var wizardExcluded = map[string]bool{"firewall": true}
 // knows which extensions are available).
 func runWizard(extensions []*registry.Extension) error {
 
+	// 0. First-run: set up user-wide defaults if they don't exist yet.
+	if !UserDefaultsExist() {
+		if err := wizardUserDefaults(); err != nil {
+			return gracefulAbort(err)
+		}
+	}
+
 	// 1. Detect workspace.
 	workspace := detectWorkspace()
 
@@ -181,6 +188,152 @@ func runWizard(extensions []*registry.Extension) error {
 		}
 		exe, _ = filepath.EvalSymlinks(exe)
 		return execCommand(exe)
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Step 0: User-wide defaults
+// ---------------------------------------------------------------------------
+
+func wizardUserDefaults() error {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, wizardTitle.Render("User-wide defaults"))
+	fmt.Fprintln(os.Stderr, wizardDim.Render("These defaults apply to all projects. You can override them per-project."))
+	fmt.Fprintln(os.Stderr)
+
+	// If defaults already exist, show them and offer edit/overwrite/cancel.
+	existing, _ := loadUserDefaultsRaw()
+	if len(existing) > 0 {
+		fmt.Fprintf(os.Stderr, "Existing defaults: %s\n\n", UserDefaultsPath())
+		for _, line := range existing {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
+		}
+		fmt.Fprintln(os.Stderr)
+
+		var action string
+		if err := huh.NewSelect[string]().
+			Title("Existing user defaults found").
+			Options(
+				huh.NewOption("Keep current defaults", "keep"),
+				huh.NewOption("Overwrite (start fresh)", "overwrite"),
+				huh.NewOption("Cancel", "cancel"),
+			).
+			Value(&action).
+			Run(); err != nil {
+			return err
+		}
+		switch action {
+		case "keep":
+			return nil
+		case "cancel":
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	// Parse existing defaults to pre-select current values.
+	existProvider := "claude"
+	existPasteKey := "meta+v"
+	existFirewall := "strict"
+	for _, line := range existing {
+		fields := strings.Fields(line)
+		if len(fields) == 2 {
+			switch fields[0] {
+			case "--provider":
+				existProvider = fields[1]
+			case "--image-paste-key":
+				existPasteKey = fields[1]
+			}
+		}
+		if len(fields) >= 1 {
+			switch fields[0] {
+			case "--firewall-dev":
+				existFirewall = "dev"
+			case "--no-firewall":
+				existFirewall = "off"
+			}
+		}
+	}
+
+	var lines []string
+
+	// 1. Default provider.
+	provider := existProvider
+	if err := huh.NewSelect[string]().
+		Title("Default AI provider").
+		Options(
+			huh.NewOption("Claude (Anthropic)", "claude"),
+			huh.NewOption("Codex (OpenAI)", "codex"),
+			huh.NewOption("Gemini (Google)", "gemini"),
+		).
+		Value(&provider).
+		Run(); err != nil {
+		return err
+	}
+	if provider != "claude" {
+		lines = append(lines, "--provider "+provider)
+	}
+
+	// 2. Clipboard paste key.
+	pasteKey := existPasteKey
+	if err := huh.NewSelect[string]().
+		Title("Image paste keybinding").
+		Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
+		Options(
+			huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
+			huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
+		).
+		Value(&pasteKey).
+		Run(); err != nil {
+		return err
+	}
+	if pasteKey == "ctrl+v" {
+		if isWSL() {
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "  ⚠ Windows Terminal intercepts Ctrl+V for text paste.")
+			fmt.Fprintln(os.Stderr, "    To use Ctrl+V for image paste inside mittens, rebind")
+			fmt.Fprintln(os.Stderr, "    the paste action in Windows Terminal settings to another")
+			fmt.Fprintln(os.Stderr, "    shortcut (e.g. Ctrl+Shift+V).")
+			fmt.Fprintln(os.Stderr)
+		}
+		lines = append(lines, "--image-paste-key "+pasteKey)
+	}
+
+	// 3. Default firewall mode.
+	fwMode := existFirewall
+	if err := huh.NewSelect[string]().
+		Title("Default firewall mode").
+		Options(
+			huh.NewOption("Strict — git, registries, package managers only", "strict"),
+			huh.NewOption("Developer-friendly (--firewall-dev) — adds cloud APIs, apt, CDN", "dev"),
+			huh.NewOption("Disabled (--no-firewall) — allow all outbound traffic", "off"),
+		).
+		Value(&fwMode).
+		Run(); err != nil {
+		return err
+	}
+	switch fwMode {
+	case "dev":
+		lines = append(lines, "--firewall-dev")
+	case "off":
+		lines = append(lines, "--no-firewall")
+	}
+
+	if err := SaveUserDefaults(lines); err != nil {
+		return fmt.Errorf("saving user defaults: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render("User defaults saved to: "+UserDefaultsPath()))
+	fmt.Fprintln(os.Stderr)
+	if len(lines) > 0 {
+		for _, l := range lines {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+l))
+		}
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return nil

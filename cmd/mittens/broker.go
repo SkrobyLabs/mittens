@@ -102,6 +102,10 @@ type HostBroker struct {
 	// OnNotify is called when a container sends a notification to the host.
 	OnNotify func(container, event, message string)
 
+	// OnClipboardRead is called when a container requests clipboard image data.
+	// Returns PNG bytes or nil if no image is available.
+	OnClipboardRead func() []byte
+
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 }
@@ -125,6 +129,7 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/notify", b.handleNotify)
 	mux.HandleFunc("/refresh", b.handleRefresh)
 	mux.HandleFunc("/login-callback", b.handleLoginCallback)
+	mux.HandleFunc("/clipboard", b.handleClipboard)
 	mux.HandleFunc("/", b.handle)
 	b.srv = &http.Server{Handler: mux}
 	return b
@@ -478,6 +483,36 @@ func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request)
 	b.blog("login-callback → %s", redactURL(cb))
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = io.WriteString(w, cb)
+}
+
+// handleClipboard reads the host clipboard and returns PNG image data.
+// Returns 200 with image/png body if an image is available, 204 otherwise.
+func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if b.OnClipboardRead == nil {
+		b.blog("CLIPBOARD → 204 (no reader configured)")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	png := b.OnClipboardRead()
+	if len(png) == 0 {
+		b.blog("CLIPBOARD → 204 (no image)")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	b.blog("CLIPBOARD → 200 (%d bytes)", len(png))
+	w.Header().Set("Content-Type", "image/png")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
 }
 
 func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {

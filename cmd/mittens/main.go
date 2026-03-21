@@ -59,17 +59,34 @@ func main() {
 func runMain(args []string) error {
 	// Handle subcommands and special flags manually since DisableFlagParsing is true.
 	if len(args) > 0 {
-		if hasInitCommand(args) {
-			return runInit()
-		}
+		// Subcommands (first arg only).
 		switch args[0] {
+		case "init":
+			if hasSubFlag(args, "--defaults") {
+				return runInitDefaults()
+			}
+			return runInit()
+		case "help":
+			return runHelp()
 		case "logs":
 			return runLogs(args[1:])
 		case "clean":
 			return runClean(args[1:])
 		case "extension":
 			return runExtension(args[1:])
-		case "--version", "-V":
+		}
+
+		// Flag-style aliases (can appear anywhere before "--").
+		if hasSubFlag(args, "--init") {
+			if hasSubFlag(args, "--defaults") {
+				return runInitDefaults()
+			}
+			return runInit()
+		}
+		if hasSubFlag(args, "--help") || hasSubFlag(args, "-h") {
+			return runHelp()
+		}
+		if hasSubFlag(args, "--version") || hasSubFlag(args, "-V") {
 			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
 			return nil
 		}
@@ -110,9 +127,15 @@ func runMain(args []string) error {
 		}
 	}
 
-	// 4. Load project config unless --no-config.
+	// 4. Load user defaults and project config unless --no-config.
+	var userArgs []string
 	var configArgs []string
 	if !noConfig {
+		userArgs, _ = LoadUserDefaults()
+		if len(userArgs) > 0 {
+			logInfo("Loaded user defaults")
+		}
+
 		workspace := detectWorkspace()
 		configArgs, err = LoadProjectConfig(workspace)
 		if err != nil {
@@ -123,8 +146,9 @@ func runMain(args []string) error {
 		}
 	}
 
-	// 5. Merge: config flags first, then CLI flags (last-wins semantics).
-	merged := append(configArgs, args...)
+	// 5. Merge: user defaults → project config → CLI args (last wins).
+	merged := append(userArgs, configArgs...)
+	merged = append(merged, args...)
 
 	// 6. Resolve provider from merged flags (project config first, then CLI).
 	provider, err := resolveProviderFromArgs(merged)
@@ -144,16 +168,35 @@ func runMain(args []string) error {
 	return app.Run()
 }
 
-func hasInitCommand(args []string) bool {
+// hasSubFlag checks whether a flag appears in the args (before "--").
+func hasSubFlag(args []string, flag string) bool {
 	for _, arg := range args {
 		if arg == "--" {
 			return false
 		}
-		if arg == "init" || arg == "--init" {
+		if arg == flag {
 			return true
 		}
 	}
 	return false
+}
+
+// runInitDefaults launches the user-wide defaults wizard directly.
+func runInitDefaults() error {
+	return wizardUserDefaults()
+}
+
+// runHelp loads extensions and prints the help text.
+func runHelp() error {
+	home := homeDir()
+	bundledDir := filepath.Join(runtimeRoot(), "extensions")
+	userExtDir := filepath.Join(home, ".mittens", "extensions")
+	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
+	if err != nil {
+		exts = nil // best-effort: show help without extensions
+	}
+	printHelp(exts)
+	return nil
 }
 
 func resolveProviderFromArgs(args []string) (*Provider, error) {

@@ -47,6 +47,7 @@ type App struct {
 	Shell         bool
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
 	Role          string // "worker", "planner", or ""
+	ImagePasteKey string // "ctrl+v" or "meta+v"
 	ExtraDirs     []string
 	InstanceName  string // user-provided name via --name
 	ClaudeArgs    []string
@@ -71,9 +72,8 @@ type App struct {
 	worktreeDirs    []string
 	worktreeOrigins map[string]string // worktree path -> original HEAD sha
 	worktreeRepos   map[string]string // worktree path -> original repo root
-	clipboardDir       string
-	clipboardReg       string
-	clipboardClientHB  string // WSL client heartbeat file in shared dir
+	clipboardDir string
+	clipboardReg string
 
 	// Drop zone for drag-and-drop file translation
 	dropDir string
@@ -104,7 +104,6 @@ var coreFlags = map[string]func(*App){
 	"--worker":       func(a *App) { a.Role = "worker" },
 	"--planner":      func(a *App) { a.Role = "planner" },
 	// --resume is handled specially in ParseFlags (optional argument).
-	"--init":         func(a *App) {}, // legacy bash flag, ignored (use `mittens init`)
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
 
@@ -113,7 +112,8 @@ var coreFlagsWithArg = map[string]func(*App, string){
 	"--dir":      func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
 	"--dir-ro":   func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
 	"--name":     func(a *App, val string) { a.InstanceName = val },
-	"--provider": func(a *App, val string) {}, // already applied in main.go pre-scan
+	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
+	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -172,11 +172,8 @@ func (a *App) ParseFlags(args []string) error {
 			continue
 		}
 
-		// Help flags -- handle here since cobra doesn't parse for us.
-		if arg == "--help" || arg == "-h" {
-			printHelp(a.Extensions)
-			os.Exit(0)
-		}
+		// Info flags -- handle here since cobra doesn't parse for us.
+		// Note: --help/-h are caught in runMain before ParseFlags.
 		if arg == "--extensions" {
 			printExtensions(a.Extensions)
 			os.Exit(0)
@@ -647,10 +644,6 @@ func argExists(args []string, val string) bool {
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
 func (a *App) Cleanup() {
-	if a.clipboardClientHB != "" {
-		_ = os.Remove(a.clipboardClientHB)
-		a.clipboardClientHB = ""
-	}
 	if a.clipboardReg != "" {
 		_ = os.Remove(a.clipboardReg)
 	}
@@ -761,10 +754,6 @@ func sharedClipboardImageFile(dir string) string {
 
 func sharedClipboardErrorFile(dir string) string {
 	return filepath.Join(dir, "clipboard.error")
-}
-
-func writeClipboardClientHeartbeat(path string) {
-	_ = os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0o600)
 }
 
 func sharedClipboardPID(dir string) (int, error) {
@@ -1525,20 +1514,25 @@ func printHelp(exts []*registry.Extension) {
 	fmt.Println(`mittens - Run Claude Code in an isolated Docker container
 
 Usage: mittens [flags] [-- claude-args...]
+       mittens <command>
 
 Commands:
-  init              Interactive project setup wizard
-  logs [-f]         Show broker logs (-f to follow)
+  help                          Show this help message
+  init                          Interactive project setup wizard
+  init --defaults               Edit user-wide defaults (provider, firewall, paste key)
+  logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
+  extension list|install|remove Manage external extensions
 
 Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
-  --no-config       Skip project config file loading
+  --no-config       Skip config file loading (user defaults + project config)
   --no-history      Disable session persistence (fully ephemeral)
   --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
+  --no-firewall     Disable network firewall entirely
   --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
   --no-yolo         Restore permission prompts (YOLO is the default)
   --no-notify       Disable desktop notifications
@@ -1551,8 +1545,9 @@ Core flags:
   --worker          Use worker role preset (model + effort)
   --planner         Use planner role preset (model + effort)
   --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
+  --image-paste-key KEY  Clipboard image paste key: meta+v (default) or ctrl+v
   --extensions      List loaded extensions and their flags
-  --help, -h        Show this help message`)
+  --version, -V     Show version information`)
 
 	if len(exts) > 0 {
 		fmt.Println("\nExtension flags:")

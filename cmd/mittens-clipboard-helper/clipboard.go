@@ -15,7 +15,6 @@ var (
 	procCloseClipboard             = user32.NewProc("CloseClipboard")
 	procGetClipboardData           = user32.NewProc("GetClipboardData")
 	procIsClipboardFormatAvailable = user32.NewProc("IsClipboardFormatAvailable")
-	procGetClipboardSequenceNumber = user32.NewProc("GetClipboardSequenceNumber")
 
 	procGlobalLock    = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock  = kernel32.NewProc("GlobalUnlock")
@@ -27,14 +26,6 @@ const (
 	cfDIB   = 8
 	cfDIBV5 = 17
 )
-
-// clipboardSequenceNumber returns the clipboard sequence number, which changes
-// every time the clipboard content changes. This can be called without opening
-// the clipboard.
-func clipboardSequenceNumber() uint32 {
-	ret, _, _ := procGetClipboardSequenceNumber.Call()
-	return uint32(ret)
-}
 
 // hasClipboardImage checks if the clipboard has image data without opening it.
 func hasClipboardImage() bool {
