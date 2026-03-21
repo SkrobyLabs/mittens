@@ -45,58 +45,34 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 	}
 }
 
-func TestParseFlags_WorkerPlannerRoleFlags(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"worker", []string{"--worker", "--print"}, "worker"},
-		{"planner", []string{"--planner"}, "planner"},
-		{"planner wins", []string{"--worker", "--planner"}, "planner"},
-	}
-	for _, tc := range tests {
-		a := &App{}
-		if err := a.ParseFlags(tc.args); err != nil {
-			t.Fatal(err)
-		}
-		if a.Role != tc.want {
-			t.Errorf("%s: Role = %q, want %q", tc.name, a.Role, tc.want)
-		}
-	}
-}
-
-func TestMaybeApplyRolePreset_ClaudeDefaultsWithExplicitModel(t *testing.T) {
-	a := &App{
-		Workspace:  "/tmp/project",
-		Provider:   ClaudeProvider(),
-		Role:       "worker",
-		ClaudeArgs: []string{"--model", "opus"},
-	}
-
-	if err := a.maybeApplyRolePreset(); err != nil {
+func TestParseFlags_LegacyWorkerPlannerIgnored(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--worker", "--planner", "--print"}); err != nil {
 		t.Fatal(err)
 	}
-
-	want := []string{"--model", "opus"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
+	if a.Profile != "" {
+		t.Errorf("Profile = %q, want empty (legacy flags should be ignored)", a.Profile)
 	}
 }
 
-func TestMaybeApplyRolePreset_PlannerUsesOverrides(t *testing.T) {
+func TestParseFlags_ProfileFlag(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--profile", "fast", "--print"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Profile != "fast" {
+		t.Errorf("Profile = %q, want %q", a.Profile, "fast")
+	}
+}
+
+func TestMaybeApplyProfile_AppliesModelAndEffort(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmp)
 	workspace := "/tmp/project"
 
-	if err := SaveRoleConfig(workspace, &RoleConfig{Roles: map[string]map[string]RolePreset{
+	if err := SaveProfileConfig(workspace, &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
 		"claude": {
-			"planner": {Model: "custom-model"},
+			"planner": {Model: "opus", Effort: "high"},
 		},
 	}}); err != nil {
 		t.Fatal(err)
@@ -105,75 +81,11 @@ func TestMaybeApplyRolePreset_PlannerUsesOverrides(t *testing.T) {
 	a := &App{
 		Workspace:  workspace,
 		Provider:   ClaudeProvider(),
-		Role:       "planner",
+		Profile:    "planner",
 		ClaudeArgs: nil,
 	}
 
-	if err := a.maybeApplyRolePreset(); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"--model", "custom-model"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
-	}
-}
-
-func TestMaybeApplyRolePreset_EffortInjected(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MITTENS_HOME", tmp)
-	workspace := ""
-	provider := ClaudeProvider()
-	provider.RoleDefaults["worker"] = RolePreset{Model: "haiku", Effort: "high"}
-
-	a := &App{
-		Workspace:  workspace,
-		Provider:   provider,
-		Role:       "worker",
-		ClaudeArgs: nil,
-	}
-
-	if err := a.maybeApplyRolePreset(); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"--model", "haiku", "--effort", "high"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
-	}
-}
-
-func TestMaybeApplyRolePreset_EffortInjectedFromOverrideConfig(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MITTENS_HOME", tmp)
-	workspace := "/tmp/project"
-
-	if err := SaveRoleConfig(workspace, &RoleConfig{Roles: map[string]map[string]RolePreset{
-		"claude": {
-			"planner": {Effort: "high"},
-		},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-
-	a := &App{
-		Workspace:  workspace,
-		Provider:   ClaudeProvider(),
-		Role:       "planner",
-		ClaudeArgs: nil,
-	}
-
-	if err := a.maybeApplyRolePreset(); err != nil {
+	if err := a.maybeApplyProfile(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,14 +100,61 @@ func TestMaybeApplyRolePreset_EffortInjectedFromOverrideConfig(t *testing.T) {
 	}
 }
 
-func TestMaybeApplyRolePreset_CodexEffortInjected(t *testing.T) {
+func TestMaybeApplyProfile_ExplicitModelNotOverridden(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmp)
 	workspace := "/tmp/project"
 
-	if err := SaveRoleConfig(workspace, &RoleConfig{Roles: map[string]map[string]RolePreset{
+	if err := SaveProfileConfig(workspace, &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
+		"claude": {
+			"fast": {Model: "haiku"},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{
+		Workspace:  workspace,
+		Provider:   ClaudeProvider(),
+		Profile:    "fast",
+		ClaudeArgs: []string{"--model", "sonnet"},
+	}
+
+	if err := a.maybeApplyProfile(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"--model", "sonnet"}
+	if len(a.ClaudeArgs) != len(want) {
+		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
+	}
+}
+
+func TestMaybeApplyProfile_NoProfileIsNoop(t *testing.T) {
+	a := &App{
+		Workspace:  "/tmp/project",
+		Provider:   ClaudeProvider(),
+		ClaudeArgs: []string{"--model", "opus"},
+	}
+
+	if err := a.maybeApplyProfile(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"--model", "opus"}
+	if len(a.ClaudeArgs) != len(want) {
+		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
+	}
+}
+
+func TestMaybeApplyProfile_CodexEffortTemplate(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmp)
+	workspace := "/tmp/project"
+
+	if err := SaveProfileConfig(workspace, &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
 		"codex": {
-			"planner": {Model: "gpt-5.4", Effort: "high"},
+			"deep": {Model: "gpt-5.4", Effort: "high"},
 		},
 	}}); err != nil {
 		t.Fatal(err)
@@ -204,11 +163,11 @@ func TestMaybeApplyRolePreset_CodexEffortInjected(t *testing.T) {
 	a := &App{
 		Workspace:  workspace,
 		Provider:   CodexProvider(),
-		Role:       "planner",
+		Profile:    "deep",
 		ClaudeArgs: nil,
 	}
 
-	if err := a.maybeApplyRolePreset(); err != nil {
+	if err := a.maybeApplyProfile(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,93 +182,27 @@ func TestMaybeApplyRolePreset_CodexEffortInjected(t *testing.T) {
 	}
 }
 
-func TestRolePreset_CodexPlannerDefaultsToHigh(t *testing.T) {
-	preset, ok := rolePreset("/tmp/project", CodexProvider(), "planner")
-	if !ok {
-		t.Fatal("expected codex planner preset")
-	}
-	if preset.Effort != "high" {
-		t.Fatalf("got effort %q, want %q", preset.Effort, "high")
-	}
-}
-
-func TestRolePreset_CodexPlannerPreservesConfiguredEffort(t *testing.T) {
+func TestMaybeApplyProfile_EffortSkippedWhenExplicit(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmp)
 	workspace := "/tmp/project"
 
-	if err := SaveRoleConfig(workspace, &RoleConfig{Roles: map[string]map[string]RolePreset{
-		"codex": {
-			"planner": {Effort: "low"},
+	if err := SaveProfileConfig(workspace, &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
+		"claude": {
+			"planner": {Model: "opus", Effort: "high"},
 		},
 	}}); err != nil {
 		t.Fatal(err)
 	}
 
-	preset, ok := rolePreset(workspace, CodexProvider(), "planner")
-	if !ok {
-		t.Fatal("expected codex planner preset")
-	}
-	if preset.Effort != "low" {
-		t.Fatalf("got effort %q, want %q", preset.Effort, "low")
-	}
-}
-
-func TestMaybeApplyRolePreset_CodexEffortNotInjectedIfProvidedViaTemplateArg(t *testing.T) {
 	a := &App{
-		Workspace:  "/tmp/project",
-		Provider:   CodexProvider(),
-		Role:       "planner",
-		ClaudeArgs: []string{"-c", "model_reasoning_effort=high"},
-	}
-
-	if err := a.maybeApplyRolePreset(); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"--model", "gpt-5.4", "-c", "model_reasoning_effort=high"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
-	}
-}
-
-func TestMaybeApplyRolePreset_CodexWorkerEffortNotInjected(t *testing.T) {
-	a := &App{
-		Workspace:  "/tmp/project",
-		Provider:   CodexProvider(),
-		Role:       "worker",
-		ClaudeArgs: nil,
-	}
-
-	if err := a.maybeApplyRolePreset(); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"--model", "gpt-5.3-codex-spark"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
-	}
-}
-
-func TestMaybeApplyRolePreset_EffortSkippedWhenExplicit(t *testing.T) {
-	a := &App{
-		Workspace:  "/tmp/project",
+		Workspace:  workspace,
 		Provider:   ClaudeProvider(),
-		Role:       "planner",
+		Profile:    "planner",
 		ClaudeArgs: []string{"--effort", "max"},
 	}
 
-	if err := a.maybeApplyRolePreset(); err != nil {
+	if err := a.maybeApplyProfile(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,21 +217,49 @@ func TestMaybeApplyRolePreset_EffortSkippedWhenExplicit(t *testing.T) {
 	}
 }
 
-func TestMaybeApplyRolePreset_CustomRoleNoPreset(t *testing.T) {
+func TestMaybeApplyProfile_MissingProfileErrorsNonInteractive(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmp)
+
 	a := &App{
 		Workspace:  "/tmp/project",
-		Provider:   CodexProvider(),
-		Role:       "custom",
-		ClaudeArgs: []string{"--model", "cli-model"},
+		Provider:   ClaudeProvider(),
+		Profile:    "nonexistent",
+		ClaudeArgs: nil,
 	}
 
-	if err := a.maybeApplyRolePreset(); err != nil {
+	err := a.maybeApplyProfile()
+	if err == nil {
+		t.Fatal("expected error for missing profile in non-interactive mode")
+	}
+}
+
+func TestLoadProfileConfig_LegacyRolesJsonFallback(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmp)
+	workspace := "/tmp/project"
+
+	// Write a legacy roles.json
+	dir := filepath.Join(tmp, "projects", ProjectDir(workspace))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"roles":{"claude":{"planner":{"model":"opus","effort":"high"}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "roles.json"), []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"--model", "cli-model"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
+	pc, err := LoadProfileConfig(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preset, ok := pc.Profiles["claude"]["planner"]
+	if !ok {
+		t.Fatal("expected planner profile from legacy roles.json")
+	}
+	if preset.Model != "opus" {
+		t.Fatalf("got model %q, want %q", preset.Model, "opus")
 	}
 }
 

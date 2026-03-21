@@ -41,9 +41,6 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 		}
 	}
 
-	if got := p.RoleDefaults["worker"]; got.Model == "" {
-		t.Error("ClaudeProvider().RoleDefaults[\"worker\"] missing model")
-	}
 	if p.ModelFlag == "" {
 		t.Error("ClaudeProvider ModelFlag should be set")
 	}

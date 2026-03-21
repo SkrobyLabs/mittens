@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 )
 
-// RolePreset defines a provider-specific model + effort combination for a role.
-type RolePreset struct {
-	Model  string
-	Effort string
+// ProfilePreset defines a model + effort combination for a named profile.
+type ProfilePreset struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // Provider holds all values that identify an AI assistant binary, its config
@@ -60,7 +60,6 @@ type Provider struct {
 	ContinueArgs             []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
 	TrustedDirsFile          string   // separate JSON array file for trusted dirs (Gemini); empty = unused
 	HistoryMountsWholeConfig bool     // mount the provider config dir directly when history is enabled
-	RoleDefaults             map[string]RolePreset
 	ModelFlag                string
 	EffortFlag               string
 	EffortTemplate           string
@@ -179,10 +178,6 @@ func ClaudeProvider() *Provider {
 		ContinueArgs:    []string{"--continue"},
 		TrustedDirsFile: "",
 		StopHookEvent:   "Stop",
-		RoleDefaults: map[string]RolePreset{
-			"worker":  {Model: "haiku", Effort: ""},
-			"planner": {Model: "opus", Effort: ""},
-		},
 		ModelFlag:  "--model",
 		EffortFlag: "--effort",
 	}
@@ -230,10 +225,6 @@ func CodexProvider() *Provider {
 		ContinueArgs:             []string{"--resume", "latest"},
 		TrustedDirsFile:          "",
 		HistoryMountsWholeConfig: true,
-		RoleDefaults: map[string]RolePreset{
-			"worker":  {Model: "gpt-5.3-codex-spark", Effort: ""},
-			"planner": {Model: "gpt-5.4", Effort: "high"},
-		},
 		ModelFlag:  "--model",
 		EffortFlag: "",
 		// Codex expects reasoning effort via -c key-value configuration.
@@ -297,10 +288,6 @@ func GeminiProvider() *Provider {
 		ResumeFlags:   []string{"--resume", "-r"},
 		SkipPermsFlag: "--approval-mode=yolo",
 		ContinueArgs:  []string{"--resume", "latest"},
-		RoleDefaults: map[string]RolePreset{
-			"worker":  {Model: "gemini-2.5-flash", Effort: ""},
-			"planner": {Model: "gemini-2.5-pro", Effort: ""},
-		},
 		ModelFlag: "--model",
 
 		ContainerHostname: "gemini-cli",

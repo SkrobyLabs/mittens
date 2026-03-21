@@ -212,47 +212,47 @@ func TestSaveProjectConfig_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadRoleConfig_Missing(t *testing.T) {
+func TestLoadProfileConfig_Missing(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)
 
-	rc, err := LoadRoleConfig("/test/no-such-project")
+	pc, err := LoadProfileConfig("/test/no-such-project")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc == nil {
-		t.Fatal("expected role config object")
+	if pc == nil {
+		t.Fatal("expected profile config object")
 	}
-	if len(rc.Roles) != 0 {
-		t.Fatalf("expected empty roles map, got %v", rc.Roles)
+	if len(pc.Profiles) != 0 {
+		t.Fatalf("expected empty profiles map, got %v", pc.Profiles)
 	}
 }
 
-func TestSaveRoleConfigRoundTrip(t *testing.T) {
+func TestSaveProfileConfigRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)
 
-	workspace := "/test/roles"
-	rc := &RoleConfig{Roles: map[string]map[string]RolePreset{
+	workspace := "/test/profiles"
+	pc := &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
 		"claude": {
-			"worker":  {Model: "claude-haiku-4-6", Effort: "low"},
-			"planner": {Model: "claude-opus-4-6", Effort: "max"},
+			"fast":    {Model: "haiku", Effort: "low"},
+			"deep": {Model: "opus", Effort: "max"},
 		},
 	}}
 
-	if err := SaveRoleConfig(workspace, rc); err != nil {
+	if err := SaveProfileConfig(workspace, pc); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := LoadRoleConfig(workspace)
+	loaded, err := LoadProfileConfig(workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got := loaded.Roles["claude"]["worker"]; got.Model != "claude-haiku-4-6" || got.Effort != "low" {
-		t.Fatalf("loaded worker preset = %v", got)
+	if got := loaded.Profiles["claude"]["fast"]; got.Model != "haiku" || got.Effort != "low" {
+		t.Fatalf("loaded fast preset = %v", got)
 	}
-	if got := loaded.Roles["claude"]["planner"]; got.Model != "claude-opus-4-6" || got.Effort != "max" {
-		t.Fatalf("loaded planner preset = %v", got)
+	if got := loaded.Profiles["claude"]["deep"]; got.Model != "opus" || got.Effort != "max" {
+		t.Fatalf("loaded deep preset = %v", got)
 	}
 }

@@ -62,8 +62,15 @@ func runMain(args []string) error {
 		// Subcommands (first arg only).
 		switch args[0] {
 		case "init":
+			if hasSubFlag(args[1:], "--help") || hasSubFlag(args[1:], "-h") || (len(args) > 1 && args[1] == "help") {
+				printInitHelp()
+				return nil
+			}
 			if hasSubFlag(args, "--defaults") {
 				return runInitDefaults()
+			}
+			if profileName := getSubFlagValue(args, "--profile"); profileName != "" {
+				return runInitProfile(profileName, args)
 			}
 			return runInit()
 		case "help":
@@ -80,6 +87,9 @@ func runMain(args []string) error {
 		if hasSubFlag(args, "--init") {
 			if hasSubFlag(args, "--defaults") {
 				return runInitDefaults()
+			}
+			if profileName := getSubFlagValue(args, "--profile"); profileName != "" {
+				return runInitProfile(profileName, args)
 			}
 			return runInit()
 		}
@@ -181,6 +191,40 @@ func hasSubFlag(args []string, flag string) bool {
 	return false
 }
 
+// getSubFlagValue returns the value of a --flag value pair from args,
+// or empty string if not found. Stops at "--".
+func getSubFlagValue(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == "--" {
+			return ""
+		}
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func printInitHelp() {
+	fmt.Println(`mittens init - Interactive project setup and configuration
+
+Usage: mittens init [command]
+
+Commands:
+  (none)                        Interactive project setup wizard
+  --defaults                    Edit user-wide defaults (provider, firewall, paste key)
+  --profile NAME                Configure a model profile (model + effort)
+  --profile NAME --delete       Delete a model profile
+  --profile NAME --provider P   Configure profile for a specific provider (default: claude)
+
+Examples:
+  mittens init                          Set up a new project
+  mittens init --defaults               Change default provider or firewall mode
+  mittens init --profile planner        Create or edit the "planner" profile
+  mittens init --profile fast           Create a "fast" profile (e.g. haiku, low effort)
+  mittens init --profile planner --delete  Remove the "planner" profile`)
+}
+
 // runInitDefaults launches the user-wide defaults wizard directly.
 func runInitDefaults() error {
 	return wizardUserDefaults()
@@ -273,6 +317,41 @@ func runInit() error {
 		return fmt.Errorf("loading extensions for wizard: %w", err)
 	}
 	return runWizard(exts)
+}
+
+// runInitProfile configures or deletes a model profile.
+func runInitProfile(profileName string, args []string) error {
+	providerName := "claude"
+	if v := getSubFlagValue(args, "--provider"); v != "" {
+		providerName = v
+	}
+	workspace := detectWorkspace()
+
+	if hasSubFlag(args, "--delete") {
+		return deleteProfile(workspace, profileName, providerName)
+	}
+	return wizardProfile(workspace, profileName, providerName)
+}
+
+// deleteProfile removes a named profile for the given provider and workspace.
+func deleteProfile(workspace, profileName, providerName string) error {
+	pc, err := LoadProfileConfig(workspace)
+	if err != nil {
+		return err
+	}
+	providerProfiles := pc.Profiles[providerName]
+	if _, ok := providerProfiles[profileName]; !ok {
+		return fmt.Errorf("profile %q not found for provider %s", profileName, providerName)
+	}
+	delete(providerProfiles, profileName)
+	if len(providerProfiles) == 0 {
+		delete(pc.Profiles, providerName)
+	}
+	if err := SaveProfileConfig(workspace, pc); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Deleted profile %q for %s\n", profileName, providerName)
+	return nil
 }
 
 // effectiveCwd returns the working directory, preferring the shim-provided

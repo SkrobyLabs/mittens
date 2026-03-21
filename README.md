@@ -2,7 +2,7 @@
   <img src="./assets/mittens.png" alt="Mittens" width="200">
 </p>
 
-<h3 align="center">Mittens on. Let it cook.</h3>
+<h3 align="center">Mittens on. Don't get burned.</h3>
 
 <p align="center">
   Run AI coding agents in isolated Docker containers with credential forwarding, network firewall, Docker-in-Docker, and pluggable extensions.
@@ -49,17 +49,11 @@ On Windows, `make build` produces both `mittens.exe` (WSL shim) and `mittens-lin
 
 ```bash
 cd your-project
-mittens                        # run Claude Code in a container
-mittens --provider codex       # use OpenAI Codex instead
-mittens --provider gemini      # use Gemini CLI instead
-mittens init                   # interactive setup wizard
-mittens --ssh                  # forward SSH keys
-mittens --aws prod             # mount specific AWS profile
-mittens --docker dind          # enable Docker-in-Docker
-mittens --no-yolo              # restore permission prompts
-mittens --worker               # use fast model preset (e.g. Haiku for Claude)
-mittens --planner              # use strong model preset (e.g. Opus for Claude)
-mittens --help                 # see all flags
+mittens                  # run in a container — that's it
+mittens init             # interactive project setup (extensions, dirs, firewall)
+mittens init --defaults  # set user-wide defaults (provider, firewall, paste key)
+mittens init --help      # see all init subcommands
+mittens help             # see all flags and commands
 ```
 
 Project configs are saved to `~/.mittens/projects/` — one flag per line, loaded automatically next time.
@@ -68,11 +62,11 @@ Project configs are saved to `~/.mittens/projects/` — one flag per line, loade
 
 Mittens supports multiple AI coding agents via `--provider`:
 
-| Provider | Flag | Default model (worker / planner) |
-|----------|------|----------------------------------|
-| **Claude** (default) | `--provider claude` | Haiku 4.6 / Opus 4.6 |
-| **Codex** | `--provider codex` | GPT-5.3 Codex Spark / GPT-5.4 |
-| **Gemini** | `--provider gemini` | Gemini 2.5 Flash / Gemini 2.5 Pro |
+| Provider | Flag |
+|----------|------|
+| **Claude** (default) | `--provider claude` |
+| **Codex** | `--provider codex` |
+| **Gemini** | `--provider gemini` |
 
 Each provider brings its own credential layout, firewall domains, CLI flags, and config format. Mittens handles all the differences — same workflow regardless of provider.
 
@@ -152,14 +146,17 @@ Use `--firewall-dev` for a developer-friendly whitelist that adds cloud APIs and
 
 Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only (`--dir-ro`) will fail worktree creation entirely.
 
-### Role Presets
+### Model Profiles
 
-`--worker` and `--planner` select model + effort presets tuned per provider:
+`--profile NAME` selects a saved model + effort preset. Profiles are per-provider, per-project, and created on first use:
 
-- **Worker** — fast, cheap model for routine tasks (e.g. Haiku for Claude, Flash for Gemini)
-- **Planner** — strongest model for architecture and planning (e.g. Opus for Claude, Pro for Gemini)
+```bash
+mittens --profile planner       # use the "planner" profile (prompts to create if missing)
+mittens init --profile fast     # configure the "fast" profile
+mittens init --profile planner --delete  # remove a profile
+```
 
-If neither is specified in an interactive session, mittens prompts you to pick a role.
+If profiles exist for the current provider and no `--profile` flag is given, mittens shows a picker at startup.
 
 ### Session Persistence
 
@@ -179,42 +176,7 @@ When the AI CLI triggers a hook event (e.g. task completion, permission prompt),
 
 The container's `xdg-open` is replaced with a shim that forwards all URLs to the host browser via the broker's `POST /open` endpoint. This works for any URL the AI CLI tries to open, not just OAuth flows.
 
-## Core Flags
-
-| Flag | Description |
-|------|-------------|
-| `--provider NAME` | AI provider: `claude` (default), `codex`, `gemini` |
-| `--verbose`, `-v` | Show the full docker command being run |
-| `--docker dind` | Enable Docker-in-Docker (`--privileged`) |
-| `--docker host` | Share host Docker socket |
-| `--no-yolo` | Restore permission prompts (YOLO is the default) |
-| `--worker` | Use fast model preset |
-| `--planner` | Use strong model preset |
-| `--network-host` | Use host networking instead of bridge + firewall |
-| `--worktree` | Git worktree isolation per invocation |
-| `--shell` | Start a bash shell instead of the AI CLI |
-| `--dir PATH` | Mount an additional directory (repeatable) |
-| `--dir-ro PATH` | Mount an additional directory read-only (repeatable) |
-| `--name NAME` | Name this container instance |
-| `--no-config` | Skip loading project config file |
-| `--no-history` | Disable session persistence (fully ephemeral) |
-| `--no-notify` | Disable desktop notifications |
-| `--no-firewall` | Disable network firewall |
-| `--firewall-dev` | Developer-friendly firewall (adds cloud APIs, apt) |
-| `--resume [ID]` | Resume last session, or a specific session by ID |
-| `--no-build` | Skip the Docker image build step |
-
-Unrecognised flags are forwarded to the AI CLI (e.g. `--model`, `--print`).
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `mittens` | Start the AI CLI in a container |
-| `mittens init` | Interactive setup wizard (TUI) |
-| `mittens logs [-f]` | View broker logs (`-f` to follow) |
-| `mittens clean [--images] [--dry-run]` | Remove stopped containers, volumes, and optionally images |
-| `mittens --version` | Print version, commit, and build date |
+Run `mittens help` for all flags and commands, or `mittens init --help` for setup subcommands.
 
 ## Debugging
 

@@ -93,45 +93,71 @@ func SaveProjectConfig(workspace string, lines []string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-// RoleConfig holds per-provider role overrides for a project.
-type RoleConfig struct {
-	Roles map[string]map[string]RolePreset `json:"roles"`
+// ProfileConfig holds per-provider model profiles for a project.
+type ProfileConfig struct {
+	Profiles map[string]map[string]ProfilePreset `json:"profiles"`
 }
 
-// LoadRoleConfig reads role overrides for the given workspace.
-func LoadRoleConfig(workspace string) (*RoleConfig, error) {
-	path := roleConfigPath(workspace)
+// LoadProfileConfig reads model profiles for the given workspace.
+// Falls back to legacy roles.json if profiles.json doesn't exist.
+func LoadProfileConfig(workspace string) (*ProfileConfig, error) {
+	path := profileConfigPath(workspace)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &RoleConfig{Roles: map[string]map[string]RolePreset{}}, nil
+			// Fallback: try legacy roles.json //legacy-delete-after:2026-04-21
+			return loadLegacyRoleConfig(workspace)
 		}
-		return nil, fmt.Errorf("reading role config %s: %w", path, err)
+		return nil, fmt.Errorf("reading profile config %s: %w", path, err)
 	}
 
-	var cfg RoleConfig
+	var cfg ProfileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing role config %s: %w", path, err)
+		return nil, fmt.Errorf("parsing profile config %s: %w", path, err)
 	}
-	if cfg.Roles == nil {
-		cfg.Roles = map[string]map[string]RolePreset{}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]map[string]ProfilePreset{}
 	}
 	return &cfg, nil
 }
 
-// SaveRoleConfig persists role overrides for the given workspace.
-func SaveRoleConfig(workspace string, cfg *RoleConfig) error {
-	if cfg == nil {
-		cfg = &RoleConfig{Roles: map[string]map[string]RolePreset{}}
-	}
-	if cfg.Roles == nil {
-		cfg.Roles = map[string]map[string]RolePreset{}
+// loadLegacyRoleConfig reads the old roles.json and converts to ProfileConfig. //legacy-delete-after:2026-04-21
+func loadLegacyRoleConfig(workspace string) (*ProfileConfig, error) {
+	path := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "roles.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{}}, nil
+		}
+		return nil, fmt.Errorf("reading legacy role config %s: %w", path, err)
 	}
 
-	path := roleConfigPath(workspace)
+	var legacy struct {
+		Roles map[string]map[string]ProfilePreset `json:"roles"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return nil, fmt.Errorf("parsing legacy role config %s: %w", path, err)
+	}
+	profiles := legacy.Roles
+	if profiles == nil {
+		profiles = map[string]map[string]ProfilePreset{}
+	}
+	return &ProfileConfig{Profiles: profiles}, nil
+}
+
+// SaveProfileConfig persists model profiles for the given workspace.
+func SaveProfileConfig(workspace string, cfg *ProfileConfig) error {
+	if cfg == nil {
+		cfg = &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{}}
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]map[string]ProfilePreset{}
+	}
+
+	path := profileConfigPath(workspace)
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating role config dir %s: %w", dir, err)
+		return fmt.Errorf("creating profile config dir %s: %w", dir, err)
 	}
 
 	payload, err := json.MarshalIndent(cfg, "", "  ")
@@ -249,8 +275,8 @@ func projectConfigPath(workspace string) string {
 	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
 }
 
-func roleConfigPath(workspace string) string {
-	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "roles.json")
+func profileConfigPath(workspace string) string {
+	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "profiles.json")
 }
 
 // javaHashCode computes the hash using Java's String.hashCode() algorithm:

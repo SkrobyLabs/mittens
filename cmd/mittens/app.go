@@ -46,7 +46,7 @@ type App struct {
 	Worktree      bool
 	Shell         bool
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
-	Role          string // "worker", "planner", or ""
+	Profile       string // model profile name (e.g. "planner", "fast")
 	ImagePasteKey string // "ctrl+v" or "meta+v"
 	ExtraDirs     []string
 	InstanceName  string // user-provided name via --name
@@ -101,8 +101,8 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
-	"--worker":       func(a *App) { a.Role = "worker" },
-	"--planner":      func(a *App) { a.Role = "planner" },
+	"--worker":  func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--planner": func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	// --resume is handled specially in ParseFlags (optional argument).
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
@@ -114,6 +114,7 @@ var coreFlagsWithArg = map[string]func(*App, string){
 	"--name":     func(a *App, val string) { a.InstanceName = val },
 	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
 	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
+	"--profile":         func(a *App, val string) { a.Profile = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -409,8 +410,8 @@ func (a *App) Run() error {
 
 	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
 
-	// Resolve role preset before Docker build so interactive choice happens first.
-	if err := a.maybeApplyRolePreset(); err != nil {
+	// Apply model profile before Docker build so interactive setup happens first.
+	if err := a.maybeApplyProfile(); err != nil {
 		if err == huh.ErrUserAborted {
 			fmt.Fprintln(os.Stderr, "\nCancelled.")
 			return nil
@@ -471,35 +472,39 @@ func (a *App) maybeApplyResumeArgs() {
 	a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
 }
 
-func (a *App) maybeApplyRolePreset() error {
-	if a.Role == "" {
-		if a.Shell {
+func (a *App) maybeApplyProfile() error {
+	if a.Profile == "" {
+		// If profiles exist and we're interactive, offer to pick one.
+		if a.Shell || argExists(a.ClaudeArgs, "--print") || !term.IsTerminal(int(os.Stdin.Fd())) {
 			return nil
 		}
-		if argExists(a.ClaudeArgs, "--print") {
-			return nil
-		}
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return nil
-		}
-
-		role, err := promptForRole()
+		profile, err := a.promptProfilePicker()
 		if err != nil {
 			return err
 		}
-		if role == "custom" {
+		if profile == "" {
 			return nil
 		}
-		a.Role = role
+		a.Profile = profile
 	}
 
-	preset, ok := rolePreset(a.Workspace, a.Provider, a.Role)
+	preset, ok := loadProfile(a.Workspace, a.Provider, a.Profile)
 	if !ok {
-		return nil
+		// Profile doesn't exist — prompt to create it.
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return fmt.Errorf("profile %q not found for provider %s (run: mittens init --profile %s)", a.Profile, a.Provider.Name, a.Profile)
+		}
+		var err error
+		preset, err = promptNewProfile(a.Provider, a.Profile)
+		if err != nil {
+			return err
+		}
+		if err := saveProfile(a.Workspace, a.Provider, a.Profile, preset); err != nil {
+			return err
+		}
 	}
 
 	extras := make([]string, 0, 4)
-
 	if a.Provider.ModelFlag != "" && preset.Model != "" && !argExists(a.ClaudeArgs, a.Provider.ModelFlag) {
 		extras = append(extras, a.Provider.ModelFlag, preset.Model)
 	}
@@ -507,75 +512,120 @@ func (a *App) maybeApplyRolePreset() error {
 		extras = append(extras, effortArgs(a.Provider, preset.Effort)...)
 	}
 	if len(extras) > 0 {
+		logInfo("Profile %q: model=%s effort=%s", a.Profile, preset.Model, preset.Effort)
 		a.ClaudeArgs = append(extras, a.ClaudeArgs...)
 	}
 	return nil
 }
 
-func promptForRole() (string, error) {
-	var role string
-	if err := createRolePrompt(&role); err != nil {
+// promptNewProfile interactively creates a new profile preset.
+func promptNewProfile(provider *Provider, name string) (ProfilePreset, error) {
+	fmt.Fprintf(os.Stderr, "\nProfile %q not found for %s — let's set it up.\n\n", name, provider.DisplayName)
+
+	var preset ProfilePreset
+
+	model := ""
+	if err := huh.NewInput().
+		Title(fmt.Sprintf("Model for %q profile (%s)", name, provider.DisplayName)).
+		Placeholder("e.g. opus, haiku, sonnet").
+		Value(&model).
+		Run(); err != nil {
+		return preset, err
+	}
+	preset.Model = strings.TrimSpace(model)
+
+	if effortEnabled(provider) {
+		effort := ""
+		if err := huh.NewSelect[string]().
+			Title(fmt.Sprintf("Effort for %q profile", name)).
+			Options(
+				huh.NewOption("(none)", ""),
+				huh.NewOption("low", "low"),
+				huh.NewOption("medium", "medium"),
+				huh.NewOption("high", "high"),
+				huh.NewOption("max", "max"),
+			).
+			Value(&effort).
+			Run(); err != nil {
+			return preset, err
+		}
+		preset.Effort = effort
+	}
+
+	return preset, nil
+}
+
+// promptProfilePicker shows a profile selection menu if profiles exist.
+// Returns empty string if no profiles or user selects "Default".
+func (a *App) promptProfilePicker() (string, error) {
+	pc, err := LoadProfileConfig(a.Workspace)
+	if err != nil {
+		return "", nil
+	}
+	providerProfiles := pc.Profiles[a.Provider.Name]
+	if len(providerProfiles) == 0 {
+		return "", nil
+	}
+
+	options := []huh.Option[string]{
+		huh.NewOption("Default (no profile)", ""),
+	}
+	for name, preset := range providerProfiles {
+		label := name
+		if preset.Model != "" {
+			label += " — " + preset.Model
+		}
+		if preset.Effort != "" {
+			label += " (" + preset.Effort + ")"
+		}
+		options = append(options, huh.NewOption(label, name))
+	}
+
+	var choice string
+	if err := huh.NewSelect[string]().
+		Title("Model profile").
+		Options(options...).
+		Value(&choice).
+		Run(); err != nil {
 		return "", err
 	}
-
-	switch role {
-	case "Worker":
-		return "worker", nil
-	case "Planner":
-		return "planner", nil
-	default:
-		return "custom", nil
-	}
+	return choice, nil
 }
 
-func createRolePrompt(role *string) error {
-	return huh.NewSelect[string]().
-		Title("Planner, Worker, or Custom (no preset)").
-		Options(
-			huh.NewOption("Planner", "Planner"),
-			huh.NewOption("Worker", "Worker"),
-			huh.NewOption("Custom (no preset)", "Custom (no preset)"),
-		).
-		Value(role).
-		Run()
-}
-
-func rolePreset(workspace string, provider *Provider, role string) (RolePreset, bool) {
+// loadProfile looks up a named profile for the given provider and workspace.
+func loadProfile(workspace string, provider *Provider, name string) (ProfilePreset, bool) {
 	if provider == nil {
-		return RolePreset{}, false
-	}
-	base, ok := provider.RoleDefaults[role]
-	if !ok {
-		return RolePreset{}, false
+		return ProfilePreset{}, false
 	}
 
-	if workspace == "" {
-		return base, true
+	pc, err := LoadProfileConfig(workspace)
+	if err != nil || pc == nil || len(pc.Profiles) == 0 {
+		return ProfilePreset{}, false
 	}
 
-	rc, err := LoadRoleConfig(workspace)
-	if err != nil {
-		return base, true
-	}
-
-	if rc == nil || len(rc.Roles) == 0 {
-		return base, true
-	}
-
-	if providerRoles, ok := rc.Roles[provider.Name]; ok {
-		if override, ok := providerRoles[role]; ok {
-			preset := base
-			if override.Model != "" {
-				preset.Model = override.Model
-			}
-			if override.Effort != "" {
-				preset.Effort = override.Effort
-			}
+	if providerProfiles, ok := pc.Profiles[provider.Name]; ok {
+		if preset, ok := providerProfiles[name]; ok {
 			return preset, true
 		}
 	}
 
-	return base, true
+	return ProfilePreset{}, false
+}
+
+// saveProfile persists a profile preset for the given provider and workspace.
+func saveProfile(workspace string, provider *Provider, name string, preset ProfilePreset) error {
+	pc, err := LoadProfileConfig(workspace)
+	if err != nil {
+		pc = &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{}}
+	}
+	if pc.Profiles == nil {
+		pc.Profiles = map[string]map[string]ProfilePreset{}
+	}
+	if pc.Profiles[provider.Name] == nil {
+		pc.Profiles[provider.Name] = map[string]ProfilePreset{}
+	}
+	pc.Profiles[provider.Name][name] = preset
+	return SaveProfileConfig(workspace, pc)
 }
 
 func effortEnabled(p *Provider) bool {
@@ -1520,6 +1570,8 @@ Commands:
   help                          Show this help message
   init                          Interactive project setup wizard
   init --defaults               Edit user-wide defaults (provider, firewall, paste key)
+  init --profile NAME           Configure a model profile (model + effort)
+  init --profile NAME --delete  Delete a model profile
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   extension list|install|remove Manage external extensions
@@ -1542,8 +1594,7 @@ Core flags:
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
   --dir-ro PATH     Mount an additional directory as read-only (repeatable)
-  --worker          Use worker role preset (model + effort)
-  --planner         Use planner role preset (model + effort)
+  --profile NAME    Use a model profile (created on first use if missing)
   --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
   --image-paste-key KEY  Clipboard image paste key: meta+v (default) or ctrl+v
   --extensions      List loaded extensions and their flags
@@ -1625,8 +1676,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
 			{Name: "--dir", Description: "Mount an additional directory (repeatable)", ArgType: "path"},
 			{Name: "--dir-ro", Description: "Mount an additional directory read-only (repeatable)", ArgType: "path"},
-			{Name: "--worker", Description: "Use worker role preset (model + effort)"},
-			{Name: "--planner", Description: "Use planner role preset (model + effort)"},
+			{Name: "--profile", Description: "Use a model profile (created on first use)", ArgType: "string"},
 			{Name: "--provider", Description: "AI provider (claude, codex, gemini)", ArgType: "string"},
 		},
 	}
