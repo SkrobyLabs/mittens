@@ -285,7 +285,7 @@ func applyInitSettings(cfg *config) {
 	settingsFile := cfg.settingsFilePath()
 	ensureJSONFile(settingsFile)
 
-	settings := readJSONFileRaw(settingsFile)
+	settings := readJSONFile(settingsFile)
 	for _, expr := range strings.Split(cfg.AIInitSettingsJQ, "|") {
 		expr = strings.TrimSpace(expr)
 		if expr == "" {
@@ -293,7 +293,7 @@ func applyInitSettings(cfg *config) {
 		}
 		applyJQAssignment(settings, expr)
 	}
-	writeJSONFileRaw(settingsFile, settings)
+	writeJSONFile(settingsFile, settings)
 }
 
 func copyGitConfig(cfg *config) {
@@ -490,15 +490,6 @@ func ensureJSONFile(path string) {
 	if _, err := os.Stat(path); err != nil {
 		os.WriteFile(path, []byte("{}\n"), 0644)
 	}
-}
-
-// readJSONFileRaw reads a JSON file preserving the raw structure for nested manipulation.
-func readJSONFileRaw(path string) map[string]interface{} {
-	return readJSONFile(path)
-}
-
-func writeJSONFileRaw(path string, obj map[string]interface{}) {
-	writeJSONFile(path, obj)
 }
 
 // setJSONKey sets a top-level key in a JSON settings file.

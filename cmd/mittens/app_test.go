@@ -555,25 +555,25 @@ func setupTestHome(t *testing.T) string {
 }
 
 func TestSharedClipboardSyncHealthy_HeartbeatFresh(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(sharedClipboardPIDFile(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	cp := newClipboardPathsAt(t.TempDir())
+	if err := os.WriteFile(cp.pidFile(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(sharedClipboardHeartbeatFile(dir), []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600); err != nil {
+	if err := os.WriteFile(cp.heartbeatFile(), []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if !sharedClipboardSyncHealthy(dir) {
+	if !cp.syncHealthy() {
 		t.Fatal("expected shared clipboard sync to be healthy")
 	}
 }
 
 func TestSharedClipboardSyncHealthy_HeartbeatStale(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(sharedClipboardPIDFile(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	cp := newClipboardPathsAt(t.TempDir())
+	if err := os.WriteFile(cp.pidFile(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	heartbeat := sharedClipboardHeartbeatFile(dir)
+	heartbeat := cp.heartbeatFile()
 	if err := os.WriteFile(heartbeat, []byte("0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestSharedClipboardSyncHealthy_HeartbeatStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if sharedClipboardSyncHealthy(dir) {
+	if cp.syncHealthy() {
 		t.Fatal("expected stale heartbeat to be unhealthy")
 	}
 }
@@ -599,32 +599,32 @@ func TestStaleClipboardLock_DeadPID(t *testing.T) {
 }
 
 func TestCopySharedClipboardSnapshot(t *testing.T) {
-	sharedDir := t.TempDir()
-	clientDir := t.TempDir()
+	shared := newClipboardPathsAt(t.TempDir())
+	client := newClipboardPathsAt(t.TempDir())
 
 	files := map[string]string{
-		sharedClipboardStateFile(sharedDir):     "image\n",
-		sharedClipboardUpdatedAtFile(sharedDir): "123\n",
-		sharedClipboardErrorFile(sharedDir):     "",
+		shared.stateFile():     "image\n",
+		shared.updatedAtFile(): "123\n",
+		shared.errorFile():     "",
 	}
 	for path, body := range files {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(sharedClipboardImageFile(sharedDir), []byte("png-bytes"), 0o600); err != nil {
+	if err := os.WriteFile(shared.imageFile(), []byte("png-bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := copySharedClipboardSnapshot(sharedDir, clientDir); err != nil {
+	if err := copySharedClipboardSnapshot(shared.dir, client.dir); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, path := range []string{
-		sharedClipboardStateFile(clientDir),
-		sharedClipboardUpdatedAtFile(clientDir),
-		sharedClipboardErrorFile(clientDir),
-		sharedClipboardImageFile(clientDir),
+		client.stateFile(),
+		client.updatedAtFile(),
+		client.errorFile(),
+		client.imageFile(),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected snapshot file %s: %v", path, err)

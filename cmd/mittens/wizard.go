@@ -797,13 +797,21 @@ func extNeedsCfg(ext *registry.Extension) bool {
 // Extensions not in this map get auto-generated prompts from their flag metadata.
 var customConfigurers = map[string]func(*registry.Extension) ([]string, error){
 	"dotnet": func(_ *registry.Extension) ([]string, error) { return configureDotnet() },
-	"aws":    func(_ *registry.Extension) ([]string, error) { return configureCloud("aws", "--aws", "--aws-all") },
-	"gcp":    func(_ *registry.Extension) ([]string, error) { return configureCloud("gcp", "--gcp", "--gcp-all") },
-	"azure": func(_ *registry.Extension) ([]string, error) {
-		return configureCloud("azure", "--azure", "--azure-all")
+	"aws": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("aws", "--aws", "--aws-all", "AWS credentials", "Select AWS profiles")
 	},
-	"kubectl": func(_ *registry.Extension) ([]string, error) { return configureKubectl() },
-	"mcp":     func(_ *registry.Extension) ([]string, error) { return configureMCP() },
+	"gcp": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("gcp", "--gcp", "--gcp-all", "GCP credentials", "Select GCP profiles")
+	},
+	"azure": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("azure", "--azure", "--azure-all", "Azure credentials", "Select Azure profiles")
+	},
+	"kubectl": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("kubectl", "--k8s", "", "Kubernetes contexts", "Select Kubernetes contexts")
+	},
+	"mcp": func(_ *registry.Extension) ([]string, error) {
+		return configureCloud("mcp", "--mcp", "--mcp-all", "MCP server passthrough", "Select MCP servers")
+	},
 }
 
 // configureExtension runs the sub-configuration step for a single extension.
@@ -910,33 +918,22 @@ func configureDotnet() ([]string, error) {
 	return []string{"--dotnet " + strings.Join(specific, ",")}, nil
 }
 
-func configureGo() ([]string, error) {
-	var version string
-	if err := huh.NewSelect[string]().
-		Title("Go SDK version").
-		Options(
-			huh.NewOption("Go 1.23", "1.23"),
-			huh.NewOption("Go 1.24", "1.24"),
-		).
-		Value(&version).
-		Run(); err != nil {
-		return nil, err
-	}
-
-	return []string{"--go " + version}, nil
-}
-
-// configureCloud handles aws/gcp/azure extension configuration with a
-// "Skip / Select / All" pattern.
-func configureCloud(name, flag, allFlag string) ([]string, error) {
+// configureCloud handles extension configuration with a "Skip / Select / All"
+// pattern. When allFlag is empty, the "All" option is omitted.
+func configureCloud(name, flag, allFlag, title, selectTitle string) ([]string, error) {
 	var action string
+
+	selectOpts := []huh.Option[string]{
+		huh.NewOption("Select", "select"),
+	}
+	if allFlag != "" {
+		selectOpts = append(selectOpts, huh.NewOption("All ("+allFlag+")", "all"))
+	}
+	selectOpts = append(selectOpts, huh.NewOption("Skip", "skip"))
+
 	if err := huh.NewSelect[string]().
-		Title(strings.ToUpper(name)+" credentials").
-		Options(
-			huh.NewOption("Select profiles", "select"),
-			huh.NewOption("All ("+allFlag+")", "all"),
-			huh.NewOption("Skip", "skip"),
-		).
+		Title(title).
+		Options(selectOpts...).
 		Value(&action).
 		Run(); err != nil {
 		return nil, err
@@ -958,7 +955,7 @@ func configureCloud(name, flag, allFlag string) ([]string, error) {
 
 	items, err := resolver()
 	if err != nil || len(items) == 0 {
-		fmt.Fprintf(os.Stderr, "  No %s profiles found.\n", name)
+		fmt.Fprintf(os.Stderr, "  No %s items found.\n", name)
 		return nil, nil
 	}
 
@@ -969,7 +966,7 @@ func configureCloud(name, flag, allFlag string) ([]string, error) {
 
 	var chosen []string
 	if err := huh.NewMultiSelect[string]().
-		Title("Select " + name + " profiles").
+		Title(selectTitle).
 		Options(opts...).
 		Value(&chosen).
 		Run(); err != nil {
@@ -981,110 +978,6 @@ func configureCloud(name, flag, allFlag string) ([]string, error) {
 	}
 	csv := strings.Join(chosen, ",")
 	return []string{flag + " " + csv}, nil
-}
-
-func configureKubectl() ([]string, error) {
-	var action string
-	if err := huh.NewSelect[string]().
-		Title("Kubernetes contexts").
-		Options(
-			huh.NewOption("Select contexts", "select"),
-			huh.NewOption("Skip", "skip"),
-		).
-		Value(&action).
-		Run(); err != nil {
-		return nil, err
-	}
-
-	if action == "skip" {
-		return nil, nil
-	}
-
-	resolver := registry.GetListResolver("kubectl")
-	if resolver == nil {
-		fmt.Fprintln(os.Stderr, "  No kubectl list resolver, skipping selection.")
-		return nil, nil
-	}
-
-	contexts, err := resolver()
-	if err != nil || len(contexts) == 0 {
-		fmt.Fprintln(os.Stderr, "  No kubectl contexts found.")
-		return nil, nil
-	}
-
-	var opts []huh.Option[string]
-	for _, ctx := range contexts {
-		opts = append(opts, huh.NewOption(ctx, ctx))
-	}
-
-	var chosen []string
-	if err := huh.NewMultiSelect[string]().
-		Title("Select Kubernetes contexts").
-		Options(opts...).
-		Value(&chosen).
-		Run(); err != nil {
-		return nil, err
-	}
-
-	if len(chosen) == 0 {
-		return nil, nil
-	}
-	csv := strings.Join(chosen, ",")
-	return []string{"--k8s " + csv}, nil
-}
-
-func configureMCP() ([]string, error) {
-	var action string
-	if err := huh.NewSelect[string]().
-		Title("MCP server passthrough").
-		Options(
-			huh.NewOption("Select servers", "select"),
-			huh.NewOption("All (--mcp-all)", "all"),
-			huh.NewOption("Skip", "skip"),
-		).
-		Value(&action).
-		Run(); err != nil {
-		return nil, err
-	}
-
-	switch action {
-	case "all":
-		return []string{"--mcp-all"}, nil
-	case "skip":
-		return nil, nil
-	}
-
-	resolver := registry.GetListResolver("mcp")
-	if resolver == nil {
-		fmt.Fprintln(os.Stderr, "  No MCP list resolver, skipping selection.")
-		return nil, nil
-	}
-
-	servers, err := resolver()
-	if err != nil || len(servers) == 0 {
-		fmt.Fprintln(os.Stderr, "  No MCP servers found.")
-		return nil, nil
-	}
-
-	var opts []huh.Option[string]
-	for _, s := range servers {
-		opts = append(opts, huh.NewOption(s, s))
-	}
-
-	var chosen []string
-	if err := huh.NewMultiSelect[string]().
-		Title("Select MCP servers").
-		Options(opts...).
-		Value(&chosen).
-		Run(); err != nil {
-		return nil, err
-	}
-
-	if len(chosen) == 0 {
-		return nil, nil
-	}
-	csv := strings.Join(chosen, ",")
-	return []string{"--mcp " + csv}, nil
 }
 
 // ---------------------------------------------------------------------------

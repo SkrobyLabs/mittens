@@ -76,6 +76,9 @@ type App struct {
 	clipboardDir string
 	clipboardReg string
 
+	// Worktree suffix (computed once per Run)
+	worktreeSuffix string
+
 	// Drop zone for drag-and-drop file translation
 	dropDir string
 
@@ -197,6 +200,9 @@ func (a *App) ParseFlags(args []string) error {
 func (a *App) Run() error {
 	defer a.Cleanup()
 
+	// Compute worktree suffix once for consistent naming across all worktrees.
+	a.worktreeSuffix = fmt.Sprintf("wt-%d", os.Getpid())
+
 	// Precondition checks.
 	if os.Getenv("HOME") == "" {
 		return fmt.Errorf("HOME environment variable is not set")
@@ -234,8 +240,7 @@ func (a *App) Run() error {
 		if dirty != "" {
 			logWarn("Working tree is dirty -- worktree will start clean from HEAD")
 		}
-		suffix := fmt.Sprintf("wt-%d", os.Getpid())
-		wtPath, err := a.createWorktree(gitRoot, suffix)
+		wtPath, err := a.createWorktree(gitRoot, a.worktreeSuffix)
 		if err != nil {
 			return fmt.Errorf("failed to create worktree: %w", err)
 		}
@@ -762,48 +767,30 @@ func (a *App) Cleanup() {
 	}
 }
 
-func sharedClipboardDir() string {
-	return filepath.Join(os.TempDir(), "mittens-clipboard-shared")
+type clipboardPaths struct {
+	dir string
 }
 
-func sharedClipboardPIDFile(dir string) string {
-	return filepath.Join(dir, "clipboard-sync.pid")
+func newClipboardPaths() clipboardPaths {
+	return clipboardPaths{dir: filepath.Join(os.TempDir(), "mittens-clipboard-shared")}
 }
 
-func sharedClipboardHeartbeatFile(dir string) string {
-	return filepath.Join(dir, "clipboard.heartbeat")
+func newClipboardPathsAt(dir string) clipboardPaths {
+	return clipboardPaths{dir: dir}
 }
 
-func sharedClipboardLockFile(dir string) string {
-	return filepath.Join(dir, "clipboard-sync.lock")
-}
+func (cp clipboardPaths) pidFile() string       { return filepath.Join(cp.dir, "clipboard-sync.pid") }
+func (cp clipboardPaths) heartbeatFile() string  { return filepath.Join(cp.dir, "clipboard.heartbeat") }
+func (cp clipboardPaths) lockFile() string       { return filepath.Join(cp.dir, "clipboard-sync.lock") }
+func (cp clipboardPaths) logFile() string        { return filepath.Join(cp.dir, "clipboard-sync.log") }
+func (cp clipboardPaths) clientsDir() string     { return filepath.Join(cp.dir, "clients") }
+func (cp clipboardPaths) stateFile() string      { return filepath.Join(cp.dir, "clipboard.state") }
+func (cp clipboardPaths) updatedAtFile() string  { return filepath.Join(cp.dir, "clipboard.updated_at") }
+func (cp clipboardPaths) imageFile() string      { return filepath.Join(cp.dir, "clipboard.png") }
+func (cp clipboardPaths) errorFile() string      { return filepath.Join(cp.dir, "clipboard.error") }
 
-func sharedClipboardLogFile(dir string) string {
-	return filepath.Join(dir, "clipboard-sync.log")
-}
-
-func sharedClipboardClientsDir(dir string) string {
-	return filepath.Join(dir, "clients")
-}
-
-func sharedClipboardStateFile(dir string) string {
-	return filepath.Join(dir, "clipboard.state")
-}
-
-func sharedClipboardUpdatedAtFile(dir string) string {
-	return filepath.Join(dir, "clipboard.updated_at")
-}
-
-func sharedClipboardImageFile(dir string) string {
-	return filepath.Join(dir, "clipboard.png")
-}
-
-func sharedClipboardErrorFile(dir string) string {
-	return filepath.Join(dir, "clipboard.error")
-}
-
-func sharedClipboardPID(dir string) (int, error) {
-	data, err := os.ReadFile(sharedClipboardPIDFile(dir))
+func (cp clipboardPaths) pid() (int, error) {
+	data, err := os.ReadFile(cp.pidFile())
 	if err != nil {
 		return 0, err
 	}
@@ -814,8 +801,8 @@ func sharedClipboardPID(dir string) (int, error) {
 	return pid, nil
 }
 
-func sharedClipboardSyncHealthy(dir string) bool {
-	pid, err := sharedClipboardPID(dir)
+func (cp clipboardPaths) syncHealthy() bool {
+	pid, err := cp.pid()
 	if err != nil || pid <= 0 {
 		return false
 	}
@@ -823,9 +810,9 @@ func sharedClipboardSyncHealthy(dir string) bool {
 		return false
 	}
 
-	heartbeatInfo, err := os.Stat(sharedClipboardHeartbeatFile(dir))
+	heartbeatInfo, err := os.Stat(cp.heartbeatFile())
 	if err != nil {
-		pidInfo, pidErr := os.Stat(sharedClipboardPIDFile(dir))
+		pidInfo, pidErr := os.Stat(cp.pidFile())
 		if pidErr != nil {
 			return false
 		}
@@ -834,15 +821,15 @@ func sharedClipboardSyncHealthy(dir string) bool {
 	return time.Since(heartbeatInfo.ModTime()) <= 5*time.Second
 }
 
-func startSharedClipboardSync(dir string) error {
-	logFile, err := os.OpenFile(sharedClipboardLogFile(dir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+func startSharedClipboardSync(cp clipboardPaths) error {
+	logFile, err := os.OpenFile(cp.logFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
 
 	syncScript := filepath.Join(containerDir(), "clipboard-sync.sh")
-	cmd := exec.Command("bash", syncScript, dir)
+	cmd := exec.Command("bash", syncScript, cp.dir)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -871,19 +858,19 @@ func staleClipboardLock(lockPath string) bool {
 }
 
 func ensureSharedClipboardSync() (string, error) {
-	dir := sharedClipboardDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	cp := newClipboardPaths()
+	if err := os.MkdirAll(cp.dir, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(sharedClipboardClientsDir(dir), 0o700); err != nil {
+	if err := os.MkdirAll(cp.clientsDir(), 0o700); err != nil {
 		return "", err
 	}
 
-	if sharedClipboardSyncHealthy(dir) {
-		return dir, nil
+	if cp.syncHealthy() {
+		return cp.dir, nil
 	}
 
-	lockPath := sharedClipboardLockFile(dir)
+	lockPath := cp.lockFile()
 	for attempt := 0; attempt < 50; attempt++ {
 		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -895,16 +882,16 @@ func ensureSharedClipboardSync() (string, error) {
 			_ = lockFile.Close()
 			defer os.Remove(lockPath)
 
-			if sharedClipboardSyncHealthy(dir) {
-				return dir, nil
+			if cp.syncHealthy() {
+				return cp.dir, nil
 			}
-			if err := startSharedClipboardSync(dir); err != nil {
+			if err := startSharedClipboardSync(cp); err != nil {
 				return "", err
 			}
 
 			for wait := 0; wait < 20; wait++ {
-				if sharedClipboardSyncHealthy(dir) {
-					return dir, nil
+				if cp.syncHealthy() {
+					return cp.dir, nil
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -918,13 +905,13 @@ func ensureSharedClipboardSync() (string, error) {
 			continue
 		}
 		time.Sleep(100 * time.Millisecond)
-		if sharedClipboardSyncHealthy(dir) {
-			return dir, nil
+		if cp.syncHealthy() {
+			return cp.dir, nil
 		}
 	}
 
-	if sharedClipboardSyncHealthy(dir) {
-		return dir, nil
+	if cp.syncHealthy() {
+		return cp.dir, nil
 	}
 	return "", fmt.Errorf("timed out waiting for shared clipboard sync")
 }
@@ -959,11 +946,13 @@ func copyFileAtomic(src, dst string) error {
 }
 
 func copySharedClipboardSnapshot(sharedDir, clientDir string) error {
+	shared := newClipboardPathsAt(sharedDir)
+	client := newClipboardPathsAt(clientDir)
 	optionalFiles := [][2]string{
-		{sharedClipboardStateFile(sharedDir), sharedClipboardStateFile(clientDir)},
-		{sharedClipboardUpdatedAtFile(sharedDir), sharedClipboardUpdatedAtFile(clientDir)},
-		{sharedClipboardImageFile(sharedDir), sharedClipboardImageFile(clientDir)},
-		{sharedClipboardErrorFile(sharedDir), sharedClipboardErrorFile(clientDir)},
+		{shared.stateFile(), client.stateFile()},
+		{shared.updatedAtFile(), client.updatedAtFile()},
+		{shared.imageFile(), client.imageFile()},
+		{shared.errorFile(), client.errorFile()},
 	}
 
 	for _, pair := range optionalFiles {
@@ -982,7 +971,8 @@ func copySharedClipboardSnapshot(sharedDir, clientDir string) error {
 }
 
 func registerClipboardClient(sharedDir, clientDir string) (string, error) {
-	regFile, err := os.CreateTemp(sharedClipboardClientsDir(sharedDir), "client-*.path")
+	shared := newClipboardPathsAt(sharedDir)
+	regFile, err := os.CreateTemp(shared.clientsDir(), "client-*.path")
 	if err != nil {
 		return "", err
 	}
@@ -1173,7 +1163,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Extra directory mounts.
 	if len(a.ExtraDirs) > 0 {
-		wtSuffix := fmt.Sprintf("wt-%d", os.Getpid())
+		wtSuffix := a.worktreeSuffix
 		var extraPaths []string
 
 		// Collect stat info for dedup (os.SameFile handles case-insensitive filesystems).

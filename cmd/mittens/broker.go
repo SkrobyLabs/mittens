@@ -125,12 +125,12 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 		done:     make(chan struct{}),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/open", b.handleOpen)
-	mux.HandleFunc("/notify", b.handleNotify)
-	mux.HandleFunc("/refresh", b.handleRefresh)
-	mux.HandleFunc("/login-callback", b.handleLoginCallback)
-	mux.HandleFunc("/clipboard", b.handleClipboard)
-	mux.HandleFunc("/", b.handle)
+	mux.HandleFunc("/open", b.withAuth(b.handleOpen))
+	mux.HandleFunc("/notify", b.withAuth(b.handleNotify))
+	mux.HandleFunc("/refresh", b.withAuth(b.handleRefresh))
+	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
+	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
+	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b
 }
@@ -216,9 +216,6 @@ func (b *HostBroker) Credentials() string {
 }
 
 func (b *HostBroker) handle(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
 		b.handleGet(w)
@@ -351,9 +348,6 @@ func (b *HostBroker) persistToHost(jsonData string) {
 const maxOpenURLSize = 4096
 
 func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -393,9 +387,6 @@ func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 const maxNotifySize = 4096
 
 func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -432,9 +423,6 @@ func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
 // The first container to POST becomes the coordinator (receives "refresh");
 // subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
 func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -462,9 +450,6 @@ func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
 // handleLoginCallback returns the captured OAuth callback URL (if any) so the
 // container can replay it to Claude Code's local callback server.
 func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -488,9 +473,6 @@ func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request)
 // handleClipboard reads the host clipboard and returns PNG image data.
 // Returns 200 with image/png body if an image is available, 204 otherwise.
 func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
-	if !b.authorize(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -513,6 +495,16 @@ func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(png)
+}
+
+// withAuth wraps an HTTP handler with the broker's authorization check.
+func (b *HostBroker) withAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !b.authorize(w, r) {
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {

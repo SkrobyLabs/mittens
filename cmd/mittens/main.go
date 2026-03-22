@@ -62,17 +62,7 @@ func runMain(args []string) error {
 		// Subcommands (first arg only).
 		switch args[0] {
 		case "init":
-			if hasSubFlag(args[1:], "--help") || hasSubFlag(args[1:], "-h") || (len(args) > 1 && args[1] == "help") {
-				printInitHelp()
-				return nil
-			}
-			if hasSubFlag(args, "--defaults") {
-				return runInitDefaults()
-			}
-			if profileName := getSubFlagValue(args, "--profile"); profileName != "" {
-				return runInitProfile(profileName, args)
-			}
-			return runInit()
+			return handleInit(args)
 		case "help":
 			return runHelp()
 		case "logs":
@@ -85,13 +75,7 @@ func runMain(args []string) error {
 
 		// Flag-style aliases (can appear anywhere before "--").
 		if hasSubFlag(args, "--init") {
-			if hasSubFlag(args, "--defaults") {
-				return runInitDefaults()
-			}
-			if profileName := getSubFlagValue(args, "--profile"); profileName != "" {
-				return runInitProfile(profileName, args)
-			}
-			return runInit()
+			return handleInit(args)
 		}
 		if hasSubFlag(args, "--help") || hasSubFlag(args, "-h") {
 			return runHelp()
@@ -112,10 +96,7 @@ func runMain(args []string) error {
 	}
 
 	// Load all extensions: bundled (disk-first, embed fallback) + user-installed.
-	home := homeDir()
-	bundledDir := filepath.Join(runtimeRoot(), "extensions")
-	userExtDir := filepath.Join(home, ".mittens", "extensions")
-	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
+	exts, err := loadExtensions()
 	if err != nil {
 		return fmt.Errorf("loading extensions: %w", err)
 	}
@@ -205,6 +186,22 @@ func getSubFlagValue(args []string, flag string) string {
 	return ""
 }
 
+// handleInit dispatches the init subcommand (or --init flag) to the
+// appropriate handler: help, defaults, profile, or the interactive wizard.
+func handleInit(args []string) error {
+	if hasSubFlag(args, "--help") || hasSubFlag(args, "-h") || (len(args) > 1 && args[1] == "help") {
+		printInitHelp()
+		return nil
+	}
+	if hasSubFlag(args, "--defaults") {
+		return runInitDefaults()
+	}
+	if profileName := getSubFlagValue(args, "--profile"); profileName != "" {
+		return runInitProfile(profileName, args)
+	}
+	return runInit()
+}
+
 func printInitHelp() {
 	fmt.Println(`mittens init - Interactive project setup and configuration
 
@@ -230,12 +227,17 @@ func runInitDefaults() error {
 	return wizardUserDefaults()
 }
 
-// runHelp loads extensions and prints the help text.
-func runHelp() error {
+// loadExtensions discovers and loads all bundled and user-installed extensions.
+func loadExtensions() ([]*registry.Extension, error) {
 	home := homeDir()
 	bundledDir := filepath.Join(runtimeRoot(), "extensions")
 	userExtDir := filepath.Join(home, ".mittens", "extensions")
-	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
+	return registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
+}
+
+// runHelp loads extensions and prints the help text.
+func runHelp() error {
+	exts, err := loadExtensions()
 	if err != nil {
 		exts = nil // best-effort: show help without extensions
 	}
@@ -309,10 +311,7 @@ func runLogs(args []string) error {
 
 // runInit launches the interactive TUI setup wizard.
 func runInit() error {
-	home := homeDir()
-	bundledDir := filepath.Join(runtimeRoot(), "extensions")
-	userExtDir := filepath.Join(home, ".mittens", "extensions")
-	exts, err := registry.LoadAllExtensions(bundledDir, userExtDir, extensionYAMLs)
+	exts, err := loadExtensions()
 	if err != nil {
 		return fmt.Errorf("loading extensions for wizard: %w", err)
 	}

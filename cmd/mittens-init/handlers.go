@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -184,34 +183,4 @@ func runX11ClipboardSync() int {
 
 		lastHash = hash
 	}
-}
-
-// runClipboardGet fetches clipboard image data from the broker and writes to stdout.
-func runClipboardGet(bc *brokerClient) ([]byte, error) {
-	body, code, err := bc.get("/clipboard")
-	if err != nil {
-		return nil, err
-	}
-	if code != http.StatusOK {
-		return nil, fmt.Errorf("clipboard: HTTP %d", code)
-	}
-	return []byte(body), nil
-}
-
-// Unused — kept for consistency; the real implementation uses the broker client
-// which handles binary data correctly via io.ReadAll.
-func readClipboardBinary(bc *brokerClient) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, bc.baseURL+"/clipboard", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := bc.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
 }

@@ -9,6 +9,15 @@ import (
 	"strings"
 )
 
+// shellJoin quotes and joins args into a single shell-safe command string.
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}
+
 func init() {
 	platformStartBroker = func(a *App) {
 		startBrokerTCP(a)
