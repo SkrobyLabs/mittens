@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1683,5 +1684,334 @@ func TestAssembleDockerArgs_ProviderFirewallDomains(t *testing.T) {
 		if !found {
 			t.Errorf("FirewallExtra missing provider domain %s", domain)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// effortEnabled
+// ---------------------------------------------------------------------------
+
+func TestEffortEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *Provider
+		want bool
+	}{
+		{"EffortFlag set", &Provider{EffortFlag: "--effort"}, true},
+		{"EffortTemplate set", &Provider{EffortTemplate: "reasoning_effort=%s"}, true},
+		{"both set", &Provider{EffortFlag: "--effort", EffortTemplate: "reasoning_effort=%s"}, true},
+		{"neither set", &Provider{}, false},
+		{"nil provider", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effortEnabled(tc.p); got != tc.want {
+				t.Errorf("effortEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// effortArgExists
+// ---------------------------------------------------------------------------
+
+func TestEffortArgExists(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *Provider
+		args []string
+		want bool
+	}{
+		{
+			"EffortFlag present",
+			&Provider{EffortFlag: "--effort"},
+			[]string{"--model", "opus", "--effort", "high"},
+			true,
+		},
+		{
+			"EffortFlag absent",
+			&Provider{EffortFlag: "--effort"},
+			[]string{"--model", "opus"},
+			false,
+		},
+		{
+			"EffortTemplate with -c prefix",
+			&Provider{EffortTemplate: "reasoning_effort=%s"},
+			[]string{"-c", "reasoning_effort=high"},
+			true,
+		},
+		{
+			"EffortTemplate absent",
+			&Provider{EffortTemplate: "reasoning_effort=%s"},
+			[]string{"--model", "opus"},
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effortArgExists(tc.p, tc.args); got != tc.want {
+				t.Errorf("effortArgExists() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// effortTemplateKey
+// ---------------------------------------------------------------------------
+
+func TestEffortTemplateKey(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *Provider
+		want string
+	}{
+		{"no equals sign", &Provider{EffortTemplate: "--thinking-budget %s"}, ""},
+		{"key=value template", &Provider{EffortTemplate: "reasoning_effort=%s"}, "reasoning_effort"},
+		{"empty template", &Provider{EffortTemplate: ""}, ""},
+		{"nil provider", nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effortTemplateKey(tc.p); got != tc.want {
+				t.Errorf("effortTemplateKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// effortArgs
+// ---------------------------------------------------------------------------
+
+func TestEffortArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		p      *Provider
+		effort string
+		want   []string
+	}{
+		{
+			"EffortFlag",
+			&Provider{EffortFlag: "--effort"},
+			"high",
+			[]string{"--effort", "high"},
+		},
+		{
+			"EffortTemplate",
+			&Provider{EffortTemplate: "reasoning_effort=%s"},
+			"high",
+			[]string{"reasoning_effort=high"},
+		},
+		{
+			"nil provider",
+			nil,
+			"high",
+			nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effortArgs(tc.p, tc.effort)
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("effortArgs() = %v, want nil", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("effortArgs() = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("effortArgs()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// argExists
+// ---------------------------------------------------------------------------
+
+func TestArgExists(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		val  string
+		want bool
+	}{
+		{"found", []string{"a", "b", "c"}, "b", true},
+		{"not found", []string{"a", "b"}, "d", false},
+		{"empty slice", []string{}, "x", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := argExists(tc.args, tc.val); got != tc.want {
+				t.Errorf("argExists() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// envOrDefault
+// ---------------------------------------------------------------------------
+
+func TestEnvOrDefault(t *testing.T) {
+	t.Run("env set", func(t *testing.T) {
+		t.Setenv("MITTENS_TEST_ENV_OR_DEFAULT", "from-env")
+		if got := envOrDefault("MITTENS_TEST_ENV_OR_DEFAULT", "fallback"); got != "from-env" {
+			t.Errorf("envOrDefault() = %q, want %q", got, "from-env")
+		}
+	})
+	t.Run("env not set", func(t *testing.T) {
+		if got := envOrDefault("MITTENS_TEST_UNSET_12345", "fallback"); got != "fallback" {
+			t.Errorf("envOrDefault() = %q, want %q", got, "fallback")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// copyFileAtomic
+// ---------------------------------------------------------------------------
+
+func TestCopyFileAtomic(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "src.txt")
+		dst := filepath.Join(dir, "dst.txt")
+		content := "hello atomic"
+		if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyFileAtomic(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != content {
+			t.Errorf("dst content = %q, want %q", string(got), content)
+		}
+	})
+	t.Run("source missing", func(t *testing.T) {
+		dir := t.TempDir()
+		err := copyFileAtomic(filepath.Join(dir, "nonexistent"), filepath.Join(dir, "dst"))
+		if err == nil {
+			t.Error("expected error for missing source")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// staleClipboardLock — additional sub-tests
+// ---------------------------------------------------------------------------
+
+func TestStaleClipboardLock(t *testing.T) {
+	t.Run("LivePID", func(t *testing.T) {
+		lockPath := filepath.Join(t.TempDir(), "clipboard-sync.lock")
+		if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if staleClipboardLock(lockPath) {
+			t.Fatal("expected live pid lock to not be stale")
+		}
+	})
+	t.Run("MissingFile", func(t *testing.T) {
+		if staleClipboardLock(filepath.Join(t.TempDir(), "nonexistent.lock")) {
+			t.Fatal("expected missing lock file to not be stale")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// extractMittensEnv
+// ---------------------------------------------------------------------------
+
+func TestExtractMittensEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		kv    string
+		want  bool
+		check func(*initcfg.ContainerConfig) bool
+	}{
+		{
+			"MITTENS_DIND=true",
+			"MITTENS_DIND=true",
+			true,
+			func(c *initcfg.ContainerConfig) bool { return c.Flags.DinD },
+		},
+		{
+			"MITTENS_MCP=server1",
+			"MITTENS_MCP=server1",
+			true,
+			func(c *initcfg.ContainerConfig) bool { return c.MCP == "server1" },
+		},
+		{
+			"MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS=30",
+			"MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS=30",
+			true,
+			func(c *initcfg.ContainerConfig) bool { return c.X11ClipboardMaxAgeSecs == 30 },
+		},
+		{
+			"unrelated var",
+			"OTHER_VAR=foo",
+			false,
+			nil,
+		},
+		{
+			"unrecognized MITTENS var",
+			"MITTENS_UNKNOWN=bar",
+			false,
+			nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &initcfg.ContainerConfig{}
+			got := extractMittensEnv(cfg, tc.kv)
+			if got != tc.want {
+				t.Errorf("extractMittensEnv(%q) = %v, want %v", tc.kv, got, tc.want)
+			}
+			if tc.check != nil && !tc.check(cfg) {
+				t.Errorf("config field not set correctly for %q", tc.kv)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// filterMittensEnvArgs
+// ---------------------------------------------------------------------------
+
+func TestFilterMittensEnvArgs(t *testing.T) {
+	cfg := &initcfg.ContainerConfig{}
+	src := []string{"-e", "MITTENS_DIND=true", "-e", "HOME=/root"}
+	dst := filterMittensEnvArgs(nil, src, cfg)
+
+	if !cfg.Flags.DinD {
+		t.Error("cfg.Flags.DinD should be true after filtering MITTENS_DIND=true")
+	}
+
+	// dst should contain HOME=/root but not MITTENS_DIND=true.
+	hasHome := false
+	hasMittens := false
+	for _, a := range dst {
+		if a == "HOME=/root" {
+			hasHome = true
+		}
+		if strings.Contains(a, "MITTENS_DIND") {
+			hasMittens = true
+		}
+	}
+	if !hasHome {
+		t.Errorf("returned args should contain HOME=/root, got %v", dst)
+	}
+	if hasMittens {
+		t.Errorf("returned args should not contain MITTENS_DIND, got %v", dst)
 	}
 }

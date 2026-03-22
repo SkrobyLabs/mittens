@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -68,4 +69,66 @@ func TestRotateBrokerLog(t *testing.T) {
 			t.Fatalf("rotated file should be overwritten: got size %d", fi.Size())
 		}
 	})
+}
+
+func TestIsSensitiveEnvKey(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"AWS_SECRET_ACCESS_KEY", true},
+		{"ANTHROPIC_API_KEY", true},
+		{"DATABASE_PASSWORD", true},
+		{"MY_TOKEN_VALUE", true},
+		{"HOME", false},
+		{"PATH", false},
+		{"VERBOSE", false},
+		{"AWS_PROFILE", false},
+		{"my_secret", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			got := isSensitiveEnvKey(tc.key)
+			if got != tc.want {
+				t.Errorf("isSensitiveEnvKey(%q) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRandomHex(t *testing.T) {
+	t.Run("length and format", func(t *testing.T) {
+		s, err := randomHex(16)
+		if err != nil {
+			t.Fatalf("randomHex(16) returned error: %v", err)
+		}
+		if len(s) != 32 {
+			t.Fatalf("expected length 32, got %d", len(s))
+		}
+		if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(s) {
+			t.Errorf("unexpected characters in hex string: %q", s)
+		}
+	})
+
+	t.Run("uniqueness", func(t *testing.T) {
+		a, err := randomHex(16)
+		if err != nil {
+			t.Fatalf("first call returned error: %v", err)
+		}
+		b, err := randomHex(16)
+		if err != nil {
+			t.Fatalf("second call returned error: %v", err)
+		}
+		if a == b {
+			t.Errorf("two calls produced identical values: %q", a)
+		}
+	})
+}
+
+func TestHomeDir(t *testing.T) {
+	t.Setenv("HOME", "/tmp/test-home-dir")
+	got := homeDir()
+	if got != "/tmp/test-home-dir" {
+		t.Fatalf("homeDir() = %q, want %q", got, "/tmp/test-home-dir")
+	}
 }

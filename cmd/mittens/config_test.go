@@ -228,6 +228,123 @@ func TestLoadProfileConfig_Missing(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// readConfigLines
+// ---------------------------------------------------------------------------
+
+func TestReadConfigLines(t *testing.T) {
+	// Happy path: blank lines, comments, and real flags.
+	tmp := filepath.Join(t.TempDir(), "config")
+	content := "\n# comment\n--verbose\n--go 1.24\n\n# another comment\n--aws foo\n"
+	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, err := readConfigLines(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--verbose", "--go 1.24", "--aws foo"}
+	if len(lines) != len(want) {
+		t.Fatalf("got %v, want %v", lines, want)
+	}
+	for i, l := range lines {
+		if l != want[i] {
+			t.Errorf("lines[%d] = %q, want %q", i, l, want[i])
+		}
+	}
+
+	// Missing file returns (nil, nil).
+	lines, err = readConfigLines(filepath.Join(t.TempDir(), "no-such-file"))
+	if err != nil {
+		t.Fatalf("expected nil error for missing file, got %v", err)
+	}
+	if lines != nil {
+		t.Fatalf("expected nil lines for missing file, got %v", lines)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// splitConfigFlags
+// ---------------------------------------------------------------------------
+
+func TestSplitConfigFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{
+			name:  "single flag",
+			input: []string{"--verbose"},
+			want:  []string{"--verbose"},
+		},
+		{
+			name:  "flag with value",
+			input: []string{"--go 1.24"},
+			want:  []string{"--go", "1.24"},
+		},
+		{
+			name:  "multiple lines mixed",
+			input: []string{"--aws profile1,profile2", "--verbose"},
+			want:  []string{"--aws", "profile1,profile2", "--verbose"},
+		},
+		{
+			name:  "nil input",
+			input: nil,
+		},
+		{
+			name:  "empty slice",
+			input: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitConfigFlags(tc.input)
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("expected empty result, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("got[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeConfigFile
+// ---------------------------------------------------------------------------
+
+func TestWriteConfigFile(t *testing.T) {
+	// Write to a path where the parent subdir doesn't exist yet (tests MkdirAll).
+	path := filepath.Join(t.TempDir(), "subdir", "config")
+
+	if err := writeConfigFile(path, "# test header\n", []string{"--verbose", "--go 1.24"}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# test header\n--verbose\n--go 1.24\n"
+	if string(data) != want {
+		t.Errorf("got %q, want %q", string(data), want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SaveProfileConfig / LoadProfileConfig round-trip
+// ---------------------------------------------------------------------------
+
 func TestSaveProfileConfigRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)
