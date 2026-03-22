@@ -74,19 +74,23 @@ func (m *CredentialManager) Setup() error {
 	if err != nil {
 		return fmt.Errorf("creating credential temp file: %w", err)
 	}
+	success := false
+	defer func() {
+		if !success {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
 
 	if err := os.Chmod(tmp.Name(), 0600); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return fmt.Errorf("setting credential temp file permissions: %w", err)
 	}
 
 	if _, err := tmp.WriteString(best); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
 		return fmt.Errorf("writing credential temp file: %w", err)
 	}
 	tmp.Close()
+	success = true
 
 	m.tmpFile = tmp.Name()
 	logInfo("OAuth credentials loaded from %s", label)

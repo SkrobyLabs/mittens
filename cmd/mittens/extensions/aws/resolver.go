@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
-	"github.com/SkrobyLabs/mittens/cmd/mittens/internal/fileutil"
+	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
 
 func init() {
@@ -126,7 +126,7 @@ func setup(ctx *registry.SetupContext) error {
 
 	// Filter credentials file
 	if _, err := os.Stat(credsFile); err == nil {
-		filtered, err := filterINI(credsFile, profiles)
+		filtered, err := filterINI(credsFile, profiles, nil)
 		if err == nil && len(filtered) > 0 {
 			dest := filepath.Join(staging, "credentials")
 			if err := os.WriteFile(dest, filtered, 0600); err != nil {
@@ -137,7 +137,12 @@ func setup(ctx *registry.SetupContext) error {
 
 	// Filter config file (uses [profile name] format)
 	if _, err := os.Stat(configFile); err == nil {
-		filtered, err := filterINIConfig(configFile, profiles)
+		filtered, err := filterINI(configFile, profiles, func(h string) string {
+			if h != "default" {
+				h = strings.TrimPrefix(h, "profile ")
+			}
+			return h
+		})
 		if err == nil && len(filtered) > 0 {
 			dest := filepath.Join(staging, "config")
 			if err := os.WriteFile(dest, filtered, 0600); err != nil {
@@ -181,7 +186,11 @@ func setup(ctx *registry.SetupContext) error {
 // INI helpers
 // ---------------------------------------------------------------------------
 
-var sectionRe = regexp.MustCompile(`^\[(.+?)\]\s*$`)
+var (
+	sectionRe       = regexp.MustCompile(`^\[(.+?)\]\s*$`)
+	sourceProfileRe = regexp.MustCompile(`^\s*source_profile\s*=\s*(.+?)\s*$`)
+	ssoKeyRe        = regexp.MustCompile(`^\s*sso_`)
+)
 
 // listINISections parses an INI file (credentials format) and returns section
 // names. Section headers are used as-is (e.g. [default] -> "default").
@@ -225,48 +234,11 @@ func listINISectionsConfig(path string) []string {
 	return names
 }
 
-// filterINI reads an INI file (credentials format) and returns only the
-// sections whose names match the wanted list. Lines before the first section
-// (header comments) are preserved.
-func filterINI(path string, sections []string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	wanted := make(map[string]bool, len(sections))
-	for _, s := range sections {
-		wanted[s] = true
-	}
-
-	var out strings.Builder
-	printing := false
-	seenSection := false
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if m := sectionRe.FindStringSubmatch(line); m != nil {
-			seenSection = true
-			printing = wanted[m[1]]
-		}
-		// Lines before the first section are header lines; always include them
-		if !seenSection || printing {
-			out.WriteString(line)
-			out.WriteByte('\n')
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return []byte(out.String()), nil
-}
-
-// filterINIConfig reads an INI file (config format) and returns only the
-// sections whose profile names match the wanted list. Config format uses
-// [profile name] headers; [default] maps to "default".
-func filterINIConfig(path string, sections []string) ([]byte, error) {
+// filterINI reads an INI file and returns only the sections whose names match
+// the wanted list. Lines before the first section (header comments) are
+// preserved. If headerNorm is non-nil it is applied to each section header
+// before matching (used by config-format files to strip "profile " prefixes).
+func filterINI(path string, sections []string, headerNorm func(string) string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -288,11 +260,12 @@ func filterINIConfig(path string, sections []string) ([]byte, error) {
 		if m := sectionRe.FindStringSubmatch(line); m != nil {
 			seenSection = true
 			header := m[1]
-			if header != "default" {
-				header = strings.TrimPrefix(header, "profile ")
+			if headerNorm != nil {
+				header = headerNorm(header)
 			}
 			printing = wanted[header]
 		}
+		// Lines before the first section are header lines; always include them
 		if !seenSection || printing {
 			out.WriteString(line)
 			out.WriteByte('\n')
@@ -319,7 +292,7 @@ func checkSourceProfiles(configPath string, profiles []string) []string {
 		wanted[p] = true
 	}
 
-	sourceRe := regexp.MustCompile(`^\s*source_profile\s*=\s*(.+?)\s*$`)
+	sourceRe := sourceProfileRe
 	currentSection := ""
 	var extra []string
 
@@ -363,7 +336,7 @@ func profilesUseSSO(configPath string, profiles []string) bool {
 		wanted[p] = true
 	}
 
-	ssoRe := regexp.MustCompile(`^\s*sso_`)
+	ssoRe := ssoKeyRe
 	currentSection := ""
 	inWanted := false
 

@@ -245,14 +245,34 @@ func (b *HostBroker) handleGet(w http.ResponseWriter) {
 
 const maxCredentialSize = 64 * 1024 // 64KB
 
-func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxCredentialSize+1))
+// readBody reads and size-checks the request body. Returns nil, false on error
+// (the response has already been written).
+func (b *HostBroker) readBody(w http.ResponseWriter, r *http.Request, maxSize int) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxSize)+1))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
-		return
+		return nil, false
 	}
-	if len(body) > maxCredentialSize {
+	if len(body) > maxSize {
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
+}
+
+// requireMethod validates the request method. Returns false (response already
+// written) if it doesn't match.
+func (b *HostBroker) requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
+}
+
+func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
+	body, ok := b.readBody(w, r, maxCredentialSize)
+	if !ok {
 		return
 	}
 
@@ -348,17 +368,11 @@ func (b *HostBroker) persistToHost(jsonData string) {
 const maxOpenURLSize = 4096
 
 func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !b.requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxOpenURLSize+1))
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxOpenURLSize {
-		http.Error(w, "URL too large", http.StatusRequestEntityTooLarge)
+	body, ok := b.readBody(w, r, maxOpenURLSize)
+	if !ok {
 		return
 	}
 
@@ -387,17 +401,11 @@ func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
 const maxNotifySize = 4096
 
 func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !b.requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxNotifySize+1))
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxNotifySize {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+	body, ok := b.readBody(w, r, maxNotifySize)
+	if !ok {
 		return
 	}
 
@@ -423,8 +431,7 @@ func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
 // The first container to POST becomes the coordinator (receives "refresh");
 // subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
 func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !b.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
@@ -450,8 +457,7 @@ func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
 // handleLoginCallback returns the captured OAuth callback URL (if any) so the
 // container can replay it to Claude Code's local callback server.
 func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !b.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
@@ -473,8 +479,7 @@ func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request)
 // handleClipboard reads the host clipboard and returns PNG image data.
 // Returns 200 with image/png body if an image is available, 204 otherwise.
 func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !b.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 

@@ -70,7 +70,7 @@ func TestFilterINI(t *testing.T) {
 	content := "# header comment\n[default]\nkey = AAA\n\n[prod]\nkey = BBB\n\n[staging]\nkey = CCC\n"
 	os.WriteFile(f, []byte(content), 0644)
 
-	filtered, err := filterINI(f, []string{"prod"})
+	filtered, err := filterINI(f, []string{"prod"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,13 @@ func TestFilterINIConfig(t *testing.T) {
 	content := "[default]\nregion = us-east-1\n\n[profile prod]\nregion = eu-west-1\n\n[profile staging]\nregion = ap-southeast-1\n"
 	os.WriteFile(f, []byte(content), 0644)
 
-	filtered, err := filterINIConfig(f, []string{"default", "prod"})
+	configHeaderNorm := func(h string) string {
+		if h != "default" {
+			h = strings.TrimPrefix(h, "profile ")
+		}
+		return h
+	}
+	filtered, err := filterINI(f, []string{"default", "prod"}, configHeaderNorm)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -225,6 +227,36 @@ func loadExtensionsFromDir(dir string) ([]*Extension, error) {
 		exts = append(exts, &ext)
 	}
 	return exts, nil
+}
+
+// ExtractUniqueHosts reads the file at path, applies the regex pattern to find
+// URLs, parses them, and returns a deduplicated list of hostnames.
+func ExtractUniqueHosts(path, pattern string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	re := regexp.MustCompile(pattern)
+	matches := re.FindAllStringSubmatch(string(data), -1)
+
+	seen := make(map[string]bool)
+	var hosts []string
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		u, err := url.Parse(m[1])
+		if err != nil {
+			continue
+		}
+		host := u.Hostname()
+		if host != "" && !seen[host] {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
 }
 
 func fileExists(path string) bool {

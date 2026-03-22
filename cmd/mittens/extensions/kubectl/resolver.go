@@ -5,11 +5,9 @@ package kubectl
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -94,7 +92,7 @@ func setup(ctx *registry.SetupContext) error {
 	_ = useCtxCmd.Run() // best-effort
 
 	// Extract API server hostnames for firewall rules.
-	hosts := extractK8sServerHosts(configPath)
+	hosts := registry.ExtractUniqueHosts(configPath, `server:\s*(https?://[^\s]+)`)
 	for _, h := range hosts {
 		*ctx.FirewallExtra = append(*ctx.FirewallExtra, h)
 	}
@@ -102,34 +100,4 @@ func setup(ctx *registry.SetupContext) error {
 	// Mount the merged config file.
 	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", configPath+":/home/claude/.kube/config:ro")
 	return nil
-}
-
-// extractK8sServerHosts reads a kubeconfig file and extracts unique hostnames
-// from all cluster server URLs.
-func extractK8sServerHosts(kubeconfigPath string) []string {
-	data, err := os.ReadFile(kubeconfigPath)
-	if err != nil {
-		return nil
-	}
-
-	re := regexp.MustCompile(`server:\s*(https?://[^\s]+)`)
-	matches := re.FindAllStringSubmatch(string(data), -1)
-
-	seen := make(map[string]bool)
-	var hosts []string
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		u, err := url.Parse(m[1])
-		if err != nil {
-			continue
-		}
-		host := u.Hostname()
-		if host != "" && !seen[host] {
-			seen[host] = true
-			hosts = append(hosts, host)
-		}
-	}
-	return hosts
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
 
 // runPhase2 performs user-level setup: config staging, trust dirs, hooks,
@@ -146,14 +148,7 @@ func startX11Clipboard(cfg *config) {
 		sync.Stdout = syncLog
 		sync.Stderr = syncLog
 	}
-	// Override argv[0] so the busybox dispatch works.
-	sync.Args[0] = "clipboard-x11-sync.sh"
-	// exec.Cmd.Args[0] is used as the displayed name but Go's exec always
-	// uses the Path field for the actual binary. We need SysProcAttr to
-	// override argv[0] as seen by the child.
-	sync.SysProcAttr = &syscall.SysProcAttr{}
-	// Actually: Go doesn't support overriding argv[0] easily via exec.Cmd.
-	// Instead, create a symlink and exec via that.
+	// Create a symlink so the busybox-style argv[0] dispatch works.
 	syncLink := "/tmp/clipboard-x11-sync.sh"
 	os.Remove(syncLink)
 	os.Symlink("/usr/local/bin/mittens-init", syncLink)
@@ -189,7 +184,7 @@ func copyConfigFiles(cfg *config) {
 		if info, err := os.Stat(srcDir); err == nil && info.IsDir() {
 			dstDir := cfg.AIDir + "/" + item
 			os.MkdirAll(dstDir, 0755)
-			copyDirContents(srcDir, dstDir)
+			fileutil.CopyDir(srcDir, dstDir)
 		}
 	}
 
@@ -200,21 +195,21 @@ func copyConfigFiles(cfg *config) {
 			dstPluginDir := cfg.AIDir + "/" + cfg.AIPluginDir
 			os.MkdirAll(dstPluginDir, 0755)
 			for _, file := range cfg.AIPluginFiles {
-				copyFileIfExists(srcPluginDir+"/"+file, dstPluginDir+"/"+file)
+				copyIfExists(srcPluginDir+"/"+file, dstPluginDir+"/"+file)
 			}
 			// Marketplaces directory.
 			mktDir := srcPluginDir + "/marketplaces"
 			if info, err := os.Stat(mktDir); err == nil && info.IsDir() {
 				dstMktDir := dstPluginDir + "/marketplaces"
 				os.MkdirAll(dstMktDir, 0755)
-				copyDirContents(mktDir, dstMktDir)
+				fileutil.CopyDir(mktDir, dstMktDir)
 			}
 		}
 	}
 
 	// Config files.
 	for _, file := range []string{cfg.AISettingsFile, "settings.local.json", cfg.AIProjectFile, "statusline.sh"} {
-		copyFileIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
+		copyIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
 	}
 
 	// Make statusline executable if copied.
@@ -224,7 +219,7 @@ func copyConfigFiles(cfg *config) {
 
 	// Persist files.
 	for _, file := range cfg.AIPersistFiles {
-		copyFileIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
+		copyIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
 	}
 }
 
@@ -297,13 +292,13 @@ func applyInitSettings(cfg *config) {
 }
 
 func copyGitConfig(cfg *config) {
-	copyFileIfExists(cfg.ConfigMount+"/.gitconfig", cfg.AIHome+"/.gitconfig")
+	copyIfExists(cfg.ConfigMount+"/.gitconfig", cfg.AIHome+"/.gitconfig")
 	exec.Command("git", "config", "--global", "--add", "safe.directory", "*").Run()
 }
 
 func copyUserPrefs(cfg *config) {
 	if cfg.AIPrefsFile != "" {
-		copyFileIfExists(cfg.ConfigMount+"/"+cfg.AIPrefsFile, cfg.AIHome+"/"+cfg.AIPrefsFile)
+		copyIfExists(cfg.ConfigMount+"/"+cfg.AIPrefsFile, cfg.AIHome+"/"+cfg.AIPrefsFile)
 	}
 }
 
@@ -311,7 +306,7 @@ func setupCredentials(cfg *config) {
 	credSrc := cfg.ConfigMount + "/" + cfg.AICredFile
 	credDst := cfg.AIDir + "/" + cfg.AICredFile
 	if _, err := os.Stat(credSrc); err == nil {
-		copyFile(credSrc, credDst)
+		fileutil.CopyFile(credSrc, credDst)
 		os.Chmod(credDst, 0600)
 	}
 }
@@ -433,34 +428,9 @@ func execArgs() error {
 
 // --- File helpers ---
 
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644)
-}
-
-func copyFileIfExists(src, dst string) {
+func copyIfExists(src, dst string) {
 	if _, err := os.Stat(src); err == nil {
-		copyFile(src, dst)
-	}
-}
-
-func copyDirContents(src, dst string) {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		srcPath := src + "/" + entry.Name()
-		dstPath := dst + "/" + entry.Name()
-		if entry.IsDir() {
-			os.MkdirAll(dstPath, 0755)
-			copyDirContents(srcPath, dstPath)
-		} else {
-			copyFile(srcPath, dstPath)
-		}
+		fileutil.CopyFile(src, dst)
 	}
 }
 

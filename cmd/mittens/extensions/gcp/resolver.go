@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
-	"github.com/SkrobyLabs/mittens/cmd/mittens/internal/fileutil"
+	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
 
 func init() {

@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
-	"github.com/SkrobyLabs/mittens/cmd/mittens/internal/fileutil"
+	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
 
 func runExtension(args []string) error {

@@ -50,10 +50,10 @@ func TestReadMCPDomainNames_Missing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// readClaudeJSONMCPServers
+// readMCPServerKeys
 // ---------------------------------------------------------------------------
 
-func TestReadClaudeJSONMCPServers(t *testing.T) {
+func TestReadMCPServerKeys_ClaudeJSON(t *testing.T) {
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, ".claude.json")
 	content := `{
@@ -65,7 +65,7 @@ func TestReadClaudeJSONMCPServers(t *testing.T) {
 }`
 	os.WriteFile(f, []byte(content), 0644)
 
-	names, err := readClaudeJSONMCPServers(f)
+	names, err := readMCPServerKeys(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,12 +82,12 @@ func TestReadClaudeJSONMCPServers(t *testing.T) {
 	}
 }
 
-func TestReadClaudeJSONMCPServers_NoMCPKey(t *testing.T) {
+func TestReadMCPServerKeys_NoMCPKey(t *testing.T) {
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, ".claude.json")
 	os.WriteFile(f, []byte(`{"otherKey": "value"}`), 0644)
 
-	names, err := readClaudeJSONMCPServers(f)
+	names, err := readMCPServerKeys(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,11 +96,7 @@ func TestReadClaudeJSONMCPServers_NoMCPKey(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// readMCPJSONServers
-// ---------------------------------------------------------------------------
-
-func TestReadMCPJSONServers(t *testing.T) {
+func TestReadMCPServerKeys_MCPJSON(t *testing.T) {
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, ".mcp.json")
 	content := `{
@@ -110,7 +106,7 @@ func TestReadMCPJSONServers(t *testing.T) {
 }`
 	os.WriteFile(f, []byte(content), 0644)
 
-	names, err := readMCPJSONServers(f)
+	names, err := readMCPServerKeys(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +116,8 @@ func TestReadMCPJSONServers(t *testing.T) {
 	}
 }
 
-func TestReadMCPJSONServers_Missing(t *testing.T) {
-	_, err := readMCPJSONServers("/nonexistent/.mcp.json")
+func TestReadMCPServerKeys_Missing(t *testing.T) {
+	_, err := readMCPServerKeys("/nonexistent/.mcp.json")
 	if err == nil {
 		t.Error("expected error for missing file")
 	}

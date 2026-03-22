@@ -101,19 +101,21 @@ func (p *Provider) HostUserPrefsPath(home string) string {
 	return filepath.Join(home, p.UserPrefsFile)
 }
 
+const stagingMountBase = "/mnt/claude-config"
+
 // StagingConfigDir returns the staging mount path for the config directory.
 func (p *Provider) StagingConfigDir() string {
-	return filepath.Join("/mnt/claude-config", p.ConfigDir)
+	return filepath.Join(stagingMountBase, p.ConfigDir)
 }
 
 // StagingCredentialPath returns the staging mount path for the credential file.
 func (p *Provider) StagingCredentialPath() string {
-	return filepath.Join("/mnt/claude-config", p.CredentialFile)
+	return filepath.Join(stagingMountBase, p.CredentialFile)
 }
 
 // StagingUserPrefsPath returns the staging mount path for the user prefs file.
 func (p *Provider) StagingUserPrefsPath() string {
-	return filepath.Join("/mnt/claude-config", p.UserPrefsFile)
+	return filepath.Join(stagingMountBase, p.UserPrefsFile)
 }
 
 // UsingCustomBaseURL reports whether the user has set a custom base URL via

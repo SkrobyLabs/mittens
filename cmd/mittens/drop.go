@@ -10,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/SkrobyLabs/mittens/cmd/mittens/internal/fileutil"
+	"github.com/SkrobyLabs/mittens/internal/fileutil"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )

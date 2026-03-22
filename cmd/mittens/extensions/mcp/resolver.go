@@ -57,7 +57,7 @@ func listServers() ([]string, error) {
 
 		// 3. mcpServers keys from ~/.claude.json.
 		claudeJSON := filepath.Join(home, ".claude.json")
-		if names, err := readClaudeJSONMCPServers(claudeJSON); err == nil {
+		if names, err := readMCPServerKeys(claudeJSON); err == nil {
 			add(names)
 		}
 	}
@@ -66,7 +66,7 @@ func listServers() ([]string, error) {
 	cwd, _ := os.Getwd()
 	if cwd != "" {
 		mcpJSON := filepath.Join(cwd, ".mcp.json")
-		if names, err := readMCPJSONServers(mcpJSON); err == nil {
+		if names, err := readMCPServerKeys(mcpJSON); err == nil {
 			add(names)
 		}
 	}
@@ -131,39 +131,9 @@ func readMCPDomainNames(path string) ([]string, error) {
 	return names, scanner.Err()
 }
 
-// readClaudeJSONMCPServers reads ~/.claude.json and returns the keys of
-// the top-level mcpServers object.
-func readClaudeJSONMCPServers(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-
-	serversRaw, ok := raw["mcpServers"]
-	if !ok {
-		return nil, nil
-	}
-
-	var serversMap map[string]json.RawMessage
-	if err := json.Unmarshal(serversRaw, &serversMap); err != nil {
-		return nil, err
-	}
-
-	var names []string
-	for name := range serversMap {
-		names = append(names, name)
-	}
-	return names, nil
-}
-
-// readMCPJSONServers reads a .mcp.json file (workspace-level MCP config)
-// and returns the keys of the top-level mcpServers object.
-func readMCPJSONServers(path string) ([]string, error) {
+// readMCPServerKeys reads a JSON file and returns the keys of its top-level
+// mcpServers object. Works for both ~/.claude.json and .mcp.json formats.
+func readMCPServerKeys(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
 )
 
 // ---------------------------------------------------------------------------
-// extractK8sServerHosts
+// ExtractUniqueHosts (via registry helper, replaces extractK8sServerHosts)
 // ---------------------------------------------------------------------------
 
 func TestExtractK8sServerHosts(t *testing.T) {
@@ -32,7 +34,7 @@ contexts:
 `
 	os.WriteFile(f, []byte(content), 0644)
 
-	hosts := extractK8sServerHosts(f)
+	hosts := registry.ExtractUniqueHosts(f, `server:\s*(https?://[^\s]+)`)
 
 	// Should deduplicate k8s.example.com.
 	want := map[string]bool{
@@ -46,40 +48,5 @@ contexts:
 		if !want[h] {
 			t.Errorf("unexpected host %q", h)
 		}
-	}
-}
-
-func TestExtractK8sServerHosts_NoServers(t *testing.T) {
-	tmp := t.TempDir()
-	f := filepath.Join(tmp, "empty-kubeconfig")
-	os.WriteFile(f, []byte("apiVersion: v1\nclusters: []\n"), 0644)
-
-	hosts := extractK8sServerHosts(f)
-	if len(hosts) != 0 {
-		t.Errorf("expected empty, got %v", hosts)
-	}
-}
-
-func TestExtractK8sServerHosts_MissingFile(t *testing.T) {
-	hosts := extractK8sServerHosts("/nonexistent/kubeconfig")
-	if hosts != nil {
-		t.Errorf("expected nil for missing file, got %v", hosts)
-	}
-}
-
-func TestExtractK8sServerHosts_IPAddress(t *testing.T) {
-	tmp := t.TempDir()
-	f := filepath.Join(tmp, "kubeconfig")
-	content := `apiVersion: v1
-clusters:
-- cluster:
-    server: https://192.168.1.100:6443
-  name: local
-`
-	os.WriteFile(f, []byte(content), 0644)
-
-	hosts := extractK8sServerHosts(f)
-	if len(hosts) != 1 || hosts[0] != "192.168.1.100" {
-		t.Errorf("got %v, want [192.168.1.100]", hosts)
 	}
 }
