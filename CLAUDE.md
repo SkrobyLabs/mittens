@@ -22,14 +22,11 @@ cmd/
     embed.go                 # go:embed for extension YAMLs
     container/               # Docker image files (not embedded, must ship with binary)
       Dockerfile
-      entrypoint.sh          # two-phase: root (firewall/DinD) then gosu to claude
-      squid.conf             # proxy config for firewall mode
+      mittens-init           # container entrypoint binary (built from cmd/mittens-init)
       firewall.conf          # default domain whitelist
+      firewall-dev.conf      # developer-friendly whitelist superset
       mcp-domains.conf       # MCP server name -> domain mappings
-      clipboard-*.sh         # clipboard image sync (macOS)
-      open-url.sh            # xdg-open shim — forwards URLs + OAuth callbacks via broker
-      notify.sh              # notification shim — sends events to broker
-      cred-sync.sh           # credential sync daemon (push/pull tokens via broker)
+      clipboard-sync.sh      # macOS host-side clipboard polling
     extensions/              # pluggable extension system
       registry/              # shared types + registration (registry.Register, LoadExtensions)
         types.go             # Extension, SetupContext, SetupResult, ParseFlag
@@ -40,6 +37,16 @@ cmd/
         build.sh             # Docker build-time install script (optional)
     internal/
       fileutil/              # CopyFile, CopyDir helpers
+  mittens-init/              # container-side entrypoint binary
+    main.go                  # busybox-style argv[0] dispatch + entrypoint
+    config.go                # MITTENS_* env var loading
+    phase1.go                # root: DinD, Docker socket, Go proxy, iptables, priv-drop
+    phase2.go                # user: config staging, JSON settings, trust dirs, hooks, cred-sync
+    proxy.go                 # FQDN-filtering HTTP/HTTPS forward proxy
+    whitelist.go             # domain whitelist with .domain wildcard matching
+    credsync.go              # credential sync goroutine
+    broker_client.go         # shared HTTP client for host broker
+    handlers.go              # xdg-open, notify, xclip, x11-clipboard handlers
   shim/                      # Windows WSL shim
 examples/
   redis-extension/           # example external extension (Python subprocess protocol)
@@ -69,7 +76,8 @@ See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAM
 - Credentials: compare Keychain + file freshness, mount read-only, extract via `docker cp` after exit
 - `HostBroker` (broker.go): single TCP server bridging host↔container for creds, URLs, OAuth, notifications, refresh coordination
 - `DropProxy` (drop.go): wraps stdin through a PTY to translate host paths in bracketed paste sequences
-- Container runs as root initially (for iptables/DinD), drops to claude user via gosu
+- Container runs as root initially (for iptables/DinD), drops to AI user via syscall.Setuid/Setgid in mittens-init
+- `mittens-init` (cmd/mittens-init): container entrypoint binary; handles root setup (proxy, iptables, DinD, priv-drop), user setup (config staging, JSON settings, cred sync), and busybox-style argv[0] dispatch for xdg-open, xclip, notify.sh symlinks
 
 ## Core Flags
 

@@ -76,7 +76,7 @@ Each provider brings its own credential layout, firewall domains, CLI flags, and
 
 The AI CLI runs inside a Docker container with `--cap-drop ALL` (unless `--docker dind` is used). The workspace is mounted at `/workspace` and the CLI's config is copied from the host at startup.
 
-The container starts as root for initial setup (firewall rules, Docker daemon), then drops to a non-root user via `gosu`. Containers are force-removed on exit — each invocation is ephemeral.
+The container starts as root for initial setup (firewall rules, Docker daemon), then drops to a non-root user via `syscall.Setuid/Setgid`. Containers are force-removed on exit — each invocation is ephemeral.
 
 ### Host Broker
 
@@ -94,7 +94,7 @@ Mittens runs a host-side TCP server (`HostBroker`) that bridges all communicatio
 Host                              Container
 ┌──────────────┐                  ┌──────────────┐
 │  Keychain /  │◄── pull ────────►│  cred-sync   │
-│  file store  │    (5s poll)     │  daemon      │
+│  file store  │    (5s poll)     │  goroutine   │
 └──────┬───────┘                  └──────┬───────┘
        │                                 │
        ▼                                 ▼
@@ -128,7 +128,7 @@ This works transparently — the AI CLI sees container-valid paths.
 
 ### Network Firewall
 
-Enabled by default (`--no-firewall` to disable). Uses Squid proxy + iptables to restrict outbound HTTP/HTTPS to whitelisted domains only.
+Enabled by default (`--no-firewall` to disable). Uses a built-in Go forward proxy + iptables to restrict outbound HTTP/HTTPS to whitelisted domains only.
 
 Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm/PyPI/crates.io/Go proxy, Docker registries, Helm, and Terraform.
 

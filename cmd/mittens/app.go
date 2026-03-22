@@ -18,6 +18,7 @@ import (
 
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/internal/initcfg"
 )
 
 // Platform function variables — defaults in platform_default.go,
@@ -701,19 +702,14 @@ func (a *App) Cleanup() {
 		_ = os.RemoveAll(a.clipboardDir)
 	}
 
-	// Extract refreshed credentials from the stopped container.
+	// Persist refreshed credentials from the broker.
 	if a.ContainerName != "" {
 		if a.Credentials != nil {
-			finalCreds := ""
 			if a.broker != nil {
-				finalCreds = a.broker.Credentials()
+				if finalCreds := a.broker.Credentials(); finalCreds != "" {
+					a.Credentials.PersistAll(finalCreds)
+				}
 				_ = a.broker.Close()
-			}
-			if finalCreds != "" {
-				a.Credentials.PersistAll(finalCreds)
-			} else {
-				// Broker had nothing (e.g. provider has no cred-sync daemon) — docker cp.
-				_ = a.Credentials.PersistFromContainer(a.ContainerName, a.Provider.ContainerCredentialPath())
 			}
 		}
 		// Copy back provider persist files (e.g. Gemini google_accounts.json, installation_id).
@@ -1056,6 +1052,42 @@ func (a *App) buildImage() error {
 	})
 }
 
+// buildInitConfig creates the ContainerConfig struct that will be
+// marshaled to JSON and mounted into the container for mittens-init.
+// Broker, ExtraDirs, FirewallExtra, and X11 clipboard fields are set
+// later in assembleDockerArgs as they depend on further processing.
+func (a *App) buildInitConfig() *initcfg.ContainerConfig {
+	return &initcfg.ContainerConfig{
+		AI: initcfg.AIConfig{
+			Binary:         a.Provider.Binary,
+			ConfigDir:      a.Provider.ConfigDir,
+			CredFile:       a.Provider.CredentialFile,
+			PrefsFile:      a.Provider.UserPrefsFile,
+			SettingsFile:   a.Provider.SettingsFile,
+			ProjectFile:    a.Provider.ProjectFile,
+			TrustedDirsKey: a.Provider.TrustedDirsKey,
+			YoloKey:        a.Provider.YoloKey,
+			MCPServersKey:  a.Provider.MCPServersKey,
+			TrustedDirsFile: a.Provider.TrustedDirsFile,
+			InitSettingsJQ: a.Provider.InitSettingsJQ,
+			StopHookEvent:  a.Provider.StopHookEvent,
+			PersistFiles:   a.Provider.PersistFiles,
+			SettingsFormat: a.Provider.SettingsFormat,
+			ConfigSubdirs:  a.Provider.ConfigSubdirs,
+			PluginDir:      a.Provider.PluginDir,
+			PluginFiles:    a.Provider.PluginFiles,
+		},
+		Flags: initcfg.Flags{
+			Verbose:  a.Verbose,
+			Yolo:     a.Yolo,
+			NoNotify: a.NoNotify,
+		},
+		ContainerName: a.ContainerName,
+		InstanceName:  a.InstanceName,
+		ImagePasteKey: a.ImagePasteKey,
+	}
+}
+
 // assembleDockerArgs builds the full docker run argument list.
 // resolverArgs and resolverFirewall come from extension setup resolvers.
 func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []string) []string {
@@ -1078,7 +1110,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-v", a.Provider.HostConfigDir(home)+":"+a.Provider.StagingConfigDir()+":ro")
 	}
 
-	// Environment variables.
+	// Environment variables (actual process env, not mittens-init config).
 	if a.Provider.APIKeyEnv != "" {
 		args = append(args, "-e", a.Provider.APIKeyEnv+"="+os.Getenv(a.Provider.APIKeyEnv))
 	}
@@ -1086,15 +1118,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", a.Provider.BaseURLEnv+"="+os.Getenv(a.Provider.BaseURLEnv))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
-	if a.Yolo {
-		args = append(args, "-e", "MITTENS_YOLO=true")
-	}
-	args = append(args, "-e", "MITTENS_CONTAINER_NAME="+a.ContainerName)
-	if a.NoNotify {
-		args = append(args, "-e", "MITTENS_NO_NOTIFY=true")
-	}
-	if a.InstanceName != "" {
-		args = append(args, "-e", "MITTENS_INSTANCE_NAME="+a.InstanceName)
+	for k, v := range a.Provider.ContainerEnv {
+		args = append(args, "-e", k+"="+v)
 	}
 
 	// Credential mount.
@@ -1102,51 +1127,20 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-v", a.Credentials.TmpFile()+":"+a.Provider.StagingCredentialPath()+":ro")
 	}
 
-	// Provider env vars — passed into the container for entrypoint.sh.
-	// Note: AI_USERNAME is baked into the image via Dockerfile ENV, not passed at runtime.
-	args = append(args,
-		"-e", "MITTENS_AI_BINARY="+a.Provider.Binary,
-		"-e", "MITTENS_AI_CONFIG_DIR="+a.Provider.ConfigDir,
-		"-e", "MITTENS_AI_CRED_FILE="+a.Provider.CredentialFile,
-		"-e", "MITTENS_AI_PREFS_FILE="+a.Provider.UserPrefsFile,
-		"-e", "MITTENS_AI_SETTINGS_FILE="+a.Provider.SettingsFile,
-		"-e", "MITTENS_AI_PROJECT_FILE="+a.Provider.ProjectFile,
-		"-e", "MITTENS_AI_TRUSTED_DIRS_KEY="+a.Provider.TrustedDirsKey,
-		"-e", "MITTENS_AI_YOLO_KEY="+a.Provider.YoloKey,
-		"-e", "MITTENS_AI_MCP_SERVERS_KEY="+a.Provider.MCPServersKey,
-		"-e", "MITTENS_AI_SETTINGS_FORMAT="+a.Provider.SettingsFormat,
-		"-e", "MITTENS_AI_CONFIG_SUBDIRS="+strings.Join(a.Provider.ConfigSubdirs, ","),
-		"-e", "MITTENS_AI_PLUGIN_DIR="+a.Provider.PluginDir,
-		"-e", "MITTENS_AI_PLUGIN_FILES="+strings.Join(a.Provider.PluginFiles, ","),
-		"-e", "MITTENS_AI_TRUSTED_DIRS_FILE="+a.Provider.TrustedDirsFile,
-		"-e", "MITTENS_AI_INIT_SETTINGS_JQ="+a.Provider.InitSettingsJQ,
-		"-e", "MITTENS_AI_STOP_HOOK_EVENT="+a.Provider.StopHookEvent,
-		"-e", "MITTENS_AI_PERSIST_FILES="+strings.Join(a.Provider.PersistFiles, ","),
-	)
+	// Build mittens-init config and mount as JSON file.
+	initCfg := a.buildInitConfig()
 
-	// Provider-specific extra env vars (e.g. DISPLAY for Gemini browser-open detection).
-	// An empty value explicitly overrides the image's ENV (e.g. DEBIAN_FRONTEND=noninteractive).
-	for k, v := range a.Provider.ContainerEnv {
-		args = append(args, "-e", k+"="+v)
-	}
-
-	// Credential broker.
+	// Credential broker — needs both config fields and docker args for mounts/networking.
 	if a.brokerSock != "" {
-		// Unix socket mode (Linux): mount the socket directory into the container.
 		sockDir := filepath.Dir(a.brokerSock)
 		containerSockDir := "/tmp/mittens-broker"
 		containerSockPath := containerSockDir + "/broker.sock"
 		args = append(args, "-v", sockDir+":"+containerSockDir)
-		args = append(args, "-e", "MITTENS_BROKER_SOCK="+containerSockPath)
-		if a.brokerToken != "" {
-			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
-		}
+		initCfg.Broker.Sock = containerSockPath
+		initCfg.Broker.Token = a.brokerToken
 	} else if a.brokerPort > 0 {
-		// TCP mode (macOS/Windows): use host.docker.internal.
-		args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
-		if a.brokerToken != "" {
-			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
-		}
+		initCfg.Broker.Port = a.brokerPort
+		initCfg.Broker.Token = a.brokerToken
 		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}
 
@@ -1172,7 +1166,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 		sessionWS := a.EffectiveWorkspace
 		if sessionWS != "" && sessionWS != "/workspace" {
-			args = append(args, "-e", "MITTENS_HOST_WORKSPACE="+sessionWS)
+			initCfg.HostWorkspace = sessionWS
 			args = append(args, "-v", a.WorkspaceMountSrc+":"+sessionWS)
 		}
 	}
@@ -1259,7 +1253,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			}
 		}
 		if len(extraPaths) > 0 {
-			args = append(args, "-e", "MITTENS_EXTRA_DIRS="+strings.Join(extraPaths, ":"))
+			initCfg.ExtraDirs = extraPaths
 		}
 	}
 
@@ -1323,13 +1317,14 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Add provider, resolver-contributed docker args and firewall domains.
+	// Extract MITTENS_* env vars from resolver args into the JSON config.
 	firewallDomains = append(firewallDomains, a.Provider.FirewallDomains...)
-	args = append(args, resolverArgs...)
+	args = filterMittensEnvArgs(args, resolverArgs, initCfg)
 	firewallDomains = append(firewallDomains, resolverFirewall...)
 
 	if len(firewallDomains) > 0 {
 		logVerbose(a.Verbose, "Firewall domains: %d extra", len(firewallDomains))
-		args = append(args, "-e", "MITTENS_FIREWALL_EXTRA="+strings.Join(firewallDomains, ","))
+		initCfg.FirewallExtra = firewallDomains
 	}
 
 	// Security hardening: apply unless a resolver (e.g. docker dind) already requested --privileged.
@@ -1356,7 +1351,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Clipboard image sync.
 	if extraArgs := platformClipboardSync(a); len(extraArgs) > 0 {
-		args = append(args, extraArgs...)
+		args = filterMittensEnvArgs(args, extraArgs, initCfg)
 	}
 
 	// Drop zone for drag-and-drop path translation.
@@ -1365,6 +1360,26 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		a.tempDirs = append(a.tempDirs, dir)
 		args = append(args, "-v", dir+":/tmp/mittens-drops:ro")
 		logInfo("Drag-and-drop path translation: enabled")
+	}
+
+	// Write mittens-init JSON config and mount it into the container.
+	cfgFile, err := os.CreateTemp("", "mittens-config.*.json")
+	if err == nil {
+		cfgPath := cfgFile.Name()
+		cfgFile.Close()
+		if err := initCfg.Write(cfgPath); err == nil {
+			// Ensure world-readable so the container user (uid 1000) can
+			// read it after privilege drop. CreateTemp uses 0600 and
+			// WriteFile preserves existing permissions on overwrite.
+			os.Chmod(cfgPath, 0644)
+			a.tempDirs = append(a.tempDirs, cfgPath)
+			args = append(args,
+				"-v", cfgPath+":"+initcfg.ConfigPath+":ro",
+				"-e", "MITTENS_CONFIG="+initcfg.ConfigPath,
+			)
+		} else {
+			logWarn("Failed to write init config: %v", err)
+		}
 	}
 
 	return args
@@ -1554,6 +1569,60 @@ func parseExtraDirSpec(s string) extraDirSpec {
 		}
 	}
 	return extraDirSpec{Path: s}
+}
+
+// filterMittensEnvArgs appends src args to dst, extracting any -e MITTENS_*
+// env vars into the JSON config struct instead of keeping them as docker args.
+// Non-MITTENS env vars and all other args pass through unchanged.
+func filterMittensEnvArgs(dst, src []string, cfg *initcfg.ContainerConfig) []string {
+	for i := 0; i < len(src); i++ {
+		if src[i] == "-e" && i+1 < len(src) {
+			kv := src[i+1]
+			i++
+			if !extractMittensEnv(cfg, kv) {
+				dst = append(dst, "-e", kv)
+			}
+		} else {
+			dst = append(dst, src[i])
+		}
+	}
+	return dst
+}
+
+// extractMittensEnv checks if kv is a "MITTENS_*=value" env var that belongs
+// in the JSON config. If so, it sets the corresponding field on cfg and returns
+// true. Returns false if kv is not a recognized MITTENS config var.
+func extractMittensEnv(cfg *initcfg.ContainerConfig, kv string) bool {
+	eq := strings.IndexByte(kv, '=')
+	if eq < 0 {
+		return false
+	}
+	key, val := kv[:eq], kv[eq+1:]
+	switch key {
+	case "MITTENS_DIND":
+		cfg.Flags.DinD = strings.EqualFold(val, "true")
+	case "MITTENS_DOCKER_HOST":
+		cfg.Flags.DockerHost = strings.EqualFold(val, "true")
+	case "MITTENS_FIREWALL":
+		cfg.Flags.Firewall = strings.EqualFold(val, "true")
+	case "MITTENS_MCP":
+		cfg.MCP = val
+	case "MITTENS_WSL_CLIPBOARD":
+		cfg.Flags.WSLClipboard = strings.EqualFold(val, "true")
+	case "MITTENS_ENABLE_X11_CLIPBOARD":
+		cfg.Flags.EnableX11Clipboard = strings.EqualFold(val, "true")
+	case "MITTENS_X11_CLIPBOARD_IMAGE":
+		cfg.X11ClipboardImage = val
+	case "MITTENS_X11_CLIPBOARD_MAX_AGE_SECONDS":
+		if v, err := strconv.Atoi(val); err == nil {
+			cfg.X11ClipboardMaxAgeSecs = v
+		}
+	case "MITTENS_IMAGE_PASTE_KEY":
+		cfg.ImagePasteKey = val
+	default:
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

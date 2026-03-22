@@ -44,11 +44,13 @@ all: build ## Build the binary
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
+INIT_BINARY := mittens-init
+
 ifeq ($(OS),Windows_NT)
 # On Windows: build both the Linux binary and a .exe shim via WSL.
 #   mittens.exe       - Windows shim (run this from PowerShell/cmd)
 #   mittens-linux     - real binary (executed inside WSL by the shim)
-build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim + clipboard helper)
+build: tidy init-binary # (internal) Build mittens for Windows (Linux binary + WSL shim + clipboard helper)
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux ./cmd/mittens
 	wsl.exe env GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY).exe ./cmd/shim
 	-@powershell -NoProfile -c "Stop-Process -Name '$(BINARY)-clipboard-helper' -Force -EA 0; sleep 1"
@@ -56,10 +58,16 @@ build: tidy # (internal) Build mittens for Windows (Linux binary + WSL shim + cl
 	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux + $(BINARY)-clipboard-helper.exe"
 	@echo "Run mittens.exe - it transparently uses WSL under the hood."
 else
-build: tidy ## Build the mittens binary
+build: tidy init-binary ## Build the mittens binary
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/mittens
 	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
 endif
+
+# Container-side init binary (always linux, matches container arch).
+# Cross-compiled as a static binary so it works in any container base image.
+init-binary: ## Build the container-side mittens-init binary
+	CGO_ENABLED=0 GOOS=linux $(GO) build -ldflags "-s -w" -o cmd/mittens/container/$(INIT_BINARY) ./cmd/mittens-init
+	@echo "Built cmd/mittens/container/$(INIT_BINARY)"
 
 install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
@@ -158,6 +166,8 @@ release: tidy ## Cross-compile for common platforms into dist/
 	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   ./cmd/mittens
 	GOOS=windows GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe ./cmd/shim
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST)/$(BINARY)-clipboard-helper-windows-amd64.exe ./cmd/mittens-clipboard-helper
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w" -o $(DIST)/$(INIT_BINARY)-linux-amd64 ./cmd/mittens-init
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags "-s -w" -o $(DIST)/$(INIT_BINARY)-linux-arm64 ./cmd/mittens-init
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -187,6 +197,7 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 
 clean: ## Remove build artifacts
 	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux $(BINARY)-clipboard-helper.exe
+	rm -f cmd/mittens/container/$(INIT_BINARY)
 	rm -rf $(DIST)
 	$(GO) clean
 
@@ -202,4 +213,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help
+.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary

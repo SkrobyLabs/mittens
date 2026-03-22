@@ -12,6 +12,9 @@
 /mittens-*
 dist/
 
+# Container init binary (built by `make init-binary`)
+cmd/mittens/container/mittens-init
+
 .vscode/settings.json
 
 /mittens.exe*

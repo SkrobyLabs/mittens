@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+
+	"github.com/SkrobyLabs/mittens/internal/credutil"
 )
 
 // CredentialStore abstracts a credential source (file, keychain, etc.).
@@ -99,53 +99,6 @@ func (m *CredentialManager) TmpFile() string {
 	return m.tmpFile
 }
 
-// PersistFromContainer extracts the (possibly refreshed) credentials from the
-// stopped container and writes them back to all known stores.
-// containerCredPath is the full path to the credential file inside the container.
-func (m *CredentialManager) PersistFromContainer(containerName, containerCredPath string) error {
-	if containerCredPath == "" || len(m.stores) == 0 {
-		return nil
-	}
-
-	// Use existing tmpFile as destination, or create a temp file for extraction
-	// (e.g. first run where no credentials existed on the host initially).
-	dst := m.tmpFile
-	if dst == "" {
-		tmp, err := os.CreateTemp("", "mittens-cred.*.json")
-		if err != nil {
-			return fmt.Errorf("creating temp file for credential extraction: %w", err)
-		}
-		tmp.Close()
-		dst = tmp.Name()
-		defer os.Remove(dst)
-	}
-
-	// docker cp from the container overlay filesystem (handles atomic writes).
-	cmd := exec.Command("docker", "cp",
-		containerName+":"+containerCredPath,
-		dst,
-	)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker cp credentials: %w", err)
-	}
-
-	data, err := os.ReadFile(dst)
-	if err != nil {
-		return fmt.Errorf("reading extracted credentials: %w", err)
-	}
-	if len(data) == 0 {
-		return nil
-	}
-
-	jsonData := string(data)
-	for _, s := range m.stores {
-		if err := s.Persist(jsonData); err != nil {
-			logWarn("Failed to persist credentials to %s: %v", s.Label(), err)
-		}
-	}
-	return nil
-}
-
 // PersistAll writes the given JSON credentials to all known stores.
 func (m *CredentialManager) PersistAll(jsonData string) {
 	for _, s := range m.stores {
@@ -168,42 +121,9 @@ func (m *CredentialManager) Cleanup() {
 // ---------------------------------------------------------------------------
 
 // expiresAt extracts the highest expiry timestamp from credential JSON.
-// Checks root-level fields: expiresAt (Claude), expires_at (Codex), expiry_date (Gemini).
-// Also checks nested objects (e.g. claudeAiOauth.expiresAt).
-// All timestamps are in milliseconds. Returns 0 if no valid expiry is found.
+// Delegates to the shared credutil package.
 func expiresAt(jsonData string) int64 {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(jsonData), &obj); err != nil {
-		return 0
-	}
-
-	var best int64
-
-	// Check root-level expiry fields.
-	for _, field := range []string{"expiresAt", "expires_at", "expiry_date"} {
-		if raw, ok := obj[field]; ok {
-			var ts float64
-			if json.Unmarshal(raw, &ts) == nil && int64(ts) > best {
-				best = int64(ts)
-			}
-		}
-	}
-
-	// Check nested objects for expiresAt (e.g. claudeAiOauth).
-	for _, raw := range obj {
-		var nested map[string]json.RawMessage
-		if json.Unmarshal(raw, &nested) != nil {
-			continue
-		}
-		if expRaw, ok := nested["expiresAt"]; ok {
-			var ts float64
-			if json.Unmarshal(expRaw, &ts) == nil && int64(ts) > best {
-				best = int64(ts)
-			}
-		}
-	}
-
-	return best
+	return credutil.ExpiresAtString(jsonData)
 }
 
 // credentialSource pairs raw JSON with a human-readable label.

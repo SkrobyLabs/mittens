@@ -28,14 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     # For some language servers and tools
     unzip \
-    # gosu for privilege de-escalation in entrypoint
-    gosu \
     # X11 clipboard bridge for Codex image paste
     xclip \
     xvfb \
     # Network firewall (--firewall mode)
     iptables \
-    squid \
     && rm -rf /var/lib/apt/lists/*
 
 # Install yq for YAML processing (architecture-aware)
@@ -111,49 +108,35 @@ ARG AI_CONFIG_DIR=".claude"
 RUN mkdir -p /home/${AI_USERNAME}/${AI_CONFIG_DIR} /home/${AI_USERNAME}/.config /mnt/claude-config && \
     chown -R ${USER_ID}:${GROUP_ID} /home/${AI_USERNAME} /mnt/claude-config
 
-# Make AI_USERNAME available at runtime for entrypoint.sh
+# Make AI_USERNAME available at runtime for the init binary
 ENV AI_USERNAME=${AI_USERNAME}
 
-# Add squid config and entrypoint
-# These files are under container/ in the source tree; build context is the project root.
-COPY container/squid.conf /etc/squid/squid.conf
+# Add MCP domain mappings
 COPY container/mcp-domains.conf /etc/mittens/mcp-domains.conf
-RUN mkdir -p /run/squid && chown proxy:proxy /run/squid
 
-COPY container/clipboard-shim.sh /usr/local/bin/xclip
-RUN chmod +x /usr/local/bin/xclip
-
+# Save real xclip before symlinking our shim
 RUN cp /usr/bin/xclip /usr/local/bin/xclip-real && chmod +x /usr/local/bin/xclip-real
 
-COPY container/clipboard-x11-sync.sh /usr/local/bin/clipboard-x11-sync.sh
-RUN chmod +x /usr/local/bin/clipboard-x11-sync.sh
+# Container entrypoint binary — handles root setup (firewall proxy, iptables,
+# DinD, privilege drop) and user setup (config staging, JSON settings, cred sync).
+# Busybox-style symlinks provide xdg-open, xclip, and notify.sh handlers.
+# Built as: CGO_ENABLED=0 GOOS=linux go build -o mittens-init ./cmd/mittens-init
+COPY container/mittens-init /usr/local/bin/mittens-init
+RUN chmod +x /usr/local/bin/mittens-init && \
+    ln -sf mittens-init /usr/local/bin/xdg-open && \
+    ln -sf mittens-init /usr/local/bin/xclip && \
+    ln -sf mittens-init /usr/local/bin/notify.sh && \
+    ln -sf mittens-init /usr/local/bin/clipboard-x11-sync.sh && \
+    ln -sf mittens-init /usr/local/bin/entrypoint.sh
 
-COPY container/open-url.sh /usr/local/bin/xdg-open
-RUN chmod +x /usr/local/bin/xdg-open
-
-COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-COPY container/cred-sync.sh /usr/local/bin/cred-sync.sh
-RUN chmod +x /usr/local/bin/cred-sync.sh
-
-COPY container/notify.sh /usr/local/bin/notify.sh
-RUN chmod +x /usr/local/bin/notify.sh
-
-# Strip Windows CRLF line endings from all copied scripts (safety net for
-# Windows checkouts where .gitattributes eol=lf was not applied).
-RUN find /usr/local/bin -name '*.sh' -exec sed -i 's/\r$//' {} + && \
-    sed -i 's/\r$//' /usr/local/bin/xclip /usr/local/bin/xdg-open
-
-# NOTE: No USER directive here — entrypoint.sh handles the root→claude
-# privilege drop via gosu, which is needed for optional DinD (dockerd
-# must start as root). When DinD is disabled the entrypoint still drops
-# to the claude user immediately, so there is no security regression.
+# NOTE: No USER directive here — mittens-init handles the root→claude
+# privilege drop via syscall.Setuid/Setgid, which is needed for optional
+# DinD (dockerd must start as root) and the network firewall (iptables).
 
 WORKDIR /workspace
 
 ENV TERM=xterm-256color
 ENV SHELL=/bin/bash
 
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["mittens-init"]
 CMD ["claude"]

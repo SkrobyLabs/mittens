@@ -13,12 +13,11 @@ The compiled `mittens` binary is **not self-contained**. It needs these files ne
 mittens                          # compiled binary
 cmd/mittens/container/
   Dockerfile                     # base Docker image definition
-  entrypoint.sh                  # container entrypoint (root -> claude user)
-  squid.conf                     # proxy config for firewall mode
+  mittens-init                   # container entrypoint binary (built from cmd/mittens-init)
   firewall.conf                  # default domain whitelist
+  firewall-dev.conf              # developer-friendly whitelist superset
   mcp-domains.conf               # MCP server -> domain mappings
-  clipboard-shim.sh              # xclip shim for clipboard images
-  clipboard-sync.sh              # macOS clipboard polling
+  clipboard-sync.sh              # macOS host-side clipboard polling
 cmd/mittens/extensions/
   aws/build.sh                   # build scripts are COPY'd into Docker
   azure/build.sh                 #   and executed during `docker build`
@@ -27,6 +26,8 @@ cmd/mittens/extensions/
   go/build.sh
   kubectl/build.sh
 ```
+
+The `mittens-init` binary is the container entrypoint — it handles root-level setup (firewall proxy, iptables, DinD, privilege drop), user-level setup (config staging, JSON settings, credential sync), and provides busybox-style symlink dispatch for `xdg-open`, `xclip`, and `notify.sh`.
 
 The extension YAML manifests and Go resolver logic are embedded into the binary at compile time (`go:embed`), so they don't need to ship as files. Only `cmd/mittens/container/` and `cmd/mittens/extensions/*/build.sh` must be present at runtime.
 

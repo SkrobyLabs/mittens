@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/internal/initcfg"
 )
 
 // ---------------------------------------------------------------------------
@@ -499,6 +500,31 @@ func argContainsExact(args []string, val string) bool {
 
 // argPairExists reports whether args contains flag immediately followed by val.
 // e.g. argPairExists(args, "-v", "/path") matches [... "-v" "/path" ...].
+// extractInitConfig finds the MITTENS_CONFIG env var in docker args,
+// reads the JSON config file it points to, and returns the parsed config.
+func extractInitConfig(t *testing.T, args []string) *initcfg.ContainerConfig {
+	t.Helper()
+	// Find the host-side file path from the -v mount that maps to initcfg.ConfigPath.
+	var hostPath string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-v" {
+			parts := strings.SplitN(args[i+1], ":", 3)
+			if len(parts) >= 2 && parts[1] == initcfg.ConfigPath {
+				hostPath = parts[0]
+				break
+			}
+		}
+	}
+	if hostPath == "" {
+		t.Fatal("no mittens-init config mount found in docker args")
+	}
+	cfg, err := initcfg.Load(hostPath)
+	if err != nil {
+		t.Fatalf("failed to load init config from %s: %v", hostPath, err)
+	}
+	return cfg
+}
+
 func argPairExists(args []string, flag, val string) bool {
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == flag && args[i+1] == val {
@@ -646,9 +672,10 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	if !argPairContains(args, "-e", "TERM=") {
 		t.Error("missing TERM env")
 	}
-	// MITTENS_DIND is only set when DinD is active; no env var in baseline.
-	if argPairExists(args, "-e", "MITTENS_DIND=false") {
-		t.Error("MITTENS_DIND=false should not be set in baseline (non-DinD) mode")
+	// MITTENS_DIND should not be set in baseline (non-DinD) mode.
+	cfg := extractInitConfig(t, args)
+	if cfg.Flags.DinD {
+		t.Error("Flags.DinD should be false in baseline (non-DinD) mode")
 	}
 
 	// Security hardening (non-DinD).
@@ -739,9 +766,10 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 		t.Error("missing tasks mount")
 	}
 
-	// MITTENS_HOST_WORKSPACE should be set when EffectiveWorkspace != "/workspace".
-	if !argPairContains(args, "-e", "MITTENS_HOST_WORKSPACE="+workspace) {
-		t.Error("missing MITTENS_HOST_WORKSPACE env")
+	// HostWorkspace should be set when EffectiveWorkspace != "/workspace".
+	cfg := extractInitConfig(t, args)
+	if cfg.HostWorkspace != workspace {
+		t.Errorf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
 	}
 }
 
@@ -807,9 +835,10 @@ func TestAssembleDockerArgs_DinD(t *testing.T) {
 		t.Error("missing docker volume mount for DinD")
 	}
 
-	// MITTENS_DIND should be true (from resolver).
-	if !argPairExists(args, "-e", "MITTENS_DIND=true") {
-		t.Error("missing MITTENS_DIND=true")
+	// MITTENS_DIND should be true (from resolver, now in JSON config).
+	cfg := extractInitConfig(t, args)
+	if !cfg.Flags.DinD {
+		t.Error("Flags.DinD should be true for DinD mode")
 	}
 
 	// Security hardening should be ABSENT (--privileged in resolverArgs suppresses it).
@@ -899,9 +928,19 @@ func TestAssembleDockerArgs_ExtensionMountsEnvCaps(t *testing.T) {
 		t.Error("missing --cap-add NET_RAW")
 	}
 
-	// Firewall domains.
-	if !argPairContains(args, "-e", "MITTENS_FIREWALL_EXTRA=ext.example.com,api.ext.com") {
-		t.Error("missing MITTENS_FIREWALL_EXTRA with extension domains")
+	// Firewall domains in JSON config.
+	{
+		cfg := extractInitConfig(t, args)
+		found := false
+		for _, d := range cfg.FirewallExtra {
+			if d == "ext.example.com" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("FirewallExtra missing ext.example.com")
+		}
 	}
 }
 
@@ -931,7 +970,7 @@ func TestAssembleDockerArgs_ResolverContributions(t *testing.T) {
 
 	args := a.assembleDockerArgs(resolverArgs, resolverFirewall)
 
-	// Resolver docker args appended verbatim.
+	// Resolver docker args appended verbatim (non-MITTENS env vars stay).
 	if !argPairExists(args, "-v", "/resolver/path:/container/path:ro") {
 		t.Error("missing resolver mount")
 	}
@@ -939,21 +978,23 @@ func TestAssembleDockerArgs_ResolverContributions(t *testing.T) {
 		t.Error("missing resolver env var")
 	}
 
-	// Firewall domains aggregated: extension + resolver.
-	if !argPairContains(args, "-e", "MITTENS_FIREWALL_EXTRA=") {
-		t.Fatal("missing MITTENS_FIREWALL_EXTRA")
-	}
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=") {
-			val := strings.TrimPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=")
-			if !strings.Contains(val, "ext-domain.com") {
-				t.Error("MITTENS_FIREWALL_EXTRA missing extension domain")
-			}
-			if !strings.Contains(val, "resolver-domain.com") {
-				t.Error("MITTENS_FIREWALL_EXTRA missing resolver domain")
-			}
-			break
+	// Firewall domains aggregated in JSON config: extension + resolver.
+	cfg := extractInitConfig(t, args)
+	hasExt := false
+	hasResolver := false
+	for _, d := range cfg.FirewallExtra {
+		if d == "ext-domain.com" {
+			hasExt = true
 		}
+		if d == "resolver-domain.com" {
+			hasResolver = true
+		}
+	}
+	if !hasExt {
+		t.Error("FirewallExtra missing extension domain")
+	}
+	if !hasResolver {
+		t.Error("FirewallExtra missing resolver domain")
 	}
 }
 
@@ -1025,12 +1066,13 @@ func TestAssembleDockerArgs_CredBroker(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Broker port env var.
-	if !argPairExists(args, "-e", "MITTENS_BROKER_PORT=12345") {
-		t.Error("missing MITTENS_BROKER_PORT env var")
+	// Broker config in JSON.
+	cfg := extractInitConfig(t, args)
+	if cfg.Broker.Port != 12345 {
+		t.Errorf("Broker.Port = %d, want 12345", cfg.Broker.Port)
 	}
-	if !argPairExists(args, "-e", "MITTENS_BROKER_TOKEN=broker-secret") {
-		t.Error("missing MITTENS_BROKER_TOKEN env var")
+	if cfg.Broker.Token != "broker-secret" {
+		t.Errorf("Broker.Token = %q, want broker-secret", cfg.Broker.Token)
 	}
 
 	// host.docker.internal mapping.
@@ -1055,12 +1097,13 @@ func TestAssembleDockerArgs_NoBroker(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Should NOT have broker env var.
-	if argPairContains(args, "-e", "MITTENS_BROKER_PORT") {
-		t.Error("MITTENS_BROKER_PORT should not be present without broker")
+	// Broker config should have zero values.
+	cfg := extractInitConfig(t, args)
+	if cfg.Broker.Port != 0 {
+		t.Errorf("Broker.Port = %d, want 0 without broker", cfg.Broker.Port)
 	}
-	if argPairContains(args, "-e", "MITTENS_BROKER_TOKEN") {
-		t.Error("MITTENS_BROKER_TOKEN should not be present without broker")
+	if cfg.Broker.Token != "" {
+		t.Errorf("Broker.Token = %q, want empty without broker", cfg.Broker.Token)
 	}
 }
 
@@ -1092,24 +1135,13 @@ func TestAssembleDockerArgs_ExtraDirs(t *testing.T) {
 		t.Errorf("missing read-only mount for extra dir %s", dir2)
 	}
 
-	// MITTENS_EXTRA_DIRS env var with colon-separated paths.
-	found := false
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_EXTRA_DIRS=") {
-			val := strings.TrimPrefix(args[i+1], "MITTENS_EXTRA_DIRS=")
-			parts := strings.Split(val, ":")
-			if len(parts) != 2 {
-				t.Errorf("MITTENS_EXTRA_DIRS should have 2 paths, got %d: %q", len(parts), val)
-			}
-			if parts[0] != dir1 || parts[1] != dir2 {
-				t.Errorf("MITTENS_EXTRA_DIRS = %q, want %s:%s", val, dir1, dir2)
-			}
-			found = true
-			break
-		}
+	// ExtraDirs in JSON config.
+	cfg := extractInitConfig(t, args)
+	if len(cfg.ExtraDirs) != 2 {
+		t.Fatalf("ExtraDirs has %d entries, want 2", len(cfg.ExtraDirs))
 	}
-	if !found {
-		t.Error("missing MITTENS_EXTRA_DIRS env var")
+	if cfg.ExtraDirs[0] != dir1 || cfg.ExtraDirs[1] != dir2 {
+		t.Errorf("ExtraDirs = %v, want [%s, %s]", cfg.ExtraDirs, dir1, dir2)
 	}
 }
 
@@ -1144,11 +1176,10 @@ func TestAssembleDockerArgs_ExtraDirsDedupWorkspace(t *testing.T) {
 		t.Errorf("expected 1 mount for workspace dir, got %d", mountCount)
 	}
 
-	// MITTENS_EXTRA_DIRS should not be set (no extra dirs after dedup).
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_EXTRA_DIRS=") {
-			t.Error("MITTENS_EXTRA_DIRS should not be set when extra dir matches workspace")
-		}
+	// ExtraDirs should be empty after dedup.
+	cfg := extractInitConfig(t, args)
+	if len(cfg.ExtraDirs) != 0 {
+		t.Errorf("ExtraDirs should be empty after dedup, got %v", cfg.ExtraDirs)
 	}
 }
 
@@ -1193,8 +1224,9 @@ func TestAssembleDockerArgs_CustomName(t *testing.T) {
 	if !argPairExists(args, "--name", "mittens-planner-1") {
 		t.Error("missing --name mittens-planner-1")
 	}
-	if !argPairExists(args, "-e", "MITTENS_INSTANCE_NAME=planner-1") {
-		t.Error("missing MITTENS_INSTANCE_NAME env var")
+	cfg := extractInitConfig(t, args)
+	if cfg.InstanceName != "planner-1" {
+		t.Errorf("InstanceName = %q, want planner-1", cfg.InstanceName)
 	}
 }
 
@@ -1213,8 +1245,9 @@ func TestAssembleDockerArgs_NoCustomName(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if argPairContains(args, "-e", "MITTENS_INSTANCE_NAME") {
-		t.Error("MITTENS_INSTANCE_NAME should not be set without --name")
+	cfg := extractInitConfig(t, args)
+	if cfg.InstanceName != "" {
+		t.Error("InstanceName should be empty without --name")
 	}
 }
 
@@ -1233,8 +1266,9 @@ func TestAssembleDockerArgs_ContainerNameEnv(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if !argPairExists(args, "-e", "MITTENS_CONTAINER_NAME=mittens-42") {
-		t.Error("missing MITTENS_CONTAINER_NAME env var")
+	cfg := extractInitConfig(t, args)
+	if cfg.ContainerName != "mittens-42" {
+		t.Errorf("ContainerName = %q, want mittens-42", cfg.ContainerName)
 	}
 }
 
@@ -1254,8 +1288,9 @@ func TestAssembleDockerArgs_NoNotify(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if !argPairExists(args, "-e", "MITTENS_NO_NOTIFY=true") {
-		t.Error("missing MITTENS_NO_NOTIFY env var")
+	cfg := extractInitConfig(t, args)
+	if !cfg.Flags.NoNotify {
+		t.Error("Flags.NoNotify should be true")
 	}
 }
 
@@ -1274,8 +1309,9 @@ func TestAssembleDockerArgs_NotifyEnabled(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if argPairContains(args, "-e", "MITTENS_NO_NOTIFY") {
-		t.Error("MITTENS_NO_NOTIFY should not be set when notifications enabled")
+	cfg := extractInitConfig(t, args)
+	if cfg.Flags.NoNotify {
+		t.Error("Flags.NoNotify should be false when notifications enabled")
 	}
 }
 
@@ -1324,25 +1360,40 @@ func TestAssembleDockerArgs_ProviderEnvVars(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	envVars := []string{
-		"MITTENS_AI_BINARY=claude",
-		"MITTENS_AI_CONFIG_DIR=.claude",
-		"MITTENS_AI_CRED_FILE=.credentials.json",
-		"MITTENS_AI_PREFS_FILE=.claude.json",
-		"MITTENS_AI_SETTINGS_FILE=settings.json",
-		"MITTENS_AI_PROJECT_FILE=CLAUDE.md",
-		"MITTENS_AI_TRUSTED_DIRS_KEY=trustedDirectories",
-		"MITTENS_AI_YOLO_KEY=skipDangerousModePermissionPrompt",
-		"MITTENS_AI_MCP_SERVERS_KEY=mcpServers",
-		"MITTENS_AI_SETTINGS_FORMAT=json",
-		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
-		"MITTENS_AI_PLUGIN_DIR=plugins",
-		"MITTENS_AI_PLUGIN_FILES=installed_plugins.json,known_marketplaces.json,config.json",
+	// Provider config is now in the JSON config file.
+	cfg := extractInitConfig(t, args)
+	if cfg.AI.Binary != "claude" {
+		t.Errorf("AI.Binary = %q, want claude", cfg.AI.Binary)
 	}
-	for _, env := range envVars {
-		if !argPairExists(args, "-e", env) {
-			t.Errorf("missing env var %s", env)
-		}
+	if cfg.AI.ConfigDir != ".claude" {
+		t.Errorf("AI.ConfigDir = %q, want .claude", cfg.AI.ConfigDir)
+	}
+	if cfg.AI.CredFile != ".credentials.json" {
+		t.Errorf("AI.CredFile = %q, want .credentials.json", cfg.AI.CredFile)
+	}
+	if cfg.AI.PrefsFile != ".claude.json" {
+		t.Errorf("AI.PrefsFile = %q, want .claude.json", cfg.AI.PrefsFile)
+	}
+	if cfg.AI.SettingsFile != "settings.json" {
+		t.Errorf("AI.SettingsFile = %q, want settings.json", cfg.AI.SettingsFile)
+	}
+	if cfg.AI.ProjectFile != "CLAUDE.md" {
+		t.Errorf("AI.ProjectFile = %q, want CLAUDE.md", cfg.AI.ProjectFile)
+	}
+	if cfg.AI.TrustedDirsKey != "trustedDirectories" {
+		t.Errorf("AI.TrustedDirsKey = %q, want trustedDirectories", cfg.AI.TrustedDirsKey)
+	}
+	if cfg.AI.YoloKey != "skipDangerousModePermissionPrompt" {
+		t.Errorf("AI.YoloKey = %q, want skipDangerousModePermissionPrompt", cfg.AI.YoloKey)
+	}
+	if cfg.AI.MCPServersKey != "mcpServers" {
+		t.Errorf("AI.MCPServersKey = %q, want mcpServers", cfg.AI.MCPServersKey)
+	}
+	if cfg.AI.SettingsFormat != "json" {
+		t.Errorf("AI.SettingsFormat = %q, want json", cfg.AI.SettingsFormat)
+	}
+	if cfg.AI.PluginDir != "plugins" {
+		t.Errorf("AI.PluginDir = %q, want plugins", cfg.AI.PluginDir)
 	}
 }
 
@@ -1419,23 +1470,25 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Codex-specific provider env vars.
-	codexEnvVars := []string{
-		"MITTENS_AI_BINARY=codex",
-		"MITTENS_AI_CONFIG_DIR=.codex",
-		"MITTENS_AI_CRED_FILE=auth.json",
-		"MITTENS_AI_PREFS_FILE=",
-		"MITTENS_AI_SETTINGS_FILE=config.toml",
-		"MITTENS_AI_PROJECT_FILE=AGENTS.md",
-		"MITTENS_AI_SETTINGS_FORMAT=toml",
-		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
-		"MITTENS_AI_PLUGIN_DIR=",
-		"MITTENS_AI_PLUGIN_FILES=",
+	// Codex-specific config in JSON.
+	cfg := extractInitConfig(t, args)
+	if cfg.AI.Binary != "codex" {
+		t.Errorf("AI.Binary = %q, want codex", cfg.AI.Binary)
 	}
-	for _, env := range codexEnvVars {
-		if !argPairExists(args, "-e", env) {
-			t.Errorf("missing env var %s", env)
-		}
+	if cfg.AI.ConfigDir != ".codex" {
+		t.Errorf("AI.ConfigDir = %q, want .codex", cfg.AI.ConfigDir)
+	}
+	if cfg.AI.CredFile != "auth.json" {
+		t.Errorf("AI.CredFile = %q, want auth.json", cfg.AI.CredFile)
+	}
+	if cfg.AI.SettingsFile != "config.toml" {
+		t.Errorf("AI.SettingsFile = %q, want config.toml", cfg.AI.SettingsFile)
+	}
+	if cfg.AI.ProjectFile != "AGENTS.md" {
+		t.Errorf("AI.ProjectFile = %q, want AGENTS.md", cfg.AI.ProjectFile)
+	}
+	if cfg.AI.SettingsFormat != "toml" {
+		t.Errorf("AI.SettingsFormat = %q, want toml", cfg.AI.SettingsFormat)
 	}
 
 	// UserPrefsFile is empty — should NOT mount a user prefs file.
@@ -1462,29 +1515,34 @@ func TestAssembleDockerArgs_GeminiProvider(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Gemini-specific provider env vars.
-	geminiEnvVars := []string{
-		"MITTENS_AI_BINARY=gemini",
-		"MITTENS_AI_CONFIG_DIR=.gemini",
-		"MITTENS_AI_CRED_FILE=oauth_creds.json",
-		"MITTENS_AI_SETTINGS_FILE=settings.json",
-		"MITTENS_AI_PROJECT_FILE=GEMINI.md",
-		"MITTENS_AI_SETTINGS_FORMAT=json",
-		"MITTENS_AI_CONFIG_SUBDIRS=skills,hooks,agents,output-styles",
-		"MITTENS_AI_TRUSTED_DIRS_FILE=trustedFolders.json",
+	// Gemini-specific config should be in the JSON config file.
+	cfg := extractInitConfig(t, args)
+	if cfg.AI.Binary != "gemini" {
+		t.Errorf("AI.Binary = %q, want gemini", cfg.AI.Binary)
 	}
-	for _, env := range geminiEnvVars {
-		if !argPairExists(args, "-e", env) {
-			t.Errorf("missing env var %s", env)
-		}
+	if cfg.AI.ConfigDir != ".gemini" {
+		t.Errorf("AI.ConfigDir = %q, want .gemini", cfg.AI.ConfigDir)
+	}
+	if cfg.AI.CredFile != "oauth_creds.json" {
+		t.Errorf("AI.CredFile = %q, want oauth_creds.json", cfg.AI.CredFile)
+	}
+	if cfg.AI.SettingsFile != "settings.json" {
+		t.Errorf("AI.SettingsFile = %q, want settings.json", cfg.AI.SettingsFile)
+	}
+	if cfg.AI.ProjectFile != "GEMINI.md" {
+		t.Errorf("AI.ProjectFile = %q, want GEMINI.md", cfg.AI.ProjectFile)
+	}
+	if cfg.AI.SettingsFormat != "json" {
+		t.Errorf("AI.SettingsFormat = %q, want json", cfg.AI.SettingsFormat)
+	}
+	if cfg.AI.TrustedDirsFile != "trustedFolders.json" {
+		t.Errorf("AI.TrustedDirsFile = %q, want trustedFolders.json", cfg.AI.TrustedDirsFile)
 	}
 
 	// ContainerHostname for Gemini.
 	if !argPairExists(args, "--hostname", "gemini-cli") {
 		t.Error("missing --hostname gemini-cli for Gemini provider")
 	}
-
-	// PersistFiles mount/env check (logic exists in assembly but no direct env var for full list).
 }
 
 func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
@@ -1502,8 +1560,9 @@ func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if !argPairExists(args, "-e", "MITTENS_AI_SETTINGS_FORMAT=json") {
-		t.Error("missing MITTENS_AI_SETTINGS_FORMAT=json for Claude provider")
+	cfg := extractInitConfig(t, args)
+	if cfg.AI.SettingsFormat != "json" {
+		t.Errorf("AI.SettingsFormat = %q, want json", cfg.AI.SettingsFormat)
 	}
 }
 
@@ -1611,17 +1670,18 @@ func TestAssembleDockerArgs_ProviderFirewallDomains(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	// Provider firewall domains should appear in MITTENS_FIREWALL_EXTRA.
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "-e" && strings.HasPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=") {
-			val := strings.TrimPrefix(args[i+1], "MITTENS_FIREWALL_EXTRA=")
-			for _, domain := range p.FirewallDomains {
-				if !strings.Contains(val, domain) {
-					t.Errorf("MITTENS_FIREWALL_EXTRA missing provider domain %s", domain)
-				}
+	// Provider firewall domains should appear in the JSON config.
+	cfg := extractInitConfig(t, args)
+	for _, domain := range p.FirewallDomains {
+		found := false
+		for _, d := range cfg.FirewallExtra {
+			if d == domain {
+				found = true
+				break
 			}
-			return
+		}
+		if !found {
+			t.Errorf("FirewallExtra missing provider domain %s", domain)
 		}
 	}
-	t.Error("missing MITTENS_FIREWALL_EXTRA env var")
 }

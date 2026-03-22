@@ -69,7 +69,7 @@ func listDomains() ([]string, error) {
 
 // setup mounts the firewall configuration file into the container and sets
 // the MITTENS_FIREWALL environment variable so the entrypoint knows to
-// activate iptables + squid.
+// activate the network firewall (proxy + iptables).
 //
 // If the user provided a custom file via --firewall /path/to/file, that
 // path is in ctx.Extension.RawArg and takes precedence over the default.

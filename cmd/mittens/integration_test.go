@@ -290,9 +290,9 @@ func TestDockerRun_FirewallWhitelist(t *testing.T) {
 	os.WriteFile(firewallConf, []byte(domains), 0644)
 
 	// We need NET_ADMIN for iptables, but just test the whitelist generation
-	// without actually starting squid (avoid requiring privileged).
-	// The entrypoint generates whitelist.txt from firewall.conf.
-	// We'll directly test the sed command that generates it.
+	// without actually starting the proxy (avoid requiring privileged).
+	// The entrypoint generates the whitelist from firewall.conf.
+	// We'll directly test the parsing that generates it.
 	runArgs := []string{
 		"-v", firewallConf + ":/mnt/claude-config/firewall.conf:ro",
 	}
@@ -665,10 +665,9 @@ echo "MOUNT_CONTENT=$mount_content"
 	}
 }
 
-// TestDockerRun_CredentialPersistFromContainer exercises the exact same
-// docker cp path that CredentialManager.PersistFromContainer uses:
-//   container writes refreshed creds → docker cp extracts them
-// This is the code path that broke before.
+// TestDockerRun_CredentialPersistFromContainer verifies that docker cp can
+// extract refreshed credentials from a stopped container. This validates
+// the persist-file pattern used for provider state files (e.g. Gemini).
 func TestDockerRun_CredentialPersistFromContainer(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -696,15 +695,14 @@ chmod 600 ~/.claude/.credentials.json
 `)
 	defer dockerRemove(t, containerName)
 
-	// Now do exactly what PersistFromContainer does:
-	// docker cp containerName:/home/claude/.claude/.credentials.json hostCredFile
+	// Extract credentials via docker cp (same pattern used for persist files).
 	cmd := exec.Command("docker", "cp",
 		containerName+":/home/claude/.claude/.credentials.json",
 		hostCredFile,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("docker cp (PersistFromContainer path) failed: %v\noutput: %s", err, out)
+		t.Fatalf("docker cp failed: %v\noutput: %s", err, out)
 	}
 
 	// Read the extracted file — this is what gets persisted to credential stores.
