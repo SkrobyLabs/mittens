@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -71,12 +72,54 @@ func openURLDefault(url string) *exec.Cmd {
 }
 
 // notifyDefault is the Linux default notification sender (notify-send).
+// On WSL, delegates to notifyWSL for Windows toast notifications.
 func notifyDefault(title, body string, _ TerminalFocus, log func(string, ...interface{})) {
+	if isWSL() {
+		notifyWSL(title, body, log)
+		return
+	}
 	cmd := exec.Command("notify-send", title, body)
 	if err := cmd.Start(); err != nil {
 		log("notify: failed to start: %v", err)
 	} else {
 		log("notify: sent %q", body)
+	}
+}
+
+// notifyWSL sends a Windows toast notification via PowerShell BalloonTip.
+// Uses powershell.exe (with .exe suffix, required for WSL interop).
+func notifyWSL(title, body string, log func(string, ...interface{})) {
+	escTitle := strings.ReplaceAll(title, "'", "''")
+	escBody := strings.ReplaceAll(body, "'", "''")
+	script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.BalloonTipTitle = '%s'; $n.BalloonTipText = '%s'; $n.Visible = $true; $n.ShowBalloonTip(5000); Start-Sleep -Milliseconds 500; $n.Dispose()`, escTitle, escBody)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", script)
+	if err := cmd.Start(); err != nil {
+		log("notify: wsl powershell failed: %v", err)
+	} else {
+		log("notify: sent via powershell %q", body)
+	}
+}
+
+// checkNotificationsDefault checks Windows notification settings on WSL.
+// On non-WSL Linux, this is a no-op.
+func checkNotificationsDefault() {
+	if isWSL() {
+		checkWindowsNotifications("powershell.exe")
+	}
+}
+
+// checkWindowsNotifications queries the Windows registry to warn if desktop
+// notifications are globally disabled. Uses powershell.exe on WSL, powershell
+// on native Windows. Called at startup when notifications are enabled.
+func checkWindowsNotifications(ps string) {
+	out, err := exec.Command(ps, "-NoProfile", "-Command",
+		`(Get-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications' -Name 'ToastEnabled' -ErrorAction SilentlyContinue).ToastEnabled`).Output()
+	if err != nil {
+		return // can't check, don't warn
+	}
+	if strings.TrimSpace(string(out)) == "0" {
+		logWarn("Windows notifications are disabled — mittens alerts will be silent")
+		logWarn("  Enable in: Windows Settings → System → Notifications")
 	}
 }
 

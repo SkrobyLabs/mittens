@@ -8,7 +8,7 @@ import (
 
 // TerminalFocus captures which terminal launched mittens and how to re-focus it.
 type TerminalFocus struct {
-	Kind     string // "iterm2", "wezterm", "kitty", "terminal_app", "x11", "none"
+	Kind     string // "iterm2", "wezterm", "kitty", "terminal_app", "x11", "windows_terminal", "none"
 	ID       string // session/pane/window ID
 	BundleID string // macOS bundle identifier (e.g. "com.googlecode.iterm2")
 }
@@ -26,6 +26,9 @@ func DetectTerminalFocus() TerminalFocus {
 	}
 	if os.Getenv("TERM_PROGRAM") == "Apple_Terminal" {
 		return TerminalFocus{Kind: "terminal_app", BundleID: "com.apple.Terminal"}
+	}
+	if id := os.Getenv("WT_SESSION"); id != "" {
+		return TerminalFocus{Kind: "windows_terminal", ID: id}
 	}
 	if id := os.Getenv("WINDOWID"); id != "" {
 		return TerminalFocus{Kind: "x11", ID: id}

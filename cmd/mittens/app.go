@@ -24,10 +24,11 @@ import (
 // Platform function variables — defaults in platform_default.go,
 // overridden via init() in app_darwin.go / app_windows.go.
 var (
-	platformStartBroker  = startBrokerDefault
-	platformOpenURL      = openURLDefault
-	platformNotify       = notifyDefault
-	platformClipboardSync = clipboardSyncDefault
+	platformStartBroker        = startBrokerDefault
+	platformOpenURL            = openURLDefault
+	platformNotify             = notifyDefault
+	platformClipboardSync      = clipboardSyncDefault
+	platformCheckNotifications = checkNotificationsDefault
 )
 
 // App holds all state for a single mittens invocation.
@@ -402,6 +403,7 @@ func (a *App) Run() error {
 			a.broker.OnNotify = func(container, event, message string) {
 				notifyOnHost(container, event, message, displayName, focus, blogFn)
 			}
+			platformCheckNotifications()
 		}
 
 		// Persistent broker log for debugging.
