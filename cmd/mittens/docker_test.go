@@ -215,3 +215,217 @@ func TestCurrentUserIDs(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// buildImageArgs
+// ---------------------------------------------------------------------------
+
+func TestBuildImageArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       BuildContext
+		hasBuildx bool
+		check     func(t *testing.T, args []string)
+	}{
+		{
+			name: "minimal build",
+			ctx: BuildContext{
+				ContextDir: "/tmp/ctx",
+				ImageName:  "mittens",
+				ImageTag:   "latest",
+			},
+			check: func(t *testing.T, args []string) {
+				if args[0] != "build" {
+					t.Error("first arg should be 'build'")
+				}
+				// Tag and context are last two arg groups.
+				if !argPairExists(args, "-t", "mittens:latest") {
+					t.Error("missing -t mittens:latest")
+				}
+				if args[len(args)-1] != "/tmp/ctx" {
+					t.Errorf("last arg = %q, want /tmp/ctx", args[len(args)-1])
+				}
+				// UID/GID defaults to 0.
+				if !argPairExists(args, "--build-arg", "USER_ID=0") {
+					t.Error("missing USER_ID=0")
+				}
+				if !argPairExists(args, "--build-arg", "GROUP_ID=0") {
+					t.Error("missing GROUP_ID=0")
+				}
+			},
+		},
+		{
+			name: "NoCache adds --no-cache",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				NoCache:    true,
+			},
+			check: func(t *testing.T, args []string) {
+				if !argContainsExact(args, "--no-cache") {
+					t.Error("missing --no-cache")
+				}
+			},
+		},
+		{
+			name: "NoCache=false omits --no-cache",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				NoCache:    false,
+			},
+			check: func(t *testing.T, args []string) {
+				if argContainsExact(args, "--no-cache") {
+					t.Error("--no-cache should be absent")
+				}
+			},
+		},
+		{
+			name: "Verbose with buildx adds --progress=plain",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				Verbose:    true,
+			},
+			hasBuildx: true,
+			check: func(t *testing.T, args []string) {
+				if !argContainsExact(args, "--progress=plain") {
+					t.Error("missing --progress=plain")
+				}
+			},
+		},
+		{
+			name: "Verbose without buildx omits --progress=plain",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				Verbose:    true,
+			},
+			hasBuildx: false,
+			check: func(t *testing.T, args []string) {
+				if argContainsExact(args, "--progress=plain") {
+					t.Error("--progress=plain should be absent without buildx")
+				}
+			},
+		},
+		{
+			name: "custom Dockerfile adds -f",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				Dockerfile: "/path/to/Dockerfile",
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "-f", "/path/to/Dockerfile") {
+					t.Error("missing -f /path/to/Dockerfile")
+				}
+			},
+		},
+		{
+			name: "UserID and GroupID",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				UserID:     1000,
+				GroupID:    1001,
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "--build-arg", "USER_ID=1000") {
+					t.Error("missing USER_ID=1000")
+				}
+				if !argPairExists(args, "--build-arg", "GROUP_ID=1001") {
+					t.Error("missing GROUP_ID=1001")
+				}
+			},
+		},
+		{
+			name: "extensions with build scripts produce INSTALL_EXTENSIONS",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				Extensions: []*registry.Extension{
+					{Name: "go", Build: &registry.BuildConfig{Script: "go.sh"}},
+					{Name: "rust", Build: &registry.BuildConfig{Script: "rust.sh"}},
+					{Name: "mcp"}, // no build script
+				},
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "--build-arg", "INSTALL_EXTENSIONS=go,rust") {
+					t.Error("missing INSTALL_EXTENSIONS=go,rust")
+				}
+			},
+		},
+		{
+			name: "extension-specific build args",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t",
+				Extensions: []*registry.Extension{
+					{
+						Name:   "dotnet",
+						RawArg: "8",
+						Build: &registry.BuildConfig{
+							Script: "dotnet.sh",
+							Args:   map[string]string{"DOTNET_CHANNEL": "{{.Arg}}"},
+						},
+					},
+				},
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "--build-arg", "DOTNET_CHANNEL=8") {
+					t.Error("missing DOTNET_CHANNEL=8")
+				}
+			},
+		},
+		{
+			name: "ExtraBuildArgs appended",
+			ctx: BuildContext{
+				ContextDir:     ".",
+				ImageName:      "m",
+				ImageTag:       "t",
+				ExtraBuildArgs: map[string]string{"INSTALL_CMD": "npm install -g claude"},
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "--build-arg", "INSTALL_CMD=npm install -g claude") {
+					t.Error("missing ExtraBuildArgs INSTALL_CMD")
+				}
+			},
+		},
+		{
+			name: "tag and context are last",
+			ctx: BuildContext{
+				ContextDir: "/my/context",
+				ImageName:  "mittens",
+				ImageTag:   "aws-go",
+				NoCache:    true,
+			},
+			check: func(t *testing.T, args []string) {
+				n := len(args)
+				if n < 3 {
+					t.Fatalf("too few args: %v", args)
+				}
+				if args[n-1] != "/my/context" {
+					t.Errorf("last arg = %q, want context dir", args[n-1])
+				}
+				if args[n-2] != "mittens:aws-go" || args[n-3] != "-t" {
+					t.Errorf("second-to-last should be -t mittens:aws-go, got %v", args[n-3:])
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := buildImageArgs(tc.ctx, tc.hasBuildx)
+			tc.check(t, args)
+		})
+	}
+}

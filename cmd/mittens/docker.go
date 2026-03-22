@@ -31,19 +31,13 @@ type BuildContext struct {
 // helper issues. Default is a no-op.
 var platformPreBuildHook = func(dockerfile string) {}
 
-// BuildImage runs `docker build` with the given context and returns any error.
-func BuildImage(ctx BuildContext) error {
-	if ctx.Dockerfile != "" {
-		platformPreBuildHook(ctx.Dockerfile)
-	}
-
+// buildImageArgs constructs the docker build argument list without executing
+// the command. The hasBuildx parameter controls whether --progress=plain is
+// added (avoiding an exec.Command call inside the pure function).
+func buildImageArgs(ctx BuildContext, hasBuildx bool) []string {
 	args := []string{"build"}
-	if ctx.Verbose {
-		// --progress=plain requires BuildKit. Check if buildx is available
-		// to avoid failing on the legacy builder.
-		if err := exec.Command("docker", "buildx", "version").Run(); err == nil {
-			args = append(args, "--progress=plain")
-		}
+	if ctx.Verbose && hasBuildx {
+		args = append(args, "--progress=plain")
 	}
 
 	if ctx.NoCache {
@@ -85,6 +79,18 @@ func BuildImage(ctx BuildContext) error {
 	// Tag and context
 	args = append(args, "-t", ctx.ImageName+":"+ctx.ImageTag)
 	args = append(args, ctx.ContextDir)
+
+	return args
+}
+
+// BuildImage runs `docker build` with the given context and returns any error.
+func BuildImage(ctx BuildContext) error {
+	if ctx.Dockerfile != "" {
+		platformPreBuildHook(ctx.Dockerfile)
+	}
+
+	hasBuildx := exec.Command("docker", "buildx", "version").Run() == nil
+	args := buildImageArgs(ctx, hasBuildx)
 
 	cmd := exec.Command("docker", args...)
 	cmd.Stdout = os.Stdout
