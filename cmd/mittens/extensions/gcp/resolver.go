@@ -60,7 +60,7 @@ func setup(ctx *registry.SetupContext) error {
 	// --gcp-all: mount entire directory
 	if ext.AllMode {
 		if info, err := os.Stat(gcloudDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", gcloudDir+":/home/claude/.config/gcloud:ro")
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", gcloudDir+":"+ctx.ContainerHome+"/.config/gcloud:ro")
 		} else {
 			fmt.Fprintf(os.Stderr, "[mittens] warning: GCP credentials requested but %s does not exist\n", gcloudDir)
 		}
@@ -126,6 +126,6 @@ func setup(ctx *registry.SetupContext) error {
 	}
 
 	// Mount the staging directory as gcloud config.
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":/home/claude/.config/gcloud:ro")
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.config/gcloud:ro")
 	return nil
 }

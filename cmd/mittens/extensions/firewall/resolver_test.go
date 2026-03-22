@@ -136,7 +136,7 @@ func TestSetup_DefaultConf(t *testing.T) {
 	joined := strings.Join(dockerArgs, " ")
 
 	// Should mount the conf file read-only.
-	if !strings.Contains(joined, confPath+":/mnt/claude-config/firewall.conf:ro") {
+	if !strings.Contains(joined, confPath+":/mnt/mittens-staging/firewall.conf:ro") {
 		t.Errorf("docker args missing conf mount, got: %v", dockerArgs)
 	}
 
@@ -174,7 +174,7 @@ func TestSetup_CustomConfPath(t *testing.T) {
 	}
 
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, customPath+":/mnt/claude-config/firewall.conf:ro") {
+	if !strings.Contains(joined, customPath+":/mnt/mittens-staging/firewall.conf:ro") {
 		t.Errorf("should use custom path, got: %v", dockerArgs)
 	}
 }

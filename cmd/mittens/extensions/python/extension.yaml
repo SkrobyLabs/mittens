@@ -18,11 +18,11 @@ firewall:
 
 mounts:
   - src: "~/.cache/pip"
-    dst: "/home/claude/.cache/pip-host"
+    dst: "~/.cache/pip-host"
     mode: "ro"
     when: "dir_exists"
     env:
-      PIP_FIND_LINKS: "/home/claude/.cache/pip-host"
+      PIP_FIND_LINKS: "~/.cache/pip-host"
 
 build:
   script: "python.sh"

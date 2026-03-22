@@ -20,11 +20,11 @@ firewall:
 
 mounts:
   - src: "~/go/pkg/mod"
-    dst: "/home/claude/go/pkg/mod-host"
+    dst: "~/go/pkg/mod-host"
     mode: "ro"
     when: "dir_exists"
     env:
-      GOMODCACHE_FALLBACK: "/home/claude/go/pkg/mod-host"
+      GOMODCACHE_FALLBACK: "~/go/pkg/mod-host"
 
 build:
   script: "go.sh"

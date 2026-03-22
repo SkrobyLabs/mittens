@@ -98,6 +98,6 @@ func setup(ctx *registry.SetupContext) error {
 	}
 
 	// Mount the merged config file.
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", configPath+":/home/claude/.kube/config:ro")
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", configPath+":"+ctx.ContainerHome+"/.kube/config:ro")
 	return nil
 }

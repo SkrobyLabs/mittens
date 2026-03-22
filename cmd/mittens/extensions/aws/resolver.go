@@ -72,7 +72,7 @@ func setup(ctx *registry.SetupContext) error {
 	// --aws-all: mount entire directory
 	if ext.AllMode {
 		if info, err := os.Stat(awsDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", awsDir+":/home/claude/.aws:ro")
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", awsDir+":"+ctx.ContainerHome+"/.aws:ro")
 			fmt.Fprintf(os.Stderr, "[mittens] Mounting AWS credentials (all profiles)\n")
 		} else {
 			fmt.Fprintf(os.Stderr, "[mittens] WARN: AWS credentials requested but %s does not exist\n", awsDir)
@@ -177,7 +177,7 @@ func setup(ctx *registry.SetupContext) error {
 		}
 	}
 
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":/home/claude/.aws:ro")
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.aws:ro")
 	fmt.Fprintf(os.Stderr, "[mittens] AWS profiles: %s\n", strings.Join(ext.Args, ", "))
 	return nil
 }

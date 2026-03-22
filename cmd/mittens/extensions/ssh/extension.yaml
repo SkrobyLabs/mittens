@@ -11,6 +11,6 @@ flags:
 
 mounts:
   - src: "~/.ssh"
-    dst: "/home/claude/.ssh"
+    dst: "~/.ssh"
     mode: "ro"
     when: "dir_exists"

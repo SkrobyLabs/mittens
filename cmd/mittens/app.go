@@ -313,6 +313,7 @@ func (a *App) Run() error {
 
 		ctx := &registry.SetupContext{
 			Home:          home,
+			ContainerHome: a.Provider.HomePath(),
 			ContainerName: a.ContainerName,
 			Extension:     ext,
 			DockerArgs:    &resolverDockerArgs,
@@ -1270,7 +1271,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// .gitconfig
 	gitconfig := filepath.Join(home, ".gitconfig")
 	if fileExists(gitconfig) {
-		args = append(args, "-v", gitconfig+":/mnt/claude-config/.gitconfig:ro")
+		args = append(args, "-v", gitconfig+":"+a.Provider.StagingGitconfigPath()+":ro")
 	}
 
 	// Extension mounts, env vars, capabilities (from YAML declarations).
@@ -1281,7 +1282,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		}
 
 		// Mounts from YAML.
-		for _, m := range ext.ExpandedMounts(home) {
+		for _, m := range ext.ExpandedMounts(home, a.Provider.HomePath()) {
 			mountStr := m.Src + ":" + m.Dst
 			if m.Mode != "" {
 				mountStr += ":" + m.Mode

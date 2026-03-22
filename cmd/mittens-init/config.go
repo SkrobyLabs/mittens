@@ -78,7 +78,7 @@ func loadConfig() *config {
 	home := "/home/" + username
 
 	return &config{
-		ConfigMount:  "/mnt/claude-config",
+		ConfigMount:  "/mnt/mittens-staging",
 		AIUsername:    username,
 		AIHome:       home,
 		AIConfigDir:  jcfg.AI.ConfigDir,
@@ -100,7 +100,7 @@ func loadConfig() *config {
 		AIPluginFiles:     jcfg.AI.PluginFiles,
 		AIBinary:          jcfg.AI.Binary,
 
-		FirewallConf: "/mnt/claude-config/firewall.conf",
+		FirewallConf: "/mnt/mittens-staging/firewall.conf",
 
 		DinD:               jcfg.Flags.DinD,
 		DockerHost:         jcfg.Flags.DockerHost,

@@ -262,6 +262,7 @@ func TestSetup_FilteredProfiles(t *testing.T) {
 		Args:    []string{"prod"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -276,7 +277,7 @@ func TestSetup_FilteredProfiles(t *testing.T) {
 
 	// Docker args should mount staging dir at /home/claude/.aws:ro.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/claude/.aws:ro") {
+	if !strings.Contains(joined, staging+":/home/testuser/.aws:ro") {
 		t.Errorf("docker args missing mount, got: %v", dockerArgs)
 	}
 
@@ -323,6 +324,7 @@ func TestSetup_AllMode(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -338,7 +340,7 @@ func TestSetup_AllMode(t *testing.T) {
 	// Should mount the entire ~/.aws directory.
 	joined := strings.Join(dockerArgs, " ")
 	awsDir := filepath.Join(home, ".aws")
-	if !strings.Contains(joined, awsDir+":/home/claude/.aws:ro") {
+	if !strings.Contains(joined, awsDir+":/home/testuser/.aws:ro") {
 		t.Errorf("AllMode should mount entire aws dir, got: %v", dockerArgs)
 	}
 }
@@ -357,6 +359,7 @@ func TestSetup_SourceProfileAutoInclude(t *testing.T) {
 		Args:    []string{"role-user"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -391,6 +394,7 @@ func TestSetup_SSOCacheCopied(t *testing.T) {
 		Args:    []string{"sso-user"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -424,6 +428,7 @@ func TestSetup_CLICacheCopied(t *testing.T) {
 		Args:    []string{"prod"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -456,6 +461,7 @@ func TestSetup_NoProfiles(t *testing.T) {
 		Args:    nil, // no profiles selected
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,

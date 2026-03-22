@@ -206,7 +206,7 @@ func TestDockerRun_CredentialMount(t *testing.T) {
 	os.WriteFile(credFile, []byte(credContent), 0644)
 
 	runArgs := []string{
-		"-v", credFile + ":/mnt/claude-config/.credentials.json:ro",
+		"-v", credFile + ":/mnt/mittens-staging/.credentials.json:ro",
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c",
@@ -238,7 +238,7 @@ func TestDockerRun_ConfigCopy(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0644)
 
 	runArgs := []string{
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
@@ -262,7 +262,7 @@ func TestDockerRun_ConfigSubdirCopyDoesNotNest(t *testing.T) {
 	}
 
 	runArgs := []string{
-		"-v", codexDir + ":/mnt/claude-config/.codex:ro",
+		"-v", codexDir + ":/mnt/mittens-staging/.codex:ro",
 		"-e", "MITTENS_AI_CONFIG_DIR=.codex",
 	}
 
@@ -294,12 +294,12 @@ func TestDockerRun_FirewallWhitelist(t *testing.T) {
 	// The entrypoint generates the whitelist from firewall.conf.
 	// We'll directly test the parsing that generates it.
 	runArgs := []string{
-		"-v", firewallConf + ":/mnt/claude-config/firewall.conf:ro",
+		"-v", firewallConf + ":/mnt/mittens-staging/firewall.conf:ro",
 	}
 
 	// Run the same sed pipeline the entrypoint uses to generate whitelist.
 	out := dockerRun(t, testImage, runArgs, "bash", "-c",
-		`sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' /mnt/claude-config/firewall.conf | grep -v '^$'`)
+		`sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' /mnt/mittens-staging/firewall.conf | grep -v '^$'`)
 
 	if !strings.Contains(out, "api.github.com") {
 		t.Error("whitelist missing api.github.com")
@@ -380,7 +380,7 @@ func TestDockerRun_NotificationHookInjection(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
 
 	runArgs := []string{
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 		"-e", "MITTENS_BROKER_PORT=12345",
 	}
 
@@ -413,7 +413,7 @@ func TestDockerRun_NotificationHookNotInjectedWithoutBroker(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
 
 	runArgs := []string{
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 		// No MITTENS_BROKER_PORT set.
 	}
 
@@ -432,7 +432,7 @@ func TestDockerRun_NotificationHookSuppressedByNoNotify(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
 
 	runArgs := []string{
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 		"-e", "MITTENS_BROKER_PORT=12345",
 		"-e", "MITTENS_NO_NOTIFY=1",
 	}
@@ -469,8 +469,8 @@ func TestDockerRun_CredentialLifecycle(t *testing.T) {
 	containerName := fmt.Sprintf("mittens-cred-lifecycle-%d", os.Getpid())
 
 	runArgs := []string{
-		"-v", credFile + ":/mnt/claude-config/.credentials.json:ro",
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", credFile + ":/mnt/mittens-staging/.credentials.json:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 	}
 
 	// Inside the container:
@@ -531,7 +531,7 @@ func TestDockerRun_CredentialReadPerms(t *testing.T) {
 	os.WriteFile(credFile, []byte(`{"accessToken":"tok"}`), 0644)
 
 	runArgs := []string{
-		"-v", credFile + ":/mnt/claude-config/.credentials.json:ro",
+		"-v", credFile + ":/mnt/mittens-staging/.credentials.json:ro",
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", `
@@ -570,7 +570,7 @@ echo "CONTENT=$content"
 	}
 }
 
-// TestDockerRun_ConfigMountReadOnly verifies that the /mnt/claude-config/.claude
+// TestDockerRun_ConfigMountReadOnly verifies that the /mnt/mittens-staging/.claude
 // mount is truly read-only — writes to it must fail, while the writable copy
 // in $HOME/.claude is unaffected.
 func TestDockerRun_ConfigMountReadOnly(t *testing.T) {
@@ -580,21 +580,21 @@ func TestDockerRun_ConfigMountReadOnly(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"original":true}`), 0644)
 
 	runArgs := []string{
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", `
 set -e
 
 # The read-only mount must reject writes.
-if echo 'hacked' > /mnt/claude-config/.claude/settings.json 2>/dev/null; then
+if echo 'hacked' > /mnt/mittens-staging/.claude/settings.json 2>/dev/null; then
     echo "RO_MOUNT=WRITABLE_BUG"
 else
     echo "RO_MOUNT=readonly"
 fi
 
 # Cannot create new files on the read-only mount either.
-if touch /mnt/claude-config/.claude/evil.txt 2>/dev/null; then
+if touch /mnt/mittens-staging/.claude/evil.txt 2>/dev/null; then
     echo "RO_CREATE=WRITABLE_BUG"
 else
     echo "RO_CREATE=readonly"
@@ -605,7 +605,7 @@ echo '{"modified":true}' > ~/.claude/settings.json
 echo "HOME_WRITE=ok"
 
 # Verify the original mount is still untouched.
-orig=$(cat /mnt/claude-config/.claude/settings.json)
+orig=$(cat /mnt/mittens-staging/.claude/settings.json)
 echo "ORIG=$orig"
 `)
 
@@ -624,7 +624,7 @@ echo "ORIG=$orig"
 }
 
 // TestDockerRun_CredentialMountReadOnly verifies that the credential file
-// mount at /mnt/claude-config/.credentials.json is read-only — writes to
+// mount at /mnt/mittens-staging/.credentials.json is read-only — writes to
 // the mount path fail, only the entrypoint-copied writable copy succeeds.
 func TestDockerRun_CredentialMountReadOnly(t *testing.T) {
 	tmp := t.TempDir()
@@ -632,14 +632,14 @@ func TestDockerRun_CredentialMountReadOnly(t *testing.T) {
 	os.WriteFile(credFile, []byte(`{"accessToken":"orig"}`), 0644)
 
 	runArgs := []string{
-		"-v", credFile + ":/mnt/claude-config/.credentials.json:ro",
+		"-v", credFile + ":/mnt/mittens-staging/.credentials.json:ro",
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", `
 set -e
 
 # The mount point itself must be read-only.
-if echo '{"hacked":true}' > /mnt/claude-config/.credentials.json 2>/dev/null; then
+if echo '{"hacked":true}' > /mnt/mittens-staging/.credentials.json 2>/dev/null; then
     echo "CRED_MOUNT=WRITABLE_BUG"
 else
     echo "CRED_MOUNT=readonly"
@@ -650,7 +650,7 @@ echo '{"accessToken":"updated"}' > ~/.claude/.credentials.json
 echo "HOME_CRED_WRITE=ok"
 
 # Mount still has original content.
-mount_content=$(cat /mnt/claude-config/.credentials.json)
+mount_content=$(cat /mnt/mittens-staging/.credentials.json)
 echo "MOUNT_CONTENT=$mount_content"
 `)
 
@@ -682,8 +682,8 @@ func TestDockerRun_CredentialPersistFromContainer(t *testing.T) {
 	containerName := fmt.Sprintf("mittens-persist-test-%d", os.Getpid())
 
 	runArgs := []string{
-		"-v", hostCredFile + ":/mnt/claude-config/.credentials.json:ro",
-		"-v", claudeDir + ":/mnt/claude-config/.claude:ro",
+		"-v", hostCredFile + ":/mnt/mittens-staging/.credentials.json:ro",
+		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
 	}
 
 	// Simulate a Claude CLI session that refreshes the token.

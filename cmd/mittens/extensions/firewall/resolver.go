@@ -172,7 +172,7 @@ func fileExists(path string) bool {
 // the firewall in the container entrypoint.
 func mountFirewall(ctx *registry.SetupContext, confPath string) error {
 	*ctx.DockerArgs = append(*ctx.DockerArgs,
-		"-v", confPath+":/mnt/claude-config/firewall.conf:ro",
+		"-v", confPath+":/mnt/mittens-staging/firewall.conf:ro",
 		"-e", "MITTENS_FIREWALL=true",
 	)
 	return nil

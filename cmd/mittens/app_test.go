@@ -721,7 +721,7 @@ func TestAssembleDockerArgs_WithCredentials(t *testing.T) {
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	wantMount := credFile + ":/mnt/claude-config/.credentials.json:ro"
+	wantMount := credFile + ":/mnt/mittens-staging/.credentials.json:ro"
 	if !argPairExists(args, "-v", wantMount) {
 		t.Errorf("missing credential mount, want -v %s\nargs: %v", wantMount, args)
 	}
@@ -1019,11 +1019,11 @@ func TestAssembleDockerArgs_OptionalFiles(t *testing.T) {
 	args := a.assembleDockerArgs(nil, nil)
 
 	// Both files should be mounted read-only.
-	claudeJSON := filepath.Join(home, ".claude.json") + ":/mnt/claude-config/.claude.json:ro"
+	claudeJSON := filepath.Join(home, ".claude.json") + ":/mnt/mittens-staging/.claude.json:ro"
 	if !argPairExists(args, "-v", claudeJSON) {
 		t.Error("missing .claude.json mount")
 	}
-	gitconfig := filepath.Join(home, ".gitconfig") + ":/mnt/claude-config/.gitconfig:ro"
+	gitconfig := filepath.Join(home, ".gitconfig") + ":/mnt/mittens-staging/.gitconfig:ro"
 	if !argPairExists(args, "-v", gitconfig) {
 		t.Error("missing .gitconfig mount")
 	}

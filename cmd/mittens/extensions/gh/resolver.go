@@ -37,7 +37,7 @@ func setup(ctx *registry.SetupContext) error {
 	if err := fileutil.CopyDir(ghDir, staging); err != nil {
 		// Fall back to direct read-only mount (original behavior).
 		*ctx.DockerArgs = append(*ctx.DockerArgs,
-			"-v", ghDir+":/home/claude/.config/gh:ro")
+			"-v", ghDir+":"+ctx.ContainerHome+"/.config/gh:ro")
 		return nil
 	}
 
@@ -48,7 +48,7 @@ func setup(ctx *registry.SetupContext) error {
 	}
 
 	*ctx.DockerArgs = append(*ctx.DockerArgs,
-		"-v", staging+":/home/claude/.config/gh:ro")
+		"-v", staging+":"+ctx.ContainerHome+"/.config/gh:ro")
 	return nil
 }
 

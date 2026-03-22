@@ -12,7 +12,7 @@ flags:
 
 mounts:
   - src: "~/.config/helm"
-    dst: "/home/claude/.config/helm"
+    dst: "~/.config/helm"
     mode: "ro"
     when: "dir_exists"
 

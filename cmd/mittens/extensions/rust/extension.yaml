@@ -20,11 +20,11 @@ firewall:
 
 mounts:
   - src: "~/.cargo/registry"
-    dst: "/home/claude/.cargo/host-registry"
+    dst: "~/.cargo/host-registry"
     mode: "ro"
     when: "dir_exists"
     env:
-      CARGO_REGISTRIES_CRATES_IO_LOCAL_MIRROR: "/home/claude/.cargo/host-registry"
+      CARGO_REGISTRIES_CRATES_IO_LOCAL_MIRROR: "~/.cargo/host-registry"
 
 build:
   script: "rust.sh"

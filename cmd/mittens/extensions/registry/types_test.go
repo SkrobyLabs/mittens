@@ -488,7 +488,8 @@ func TestExpandedMounts(t *testing.T) {
 		},
 	}
 
-	mounts := ext.ExpandedMounts(home)
+	containerHome := "/home/testuser"
+	mounts := ext.ExpandedMounts(home, containerHome)
 
 	if len(mounts) != 3 {
 		t.Fatalf("got %d mounts, want 3: %+v", len(mounts), mounts)

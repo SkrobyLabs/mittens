@@ -20,11 +20,11 @@ firewall:
 
 mounts:
   - src: "~/.nuget/packages"
-    dst: "/home/claude/.nuget/host-packages"
+    dst: "~/.nuget/host-packages"
     mode: "ro"
     when: "dir_exists"
     env:
-      NUGET_FALLBACK_PACKAGES: "/home/claude/.nuget/host-packages"
+      NUGET_FALLBACK_PACKAGES: "~/.nuget/host-packages"
 
 build:
   script: "dotnet.sh"

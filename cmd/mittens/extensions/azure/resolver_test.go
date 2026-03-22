@@ -194,6 +194,7 @@ func TestSetup_FilteredSubscriptions(t *testing.T) {
 		Args:    []string{"dev", "staging"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -208,7 +209,7 @@ func TestSetup_FilteredSubscriptions(t *testing.T) {
 
 	// Docker args should mount staging dir.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/claude/.azure:ro") {
+	if !strings.Contains(joined, staging+":/home/testuser/.azure:ro") {
 		t.Errorf("docker args missing mount, got: %v", dockerArgs)
 	}
 
@@ -262,6 +263,7 @@ func TestSetup_SupportingFilesCopied(t *testing.T) {
 		Args:    []string{"prod"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -300,6 +302,7 @@ func TestSetup_AllMode_Azure(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -314,7 +317,7 @@ func TestSetup_AllMode_Azure(t *testing.T) {
 
 	joined := strings.Join(dockerArgs, " ")
 	azureDir := filepath.Join(home, ".azure")
-	if !strings.Contains(joined, azureDir+":/home/claude/.azure:ro") {
+	if !strings.Contains(joined, azureDir+":/home/testuser/.azure:ro") {
 		t.Errorf("AllMode should mount entire azure dir, got: %v", dockerArgs)
 	}
 }
@@ -332,6 +335,7 @@ func TestSetup_NoSubscriptions(t *testing.T) {
 		Args:    nil,
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,

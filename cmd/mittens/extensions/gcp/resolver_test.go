@@ -106,6 +106,7 @@ func TestSetup_FilteredConfigs(t *testing.T) {
 		Args:    []string{"default", "prod"},
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -120,7 +121,7 @@ func TestSetup_FilteredConfigs(t *testing.T) {
 
 	// Docker args should mount staging dir.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/claude/.config/gcloud:ro") {
+	if !strings.Contains(joined, staging+":/home/testuser/.config/gcloud:ro") {
 		t.Errorf("docker args missing gcloud mount, got: %v", dockerArgs)
 	}
 
@@ -177,6 +178,7 @@ func TestSetup_AllMode_GCP(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,
@@ -191,7 +193,7 @@ func TestSetup_AllMode_GCP(t *testing.T) {
 
 	joined := strings.Join(dockerArgs, " ")
 	gcloudDir := filepath.Join(home, ".config", "gcloud")
-	if !strings.Contains(joined, gcloudDir+":/home/claude/.config/gcloud:ro") {
+	if !strings.Contains(joined, gcloudDir+":/home/testuser/.config/gcloud:ro") {
 		t.Errorf("AllMode should mount entire gcloud dir, got: %v", dockerArgs)
 	}
 }
@@ -209,6 +211,7 @@ func TestSetup_NoConfigs_GCP(t *testing.T) {
 		Args:    nil,
 	}
 	ctx := &registry.SetupContext{
+		ContainerHome: "/home/testuser",
 		Home:          home,
 		Extension:     ext,
 		DockerArgs:    &dockerArgs,

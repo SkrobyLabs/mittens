@@ -64,6 +64,7 @@ type ResolvedMount struct {
 // SetupContext is passed to setup resolvers.
 type SetupContext struct {
 	Home          string
+	ContainerHome string    // container-side home directory (e.g. "/home/claude")
 	ContainerName string    // docker container name for this invocation
 	Extension     *Extension
 	DockerArgs    *[]string // append docker run flags
@@ -213,14 +214,14 @@ func (e *Extension) BuildArgs() map[string]string {
 	return resolved
 }
 
-// ExpandedMounts returns mounts with ~ expanded to the given home directory
-// and conditional mounts filtered by existence checks. Mounts whose "when"
-// condition is not satisfied are excluded.
-func (e *Extension) ExpandedMounts(home string) []ResolvedMount {
+// ExpandedMounts returns mounts with ~ expanded and conditional mounts
+// filtered by existence checks. Source paths expand ~ using the host home;
+// destination paths and env values expand ~ using containerHome.
+func (e *Extension) ExpandedMounts(home, containerHome string) []ResolvedMount {
 	var result []ResolvedMount
 	for _, m := range e.Mounts {
 		src := expandTilde(m.Src, home)
-		dst := expandTilde(m.Dst, home)
+		dst := expandTilde(m.Dst, containerHome)
 
 		switch m.When {
 		case "dir_exists":
@@ -240,11 +241,20 @@ func (e *Extension) ExpandedMounts(home string) []ResolvedMount {
 			mode = "ro"
 		}
 
+		// Expand ~ in env values using the container home.
+		var env map[string]string
+		if len(m.Env) > 0 {
+			env = make(map[string]string, len(m.Env))
+			for k, v := range m.Env {
+				env[k] = expandTilde(v, containerHome)
+			}
+		}
+
 		result = append(result, ResolvedMount{
 			Src:  src,
 			Dst:  dst,
 			Mode: mode,
-			Env:  m.Env,
+			Env:  env,
 		})
 	}
 	return result

@@ -85,7 +85,7 @@ func runPhase2(cfg *config) error {
 	}
 
 	// Exec the remaining args (typically the AI CLI binary).
-	return execArgs()
+	return execArgs(cfg.AIBinary)
 }
 
 func sourceProfileD() {
@@ -412,10 +412,10 @@ func setupNotificationHooks(cfg *config) {
 	writeJSONFile(settingsFile, settings)
 }
 
-func execArgs() error {
+func execArgs(defaultBinary string) error {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		args = []string{"claude"}
+		args = []string{defaultBinary}
 	}
 
 	binary, err := exec.LookPath(args[0])

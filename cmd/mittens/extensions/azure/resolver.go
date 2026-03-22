@@ -100,7 +100,7 @@ func setup(ctx *registry.SetupContext) error {
 	// --azure-all: mount entire directory
 	if ext.AllMode {
 		if info, err := os.Stat(azureDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", azureDir+":/home/claude/.azure:ro")
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", azureDir+":"+ctx.ContainerHome+"/.azure:ro")
 			fmt.Fprintf(os.Stderr, "[mittens] Mounting Azure credentials (all subscriptions)\n")
 		} else {
 			fmt.Fprintf(os.Stderr, "[mittens] WARN: Azure credentials requested but %s does not exist\n", azureDir)
@@ -149,7 +149,7 @@ func setup(ctx *registry.SetupContext) error {
 		}
 	}
 
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":/home/claude/.azure:ro")
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.azure:ro")
 	fmt.Fprintf(os.Stderr, "[mittens] Azure subscriptions: %s\n", strings.Join(ext.Args, ", "))
 	return nil
 }

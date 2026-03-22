@@ -100,9 +100,9 @@ func TestProvider_StagingPaths(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"StagingConfigDir", p.StagingConfigDir(), "/mnt/claude-config/.claude"},
-		{"StagingCredentialPath", p.StagingCredentialPath(), "/mnt/claude-config/.credentials.json"},
-		{"StagingUserPrefsPath", p.StagingUserPrefsPath(), "/mnt/claude-config/.claude.json"},
+		{"StagingConfigDir", p.StagingConfigDir(), "/mnt/mittens-staging/.claude"},
+		{"StagingCredentialPath", p.StagingCredentialPath(), "/mnt/mittens-staging/.credentials.json"},
+		{"StagingUserPrefsPath", p.StagingUserPrefsPath(), "/mnt/mittens-staging/.claude.json"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
