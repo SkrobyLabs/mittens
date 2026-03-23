@@ -75,6 +75,20 @@ func init() {
 		a.clipboardReg = regFile
 		var extraArgs []string
 		extraArgs = append(extraArgs, "-v", clientDir+":/tmp/mittens-clipboard:ro")
+
+		// Wire up on-demand clipboard reading via the broker so the container's
+		// xclip shim (GET /clipboard) returns the latest PNG from the shared dir.
+		shared := newClipboardPathsAt(sharedDir)
+		if a.broker != nil {
+			a.broker.OnClipboardRead = func() []byte {
+				data, err := os.ReadFile(shared.imageFile())
+				if err != nil {
+					return nil
+				}
+				return data
+			}
+		}
+
 		logInfo("Clipboard image sync: enabled via %s", sharedDir)
 
 		if a.clipboardDir != "" && a.Provider != nil && a.Provider.Name == "codex" {
