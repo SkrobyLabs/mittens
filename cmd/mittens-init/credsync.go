@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/credutil"
@@ -13,10 +14,54 @@ import (
 const (
 	credSyncInterval     = 5 * time.Second
 	refreshThresholdMS   = 300000 // trigger proactive refresh when <5 min remain
+	refreshPendingTimeout = 60 * time.Second // safety timeout for refresh-pending state
 )
 
-// runCredSync is the credential sync daemon.
-// Runs as a goroutine: pushes refreshed tokens up and pulls newer tokens down.
+// shouldAcceptPull decides whether a pull from broker should overwrite local creds.
+// During a pending proactive refresh, only genuinely new creds (higher than the
+// original pre-refresh expiresAt) are accepted — this prevents the pull loop from
+// undoing the faked expiresAt=1 that triggers the CLI's OAuth refresh.
+func shouldAcceptPull(remoteExp, localExp, refreshOrigExp int64, refreshPending bool) bool {
+	if !refreshPending {
+		return remoteExp > 0 && localExp >= 0 && remoteExp > localExp
+	}
+	return remoteExp > refreshOrigExp
+}
+
+// forkCredSync starts the credential sync daemon as a separate child process.
+// This is necessary because the parent process will syscall.Exec to launch the
+// AI CLI — which would kill an in-process goroutine. The child process inherits
+// env vars (including MITTENS_CONFIG) and runs independently.
+func forkCredSync() error {
+	cmd := exec.Command("/proc/self/exe")
+	cmd.Env = append(os.Environ(), "MITTENS_CREDSYNC_MODE=1")
+	logFile, _ := os.OpenFile("/tmp/credsync-child.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("fork credsync: %w", err)
+	}
+	// Don't Wait() — let the child run independently.
+	// The parent is about to syscall.Exec, which orphans the child.
+	return nil
+}
+
+// runCredsyncMain is the entry point for the forked credsync child process.
+// It loads config, creates a broker client, and runs the sync loop forever.
+func runCredsyncMain() {
+	cfg := loadConfig()
+	bc := newBrokerClient(cfg)
+	if bc == nil {
+		return
+	}
+	credFile := cfg.AIDir + "/" + cfg.AICredFile
+	runCredSync(bc, credFile)
+}
+
+// runCredSync is the credential sync daemon main loop.
+// Runs as the main function of a forked child process: pushes refreshed tokens up and pulls newer tokens down.
 func runCredSync(bc *brokerClient, credFile string) {
 	log := newCredLogger()
 
@@ -42,6 +87,12 @@ func runCredSync(bc *brokerClient, credFile string) {
 	ticker := time.NewTicker(credSyncInterval)
 	defer ticker.Stop()
 
+	// Refresh-pending state: tracks when we've triggered proactive refresh
+	// and are waiting for the CLI to complete its OAuth flow.
+	var refreshPending bool
+	var refreshOrigExp int64
+	var refreshTriggeredAt time.Time
+
 	for range ticker.C {
 		// --- Push: detect local file changes ---
 		currentHash := computeFileHash(credFile)
@@ -57,17 +108,30 @@ func runCredSync(bc *brokerClient, credFile string) {
 		}
 
 		// --- Pull: check if broker has newer credentials ---
+		// During a pending proactive refresh, only accept genuinely new creds
+		// (higher expiresAt than the original pre-refresh value). This prevents
+		// the pull loop from overwriting the faked expiresAt=1 with the broker's
+		// stale near-expiry creds before the CLI can complete its OAuth refresh.
+		if refreshPending && time.Since(refreshTriggeredAt) > refreshPendingTimeout {
+			refreshPending = false
+			log.write("proactive refresh: timeout waiting for CLI refresh, resuming pull")
+		}
 		remote, code, err := bc.get("/")
 		if err == nil && code == 200 && remote != "" {
 			remoteExp := credExpiresAt([]byte(remote))
 			localExp := credExpiresAtFile(credFile)
 
-			if remoteExp > 0 && localExp >= 0 && remoteExp > localExp {
+			if shouldAcceptPull(remoteExp, localExp, refreshOrigExp, refreshPending) {
 				tmp := credFile + fmt.Sprintf(".tmp.%d", os.Getpid())
 				if err := os.WriteFile(tmp, []byte(remote), 0600); err == nil {
 					os.Rename(tmp, credFile)
 					lastHash = computeFileHash(credFile)
-					log.write("pull: updated local creds (remote: %d, was: %d)", remoteExp, localExp)
+					if refreshPending {
+						refreshPending = false
+						log.write("pull: CLI refreshed, accepted new creds (remote: %d, was: %d)", remoteExp, refreshOrigExp)
+					} else {
+						log.write("pull: updated local creds (remote: %d, was: %d)", remoteExp, localExp)
+					}
 				}
 			}
 		}
@@ -81,8 +145,11 @@ func runCredSync(bc *brokerClient, credFile string) {
 				action := brokerRefreshRequest(bc)
 				if action == "refresh" {
 					log.write("proactive refresh: triggering (expires in %dms)", remaining)
+					refreshOrigExp = curExp
 					triggerTokenRefresh(credFile, log)
 					lastHash = computeFileHash(credFile)
+					refreshPending = true
+					refreshTriggeredAt = time.Now()
 				} else {
 					log.write("proactive refresh: another container is handling it")
 				}

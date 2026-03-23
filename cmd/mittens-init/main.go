@@ -23,6 +23,14 @@ func main() {
 		return
 	}
 
+	// Internal credsync subprocess mode — runs the credential sync daemon.
+	// Started by phase 2 as a child process so it survives the
+	// syscall.Exec that launches the AI CLI.
+	if os.Getenv("MITTENS_CREDSYNC_MODE") == "1" {
+		runCredsyncMain()
+		return
+	}
+
 	// Busybox-style dispatch based on argv[0] basename.
 	base := filepath.Base(os.Args[0])
 	switch base {

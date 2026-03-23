@@ -70,12 +70,11 @@ func runPhase2(cfg *config) error {
 	// Inject notification hooks.
 	setupNotificationHooks(cfg)
 
-	// Start credential sync daemon.
+	// Start credential sync daemon as a forked child process.
+	// Must be a separate process because syscall.Exec (below) kills goroutines.
 	if cfg.hasBroker() {
-		bc := newBrokerClient(cfg)
-		if bc != nil {
-			credFile := cfg.AIDir + "/" + cfg.AICredFile
-			go runCredSync(bc, credFile)
+		if err := forkCredSync(); err != nil {
+			logWarn("credential sync: %v", err)
 		}
 	}
 
