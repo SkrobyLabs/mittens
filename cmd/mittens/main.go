@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
@@ -86,6 +87,17 @@ func runMain(args []string) error {
 		}
 	}
 
+	// Pre-scan for --session (ephemeral config edit).
+	sessionMode := hasSubFlag(args, "--session")
+	if sessionMode {
+		if hasSubFlag(args, "--no-config") {
+			return fmt.Errorf("--session and --no-config cannot be used together")
+		}
+		if hasSubFlag(args, "--init") {
+			return fmt.Errorf("--session and --init cannot be used together")
+		}
+	}
+
 	app := &App{
 		Provider:        DefaultProvider(),
 		ImageName:       "mittens",
@@ -109,31 +121,54 @@ func runMain(args []string) error {
 	firewallext.EmbeddedConf = embeddedFirewallConf
 	firewallext.EmbeddedDevConf = embeddedFirewallDevConf
 
-	// 3. Pre-scan for --no-config (needed before loading project config).
-	noConfig := false
-	for _, a := range args {
-		if a == "--no-config" {
-			noConfig = true
-			break
-		}
-	}
-
-	// 4. Load user defaults and project config unless --no-config.
+	// 3. Load config: either ephemeral (--session wizard) or from disk.
 	var userArgs []string
 	var configArgs []string
-	if !noConfig {
+
+	if sessionMode {
 		userArgs, _ = LoadUserDefaults()
-		if len(userArgs) > 0 {
-			logInfo("Loaded user defaults")
+
+		ephemeralLines, err := wizardSession(app.Extensions)
+		if err != nil {
+			if err == huh.ErrUserAborted {
+				fmt.Fprintln(os.Stderr, "\nCancelled.")
+				return nil
+			}
+			return err
+		}
+		configArgs = splitConfigFlags(ephemeralLines)
+
+		// Strip --session from args before merging.
+		var filtered []string
+		for _, a := range args {
+			if a != "--session" {
+				filtered = append(filtered, a)
+			}
+		}
+		args = filtered
+	} else {
+		noConfig := false
+		for _, a := range args {
+			if a == "--no-config" {
+				noConfig = true
+				break
+			}
 		}
 
-		workspace := detectWorkspace()
-		configArgs, err = LoadProjectConfig(workspace)
-		if err != nil {
-			return fmt.Errorf("loading project config: %w", err)
-		}
-		if len(configArgs) > 0 {
-			logInfo("Loaded project config for %s", ProjectDir(workspace))
+		if !noConfig {
+			userArgs, _ = LoadUserDefaults()
+			if len(userArgs) > 0 {
+				logInfo("Loaded user defaults")
+			}
+
+			workspace := detectWorkspace()
+			configArgs, err = LoadProjectConfig(workspace)
+			if err != nil {
+				return fmt.Errorf("loading project config: %w", err)
+			}
+			if len(configArgs) > 0 {
+				logInfo("Loaded project config for %s", ProjectDir(workspace))
+			}
 		}
 	}
 
@@ -153,7 +188,7 @@ func runMain(args []string) error {
 		return err
 	}
 
-	app.NoConfig = noConfig
+	app.NoConfig = hasSubFlag(args, "--no-config")
 
 	// 8. Run.
 	return app.Run()

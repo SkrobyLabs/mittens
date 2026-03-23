@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
 )
@@ -175,6 +176,89 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Session mode (ephemeral config edit)
+// ---------------------------------------------------------------------------
+
+// wizardSession runs the wizard in edit mode but does NOT persist changes.
+// Returns the config lines for the caller to use as ephemeral config.
+// Returns huh.ErrUserAborted on Ctrl+C (not nil) so the caller can
+// distinguish cancellation from an empty-but-valid config.
+func wizardSession(extensions []*registry.Extension) ([]string, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil, fmt.Errorf("--session requires an interactive terminal")
+	}
+
+	workspace := detectWorkspace()
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens session settings"))
+	fmt.Fprintln(os.Stderr, wizardDim.Render("Changes apply to this launch only and will not be saved."))
+	fmt.Fprintln(os.Stderr)
+
+	existing, err := loadProjectConfigRaw(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("loading existing config: %w", err)
+	}
+
+	editMode := false
+	var existDirs, existProviders, existExts, existFirewall, existOpts []string
+
+	if len(existing) > 0 {
+		editMode = true
+		existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
+
+		fmt.Fprintln(os.Stderr, wizardDim.Render("Current project config:"))
+		for _, line := range existing {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	var configLines []string
+
+	providerLines, err := wizardProvider(editMode, existProviders)
+	if err != nil {
+		return nil, err
+	}
+	configLines = append(configLines, providerLines...)
+
+	dirLines, err := wizardDirs(workspace, editMode, existDirs)
+	if err != nil {
+		return nil, err
+	}
+	configLines = append(configLines, dirLines...)
+
+	extLines, err := wizardExtensions(extensions, editMode, existExts)
+	if err != nil {
+		return nil, err
+	}
+	configLines = append(configLines, extLines...)
+
+	fwLines, err := wizardFirewall(editMode, existFirewall)
+	if err != nil {
+		return nil, err
+	}
+	configLines = append(configLines, fwLines...)
+
+	optLines, err := wizardOptions(editMode, existOpts)
+	if err != nil {
+		return nil, err
+	}
+	configLines = append(configLines, optLines...)
+
+	fmt.Fprintln(os.Stderr)
+	if len(configLines) > 0 {
+		equiv := "mittens " + strings.Join(configLines, " ")
+		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: "+equiv))
+	} else {
+		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: mittens (default settings)"))
+	}
+	fmt.Fprintln(os.Stderr)
+
+	return configLines, nil
 }
 
 // ---------------------------------------------------------------------------

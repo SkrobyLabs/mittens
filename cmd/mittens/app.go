@@ -1649,6 +1649,7 @@ Commands:
 
 Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
+  --session         Tweak settings for this run only (opens wizard, doesn't save)
   --no-config       Skip config file loading (user defaults + project config)
   --no-history      Disable session persistence (fully ephemeral)
   --resume [ID]     Resume last session, or a specific session by ID

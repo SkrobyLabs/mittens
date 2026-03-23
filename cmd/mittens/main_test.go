@@ -53,3 +53,29 @@ func TestResolveProviderFromArgs_Unknown(t *testing.T) {
 		t.Fatal("expected unknown provider error")
 	}
 }
+
+func TestHasSubFlag_Session(t *testing.T) {
+	if !hasSubFlag([]string{"--session"}, "--session") {
+		t.Fatal("expected --session to match")
+	}
+	if !hasSubFlag([]string{"--verbose", "--session"}, "--session") {
+		t.Fatal("expected --session with other flags to match")
+	}
+	if hasSubFlag([]string{"--", "--session"}, "--session") {
+		t.Fatal("did not expect --session after -- to match")
+	}
+}
+
+func TestSessionConflictsDetected(t *testing.T) {
+	// --session + --no-config should both be detectable
+	args := []string{"--session", "--no-config"}
+	if !hasSubFlag(args, "--session") || !hasSubFlag(args, "--no-config") {
+		t.Fatal("expected both --session and --no-config to be detected")
+	}
+
+	// --session + --init should both be detectable
+	args = []string{"--session", "--init"}
+	if !hasSubFlag(args, "--session") || !hasSubFlag(args, "--init") {
+		t.Fatal("expected both --session and --init to be detected")
+	}
+}
