@@ -80,6 +80,9 @@ type App struct {
 	// Worktree suffix (computed once per Run)
 	worktreeSuffix string
 
+	// Credential staging dirs ("staging_path:target_dir") from extension resolvers
+	credStagingDirs []string
+
 	// Drop zone for drag-and-drop file translation
 	dropDir string
 
@@ -296,6 +299,7 @@ func (a *App) Run() error {
 	// Run setup resolvers for enabled extensions.
 	var resolverDockerArgs []string
 	var resolverFirewallExtra []string
+	var credStagingDirs []string
 	for _, ext := range a.Extensions {
 		if !ext.Enabled {
 			continue
@@ -313,19 +317,21 @@ func (a *App) Run() error {
 		a.tempDirs = append(a.tempDirs, staging)
 
 		ctx := &registry.SetupContext{
-			Home:          home,
-			ContainerHome: a.Provider.HomePath(),
-			ContainerName: a.ContainerName,
-			Extension:     ext,
-			DockerArgs:    &resolverDockerArgs,
-			FirewallExtra: &resolverFirewallExtra,
-			TempDirs:      &a.tempDirs,
-			StagingDir:    staging,
+			Home:            home,
+			ContainerHome:   a.Provider.HomePath(),
+			ContainerName:   a.ContainerName,
+			Extension:       ext,
+			DockerArgs:      &resolverDockerArgs,
+			FirewallExtra:   &resolverFirewallExtra,
+			TempDirs:        &a.tempDirs,
+			StagingDir:      staging,
+			CredStagingDirs: &credStagingDirs,
 		}
 		if err := setupFn(ctx); err != nil {
 			return fmt.Errorf("extension %s setup: %w", ext.Name, err)
 		}
 	}
+	a.credStagingDirs = credStagingDirs
 
 	// Include non-default provider in image tag to avoid cache collisions.
 	if a.Provider.Name != "claude" {
@@ -1077,9 +1083,10 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			Shell:     a.Shell,
 			PrintMode: argExists(a.ClaudeArgs, "--print"),
 		},
-		ContainerName: a.ContainerName,
-		InstanceName:  a.InstanceName,
-		ImagePasteKey: a.ImagePasteKey,
+		ContainerName:   a.ContainerName,
+		InstanceName:    a.InstanceName,
+		ImagePasteKey:   a.ImagePasteKey,
+		CredStagingDirs: a.credStagingDirs,
 	}
 }
 

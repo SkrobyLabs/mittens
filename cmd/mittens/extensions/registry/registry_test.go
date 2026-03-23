@@ -98,11 +98,11 @@ func TestLoadExtensions_Empty(t *testing.T) {
 func TestRegister_OverwriteDoesNotPanic(t *testing.T) {
 	// First registration.
 	Register("test-overwrite", &Registration{
-		List: func() ([]string, error) { return []string{"a"}, nil },
+		List: func() ([]ListItem, error) { return []ListItem{{Label: "a", Value: "a"}}, nil },
 	})
 	// Second registration should overwrite without panicking.
 	Register("test-overwrite", &Registration{
-		List: func() ([]string, error) { return []string{"b"}, nil },
+		List: func() ([]ListItem, error) { return []ListItem{{Label: "b", Value: "b"}}, nil },
 	})
 
 	lr := GetListResolver("test-overwrite")
@@ -113,8 +113,8 @@ func TestRegister_OverwriteDoesNotPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0] != "b" {
-		t.Errorf("expected [b], got %v", items)
+	if len(items) != 1 || items[0].Value != "b" {
+		t.Errorf("expected [{b b}], got %v", items)
 	}
 
 	// Clean up.

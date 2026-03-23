@@ -297,6 +297,21 @@ func TestSplitConfigFlags(t *testing.T) {
 			name:  "empty slice",
 			input: []string{},
 		},
+		{
+			name:  "double-quoted value with spaces",
+			input: []string{`--azure "Quix ISV Programme"`},
+			want:  []string{"--azure", "Quix ISV Programme"},
+		},
+		{
+			name:  "quoted csv values",
+			input: []string{`--azure "sub-id-1,sub-id-2"`},
+			want:  []string{"--azure", "sub-id-1,sub-id-2"},
+		},
+		{
+			name:  "mixed quoted and unquoted",
+			input: []string{`--azure "some value" --verbose`},
+			want:  []string{"--azure", "some value", "--verbose"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

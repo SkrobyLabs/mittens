@@ -26,9 +26,9 @@ func init() {
 // ---------------------------------------------------------------------------
 
 // listSubscriptions parses ~/.azure/azureProfile.json and returns subscription
-// names sorted alphabetically, with the default subscription first (prefixed
-// with "*").
-func listSubscriptions() ([]string, error) {
+// items with name as label and subscription ID as value, sorted alphabetically
+// with the default subscription first.
+func listSubscriptions() ([]registry.ListItem, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -56,33 +56,49 @@ func listSubscriptions() ([]string, error) {
 		return nil, nil
 	}
 
-	var defaultName string
-	var names []string
+	type subInfo struct {
+		name      string
+		id        string
+		isDefault bool
+	}
+	var defaultSub *subInfo
+	var others []subInfo
 	for _, s := range subs {
 		sub, ok := s.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		name, _ := sub["name"].(string)
-		if name == "" {
+		id, _ := sub["id"].(string)
+		if id == "" {
 			continue
 		}
+		info := subInfo{name: name, id: id}
 		isDefault, _ := sub["isDefault"].(bool)
 		if isDefault {
-			defaultName = name
+			info.isDefault = true
+			defaultSub = &info
 		} else {
-			names = append(names, name)
+			others = append(others, info)
 		}
 	}
 
-	sort.Strings(names)
+	sort.Slice(others, func(i, j int) bool { return others[i].name < others[j].name })
 
-	// Default subscription goes first, prefixed with *
-	var result []string
-	if defaultName != "" {
-		result = append(result, "*"+defaultName)
+	// Default subscription goes first, marked with *.
+	var result []registry.ListItem
+	if defaultSub != nil {
+		result = append(result, registry.ListItem{
+			Label: "*" + defaultSub.name,
+			Value: defaultSub.id,
+		})
 	}
-	result = append(result, names...)
+	for _, s := range others {
+		result = append(result, registry.ListItem{
+			Label: s.name,
+			Value: s.id,
+		})
+	}
 	return result, nil
 }
 
@@ -97,13 +113,30 @@ func setup(ctx *registry.SetupContext) error {
 	home := ctx.Home
 	azureDir := filepath.Join(home, ".azure")
 
-	// --azure-all: mount entire directory
+	credStagingPath := "/mnt/mittens-creds-azure"
+
+	// --azure-all: stage the entire directory (copy, not direct mount) so
+	// we can inject the plaintext MSAL cache extracted from the macOS Keychain.
 	if ext.AllMode {
 		if info, err := os.Stat(azureDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", azureDir+":"+ctx.ContainerHome+"/.azure:ro")
-			fmt.Fprintf(os.Stderr, "[mittens] Mounting Azure credentials (all subscriptions)\n")
+			staging := ctx.StagingDir
+			if staging == "" {
+				tmpDir, err := os.MkdirTemp("", "mittens-azure.*")
+				if err != nil {
+					return fmt.Errorf("creating Azure temp dir: %w", err)
+				}
+				staging = tmpDir
+				*ctx.TempDirs = append(*ctx.TempDirs, tmpDir)
+			}
+			if err := fileutil.CopyDir(azureDir, staging); err != nil {
+				return fmt.Errorf("copying Azure dir: %w", err)
+			}
+			extractMSALCache(staging, nil)
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+credStagingPath+":ro")
+			*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.azure")
+			registry.LogInfo("Mounting Azure credentials (all subscriptions)")
 		} else {
-			fmt.Fprintf(os.Stderr, "[mittens] WARN: Azure credentials requested but %s does not exist\n", azureDir)
+			registry.LogWarn("Azure credentials requested but %s does not exist", azureDir)
 		}
 		return nil
 	}
@@ -149,8 +182,16 @@ func setup(ctx *registry.SetupContext) error {
 		}
 	}
 
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.azure:ro")
-	fmt.Fprintf(os.Stderr, "[mittens] Azure subscriptions: %s\n", strings.Join(ext.Args, ", "))
+	// On macOS, MSAL tokens live in the Keychain, not in the file. Extract
+	// the plaintext cache so the container's az CLI can use it.
+	extractMSALCache(staging, ext.Args)
+
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+credStagingPath+":ro")
+	*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.azure")
+
+	// Log with names for readability.
+	names := subscriptionNames(profilePath, ext.Args)
+	registry.LogInfo("Azure subscriptions: %s", strings.Join(names, ", "))
 	return nil
 }
 
@@ -158,11 +199,11 @@ func setup(ctx *registry.SetupContext) error {
 // Azure profile filtering
 // ---------------------------------------------------------------------------
 
-// filterAzureProfile reads an Azure profile JSON, keeps only the named
-// subscriptions, sets the first as default, and writes the result to destPath.
-// Uses map[string]interface{} to preserve all fields without needing to define
-// every field in a struct.
-func filterAzureProfile(srcPath, destPath string, wantedNames []string) error {
+// filterAzureProfile reads an Azure profile JSON, keeps only the subscriptions
+// matching the given IDs, sets the first as default, and writes the result to
+// destPath. Uses map[string]interface{} to preserve all fields without needing
+// to define every field in a struct.
+func filterAzureProfile(srcPath, destPath string, wantedIDs []string) error {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return err
@@ -186,21 +227,21 @@ func filterAzureProfile(srcPath, destPath string, wantedNames []string) error {
 		return fmt.Errorf("subscriptions field is not an array")
 	}
 
-	// Build wanted set
-	wanted := make(map[string]bool, len(wantedNames))
-	for _, n := range wantedNames {
-		wanted[n] = true
+	// Build wanted set (by subscription ID)
+	wanted := make(map[string]bool, len(wantedIDs))
+	for _, id := range wantedIDs {
+		wanted[id] = true
 	}
 
-	// Filter subscriptions
+	// Filter subscriptions by ID
 	var filtered []interface{}
 	for _, s := range subs {
 		sub, ok := s.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		name, _ := sub["name"].(string)
-		if wanted[name] {
+		id, _ := sub["id"].(string)
+		if wanted[id] {
 			sub["isDefault"] = false
 			filtered = append(filtered, sub)
 		}
@@ -228,6 +269,39 @@ func filterAzureProfile(srcPath, destPath string, wantedNames []string) error {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// subscriptionNames maps subscription IDs to "name (id)" for log output.
+// Falls back to the bare ID if the profile can't be read.
+func subscriptionNames(profilePath string, ids []string) []string {
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
+		return ids
+	}
+	data = stripBOM(data)
+	var raw map[string]interface{}
+	if json.Unmarshal(data, &raw) != nil {
+		return ids
+	}
+	subs, _ := raw["subscriptions"].([]interface{})
+	nameByID := make(map[string]string)
+	for _, s := range subs {
+		sub, _ := s.(map[string]interface{})
+		id, _ := sub["id"].(string)
+		name, _ := sub["name"].(string)
+		if id != "" && name != "" {
+			nameByID[id] = name
+		}
+	}
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		if name, ok := nameByID[id]; ok {
+			result[i] = name + " (" + id + ")"
+		} else {
+			result[i] = id
+		}
+	}
+	return result
+}
 
 // stripBOM removes a UTF-8 BOM prefix if present. Azure CLI writes UTF-8 BOM
 // to azureProfile.json on some platforms.

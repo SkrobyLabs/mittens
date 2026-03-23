@@ -33,6 +33,9 @@ func runPhase2(cfg *config) error {
 		setupWSLClipboard(cfg)
 	}
 
+	// Copy read-only credential staging mounts into writable home.
+	copyCredStagingDirs(cfg)
+
 	// Copy read-only config into writable home.
 	copyConfigFiles(cfg)
 
@@ -164,6 +167,27 @@ func setupWSLClipboard(cfg *config) {
 	if _, err := os.Stat(kbFile); err != nil {
 		content := fmt.Sprintf(`{"bindings":[{"context":"Chat","bindings":{"%s":"chat:imagePaste"}}]}`, cfg.ImagePasteKey)
 		os.WriteFile(kbFile, []byte(content), 0644)
+	}
+}
+
+// copyCredStagingDirs copies read-only credential staging mounts into writable
+// home directories. Each entry is "staging_path:target_dir" where target_dir is
+// relative to the user's home (e.g. ".azure", ".aws").
+func copyCredStagingDirs(cfg *config) {
+	for _, entry := range cfg.CredStagingDirs {
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		staging, targetDir := parts[0], parts[1]
+		if info, err := os.Stat(staging); err != nil || !info.IsDir() {
+			continue
+		}
+		dst := cfg.AIHome + "/" + targetDir
+		os.MkdirAll(dst, 0755)
+		if err := fileutil.CopyDir(staging, dst); err != nil {
+			logWarn("credential staging copy %s -> %s: %v", staging, dst, err)
+		}
 	}
 }
 

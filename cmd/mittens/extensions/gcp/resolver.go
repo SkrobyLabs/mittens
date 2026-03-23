@@ -23,7 +23,7 @@ func init() {
 
 // listConfigs returns available gcloud configuration names by scanning
 // ~/.config/gcloud/configurations/config_* files and stripping the prefix.
-func listConfigs() ([]string, error) {
+func listConfigs() ([]registry.ListItem, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -46,7 +46,11 @@ func listConfigs() ([]string, error) {
 		}
 	}
 	sort.Strings(configs)
-	return configs, nil
+	var items []registry.ListItem
+	for _, c := range configs {
+		items = append(items, registry.ListItem{Label: c, Value: c})
+	}
+	return items, nil
 }
 
 // setup mounts GCP credentials into the container. In AllMode the entire
@@ -57,12 +61,15 @@ func setup(ctx *registry.SetupContext) error {
 	home := ctx.Home
 	gcloudDir := filepath.Join(home, ".config", "gcloud")
 
+	credStagingPath := "/mnt/mittens-creds-gcp"
+
 	// --gcp-all: mount entire directory
 	if ext.AllMode {
 		if info, err := os.Stat(gcloudDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", gcloudDir+":"+ctx.ContainerHome+"/.config/gcloud:ro")
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", gcloudDir+":"+credStagingPath+":ro")
+			*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.config/gcloud")
 		} else {
-			fmt.Fprintf(os.Stderr, "[mittens] warning: GCP credentials requested but %s does not exist\n", gcloudDir)
+			registry.LogWarn("GCP credentials requested but %s does not exist", gcloudDir)
 		}
 		return nil
 	}
@@ -86,7 +93,7 @@ func setup(ctx *registry.SetupContext) error {
 		src := filepath.Join(configsDir, "config_"+cfg)
 		dst := filepath.Join(stagingConfigsDir, "config_"+cfg)
 		if err := fileutil.CopyFile(src, dst); err != nil {
-			fmt.Fprintf(os.Stderr, "[mittens] warning: GCP config '%s' not found: %v\n", cfg, err)
+			registry.LogWarn("GCP config '%s' not found: %v", cfg, err)
 		}
 	}
 
@@ -121,11 +128,12 @@ func setup(ctx *registry.SetupContext) error {
 	if info, err := os.Stat(legacyDir); err == nil && info.IsDir() {
 		dst := filepath.Join(staging, "legacy_credentials")
 		if err := fileutil.CopyDir(legacyDir, dst); err != nil {
-			fmt.Fprintf(os.Stderr, "[mittens] warning: failed to copy legacy_credentials: %v\n", err)
+			registry.LogWarn("failed to copy legacy_credentials: %v", err)
 		}
 	}
 
-	// Mount the staging directory as gcloud config.
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.config/gcloud:ro")
+	// Mount the staging directory at the credential staging path.
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+credStagingPath+":ro")
+	*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.config/gcloud")
 	return nil
 }

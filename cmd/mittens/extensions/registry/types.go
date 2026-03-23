@@ -8,6 +8,13 @@ import (
 	"text/template"
 )
 
+// ListItem represents a selectable item returned by a list resolver.
+// Label is shown in the wizard; Value is stored in config and passed as a flag argument.
+type ListItem struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
 // Extension represents a parsed extension definition (from YAML manifest).
 type Extension struct {
 	Name         string            `yaml:"name"`
@@ -71,6 +78,7 @@ type SetupContext struct {
 	FirewallExtra *[]string // append extra domains
 	TempDirs      *[]string // track temp dirs for cleanup
 	StagingDir    string    // pre-created temp dir for this extension
+	CredStagingDirs *[]string // "staging_path:target_dir" entries for writable credential copy
 }
 
 // SetupResult is returned by external (subprocess) plugins.

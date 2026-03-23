@@ -28,7 +28,7 @@ func init() {
 //  2. User override at ~/.claude/mcp-domains.conf
 //  3. mcpServers keys from ~/.claude.json
 //  4. Server names from {workspace}/.mcp.json (if it exists)
-func listServers() ([]string, error) {
+func listServers() ([]registry.ListItem, error) {
 	seen := make(map[string]bool)
 	var servers []string
 
@@ -72,7 +72,11 @@ func listServers() ([]string, error) {
 	}
 
 	sort.Strings(servers)
-	return servers, nil
+	var items []registry.ListItem
+	for _, s := range servers {
+		items = append(items, registry.ListItem{Label: s, Value: s})
+	}
+	return items, nil
 }
 
 // setup sets the MITTENS_MCP environment variable so the container

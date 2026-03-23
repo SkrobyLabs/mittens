@@ -41,8 +41,8 @@ func TestListConfigs(t *testing.T) {
 		t.Fatalf("got %v, want %v", configs, want)
 	}
 	for i, c := range configs {
-		if c != want[i] {
-			t.Errorf("configs[%d] = %q, want %q", i, c, want[i])
+		if c.Value != want[i] {
+			t.Errorf("configs[%d].Value = %q, want %q", i, c.Value, want[i])
 		}
 	}
 }
@@ -99,6 +99,7 @@ func TestSetup_FilteredConfigs(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "gcp",
@@ -106,23 +107,29 @@ func TestSetup_FilteredConfigs(t *testing.T) {
 		Args:    []string{"default", "prod"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Docker args should mount staging dir.
+	// Docker args should mount staging dir at the credential staging path.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/testuser/.config/gcloud:ro") {
-		t.Errorf("docker args missing gcloud mount, got: %v", dockerArgs)
+	if !strings.Contains(joined, staging+":/mnt/mittens-creds-gcp:ro") {
+		t.Errorf("docker args missing staging mount, got: %v", dockerArgs)
+	}
+
+	// CredStagingDirs should have an entry.
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-gcp:.config/gcloud" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-gcp:.config/gcloud\"]", credStagingDirs)
 	}
 
 	// Only requested configs should be staged.
@@ -171,6 +178,7 @@ func TestSetup_AllMode_GCP(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "gcp",
@@ -178,13 +186,14 @@ func TestSetup_AllMode_GCP(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
@@ -193,8 +202,12 @@ func TestSetup_AllMode_GCP(t *testing.T) {
 
 	joined := strings.Join(dockerArgs, " ")
 	gcloudDir := filepath.Join(home, ".config", "gcloud")
-	if !strings.Contains(joined, gcloudDir+":/home/testuser/.config/gcloud:ro") {
-		t.Errorf("AllMode should mount entire gcloud dir, got: %v", dockerArgs)
+	if !strings.Contains(joined, gcloudDir+":/mnt/mittens-creds-gcp:ro") {
+		t.Errorf("AllMode should mount gcloud dir at staging path, got: %v", dockerArgs)
+	}
+
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-gcp:.config/gcloud" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-gcp:.config/gcloud\"]", credStagingDirs)
 	}
 }
 
@@ -204,6 +217,7 @@ func TestSetup_NoConfigs_GCP(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "gcp",
@@ -211,13 +225,14 @@ func TestSetup_NoConfigs_GCP(t *testing.T) {
 		Args:    nil,
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {

@@ -261,29 +261,29 @@ func wizardUserDefaults() error {
 		lines = append(lines, "--provider "+provider)
 	}
 
-	// 2. Clipboard paste key.
+	// 2. Clipboard paste key (WSL only — on macOS/Linux meta+v is always correct).
 	pasteKey := existPasteKey
-	if err := huh.NewSelect[string]().
-		Title("Image paste keybinding").
-		Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
-		Options(
-			huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
-			huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
-		).
-		Value(&pasteKey).
-		Run(); err != nil {
-		return err
-	}
-	if pasteKey == "ctrl+v" {
-		if isWSL() {
+	if isWSL() {
+		if err := huh.NewSelect[string]().
+			Title("Image paste keybinding").
+			Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
+			Options(
+				huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
+				huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
+			).
+			Value(&pasteKey).
+			Run(); err != nil {
+			return err
+		}
+		if pasteKey == "ctrl+v" {
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, "  ⚠ Windows Terminal intercepts Ctrl+V for text paste.")
 			fmt.Fprintln(os.Stderr, "    To use Ctrl+V for image paste inside mittens, rebind")
 			fmt.Fprintln(os.Stderr, "    the paste action in Windows Terminal settings to another")
 			fmt.Fprintln(os.Stderr, "    shortcut (e.g. Ctrl+Shift+V).")
 			fmt.Fprintln(os.Stderr)
+			lines = append(lines, "--image-paste-key "+pasteKey)
 		}
-		lines = append(lines, "--image-paste-key "+pasteKey)
 	}
 
 	// 3. Default firewall mode.
@@ -961,7 +961,7 @@ func configureCloud(name, flag, allFlag, title, selectTitle string) ([]string, e
 
 	var opts []huh.Option[string]
 	for _, item := range items {
-		opts = append(opts, huh.NewOption(item, item))
+		opts = append(opts, huh.NewOption(item.Label, item.Value))
 	}
 
 	var chosen []string

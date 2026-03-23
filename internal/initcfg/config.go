@@ -30,6 +30,11 @@ type ContainerConfig struct {
 	ImagePasteKey string   `json:"imagePasteKey,omitempty"`
 	MCP           string   `json:"mcp,omitempty"`
 
+	// Credential staging: each entry is "staging_path:target_dir" (e.g.
+	// "/mnt/mittens-creds-azure:.azure"). mittens-init copies the read-only
+	// staging mount to a writable ~/target_dir so CLIs like az/aws can write.
+	CredStagingDirs []string `json:"credStagingDirs,omitempty"`
+
 	// X11 clipboard (macOS clipboard bridge, Codex).
 	X11ClipboardImage      string `json:"x11ClipboardImage,omitempty"`
 	X11ClipboardMaxAgeSecs int    `json:"x11ClipboardMaxAgeSecs,omitempty"`

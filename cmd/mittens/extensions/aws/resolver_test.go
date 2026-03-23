@@ -255,6 +255,7 @@ func TestSetup_FilteredProfiles(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -262,23 +263,29 @@ func TestSetup_FilteredProfiles(t *testing.T) {
 		Args:    []string{"prod"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Docker args should mount staging dir at /home/claude/.aws:ro.
+	// Docker args should mount staging dir at the credential staging path.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/testuser/.aws:ro") {
-		t.Errorf("docker args missing mount, got: %v", dockerArgs)
+	if !strings.Contains(joined, staging+":/mnt/mittens-creds-aws:ro") {
+		t.Errorf("docker args missing staging mount, got: %v", dockerArgs)
+	}
+
+	// CredStagingDirs should have an entry.
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-aws:.aws" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-aws:.aws\"]", credStagingDirs)
 	}
 
 	// Staged credentials should contain only [prod], not [default] or [dev].
@@ -317,6 +324,7 @@ func TestSetup_AllMode(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -324,24 +332,29 @@ func TestSetup_AllMode(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Should mount the entire ~/.aws directory.
+	// Should mount the entire ~/.aws directory at the staging path.
 	joined := strings.Join(dockerArgs, " ")
 	awsDir := filepath.Join(home, ".aws")
-	if !strings.Contains(joined, awsDir+":/home/testuser/.aws:ro") {
-		t.Errorf("AllMode should mount entire aws dir, got: %v", dockerArgs)
+	if !strings.Contains(joined, awsDir+":/mnt/mittens-creds-aws:ro") {
+		t.Errorf("AllMode should mount aws dir at staging path, got: %v", dockerArgs)
+	}
+
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-aws:.aws" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-aws:.aws\"]", credStagingDirs)
 	}
 }
 
@@ -352,6 +365,7 @@ func TestSetup_SourceProfileAutoInclude(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -359,13 +373,14 @@ func TestSetup_SourceProfileAutoInclude(t *testing.T) {
 		Args:    []string{"role-user"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
@@ -387,6 +402,7 @@ func TestSetup_SSOCacheCopied(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -394,13 +410,14 @@ func TestSetup_SSOCacheCopied(t *testing.T) {
 		Args:    []string{"sso-user"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
@@ -421,6 +438,7 @@ func TestSetup_CLICacheCopied(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -428,13 +446,14 @@ func TestSetup_CLICacheCopied(t *testing.T) {
 		Args:    []string{"prod"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
@@ -454,6 +473,7 @@ func TestSetup_NoProfiles(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "aws",
@@ -461,13 +481,14 @@ func TestSetup_NoProfiles(t *testing.T) {
 		Args:    nil, // no profiles selected
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {

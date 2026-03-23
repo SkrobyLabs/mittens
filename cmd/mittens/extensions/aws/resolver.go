@@ -28,7 +28,7 @@ func init() {
 
 // listProfiles reads ~/.aws/credentials and ~/.aws/config and returns a
 // deduplicated, sorted list of profile names.
-func listProfiles() ([]string, error) {
+func listProfiles() ([]registry.ListItem, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -55,7 +55,11 @@ func listProfiles() ([]string, error) {
 	}
 
 	sort.Strings(profiles)
-	return profiles, nil
+	var items []registry.ListItem
+	for _, p := range profiles {
+		items = append(items, registry.ListItem{Label: p, Value: p})
+	}
+	return items, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -69,13 +73,16 @@ func setup(ctx *registry.SetupContext) error {
 	home := ctx.Home
 	awsDir := filepath.Join(home, ".aws")
 
+	credStagingPath := "/mnt/mittens-creds-aws"
+
 	// --aws-all: mount entire directory
 	if ext.AllMode {
 		if info, err := os.Stat(awsDir); err == nil && info.IsDir() {
-			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", awsDir+":"+ctx.ContainerHome+"/.aws:ro")
-			fmt.Fprintf(os.Stderr, "[mittens] Mounting AWS credentials (all profiles)\n")
+			*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", awsDir+":"+credStagingPath+":ro")
+			*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.aws")
+			registry.LogInfo("Mounting AWS credentials (all profiles)")
 		} else {
-			fmt.Fprintf(os.Stderr, "[mittens] WARN: AWS credentials requested but %s does not exist\n", awsDir)
+			registry.LogWarn("AWS credentials requested but %s does not exist", awsDir)
 		}
 		return nil
 	}
@@ -120,7 +127,7 @@ func setup(ctx *registry.SetupContext) error {
 	}
 	for _, p := range ext.Args {
 		if !known[p] {
-			fmt.Fprintf(os.Stderr, "[mittens] WARN: AWS profile '%s' not found in credentials or config\n", p)
+			registry.LogWarn("AWS profile '%s' not found in credentials or config", p)
 		}
 	}
 
@@ -159,7 +166,7 @@ func setup(ctx *registry.SetupContext) error {
 				destSSO := filepath.Join(staging, "sso", "cache")
 				if err := os.MkdirAll(filepath.Dir(destSSO), 0755); err == nil {
 					if err := fileutil.CopyDir(ssoDir, destSSO); err != nil {
-						fmt.Fprintf(os.Stderr, "[mittens] WARN: Failed to copy SSO cache: %v\n", err)
+						registry.LogWarn("Failed to copy SSO cache: %v", err)
 					}
 				}
 			}
@@ -172,13 +179,14 @@ func setup(ctx *registry.SetupContext) error {
 		destCache := filepath.Join(staging, "cli", "cache")
 		if err := os.MkdirAll(filepath.Dir(destCache), 0755); err == nil {
 			if err := fileutil.CopyDir(cliCache, destCache); err != nil {
-				fmt.Fprintf(os.Stderr, "[mittens] WARN: Failed to copy CLI cache: %v\n", err)
+				registry.LogWarn("Failed to copy CLI cache: %v", err)
 			}
 		}
 	}
 
-	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+ctx.ContainerHome+"/.aws:ro")
-	fmt.Fprintf(os.Stderr, "[mittens] AWS profiles: %s\n", strings.Join(ext.Args, ", "))
+	*ctx.DockerArgs = append(*ctx.DockerArgs, "-v", staging+":"+credStagingPath+":ro")
+	*ctx.CredStagingDirs = append(*ctx.CredStagingDirs, credStagingPath+":.aws")
+	registry.LogInfo("AWS profiles: %s", strings.Join(ext.Args, ", "))
 	return nil
 }
 
@@ -311,8 +319,8 @@ func checkSourceProfiles(configPath string, profiles []string) []string {
 			if m := sourceRe.FindStringSubmatch(line); m != nil {
 				sourceProfile := m[1]
 				if !wanted[sourceProfile] {
-					fmt.Fprintf(os.Stderr, "[mittens] WARN: Profile '%s' has source_profile '%s' which is not in the requested set\n", currentSection, sourceProfile)
-					fmt.Fprintf(os.Stderr, "[mittens] WARN:   Including '%s' automatically. Add --aws %s explicitly to silence this.\n", sourceProfile, sourceProfile)
+					registry.LogWarn("Profile '%s' has source_profile '%s' which is not in the requested set", currentSection, sourceProfile)
+					registry.LogWarn("  Including '%s' automatically. Add --aws %s explicitly to silence this.", sourceProfile, sourceProfile)
 					wanted[sourceProfile] = true
 					extra = append(extra, sourceProfile)
 				}

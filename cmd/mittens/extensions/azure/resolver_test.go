@@ -71,7 +71,7 @@ func TestFilterAzureProfile(t *testing.T) {
 	os.WriteFile(srcPath, srcData, 0644)
 
 	destPath := filepath.Join(tmp, "filtered.json")
-	if err := filterAzureProfile(srcPath, destPath, []string{"dev", "staging"}); err != nil {
+	if err := filterAzureProfile(srcPath, destPath, []string{"dev-id", "staging-id"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestFilterAzureProfile_WithBOM(t *testing.T) {
 	os.WriteFile(srcPath, bomData, 0644)
 
 	destPath := filepath.Join(tmp, "filtered.json")
-	if err := filterAzureProfile(srcPath, destPath, []string{"only"}); err != nil {
+	if err := filterAzureProfile(srcPath, destPath, []string{"only-id"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,26 +191,33 @@ func TestSetup_FilteredSubscriptions(t *testing.T) {
 	ext := &registry.Extension{
 		Name:    "azure",
 		Enabled: true,
-		Args:    []string{"dev", "staging"},
+		Args:    []string{"dev-id", "staging-id"},
 	}
+	var credStagingDirs []string
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Docker args should mount staging dir.
+	// Docker args should mount staging dir at the credential staging path.
 	joined := strings.Join(dockerArgs, " ")
-	if !strings.Contains(joined, staging+":/home/testuser/.azure:ro") {
-		t.Errorf("docker args missing mount, got: %v", dockerArgs)
+	if !strings.Contains(joined, staging+":/mnt/mittens-creds-azure:ro") {
+		t.Errorf("docker args missing staging mount, got: %v", dockerArgs)
+	}
+
+	// CredStagingDirs should have an entry.
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-azure:.azure" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-azure:.azure\"]", credStagingDirs)
 	}
 
 	// Filtered profile should have only dev and staging.
@@ -256,20 +263,22 @@ func TestSetup_SupportingFilesCopied(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "azure",
 		Enabled: true,
-		Args:    []string{"prod"},
+		Args:    []string{"prod-id"},
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    staging,
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      staging,
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
@@ -295,6 +304,7 @@ func TestSetup_AllMode_Azure(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "azure",
@@ -302,23 +312,34 @@ func TestSetup_AllMode_Azure(t *testing.T) {
 		AllMode: true,
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 
+	// AllMode now copies to staging dir (to allow MSAL cache override).
 	joined := strings.Join(dockerArgs, " ")
-	azureDir := filepath.Join(home, ".azure")
-	if !strings.Contains(joined, azureDir+":/home/testuser/.azure:ro") {
-		t.Errorf("AllMode should mount entire azure dir, got: %v", dockerArgs)
+	if !strings.Contains(joined, ":/mnt/mittens-creds-azure:ro") {
+		t.Errorf("AllMode should mount staging at cred staging path, got: %v", dockerArgs)
+	}
+
+	if len(credStagingDirs) != 1 || credStagingDirs[0] != "/mnt/mittens-creds-azure:.azure" {
+		t.Errorf("credStagingDirs = %v, want [\"/mnt/mittens-creds-azure:.azure\"]", credStagingDirs)
+	}
+
+	// The staging dir should contain the azureProfile.json (copied from fixture).
+	stagingDir := ctx.StagingDir
+	if _, err := os.Stat(filepath.Join(stagingDir, "azureProfile.json")); err != nil {
+		t.Error("azureProfile.json should be copied to staging dir")
 	}
 }
 
@@ -328,6 +349,7 @@ func TestSetup_NoSubscriptions(t *testing.T) {
 	var dockerArgs []string
 	var firewallExtra []string
 	var tempDirs []string
+	var credStagingDirs []string
 
 	ext := &registry.Extension{
 		Name:    "azure",
@@ -335,13 +357,14 @@ func TestSetup_NoSubscriptions(t *testing.T) {
 		Args:    nil,
 	}
 	ctx := &registry.SetupContext{
-		ContainerHome: "/home/testuser",
-		Home:          home,
-		Extension:     ext,
-		DockerArgs:    &dockerArgs,
-		FirewallExtra: &firewallExtra,
-		TempDirs:      &tempDirs,
-		StagingDir:    t.TempDir(),
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
 	}
 
 	if err := setup(ctx); err != nil {

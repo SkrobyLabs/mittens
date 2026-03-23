@@ -44,7 +44,7 @@ func setup(ctx *registry.SetupContext) error {
 	// Try to enrich hosts.yml with tokens from the host keyring.
 	hostsPath := filepath.Join(staging, "hosts.yml")
 	if err := enrichHostsWithTokens(hostsPath); err != nil {
-		fmt.Fprintf(os.Stderr, "[mittens] gh: token extraction: %v (gh may not authenticate inside container)\n", err)
+		registry.LogWarn("gh: token extraction: %v (gh may not authenticate inside container)", err)
 	}
 
 	*ctx.DockerArgs = append(*ctx.DockerArgs,

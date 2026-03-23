@@ -24,6 +24,11 @@ LDFLAGS  := -s -w \
 	-X '$(MODULE)/cmd/mittens.commit=$(COMMIT)' \
 	-X '$(MODULE)/cmd/mittens.date=$(DATE)'
 
+# Disable Go's automatic VCS stamping — version info is already injected via
+# LDFLAGS above, and the automatic stamping can fail in some environments
+# (worktrees, detached HEAD, cross-compilation).
+export GOFLAGS := -buildvcs=false
+
 # Install destination: ~/.local on Linux (no sudo), /usr/local on macOS
 UNAME_S  := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)

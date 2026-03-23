@@ -1,8 +1,6 @@
 package helm
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
@@ -19,7 +17,7 @@ func setup(ctx *registry.SetupContext) error {
 	hosts := registry.ExtractUniqueHosts(reposFile, `(?m)^\s*-?\s*url:\s*(https?://\S+)`)
 	if len(hosts) > 0 {
 		*ctx.FirewallExtra = append(*ctx.FirewallExtra, hosts...)
-		fmt.Fprintf(os.Stderr, "[mittens] helm: added %d custom repo domain(s) to firewall\n", len(hosts))
+		registry.LogInfo("helm: added %d custom repo domain(s) to firewall", len(hosts))
 	}
 	return nil
 }

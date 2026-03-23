@@ -15,8 +15,10 @@ flags:
 
 firewall:
   - "login.microsoftonline.com"
+  - "login.windows.net"
   - "management.azure.com"
   - "graph.microsoft.com"
+  - "prices.azure.com"
 
 build:
   script: "azure.sh"

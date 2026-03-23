@@ -72,14 +72,47 @@ func readConfigLines(path string) ([]string, error) {
 	return lines, nil
 }
 
-// splitConfigFlags splits each line into whitespace-delimited tokens so that
-// "--go 1.24" becomes ["--go", "1.24"].
+// splitConfigFlags splits each line into tokens, respecting double-quoted values
+// so that `--azure "Quix ISV Programme"` becomes ["--azure", "Quix ISV Programme"].
+// Unquoted tokens are split on whitespace.
 func splitConfigFlags(lines []string) []string {
 	var flags []string
 	for _, line := range lines {
-		flags = append(flags, strings.Fields(line)...)
+		flags = append(flags, shellSplit(line)...)
 	}
 	return flags
+}
+
+// shellSplit splits a string into tokens on whitespace, respecting double-quoted
+// segments. Quotes are stripped from the result. Backslash-escaped quotes within
+// a quoted segment are preserved.
+func shellSplit(s string) []string {
+	var tokens []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' && !inQuote:
+			inQuote = true
+		case c == '"' && inQuote:
+			inQuote = false
+		case c == '\\' && inQuote && i+1 < len(s) && s[i+1] == '"':
+			cur.WriteByte('"')
+			i++
+		case (c == ' ' || c == '\t') && !inQuote:
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens
 }
 
 // writeConfigFile writes lines to path with a header comment, creating

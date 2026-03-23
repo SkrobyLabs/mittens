@@ -23,7 +23,7 @@ func init() {
 
 // listContexts runs `kubectl config get-contexts -o name` and returns
 // the context names sorted alphabetically.
-func listContexts() ([]string, error) {
+func listContexts() ([]registry.ListItem, error) {
 	out, err := exec.Command("kubectl", "config", "get-contexts", "-o", "name").Output()
 	if err != nil {
 		return nil, fmt.Errorf("kubectl config get-contexts: %w", err)
@@ -41,7 +41,11 @@ func listContexts() ([]string, error) {
 		}
 	}
 	sort.Strings(contexts)
-	return contexts, nil
+	var items []registry.ListItem
+	for _, c := range contexts {
+		items = append(items, registry.ListItem{Label: c, Value: c})
+	}
+	return items, nil
 }
 
 // setup creates a merged, filtered kubeconfig containing only the requested

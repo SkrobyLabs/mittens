@@ -42,29 +42,37 @@ var EmbeddedDevConf []byte
 
 // listDomains reads the firewall.conf file and returns a sorted list of
 // whitelisted domain names (one per line, comments stripped).
-func listDomains() ([]string, error) {
+func listDomains() ([]registry.ListItem, error) {
+	var domains []string
+	var err error
+
 	// In DevMode, use the developer-friendly conf if available.
 	if DevMode && len(EmbeddedDevConf) > 0 {
-		return parseFirewallDomains(string(EmbeddedDevConf))
-	}
+		domains, err = parseFirewallDomains(string(EmbeddedDevConf))
+	} else {
+		path := resolveConfPath("")
 
-	path := resolveConfPath("")
-
-	// Fall back to parsing the embedded content directly (no temp file
-	// needed here since we only need the domain list, not a mount path).
-	if path == "" || !fileExists(path) {
-		if len(EmbeddedConf) > 0 {
-			return parseFirewallDomains(string(EmbeddedConf))
+		// Fall back to parsing the embedded content directly (no temp file
+		// needed here since we only need the domain list, not a mount path).
+		if path == "" || !fileExists(path) {
+			if len(EmbeddedConf) > 0 {
+				domains, err = parseFirewallDomains(string(EmbeddedConf))
+			} else {
+				return nil, fmt.Errorf("firewall.conf not found")
+			}
+		} else {
+			domains, err = readFirewallDomains(path)
 		}
-		return nil, fmt.Errorf("firewall.conf not found")
 	}
-
-	domains, err := readFirewallDomains(path)
 	if err != nil {
 		return nil, err
 	}
 	sort.Strings(domains)
-	return domains, nil
+	var items []registry.ListItem
+	for _, d := range domains {
+		items = append(items, registry.ListItem{Label: d, Value: d})
+	}
+	return items, nil
 }
 
 // setup mounts the firewall configuration file into the container and sets

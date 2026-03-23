@@ -15,8 +15,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ListResolver returns available values for an extension (e.g., AWS profile names).
-type ListResolver func() ([]string, error)
+// ANSI color codes matching the main package's logInfo/logWarn style.
+const (
+	colorReset  = "\033[0m"
+	colorCyan   = "\033[36m"
+	colorYellow = "\033[33m"
+)
+
+// LogInfo prints an informational message to stderr with the [mittens] prefix
+// in cyan, matching the main package's log style.
+func LogInfo(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, colorCyan+"[mittens]"+colorReset+" "+format+"\n", args...)
+}
+
+// LogWarn prints a warning message to stderr with the [mittens] prefix in yellow.
+func LogWarn(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, colorYellow+"[mittens] Warning: "+colorReset+format+"\n", args...)
+}
+
+// ListResolver returns available items for an extension (e.g., AWS profile names).
+type ListResolver func() ([]ListItem, error)
 
 // SetupResolver performs custom setup (filtered credential mounting, etc.).
 type SetupResolver func(ctx *SetupContext) error
@@ -35,7 +53,7 @@ var resolvers = make(map[string]*Registration)
 // overriding a built-in), the new registration replaces it with a warning.
 func Register(name string, r *Registration) {
 	if _, exists := resolvers[name]; exists {
-		fmt.Fprintf(os.Stderr, "[mittens] Warning: overriding resolver for extension %q\n", name)
+		LogWarn("overriding resolver for extension %q", name)
 	}
 	resolvers[name] = r
 }
@@ -105,12 +123,12 @@ func LoadAllExtensions(bundledDir, userDir string, embeddedFS fs.FS) ([]*Extensi
 			if hasYAML {
 				data, err := os.ReadFile(yamlPath)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[mittens] Warning: external extension %q: %v\n", entry.Name(), err)
+					LogWarn("external extension %q: %v", entry.Name(), err)
 					continue
 				}
 				var yamlExt Extension
 				if err := yaml.Unmarshal(data, &yamlExt); err != nil {
-					fmt.Fprintf(os.Stderr, "[mittens] Warning: external extension %q bad YAML: %v\n", entry.Name(), err)
+					LogWarn("external extension %q bad YAML: %v", entry.Name(), err)
 					continue
 				}
 				ext = &yamlExt
@@ -118,12 +136,12 @@ func LoadAllExtensions(bundledDir, userDir string, embeddedFS fs.FS) ([]*Extensi
 				// Plugin-only: must run plugin manifest to get the Extension struct.
 				out, err := exec.Command(pluginPath, "manifest").Output()
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[mittens] Warning: external extension %q manifest failed: %v\n", entry.Name(), err)
+					LogWarn("external extension %q manifest failed: %v", entry.Name(), err)
 					continue
 				}
 				var pluginExt Extension
 				if err := json.Unmarshal(out, &pluginExt); err != nil {
-					fmt.Fprintf(os.Stderr, "[mittens] Warning: external extension %q bad manifest: %v\n", entry.Name(), err)
+					LogWarn("external extension %q bad manifest: %v", entry.Name(), err)
 					continue
 				}
 				ext = &pluginExt
@@ -136,14 +154,22 @@ func LoadAllExtensions(bundledDir, userDir string, embeddedFS fs.FS) ([]*Extensi
 				capturedPath := pluginPath
 				extName := ext.Name
 				Register(extName, &Registration{
-					List: func() ([]string, error) {
+					List: func() ([]ListItem, error) {
 						out, err := exec.Command(capturedPath, "list").Output()
 						if err != nil {
 							return nil, err
 						}
-						var items []string
-						if err := json.Unmarshal(out, &items); err != nil {
+						// Support both []string (legacy) and []ListItem formats.
+						var items []ListItem
+						if err := json.Unmarshal(out, &items); err == nil && len(items) > 0 && items[0].Value != "" {
+							return items, nil
+						}
+						var strings []string
+						if err := json.Unmarshal(out, &strings); err != nil {
 							return nil, err
+						}
+						for _, s := range strings {
+							items = append(items, ListItem{Label: s, Value: s})
 						}
 						return items, nil
 					},
