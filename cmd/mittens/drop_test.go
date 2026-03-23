@@ -197,6 +197,97 @@ func TestSplitPastePaths_NonAbsolutePath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Windows path conversion
+// ---------------------------------------------------------------------------
+
+func TestWindowsToWSLPath(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{`C:\Users\foo\file.txt`, `/mnt/c/Users/foo/file.txt`},
+		{`D:\project\src\main.go`, `/mnt/d/project/src/main.go`},
+		{`c:\lowercase\drive`, `/mnt/c/lowercase/drive`},
+		{"/unix/path", "/unix/path"},           // passthrough
+		{"relative/path", "relative/path"},     // passthrough
+		{"C:", "C:"},                           // too short, passthrough
+		{`C:\`, `/mnt/c/`},                    // root only
+	}
+	for _, tc := range tests {
+		got := windowsToWSLPath(tc.input)
+		if got != tc.want {
+			t.Errorf("windowsToWSLPath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestSplitPastePaths_WindowsPath(t *testing.T) {
+	paths := splitPastePaths(`C:\Users\foo\file.txt`)
+	if len(paths) != 1 || paths[0] != `C:\Users\foo\file.txt` {
+		t.Errorf("splitPastePaths = %v, want [C:\\Users\\foo\\file.txt]", paths)
+	}
+}
+
+func TestSplitPastePaths_WindowsMultiple(t *testing.T) {
+	paths := splitPastePaths(`C:\a.txt D:\b.txt`)
+	if len(paths) != 2 {
+		t.Fatalf("splitPastePaths = %v, want 2 paths", paths)
+	}
+}
+
+func TestPathMapper_Translate_WindowsPath(t *testing.T) {
+	m := &PathMapper{
+		mappings: []pathMapping{
+			{"/mnt/c/Source/project", "/workspace"},
+		},
+	}
+	got := m.Translate(`C:\Source\project\src\main.go`)
+	want := "/workspace/src/main.go"
+	if got != want {
+		t.Errorf("Translate() = %q, want %q", got, want)
+	}
+}
+
+func TestPathMapper_Translate_QuotedWindowsPathWithSpaces(t *testing.T) {
+	dropDir := t.TempDir()
+	// Create a fake file at the WSL-translated path to test drop zone copy.
+	// In real WSL, /mnt/c/... would exist — here we just test the translation logic.
+	m := &PathMapper{
+		mappings: []pathMapping{
+			{"/mnt/c/Source/project", "/workspace"},
+		},
+		dropDir:          dropDir,
+		containerDropDir: "/tmp/mittens-drops",
+	}
+	// Quoted Windows path with spaces — should unquote, then convert to WSL path.
+	got := m.Translate(`"C:\Users\ceeme\Pictures\Screenshot 2026-03-21 014136.png"`)
+	// This path is outside all mappings and the file doesn't exist on disk,
+	// so it passes through as the WSL-translated path.
+	want := "/mnt/c/Users/ceeme/Pictures/Screenshot 2026-03-21 014136.png"
+	if got != want {
+		t.Errorf("Translate() = %q, want %q", got, want)
+	}
+}
+
+func TestDropProxy_WindowsPathPaste(t *testing.T) {
+	paste := string(pasteStart) + `C:\Source\project\file.go` + string(pasteEnd)
+	mapper := &PathMapper{
+		mappings: []pathMapping{
+			{"/mnt/c/Source/project", "/workspace"},
+		},
+	}
+	proxy := NewDropProxy(strings.NewReader(paste), mapper)
+	out, err := io.ReadAll(proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(pasteStart) + "/workspace/file.go" + string(pasteEnd)
+	if string(out) != want {
+		t.Errorf("output = %q, want %q", string(out), want)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DropProxy — end-to-end
 // ---------------------------------------------------------------------------
 

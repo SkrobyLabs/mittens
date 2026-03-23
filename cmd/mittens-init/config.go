@@ -43,6 +43,8 @@ type config struct {
 	NoNotify           bool
 	EnableX11Clipboard bool
 	WSLClipboard       bool
+	Shell              bool
+	PrintMode          bool
 
 	// Broker
 	BrokerPort  string
@@ -110,6 +112,8 @@ func loadConfig() *config {
 		NoNotify:           jcfg.Flags.NoNotify,
 		EnableX11Clipboard: jcfg.Flags.EnableX11Clipboard,
 		WSLClipboard:       jcfg.Flags.WSLClipboard,
+		Shell:              jcfg.Flags.Shell,
+		PrintMode:          jcfg.Flags.PrintMode,
 
 		BrokerPort:  fmt.Sprintf("%d", jcfg.Broker.Port),
 		BrokerSock:  jcfg.Broker.Sock,

@@ -67,6 +67,8 @@ type Flags struct {
 	NoNotify           bool `json:"noNotify,omitempty"`
 	EnableX11Clipboard bool `json:"enableX11Clipboard,omitempty"`
 	WSLClipboard       bool `json:"wslClipboard,omitempty"`
+	Shell              bool `json:"shell,omitempty"`
+	PrintMode          bool `json:"printMode,omitempty"`
 }
 
 // BrokerConfig holds connection details for the host credential broker.

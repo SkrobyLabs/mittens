@@ -23,6 +23,25 @@ var (
 
 const maxDropFileSize = 100 << 20 // 100 MB
 
+// isWindowsDrivePath returns true if s looks like a Windows absolute path (e.g. C:\...).
+func isWindowsDrivePath(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	return ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) &&
+		s[1] == ':' && s[2] == '\\'
+}
+
+// windowsToWSLPath converts a Windows path like C:\Users\foo to /mnt/c/Users/foo.
+func windowsToWSLPath(p string) string {
+	if !isWindowsDrivePath(p) {
+		return p
+	}
+	drive := strings.ToLower(string(p[0]))
+	rest := strings.ReplaceAll(p[3:], "\\", "/")
+	return "/mnt/" + drive + "/" + rest
+}
+
 // pathMapping maps a host path prefix to a container path prefix.
 type pathMapping struct {
 	hostPrefix      string
@@ -52,6 +71,16 @@ func (m *PathMapper) Translate(hostPath string) string {
 		}
 	}
 
+	// Convert Windows paths (C:\...) to WSL paths (/mnt/c/...) after unquoting.
+	cleaned = windowsToWSLPath(cleaned)
+
+	// Use the cleaned path as the fallback (not the original) when a Windows
+	// path was converted — the raw C:\... is useless inside the container.
+	fallback := hostPath
+	if cleaned != hostPath && strings.HasPrefix(cleaned, "/mnt/") {
+		fallback = cleaned
+	}
+
 	// Try prefix mappings (longest match first — mappings should be ordered).
 	for _, pm := range m.mappings {
 		if strings.HasPrefix(cleaned, pm.hostPrefix) {
@@ -67,15 +96,15 @@ func (m *PathMapper) Translate(hostPath string) string {
 
 	// Path is outside all mounts — copy to drop zone if it exists on disk.
 	if m.dropDir == "" {
-		return hostPath
+		return fallback
 	}
 
 	info, err := os.Stat(cleaned)
 	if err != nil || info.IsDir() {
-		return hostPath // not a file, pass through unchanged
+		return fallback // not a file, pass through unchanged
 	}
 	if info.Size() > maxDropFileSize {
-		return hostPath // too large, skip
+		return fallback // too large, skip
 	}
 
 	dst := filepath.Join(m.dropDir, filepath.Base(cleaned))
@@ -281,7 +310,8 @@ func (d *DropProxy) translatePaths(content string) string {
 
 // splitPastePaths extracts potential absolute file paths from pasted content.
 // Handles:
-// - Simple paths: /Users/foo/bar.png
+// - Unix paths: /Users/foo/bar.png
+// - Windows paths: C:\Users\foo\bar.png (WSL drag-and-drop)
 // - Backslash-escaped spaces: /Users/foo/my\ file.png
 // - Quoted paths: '/Users/foo/my file.png' or "/Users/foo/my file.png"
 func splitPastePaths(content string) []string {
@@ -300,9 +330,8 @@ func splitPastePaths(content string) []string {
 			end := strings.IndexByte(content[i+1:], quote)
 			if end >= 0 {
 				path := content[i : i+2+end]
-				// Check if the inner content starts with /
 				inner := content[i+1 : i+1+end]
-				if len(inner) > 0 && inner[0] == '/' {
+				if len(inner) > 0 && (inner[0] == '/' || isWindowsDrivePath(inner)) {
 					paths = append(paths, path)
 				}
 				i += 2 + end
@@ -310,15 +339,27 @@ func splitPastePaths(content string) []string {
 			}
 		}
 
-		// Unquoted path starting with /.
+		// Unquoted path starting with / (Unix).
 		if content[i] == '/' {
-			// Consume until unescaped whitespace or end.
 			start := i
 			for i < len(content) {
 				if content[i] == '\\' && i+1 < len(content) && content[i+1] == ' ' {
 					i += 2 // skip escaped space
 					continue
 				}
+				if content[i] == ' ' || content[i] == '\t' || content[i] == '\n' || content[i] == '\r' {
+					break
+				}
+				i++
+			}
+			paths = append(paths, content[start:i])
+			continue
+		}
+
+		// Windows drive-letter path (C:\...).
+		if isWindowsDrivePath(content[i:]) {
+			start := i
+			for i < len(content) {
 				if content[i] == ' ' || content[i] == '\t' || content[i] == '\n' || content[i] == '\r' {
 					break
 				}
@@ -389,3 +430,4 @@ func StartPTYProxy(proxy *DropProxy) (slave *os.File, cleanup func(), err error)
 
 	return slave, cleanup, nil
 }
+
