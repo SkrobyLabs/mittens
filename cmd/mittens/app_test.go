@@ -662,7 +662,7 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	}
 
 	// Workspace mount.
-	if !argPairExists(args, "-v", "/tmp/workspace:/workspace") {
+	if !argPairExists(args, "-v", "/tmp/workspace:/tmp/workspace") {
 		t.Error("missing workspace mount")
 	}
 
@@ -767,7 +767,7 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 		t.Error("missing tasks mount")
 	}
 
-	// HostWorkspace should be set when EffectiveWorkspace != "/workspace".
+	// HostWorkspace is always set to EffectiveWorkspace.
 	cfg := extractInitConfig(t, args)
 	if cfg.HostWorkspace != workspace {
 		t.Errorf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
@@ -1172,7 +1172,7 @@ func TestAssembleDockerArgs_ExtraDirsDedupWorkspace(t *testing.T) {
 			mountCount++
 		}
 	}
-	// Expect exactly 1 mount (the primary workspace mount at /workspace), not 2.
+	// Expect exactly 1 mount (the primary workspace identity mount), not 2.
 	if mountCount != 1 {
 		t.Errorf("expected 1 mount for workspace dir, got %d", mountCount)
 	}

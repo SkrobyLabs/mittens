@@ -133,7 +133,7 @@ RUN chmod +x /usr/local/bin/mittens-init && \
 # privilege drop via syscall.Setuid/Setgid, which is needed for optional
 # DinD (dockerd must start as root) and the network firewall (iptables).
 
-WORKDIR /workspace
+WORKDIR /home/claude
 
 ENV TERM=xterm-256color
 ENV SHELL=/bin/bash

@@ -57,7 +57,7 @@ type App struct {
 	// Computed state
 	Workspace          string // git root or cwd
 	EffectiveWorkspace string // worktree path if --worktree, else same as Workspace
-	WorkspaceMountSrc  string // what actually gets mounted at /workspace
+	WorkspaceMountSrc  string // what actually gets bind-mounted into the container (identity mount)
 	Extensions         []*registry.Extension
 	Credentials        *CredentialManager
 	ContainerName      string
@@ -1102,8 +1102,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "--hostname", a.Provider.ContainerHostname)
 	}
 
-	// Primary workspace mount.
-	args = append(args, "-v", a.WorkspaceMountSrc+":/workspace")
+	// Primary workspace mount (identity: host path = container path).
+	args = append(args, "-v", a.WorkspaceMountSrc+":"+a.WorkspaceMountSrc)
 
 	// AI config staging (read-only). Providers that mount the whole config
 	// directory for session persistence should not also mount the same host
@@ -1166,11 +1166,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
 
-		sessionWS := a.EffectiveWorkspace
-		if sessionWS != "" && sessionWS != "/workspace" {
-			initCfg.HostWorkspace = sessionWS
-			args = append(args, "-v", a.WorkspaceMountSrc+":"+sessionWS)
-		}
+		initCfg.HostWorkspace = a.EffectiveWorkspace
 	}
 
 	// Extra directory mounts.
@@ -1417,11 +1413,11 @@ func (a *App) newStdinProxy() (stdin *os.File, cleanup func()) {
 		containerDropDir: "/tmp/mittens-drops",
 	}
 
-	// Primary workspace mapping.
+	// Primary workspace mapping (identity mount: host path = container path).
 	if a.WorkspaceMountSrc != "" {
 		mapper.mappings = append(mapper.mappings, pathMapping{
 			hostPrefix:      a.WorkspaceMountSrc,
-			containerPrefix: "/workspace",
+			containerPrefix: a.WorkspaceMountSrc,
 		})
 	}
 

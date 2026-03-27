@@ -232,7 +232,9 @@ func resolveMCPDomains(cfg *config) []string {
 		// Collect all MCP server names from config files.
 		claudeJSON := cfg.ConfigMount + "/" + cfg.AIPrefsFile
 		serverList = append(serverList, extractMCPServerNames(claudeJSON, cfg.AIMCPServersKey)...)
-		serverList = append(serverList, extractMCPServerNames("/workspace/.mcp.json", "mcpServers")...)
+		if cfg.HostWorkspace != "" {
+			serverList = append(serverList, extractMCPServerNames(cfg.HostWorkspace+"/.mcp.json", "mcpServers")...)
+		}
 	} else {
 		serverList = strings.Split(cfg.MCP, ",")
 	}

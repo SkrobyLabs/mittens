@@ -81,8 +81,8 @@ func runPhase2(cfg *config) error {
 		}
 	}
 
-	// cd to host workspace path.
-	if cfg.HostWorkspace != "" && cfg.HostWorkspace != "/workspace" {
+	// cd to host workspace path (always the real path with identity mount).
+	if cfg.HostWorkspace != "" {
 		os.Chdir(cfg.HostWorkspace)
 	}
 
@@ -251,10 +251,7 @@ func setupTrustedDirs(cfg *config) {
 		return
 	}
 
-	dirs := []string{"/workspace"}
-	if cfg.HostWorkspace != "" && cfg.HostWorkspace != "/workspace" {
-		dirs = append(dirs, cfg.HostWorkspace)
-	}
+	dirs := []string{cfg.HostWorkspace}
 	dirs = append(dirs, cfg.ExtraDirs...)
 
 	settingsFile := cfg.settingsFilePath()
@@ -282,8 +279,8 @@ func setupTrustedDirsFile(cfg *config) {
 		return
 	}
 
-	trust := map[string]string{"/workspace": "TRUST_FOLDER"}
-	if cfg.HostWorkspace != "" && cfg.HostWorkspace != "/workspace" {
+	trust := map[string]string{}
+	if cfg.HostWorkspace != "" {
 		trust[cfg.HostWorkspace] = "TRUST_FOLDER"
 	}
 	for _, d := range cfg.ExtraDirs {

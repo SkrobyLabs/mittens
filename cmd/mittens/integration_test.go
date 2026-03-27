@@ -234,7 +234,7 @@ func TestDockerRun_ConfigCopy(t *testing.T) {
 	// Create a .claude dir with settings.json.
 	claudeDir := filepath.Join(tmp, ".claude")
 	os.MkdirAll(claudeDir, 0o755)
-	settings := `{"trustedDirectories":["/workspace"]}`
+	settings := `{"trustedDirectories":["/tmp/test-ws"]}`
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0644)
 
 	runArgs := []string{
@@ -337,10 +337,10 @@ func TestDockerRun_WorkspaceMount(t *testing.T) {
 	os.WriteFile(filepath.Join(tmp, "marker.txt"), []byte("mittens-integration"), 0644)
 
 	runArgs := []string{
-		"-v", tmp + ":/workspace",
+		"-v", tmp + ":" + tmp,
 	}
 
-	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat /workspace/marker.txt")
+	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat "+tmp+"/marker.txt")
 
 	if out != "mittens-integration" {
 		t.Errorf("marker content = %q, want 'mittens-integration'", out)

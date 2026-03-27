@@ -16,12 +16,12 @@ import (
 func TestPathMapper_Translate_WorkspaceMapping(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 
-	got := m.Translate("/Users/peter/project/src/main.go")
-	want := "/workspace/src/main.go"
+	got := m.Translate("/home/user/project/src/main.go")
+	want := "/home/user/project/src/main.go"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -30,12 +30,12 @@ func TestPathMapper_Translate_WorkspaceMapping(t *testing.T) {
 func TestPathMapper_Translate_ExactRoot(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 
-	got := m.Translate("/Users/peter/project")
-	want := "/workspace"
+	got := m.Translate("/home/user/project")
+	want := "/home/user/project"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -44,13 +44,13 @@ func TestPathMapper_Translate_ExactRoot(t *testing.T) {
 func TestPathMapper_Translate_ExtraDir(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
-			{"/Users/peter/other", "/Users/peter/other"},
+			{"/home/user/project", "/home/user/project"},
+			{"/home/user/other", "/home/user/other"},
 		},
 	}
 
-	got := m.Translate("/Users/peter/other/file.txt")
-	want := "/Users/peter/other/file.txt"
+	got := m.Translate("/home/user/other/file.txt")
+	want := "/home/user/other/file.txt"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -59,12 +59,12 @@ func TestPathMapper_Translate_ExtraDir(t *testing.T) {
 func TestPathMapper_Translate_EscapedSpaces(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/my project", "/workspace"},
+			{"/home/user/my project", "/home/user/my project"},
 		},
 	}
 
-	got := m.Translate("/Users/peter/my\\ project/src/main.go")
-	want := "/workspace/src/main.go"
+	got := m.Translate("/home/user/my\\ project/src/main.go")
+	want := "/home/user/my\\ project/src/main.go"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -73,12 +73,12 @@ func TestPathMapper_Translate_EscapedSpaces(t *testing.T) {
 func TestPathMapper_Translate_QuotedPath(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/my project", "/workspace"},
+			{"/home/user/my project", "/home/user/my project"},
 		},
 	}
 
-	got := m.Translate("'/Users/peter/my project/file.txt'")
-	want := "/workspace/file.txt"
+	got := m.Translate("'/home/user/my project/file.txt'")
+	want := "/home/user/my project/file.txt"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -91,7 +91,7 @@ func TestPathMapper_Translate_UnmappedExistingFile(t *testing.T) {
 	os.WriteFile(srcFile, []byte("fake-png"), 0644)
 
 	m := &PathMapper{
-		mappings:         []pathMapping{{"/Users/peter/project", "/workspace"}},
+		mappings:         []pathMapping{{"/home/user/project", "/home/user/project"}},
 		dropDir:          dropDir,
 		containerDropDir: "/tmp/mittens-drops",
 	}
@@ -115,7 +115,7 @@ func TestPathMapper_Translate_UnmappedExistingFile(t *testing.T) {
 
 func TestPathMapper_Translate_UnmappedNonExistent(t *testing.T) {
 	m := &PathMapper{
-		mappings:         []pathMapping{{"/Users/peter/project", "/workspace"}},
+		mappings:         []pathMapping{{"/home/user/project", "/home/user/project"}},
 		dropDir:          t.TempDir(),
 		containerDropDir: "/tmp/mittens-drops",
 	}
@@ -152,40 +152,40 @@ func TestPathMapper_Translate_FilenameCollision(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSplitPastePaths_SinglePath(t *testing.T) {
-	paths := splitPastePaths("/Users/peter/file.txt")
-	if len(paths) != 1 || paths[0] != "/Users/peter/file.txt" {
-		t.Errorf("splitPastePaths = %v, want [/Users/peter/file.txt]", paths)
+	paths := splitPastePaths("/home/user/file.txt")
+	if len(paths) != 1 || paths[0] != "/home/user/file.txt" {
+		t.Errorf("splitPastePaths = %v, want [/home/user/file.txt]", paths)
 	}
 }
 
 func TestSplitPastePaths_MultiplePaths(t *testing.T) {
-	paths := splitPastePaths("/Users/peter/a.txt /Users/peter/b.txt")
+	paths := splitPastePaths("/home/user/a.txt /home/user/b.txt")
 	if len(paths) != 2 {
 		t.Fatalf("splitPastePaths = %v, want 2 paths", paths)
 	}
-	if paths[0] != "/Users/peter/a.txt" || paths[1] != "/Users/peter/b.txt" {
+	if paths[0] != "/home/user/a.txt" || paths[1] != "/home/user/b.txt" {
 		t.Errorf("splitPastePaths = %v", paths)
 	}
 }
 
 func TestSplitPastePaths_EscapedSpaces(t *testing.T) {
-	paths := splitPastePaths("/Users/peter/my\\ file.txt")
-	if len(paths) != 1 || paths[0] != "/Users/peter/my\\ file.txt" {
-		t.Errorf("splitPastePaths = %v, want [/Users/peter/my\\ file.txt]", paths)
+	paths := splitPastePaths("/home/user/my\\ file.txt")
+	if len(paths) != 1 || paths[0] != "/home/user/my\\ file.txt" {
+		t.Errorf("splitPastePaths = %v, want [/home/user/my\\ file.txt]", paths)
 	}
 }
 
 func TestSplitPastePaths_QuotedPath(t *testing.T) {
-	paths := splitPastePaths("'/Users/peter/my file.txt'")
-	if len(paths) != 1 || paths[0] != "'/Users/peter/my file.txt'" {
+	paths := splitPastePaths("'/home/user/my file.txt'")
+	if len(paths) != 1 || paths[0] != "'/home/user/my file.txt'" {
 		t.Errorf("splitPastePaths = %v", paths)
 	}
 }
 
 func TestSplitPastePaths_MixedContent(t *testing.T) {
-	paths := splitPastePaths("hello /Users/peter/file.txt world")
-	if len(paths) != 1 || paths[0] != "/Users/peter/file.txt" {
-		t.Errorf("splitPastePaths = %v, want [/Users/peter/file.txt]", paths)
+	paths := splitPastePaths("hello /home/user/file.txt world")
+	if len(paths) != 1 || paths[0] != "/home/user/file.txt" {
+		t.Errorf("splitPastePaths = %v, want [/home/user/file.txt]", paths)
 	}
 }
 
@@ -238,11 +238,11 @@ func TestSplitPastePaths_WindowsMultiple(t *testing.T) {
 func TestPathMapper_Translate_WindowsPath(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/mnt/c/Source/project", "/workspace"},
+			{"/mnt/c/Source/project", "/mnt/c/Source/project"},
 		},
 	}
 	got := m.Translate(`C:\Source\project\src\main.go`)
-	want := "/workspace/src/main.go"
+	want := "/mnt/c/Source/project/src/main.go"
 	if got != want {
 		t.Errorf("Translate() = %q, want %q", got, want)
 	}
@@ -254,7 +254,7 @@ func TestPathMapper_Translate_QuotedWindowsPathWithSpaces(t *testing.T) {
 	// In real WSL, /mnt/c/... would exist — here we just test the translation logic.
 	m := &PathMapper{
 		mappings: []pathMapping{
-			{"/mnt/c/Source/project", "/workspace"},
+			{"/mnt/c/Source/project", "/mnt/c/Source/project"},
 		},
 		dropDir:          dropDir,
 		containerDropDir: "/tmp/mittens-drops",
@@ -273,7 +273,7 @@ func TestDropProxy_WindowsPathPaste(t *testing.T) {
 	paste := string(pasteStart) + `C:\Source\project\file.go` + string(pasteEnd)
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/mnt/c/Source/project", "/workspace"},
+			{"/mnt/c/Source/project", "/mnt/c/Source/project"},
 		},
 	}
 	proxy := NewDropProxy(strings.NewReader(paste), mapper)
@@ -281,7 +281,7 @@ func TestDropProxy_WindowsPathPaste(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := string(pasteStart) + "/workspace/file.go" + string(pasteEnd)
+	want := string(pasteStart) + "/mnt/c/Source/project/file.go" + string(pasteEnd)
 	if string(out) != want {
 		t.Errorf("output = %q, want %q", string(out), want)
 	}
@@ -306,13 +306,13 @@ func TestDropProxy_NormalInput(t *testing.T) {
 }
 
 func TestDropProxy_PasteWithPathTranslation(t *testing.T) {
-	hostPath := "/Users/peter/project/src/main.go"
-	containerPath := "/workspace/src/main.go"
+	hostPath := "/home/user/project/src/main.go"
+	containerPath := "/home/user/project/src/main.go"
 	paste := string(pasteStart) + hostPath + string(pasteEnd)
 
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 	proxy := NewDropProxy(strings.NewReader(paste), mapper)
@@ -328,12 +328,12 @@ func TestDropProxy_PasteWithPathTranslation(t *testing.T) {
 }
 
 func TestDropProxy_PasteWithMultiplePaths(t *testing.T) {
-	content := "/Users/peter/project/a.go /Users/peter/project/b.go"
+	content := "/home/user/project/a.go /home/user/project/b.go"
 	paste := string(pasteStart) + content + string(pasteEnd)
 
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 	proxy := NewDropProxy(strings.NewReader(paste), mapper)
@@ -342,17 +342,17 @@ func TestDropProxy_PasteWithMultiplePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := string(pasteStart) + "/workspace/a.go /workspace/b.go" + string(pasteEnd)
+	want := string(pasteStart) + "/home/user/project/a.go /home/user/project/b.go" + string(pasteEnd)
 	if string(out) != want {
 		t.Errorf("output = %q, want %q", string(out), want)
 	}
 }
 
 func TestDropProxy_MixedNormalAndPaste(t *testing.T) {
-	input := "before" + string(pasteStart) + "/Users/peter/project/file.go" + string(pasteEnd) + "after"
+	input := "before" + string(pasteStart) + "/home/user/project/file.go" + string(pasteEnd) + "after"
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 	proxy := NewDropProxy(strings.NewReader(input), mapper)
@@ -361,7 +361,7 @@ func TestDropProxy_MixedNormalAndPaste(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "before" + string(pasteStart) + "/workspace/file.go" + string(pasteEnd) + "after"
+	want := "before" + string(pasteStart) + "/home/user/project/file.go" + string(pasteEnd) + "after"
 	if string(out) != want {
 		t.Errorf("output = %q, want %q", string(out), want)
 	}
@@ -388,7 +388,7 @@ func TestDropProxy_PasteWithNoPath(t *testing.T) {
 
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 	proxy := NewDropProxy(strings.NewReader(paste), mapper)
@@ -405,12 +405,12 @@ func TestDropProxy_PasteWithNoPath(t *testing.T) {
 
 func TestDropProxy_SmallReads(t *testing.T) {
 	// Simulate byte-at-a-time reads from the inner reader.
-	hostPath := "/Users/peter/project/file.go"
+	hostPath := "/home/user/project/file.go"
 	paste := string(pasteStart) + hostPath + string(pasteEnd)
 
 	mapper := &PathMapper{
 		mappings: []pathMapping{
-			{"/Users/peter/project", "/workspace"},
+			{"/home/user/project", "/home/user/project"},
 		},
 	}
 	proxy := NewDropProxy(newSlowReader([]byte(paste)), mapper)
@@ -419,7 +419,7 @@ func TestDropProxy_SmallReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := string(pasteStart) + "/workspace/file.go" + string(pasteEnd)
+	want := string(pasteStart) + "/home/user/project/file.go" + string(pasteEnd)
 	if string(out) != want {
 		t.Errorf("output = %q, want %q", string(out), want)
 	}
@@ -458,7 +458,7 @@ func TestDropProxy_UnmappedFileCopied(t *testing.T) {
 	os.WriteFile(srcFile, []byte("jpeg-data"), 0644)
 
 	mapper := &PathMapper{
-		mappings:         []pathMapping{{"/Users/peter/project", "/workspace"}},
+		mappings:         []pathMapping{{"/home/user/project", "/home/user/project"}},
 		dropDir:          dropDir,
 		containerDropDir: "/tmp/mittens-drops",
 	}
