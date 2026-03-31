@@ -75,26 +75,24 @@ func listDomains() ([]registry.ListItem, error) {
 	return items, nil
 }
 
-// setup mounts the firewall configuration file into the container and sets
-// the MITTENS_FIREWALL environment variable so the entrypoint knows to
-// activate the network firewall (proxy + iptables).
+// ResolveConfFile determines the host-side path to a firewall.conf file
+// suitable for bind-mounting into a container. It respects DevMode,
+// custom paths (from --firewall), DefaultConfPath, and embedded fallbacks.
 //
-// If the user provided a custom file via --firewall /path/to/file, that
-// path is in ctx.Extension.RawArg and takes precedence over the default.
-func setup(ctx *registry.SetupContext) error {
-	ext := ctx.Extension
-
+// The returned path may be a temp file (from embedded extraction) — callers
+// that need cleanup must track it themselves.
+func ResolveConfFile(customPath string) (string, error) {
 	// In DevMode, use the developer-friendly conf directly from the
-	// embedded content (ignore any custom --firewall path).
+	// embedded content (ignore any custom path).
 	if DevMode && len(EmbeddedDevConf) > 0 {
 		tmp, err := extractEmbedded(EmbeddedDevConf, "mittens-firewall-dev-*.conf")
 		if err != nil {
-			return fmt.Errorf("extracting embedded firewall-dev.conf: %w", err)
+			return "", fmt.Errorf("extracting embedded firewall-dev.conf: %w", err)
 		}
-		return mountFirewall(ctx, tmp)
+		return tmp, nil
 	}
 
-	confPath := resolveConfPath(ext.RawArg)
+	confPath := resolveConfPath(customPath)
 
 	// If the resolved path doesn't exist on disk, try extracting the
 	// embedded default to a temp file. This covers the "make install"
@@ -104,16 +102,30 @@ func setup(ctx *registry.SetupContext) error {
 		if len(EmbeddedConf) > 0 {
 			tmp, err := extractEmbedded(EmbeddedConf, "mittens-firewall-*.conf")
 			if err != nil {
-				return fmt.Errorf("extracting embedded firewall.conf: %w", err)
+				return "", fmt.Errorf("extracting embedded firewall.conf: %w", err)
 			}
-			confPath = tmp
+			return tmp, nil
 		} else if confPath == "" {
-			return fmt.Errorf("firewall.conf not found (set DefaultConfPath or use --firewall /path/to/file)")
+			return "", fmt.Errorf("firewall.conf not found (set DefaultConfPath or use --firewall /path/to/file)")
 		} else {
-			return fmt.Errorf("firewall config not found: %s", confPath)
+			return "", fmt.Errorf("firewall config not found: %s", confPath)
 		}
 	}
 
+	return confPath, nil
+}
+
+// setup mounts the firewall configuration file into the container and sets
+// the MITTENS_FIREWALL environment variable so the entrypoint knows to
+// activate the network firewall (proxy + iptables).
+//
+// If the user provided a custom file via --firewall /path/to/file, that
+// path is in ctx.Extension.RawArg and takes precedence over the default.
+func setup(ctx *registry.SetupContext) error {
+	confPath, err := ResolveConfFile(ctx.Extension.RawArg)
+	if err != nil {
+		return err
+	}
 	return mountFirewall(ctx, confPath)
 }
 

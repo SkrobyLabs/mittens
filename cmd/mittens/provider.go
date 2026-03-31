@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProfilePreset defines a model + effort combination for a named profile.
@@ -55,10 +56,8 @@ type Provider struct {
 	PersistFiles []string
 
 	// CLI flags
-	ResumeFlags              []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
-	SkipPermsFlag            string   // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
-	ContinueArgs             []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
-	TrustedDirsFile          string   // separate JSON array file for trusted dirs (Gemini); empty = unused
+	SkipPermsFlag            string // flag to skip permission prompts, e.g. "--dangerously-skip-permissions"
+	TrustedDirsFile          string // separate JSON array file for trusted dirs (Gemini); empty = unused
 	HistoryMountsWholeConfig bool     // mount the provider config dir directly when history is enabled
 	ModelFlag                string
 	EffortFlag               string
@@ -136,16 +135,6 @@ func (p *Provider) UsingCustomBaseURL() bool {
 	return p.BaseURLEnv != "" && os.Getenv(p.BaseURLEnv) != ""
 }
 
-// IsResumeFlag reports whether the given CLI argument is a resume/continue flag.
-func (p *Provider) IsResumeFlag(arg string) bool {
-	for _, f := range p.ResumeFlags {
-		if arg == f {
-			return true
-		}
-	}
-	return false
-}
-
 // ClaudeProvider returns a Provider configured for Claude Code with all
 // current hardcoded values. This is the only provider implemented today.
 func ClaudeProvider() *Provider {
@@ -185,13 +174,11 @@ func ClaudeProvider() *Provider {
 		YoloKey:        "skipDangerousModePermissionPrompt",
 		MCPServersKey:  "mcpServers",
 
-		ResumeFlags:     []string{"--continue", "-c", "--resume", "-r"},
 		SkipPermsFlag:   "--dangerously-skip-permissions",
-		ContinueArgs:    []string{"--continue"},
 		TrustedDirsFile: "",
 		StopHookEvent:   "Stop",
-		ModelFlag:  "--model",
-		EffortFlag: "--effort",
+		ModelFlag:       "--model",
+		EffortFlag:      "--effort",
 	}
 }
 
@@ -232,13 +219,11 @@ func CodexProvider() *Provider {
 		YoloKey:        "",
 		MCPServersKey:  "",
 
-		ResumeFlags:              []string{"--resume", "-r", "--continue", "-l"},
 		SkipPermsFlag:            "--dangerously-bypass-approvals-and-sandbox",
-		ContinueArgs:             []string{"--resume", "latest"},
 		TrustedDirsFile:          "",
 		HistoryMountsWholeConfig: true,
-		ModelFlag:  "--model",
-		EffortFlag: "",
+		ModelFlag:                "--model",
+		EffortFlag:               "",
 		// Codex expects reasoning effort via -c key-value configuration.
 		EffortTemplate: "-c model_reasoning_effort=%s",
 	}
@@ -297,10 +282,8 @@ func GeminiProvider() *Provider {
 		MCPServersKey:   "mcpServers",
 		TrustedDirsFile: "trustedFolders.json",
 
-		ResumeFlags:   []string{"--resume", "-r"},
 		SkipPermsFlag: "--approval-mode=yolo",
-		ContinueArgs:  []string{"--resume", "latest"},
-		ModelFlag: "--model",
+		ModelFlag:     "--model",
 
 		ContainerHostname: "gemini-cli",
 		ContainerEnv: map[string]string{
@@ -334,4 +317,17 @@ func GeminiProvider() *Provider {
 // DefaultProvider returns the default provider (Claude).
 func DefaultProvider() *Provider {
 	return ClaudeProvider()
+}
+
+func canonicalProviderName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "claude", "anthropic":
+		return "claude"
+	case "codex", "openai":
+		return "codex"
+	case "gemini", "google":
+		return "gemini"
+	default:
+		return strings.ToLower(strings.TrimSpace(name))
+	}
 }

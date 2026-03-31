@@ -45,6 +45,9 @@ func main() {
 	}
 
 	// Default: run as container entrypoint.
+	// Workers (MITTENS_WORKER_ID set) also flow through the normal entrypoint
+	// so they get phase1 (priv-drop, firewall) and phase2 (credentials, config
+	// staging, trusted dirs, cred sync). Workers diverge at the end of phase2.
 	if err := runEntrypoint(); err != nil {
 		fmt.Fprintf(os.Stderr, "[mittens-init] %v\n", err)
 		os.Exit(1)

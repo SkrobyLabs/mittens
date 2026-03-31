@@ -17,7 +17,7 @@ func init() {
 		checkWindowsNotifications("powershell")
 	}
 
-	platformNotify = func(title, body string, _ TerminalFocus, log func(string, ...interface{})) {
+	platformNotify = func(title, body string, _ TerminalFocus, log func(string, ...interface{}), _ bool) {
 		escTitle := strings.ReplaceAll(title, "'", "''")
 		escBody := strings.ReplaceAll(body, "'", "''")
 		script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.BalloonTipTitle = '%s'; $n.BalloonTipText = '%s'; $n.Visible = $true; $n.ShowBalloonTip(5000); Start-Sleep -Milliseconds 500; $n.Dispose()`, escTitle, escBody)

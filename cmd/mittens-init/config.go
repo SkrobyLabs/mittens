@@ -31,6 +31,7 @@ type config struct {
 	AIPluginDir       string
 	AIPluginFiles     []string
 	AIBinary          string
+	AISkipPermsFlag   string
 
 	FirewallConf string
 
@@ -45,6 +46,7 @@ type config struct {
 	WSLClipboard       bool
 	Shell              bool
 	PrintMode          bool
+	TeamMCP            bool
 
 	// Broker
 	BrokerPort  string
@@ -102,6 +104,7 @@ func loadConfig() *config {
 		AIPluginDir:       jcfg.AI.PluginDir,
 		AIPluginFiles:     jcfg.AI.PluginFiles,
 		AIBinary:          jcfg.AI.Binary,
+		AISkipPermsFlag:   jcfg.AI.SkipPermsFlag,
 
 		FirewallConf: "/mnt/mittens-staging/firewall.conf",
 
@@ -115,6 +118,7 @@ func loadConfig() *config {
 		WSLClipboard:       jcfg.Flags.WSLClipboard,
 		Shell:              jcfg.Flags.Shell,
 		PrintMode:          jcfg.Flags.PrintMode,
+		TeamMCP:            jcfg.Flags.TeamMCP,
 
 		BrokerPort:  fmt.Sprintf("%d", jcfg.Broker.Port),
 		BrokerSock:  jcfg.Broker.Sock,

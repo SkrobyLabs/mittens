@@ -27,22 +27,28 @@ func init() {
 		return exec.Command("open", url)
 	}
 
-	platformNotify = func(title, body string, focus TerminalFocus, log func(string, ...interface{})) {
+	platformNotify = func(title, body string, focus TerminalFocus, log func(string, ...interface{}), verbose bool) {
 		var cmd *exec.Cmd
 		if path, err := exec.LookPath("terminal-notifier"); err == nil {
 			args := []string{"-title", title, "-message", body, "-sound", "Glass"}
 			if focus.BundleID != "" {
 				args = append(args, "-activate", focus.BundleID)
-				log("notify: terminal-notifier -activate %s", focus.BundleID)
+				if verbose {
+					log("notify: terminal-notifier -activate %s", focus.BundleID)
+				}
 			}
 			if focusCmd := focus.FocusCommand(); focusCmd != nil {
 				executeStr := shellJoin(focusCmd)
 				args = append(args, "-execute", executeStr)
-				log("notify: terminal-notifier -execute %s", executeStr)
+				if verbose {
+					log("notify: terminal-notifier -execute %s", executeStr)
+				}
 			}
 			cmd = exec.Command(path, args...)
 		} else {
-			log("notify: terminal-notifier not found, using osascript via stdin")
+			if verbose {
+				log("notify: terminal-notifier not found, using osascript via stdin")
+			}
 			script := fmt.Sprintf(`display notification %q with title %q sound name "Glass"`, body, title)
 			cmd = exec.Command("osascript")
 			cmd.Stdin = strings.NewReader(script)

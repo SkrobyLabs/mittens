@@ -63,7 +63,7 @@ build: tidy init-binary # (internal) Build mittens for Windows (Linux binary + W
 	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux + $(BINARY)-clipboard-helper.exe"
 	@echo "Run mittens.exe - it transparently uses WSL under the hood."
 else
-build: tidy init-binary ## Build the mittens binary
+build: tidy init-binary team-mcp-binary ## Build the mittens binary
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/mittens
 	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
 endif
@@ -73,6 +73,11 @@ endif
 init-binary: ## Build the container-side mittens-init binary
 	CGO_ENABLED=0 GOOS=linux $(GO) build -ldflags "-s -w" -o cmd/mittens/container/$(INIT_BINARY) ./cmd/mittens-init
 	@echo "Built cmd/mittens/container/$(INIT_BINARY)"
+
+# Container-side team-mcp binary (MCP server for team mode leaders).
+team-mcp-binary: ## Build the container-side team-mcp binary
+	CGO_ENABLED=0 GOOS=linux $(GO) build -ldflags "-s -w" -o cmd/mittens/container/team-mcp ./cmd/team-mcp
+	@echo "Built cmd/mittens/container/team-mcp"
 
 install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
@@ -218,4 +223,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary
+.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary team-mcp-binary

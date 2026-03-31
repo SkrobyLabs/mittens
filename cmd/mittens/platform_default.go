@@ -73,7 +73,7 @@ func openURLDefault(url string) *exec.Cmd {
 
 // notifyDefault is the Linux default notification sender (notify-send).
 // On WSL, delegates to notifyWSL for Windows toast notifications.
-func notifyDefault(title, body string, _ TerminalFocus, log func(string, ...interface{})) {
+func notifyDefault(title, body string, _ TerminalFocus, log func(string, ...interface{}), _ bool) {
 	if isWSL() {
 		notifyWSL(title, body, log)
 		return

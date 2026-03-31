@@ -12,8 +12,10 @@
 /mittens-*
 dist/
 
-# Container init binary (built by `make init-binary`)
+# Container binaries (built by `make init-binary` / `make team-mcp-binary`)
 cmd/mittens/container/mittens-init
+cmd/mittens/container/team-mcp
+/team-mcp
 
 .vscode/settings.json
 

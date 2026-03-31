@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/SkrobyLabs/mittens/cmd/mittens/team"
 	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
 
@@ -73,6 +74,9 @@ func runPhase2(cfg *config) error {
 	// Inject notification hooks.
 	setupNotificationHooks(cfg)
 
+	// Register team-mcp as MCP server for team mode leaders.
+	setupTeamMCP(cfg)
+
 	// Start credential sync daemon as a forked child process.
 	// Must be a separate process because syscall.Exec (below) kills goroutines.
 	if cfg.hasBroker() {
@@ -84,6 +88,12 @@ func runPhase2(cfg *config) error {
 	// cd to host workspace path (always the real path with identity mount).
 	if cfg.HostWorkspace != "" {
 		os.Chdir(cfg.HostWorkspace)
+	}
+
+	// Worker containers run the worker agent instead of the AI CLI.
+	if os.Getenv("MITTENS_WORKER_ID") != "" {
+		runWorkerAgent(cfg)
+		return nil
 	}
 
 	// Exec the remaining args (typically the AI CLI binary).
@@ -402,14 +412,18 @@ func setupNotificationHooks(cfg *config) {
 
 	notifyCmd := `MSG=$(jq -r '.message // "needs attention"'); /usr/local/bin/notify.sh notification "$MSG"`
 
-	hooks := map[string]interface{}{
-		"Notification": []interface{}{
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": notifyCmd,
-					},
+	// Merge notification hooks into existing hooks (preserve user/plugin hooks).
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = map[string]interface{}{}
+	}
+
+	hooks["Notification"] = []interface{}{
+		map[string]interface{}{
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": notifyCmd,
 				},
 			},
 		},
@@ -487,6 +501,65 @@ func setJSONKey(path, key string, value interface{}) {
 	settings := readJSONFile(path)
 	settings[key] = value
 	writeJSONFile(path, settings)
+}
+
+// setupTeamMCP registers the team MCP server via `claude mcp add` and writes
+// the leader system prompt and skill files.
+func setupTeamMCP(cfg *config) {
+	if !cfg.TeamMCP {
+		return
+	}
+
+	// Verify the binary exists before trying to register it.
+	if _, err := os.Stat("/usr/local/bin/team-mcp"); err != nil {
+		logWarn("team-mcp binary not found: %v", err)
+		return
+	}
+
+	// Register via `<provider> mcp add` so it goes into the project's
+	// settings file which the AI CLI reads on startup.
+	// The flag syntax varies by provider.
+	var args []string
+	switch filepath.Base(cfg.AIBinary) {
+	case "claude":
+		args = []string{"mcp", "add", "-s", "local", "team", "--", "/usr/local/bin/team-mcp"}
+	case "codex":
+		args = []string{"mcp", "add", "team", "--", "/usr/local/bin/team-mcp"}
+	default:
+		args = []string{"mcp", "add", "team", "--", "/usr/local/bin/team-mcp"}
+	}
+	cmd := exec.Command(cfg.AIBinary, args...)
+	cmd.Dir = cfg.HostWorkspace
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logWarn("register team MCP server: %v: %s", err, out)
+		return
+	}
+
+	setupTeamPrompt(cfg)
+}
+
+// setupTeamPrompt writes the leader system prompt to the user-level project
+// file and creates skill files for /mt:* slash commands.
+func setupTeamPrompt(cfg *config) {
+	if !cfg.TeamMCP {
+		return
+	}
+
+	// Write leader prompt to user-level project file.
+	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
+	if err := os.WriteFile(projectFile, []byte(team.LeaderSystemPrompt()), 0644); err != nil {
+		logWarn("write leader prompt to %s: %v", projectFile, err)
+	}
+
+	// Write skill files so /mt:* commands are real Claude Code slash commands.
+	skillsDir := cfg.AIDir + "/skills"
+	for _, skill := range team.LeaderSkills() {
+		dir := skillsDir + "/" + skill.Name
+		os.MkdirAll(dir, 0755)
+		if err := os.WriteFile(dir+"/SKILL.md", []byte(skill.Content), 0644); err != nil {
+			logWarn("write skill %s: %v", skill.Name, err)
+		}
+	}
 }
 
 // applyJQAssignment applies a simple ".path.to.key = value" jq expression.

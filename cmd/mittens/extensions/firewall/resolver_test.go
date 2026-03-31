@@ -179,6 +179,96 @@ func TestSetup_CustomConfPath(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// ResolveConfFile
+// ---------------------------------------------------------------------------
+
+func TestResolveConfFile_DefaultPath(t *testing.T) {
+	tmp := t.TempDir()
+	confPath := filepath.Join(tmp, "firewall.conf")
+	os.WriteFile(confPath, []byte("example.com\n"), 0644)
+
+	origDefault := DefaultConfPath
+	origDevMode := DevMode
+	DefaultConfPath = confPath
+	DevMode = false
+	defer func() { DefaultConfPath = origDefault; DevMode = origDevMode }()
+
+	got, err := ResolveConfFile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != confPath {
+		t.Errorf("got %q, want %q", got, confPath)
+	}
+}
+
+func TestResolveConfFile_EmbeddedFallback(t *testing.T) {
+	origDefault := DefaultConfPath
+	origEmbed := EmbeddedConf
+	origDevMode := DevMode
+	DefaultConfPath = ""
+	EmbeddedConf = []byte("fallback.example.com\n")
+	DevMode = false
+	defer func() { DefaultConfPath = origDefault; EmbeddedConf = origEmbed; DevMode = origDevMode }()
+
+	got, err := ResolveConfFile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == "" {
+		t.Fatal("expected non-empty path")
+	}
+	// Verify the extracted file is readable and has the right content.
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "fallback.example.com\n" {
+		t.Errorf("content = %q, want %q", string(data), "fallback.example.com\n")
+	}
+	os.Remove(got) // cleanup temp
+}
+
+func TestResolveConfFile_DevMode(t *testing.T) {
+	origDevMode := DevMode
+	origDevConf := EmbeddedDevConf
+	DevMode = true
+	EmbeddedDevConf = []byte("dev.example.com\n")
+	defer func() { DevMode = origDevMode; EmbeddedDevConf = origDevConf }()
+
+	got, err := ResolveConfFile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "dev.example.com\n" {
+		t.Errorf("content = %q, want dev conf", string(data))
+	}
+	os.Remove(got) // cleanup temp
+}
+
+func TestResolveConfFile_CustomPath(t *testing.T) {
+	tmp := t.TempDir()
+	customPath := filepath.Join(tmp, "custom.conf")
+	os.WriteFile(customPath, []byte("custom.example.com\n"), 0644)
+
+	origDevMode := DevMode
+	DevMode = false
+	defer func() { DevMode = origDevMode }()
+
+	got, err := ResolveConfFile(customPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != customPath {
+		t.Errorf("got %q, want %q", got, customPath)
+	}
+}
+
 func TestSetup_MissingConf(t *testing.T) {
 	origDefault := DefaultConfPath
 	DefaultConfPath = ""

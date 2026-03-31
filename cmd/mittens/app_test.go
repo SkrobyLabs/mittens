@@ -49,7 +49,7 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 
 func TestParseFlags_LegacyWorkerPlannerIgnored(t *testing.T) {
 	a := &App{}
-	if err := a.ParseFlags([]string{"--worker", "--planner", "--print"}); err != nil {
+	if err := a.ParseFlags([]string{"--worker", "--planner"}); err != nil {
 		t.Fatal(err)
 	}
 	if a.Profile != "" {
@@ -59,7 +59,7 @@ func TestParseFlags_LegacyWorkerPlannerIgnored(t *testing.T) {
 
 func TestParseFlags_ProfileFlag(t *testing.T) {
 	a := &App{}
-	if err := a.ParseFlags([]string{"--profile", "fast", "--print"}); err != nil {
+	if err := a.ParseFlags([]string{"--profile", "fast"}); err != nil {
 		t.Fatal(err)
 	}
 	if a.Profile != "fast" {
@@ -266,49 +266,17 @@ func TestLoadProfileConfig_LegacyRolesJsonFallback(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ParseFlags — --resume with optional argument
+// ParseFlags — --resume is no longer a mittens flag (use -- separator)
 // ---------------------------------------------------------------------------
 
-func TestParseFlags_ResumeLatest(t *testing.T) {
+func TestParseFlags_ResumeIsUnknownFlag(t *testing.T) {
 	a := &App{}
-	if err := a.ParseFlags([]string{"--resume"}); err != nil {
-		t.Fatal(err)
+	err := a.ParseFlags([]string{"--resume"})
+	if err == nil {
+		t.Fatal("expected error for --resume, got nil")
 	}
-	if a.ResumeSession != "latest" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
-	}
-}
-
-func TestParseFlags_ResumeWithID(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--resume", "abc123"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "abc123" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "abc123")
-	}
-}
-
-func TestParseFlags_ResumeBeforeOtherFlags(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--resume", "--verbose"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "latest" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
-	}
-	if !a.Verbose {
-		t.Error("--verbose not set")
-	}
-}
-
-func TestParseFlags_DefaultNoResume(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--verbose"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "" {
-		t.Errorf("ResumeSession = %q, want empty", a.ResumeSession)
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %q, want 'unknown flag'", err.Error())
 	}
 }
 
@@ -389,20 +357,36 @@ func TestParseFlags_Separator(t *testing.T) {
 // ParseFlags — unknown flags forwarded to ClaudeArgs
 // ---------------------------------------------------------------------------
 
-func TestParseFlags_UnknownForwarded(t *testing.T) {
+func TestParseFlags_UnknownFlagRejectsWithError(t *testing.T) {
 	a := &App{}
-	if err := a.ParseFlags([]string{"--print", "--model", "opus"}); err != nil {
+	err := a.ParseFlags([]string{"--print", "--model", "opus"})
+	if err == nil {
+		t.Fatal("expected error for unknown flag, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "unknown flag")
+	}
+}
+
+func TestParseFlags_UnknownFlagAfterSeparatorAllowed(t *testing.T) {
+	a := &App{}
+	if err := a.ParseFlags([]string{"--verbose", "--", "--print", "--model", "opus"}); err != nil {
 		t.Fatal(err)
 	}
-
 	want := []string{"--print", "--model", "opus"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}
-	for i, arg := range a.ClaudeArgs {
-		if arg != want[i] {
-			t.Errorf("ClaudeArgs[%d] = %q, want %q", i, arg, want[i])
-		}
+}
+
+func TestParseFlags_PositionalArgRejected(t *testing.T) {
+	a := &App{}
+	err := a.ParseFlags([]string{"do something"})
+	if err == nil {
+		t.Fatal("expected error for positional arg, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %q, want it to contain \"unknown command\"", err)
 	}
 }
 
@@ -781,14 +765,19 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 
 	p := CodexProvider()
 	os.MkdirAll(p.HostConfigDir(home), 0o755)
+	hostProjectFile := filepath.Join(p.HostConfigDir(home), p.ProjectFile)
+	if err := os.WriteFile(hostProjectFile, []byte("host agents\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	a := &App{
-		Provider:          p,
-		NoHistory:         false,
-		ContainerName:     "mittens-codex-session",
-		WorkspaceMountSrc: "/tmp/ws",
-		Workspace:         "/Users/test/project",
-		Credentials:       &CredentialManager{},
+		Provider:           p,
+		NoHistory:          false,
+		ContainerName:      "mittens-codex-session",
+		WorkspaceMountSrc:  "/tmp/ws",
+		Workspace:          "/Users/test/project",
+		EffectiveWorkspace: "/Users/test/project",
+		Credentials:        &CredentialManager{},
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
@@ -801,6 +790,40 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 	}
 	if argPairContains(args, "-v", "/projects/") {
 		t.Fatalf("did not expect project-only history mount for codex")
+	}
+	if !argPairContains(args, "-v", ":"+filepath.Join(p.ContainerConfigDir(), p.ProjectFile)) {
+		t.Fatalf("missing runtime project file overlay mount")
+	}
+
+	cfg := extractInitConfig(t, args)
+	if cfg.HostWorkspace != "/Users/test/project" {
+		t.Fatalf("HostWorkspace = %q, want %q", cfg.HostWorkspace, "/Users/test/project")
+	}
+
+	var overlayPath string
+	wantTarget := filepath.Join(p.ContainerConfigDir(), p.ProjectFile)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "-v" {
+			continue
+		}
+		parts := strings.SplitN(args[i+1], ":", 2)
+		if len(parts) == 2 && parts[1] == wantTarget {
+			overlayPath = parts[0]
+			break
+		}
+	}
+	if overlayPath == "" {
+		t.Fatal("overlay mount target not found")
+	}
+	if overlayPath == hostProjectFile {
+		t.Fatal("overlay mount should not point to the host project file directly")
+	}
+	data, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("reading overlay file: %v", err)
+	}
+	if string(data) != "host agents\n" {
+		t.Fatalf("overlay file contents = %q, want %q", string(data), "host agents\n")
 	}
 }
 
@@ -1567,16 +1590,15 @@ func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
 	}
 }
 
-func TestMaybeApplyResumeArgs_CodexLatest(t *testing.T) {
+func TestMaybeApplyProviderRuntimeArgs_CodexDisablesUpdateCheck(t *testing.T) {
 	a := &App{
-		Provider:      CodexProvider(),
-		ResumeSession: "latest",
-		ClaudeArgs:    []string{"--model", "gpt-5"},
+		Provider:   CodexProvider(),
+		ClaudeArgs: []string{"--model", "gpt-5"},
 	}
 
-	a.maybeApplyResumeArgs()
+	a.maybeApplyProviderRuntimeArgs()
 
-	want := []string{"--resume", "latest", "--model", "gpt-5"}
+	want := []string{"-c", "check_for_update_on_startup=false", "--model", "gpt-5"}
 	if len(a.ClaudeArgs) != len(want) {
 		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
 	}
@@ -1587,17 +1609,22 @@ func TestMaybeApplyResumeArgs_CodexLatest(t *testing.T) {
 	}
 }
 
-func TestMaybeApplyResumeArgs_DoesNotDuplicate(t *testing.T) {
+func TestMaybeApplyProviderRuntimeArgs_CodexRespectsExistingOverride(t *testing.T) {
 	a := &App{
-		Provider:      CodexProvider(),
-		ResumeSession: "latest",
-		ClaudeArgs:    []string{"--resume", "abc123"},
+		Provider:   CodexProvider(),
+		ClaudeArgs: []string{"-c", "check_for_update_on_startup=true", "--model", "gpt-5"},
 	}
 
-	a.maybeApplyResumeArgs()
+	a.maybeApplyProviderRuntimeArgs()
 
-	if len(a.ClaudeArgs) != 2 {
-		t.Fatalf("ClaudeArgs = %v, want existing args unchanged", a.ClaudeArgs)
+	want := []string{"-c", "check_for_update_on_startup=true", "--model", "gpt-5"}
+	if len(a.ClaudeArgs) != len(want) {
+		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
+	}
+	for i := range want {
+		if a.ClaudeArgs[i] != want[i] {
+			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
+		}
 	}
 }
 

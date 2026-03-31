@@ -60,6 +60,7 @@ type AIConfig struct {
 	ConfigSubdirs  []string `json:"configSubdirs"`
 	PluginDir      string   `json:"pluginDir,omitempty"`
 	PluginFiles    []string `json:"pluginFiles,omitempty"`
+	SkipPermsFlag  string   `json:"skipPermsFlag,omitempty"`
 }
 
 // Flags holds boolean feature toggles.
@@ -74,6 +75,7 @@ type Flags struct {
 	WSLClipboard       bool `json:"wslClipboard,omitempty"`
 	Shell              bool `json:"shell,omitempty"`
 	PrintMode          bool `json:"printMode,omitempty"`
+	TeamMCP            bool `json:"teamMcp,omitempty"`
 }
 
 // BrokerConfig holds connection details for the host credential broker.

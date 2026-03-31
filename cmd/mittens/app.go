@@ -19,6 +19,7 @@ import (
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
 	"github.com/SkrobyLabs/mittens/internal/initcfg"
+	"github.com/SkrobyLabs/mittens/internal/pool"
 )
 
 // Platform function variables — defaults in platform_default.go,
@@ -47,8 +48,7 @@ type App struct {
 	NetworkHost   bool
 	Worktree      bool
 	Shell         bool
-	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
-	Profile       string // model profile name (e.g. "planner", "fast")
+	Profile string // model profile name (e.g. "planner", "fast")
 	ImagePasteKey string // "ctrl+v" or "meta+v"
 	ExtraDirs     []string
 	InstanceName  string // user-provided name via --name
@@ -74,8 +74,8 @@ type App struct {
 	worktreeDirs    []string
 	worktreeOrigins map[string]string // worktree path -> original HEAD sha
 	worktreeRepos   map[string]string // worktree path -> original repo root
-	clipboardDir string
-	clipboardReg string
+	clipboardDir    string
+	clipboardReg    string
 
 	// Worktree suffix (computed once per Run)
 	worktreeSuffix string
@@ -94,6 +94,19 @@ type App struct {
 	brokerPort  int
 	brokerToken string
 	brokerSock  string // Unix socket path (Linux mode)
+
+	// Team mode
+	teamMode              bool
+	teamSessionID         string
+	teamStateDir          string
+	teamEnv               map[string]string
+	teamMaxWorkers        int
+	teamPlansDir          string // project-scoped plans directory for cross-session persistence
+	teamPoolToken         string // separate token for pool management endpoints (leader-only)
+	firewallConfPath      string // resolved host-side firewall.conf for worker mounts
+	teamExtraProviders    []*Provider
+	teamWorkerCredentials map[string]*CredentialManager
+	teamSessionReuse      pool.SessionReuseConfig
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -109,17 +122,16 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
-	"--worker":  func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--planner": func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	// --resume is handled specially in ParseFlags (optional argument).
+	"--worker":       func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--planner":      func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
 
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
-	"--dir":      func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
-	"--dir-ro":   func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
-	"--name":     func(a *App, val string) { a.InstanceName = val },
+	"--dir":             func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--dir-ro":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
+	"--name":            func(a *App, val string) { a.InstanceName = val },
 	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
 	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
 	"--profile":         func(a *App, val string) { a.Profile = val },
@@ -136,18 +148,6 @@ func (a *App) ParseFlags(args []string) error {
 		if arg == "--" {
 			a.ClaudeArgs = append(a.ClaudeArgs, args[i+1:]...)
 			break
-		}
-
-		// --resume [ID] — optional argument.
-		if arg == "--resume" {
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				a.ResumeSession = args[i+1]
-				i += 2
-			} else {
-				a.ResumeSession = "latest"
-				i++
-			}
-			continue
 		}
 
 		// Core boolean flags.
@@ -192,10 +192,13 @@ func (a *App) ParseFlags(args []string) error {
 			os.Exit(0)
 		}
 
-		// Unrecognised flag or positional arg -- forward to Claude.
-		// Claude Code accepts flags like --resume, --model, --print, etc.
-		a.ClaudeArgs = append(a.ClaudeArgs, arg)
-		i++
+		// Unrecognised flag — reject with guidance.
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag %q (use -- to pass flags to the AI provider)", arg)
+		}
+
+		// Unknown positional arg — reject with guidance.
+		return fmt.Errorf("unknown command %q (use \"mittens help\" to see available commands, or -- to pass arguments to the provider)", arg)
 	}
 	return nil
 }
@@ -337,6 +340,9 @@ func (a *App) Run() error {
 	if a.Provider.Name != "claude" {
 		a.imageTagParts = append(a.imageTagParts, a.Provider.Name)
 	}
+	for _, p := range a.teamExtraProviders {
+		a.imageTagParts = append(a.imageTagParts, "team-"+p.Name)
+	}
 
 	// Collect extension build state.
 	a.buildArgs = make(map[string]string)
@@ -407,9 +413,21 @@ func (a *App) Run() error {
 			focus := a.terminalFocus
 			blogFn := a.broker.blog
 			a.broker.OnNotify = func(container, event, message string) {
-				notifyOnHost(container, event, message, displayName, focus, blogFn)
+				notifyOnHost(container, event, message, displayName, focus, blogFn, a.Verbose)
 			}
 			platformCheckNotifications()
+		}
+
+		// Team mode: wire pool spawn/kill callbacks and generate pool token.
+		if a.teamMode {
+			a.broker.OnPoolSpawn = a.spawnWorkerContainer
+			a.broker.OnPoolKill = a.killWorkerContainer
+			pt, err := randomHex(16)
+			if err != nil {
+				return fmt.Errorf("generate pool token: %w", err)
+			}
+			a.teamPoolToken = pt
+			a.broker.PoolToken = pt
 		}
 
 		// Persistent broker log for debugging.
@@ -441,8 +459,7 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Resume session if --resume was given.
-	a.maybeApplyResumeArgs()
+	a.maybeApplyProviderRuntimeArgs()
 
 	// Yolo mode: prepend skip-permissions flag.
 	if a.Yolo {
@@ -471,20 +488,48 @@ func (a *App) Run() error {
 	return a.runContainer(dockerArgs)
 }
 
-func (a *App) maybeApplyResumeArgs() {
-	if a.ResumeSession == "" || a.Shell {
+func (a *App) maybeApplyProviderRuntimeArgs() {
+	if a.Provider == nil {
 		return
 	}
-	for _, arg := range a.ClaudeArgs {
-		if a.Provider.IsResumeFlag(arg) {
-			return
+	if a.Provider.Name == "codex" && !hasCodexConfigOverride(a.ClaudeArgs, "check_for_update_on_startup") {
+		a.ClaudeArgs = append([]string{"-c", "check_for_update_on_startup=false"}, a.ClaudeArgs...)
+	}
+}
+
+func hasCodexConfigOverride(args []string, key string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-c" && i+1 < len(args):
+			if hasTomlConfigKey(args[i+1], key) {
+				return true
+			}
+			i++
+		case strings.HasPrefix(arg, "--config="):
+			if hasTomlConfigKey(strings.TrimPrefix(arg, "--config="), key) {
+				return true
+			}
+		case arg == "--config" && i+1 < len(args):
+			if hasTomlConfigKey(args[i+1], key) {
+				return true
+			}
+			i++
 		}
 	}
-	if a.ResumeSession == "latest" {
-		a.ClaudeArgs = append(a.Provider.ContinueArgs, a.ClaudeArgs...)
-		return
+	return false
+}
+
+func hasTomlConfigKey(expr, key string) bool {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false
 	}
-	a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
+	parts := strings.SplitN(expr, "=", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	return strings.TrimSpace(parts[0]) == key
 }
 
 func (a *App) maybeApplyProfile() error {
@@ -751,6 +796,11 @@ func (a *App) Cleanup() {
 	if a.Credentials != nil {
 		a.Credentials.Cleanup()
 	}
+	for _, mgr := range a.teamWorkerCredentials {
+		if mgr != nil {
+			mgr.Cleanup()
+		}
+	}
 
 	// Clean up worktrees: remove if clean, keep if dirty/new commits.
 	for _, wt := range a.worktreeDirs {
@@ -789,14 +839,14 @@ func newClipboardPathsAt(dir string) clipboardPaths {
 }
 
 func (cp clipboardPaths) pidFile() string       { return filepath.Join(cp.dir, "clipboard-sync.pid") }
-func (cp clipboardPaths) heartbeatFile() string  { return filepath.Join(cp.dir, "clipboard.heartbeat") }
-func (cp clipboardPaths) lockFile() string       { return filepath.Join(cp.dir, "clipboard-sync.lock") }
-func (cp clipboardPaths) logFile() string        { return filepath.Join(cp.dir, "clipboard-sync.log") }
-func (cp clipboardPaths) clientsDir() string     { return filepath.Join(cp.dir, "clients") }
-func (cp clipboardPaths) stateFile() string      { return filepath.Join(cp.dir, "clipboard.state") }
-func (cp clipboardPaths) updatedAtFile() string  { return filepath.Join(cp.dir, "clipboard.updated_at") }
-func (cp clipboardPaths) imageFile() string      { return filepath.Join(cp.dir, "clipboard.png") }
-func (cp clipboardPaths) errorFile() string      { return filepath.Join(cp.dir, "clipboard.error") }
+func (cp clipboardPaths) heartbeatFile() string { return filepath.Join(cp.dir, "clipboard.heartbeat") }
+func (cp clipboardPaths) lockFile() string      { return filepath.Join(cp.dir, "clipboard-sync.lock") }
+func (cp clipboardPaths) logFile() string       { return filepath.Join(cp.dir, "clipboard-sync.log") }
+func (cp clipboardPaths) clientsDir() string    { return filepath.Join(cp.dir, "clients") }
+func (cp clipboardPaths) stateFile() string     { return filepath.Join(cp.dir, "clipboard.state") }
+func (cp clipboardPaths) updatedAtFile() string { return filepath.Join(cp.dir, "clipboard.updated_at") }
+func (cp clipboardPaths) imageFile() string     { return filepath.Join(cp.dir, "clipboard.png") }
+func (cp clipboardPaths) errorFile() string     { return filepath.Join(cp.dir, "clipboard.error") }
 
 func (cp clipboardPaths) pid() (int, error) {
 	data, err := os.ReadFile(cp.pidFile())
@@ -1032,6 +1082,11 @@ func (a *App) buildImage() error {
 		dockerfile = filepath.Join(tmpCtx, "container", "Dockerfile")
 	}
 
+	var extraInstallCmds []string
+	for _, p := range a.teamExtraProviders {
+		extraInstallCmds = append(extraInstallCmds, p.InstallCmd)
+	}
+
 	return BuildImage(BuildContext{
 		ContextDir: contextDir,
 		Dockerfile: dockerfile,
@@ -1041,14 +1096,33 @@ func (a *App) buildImage() error {
 		GroupID:    gid,
 		Extensions: enabledExts,
 		ExtraBuildArgs: map[string]string{
-			"AI_USERNAME":    a.Provider.Username,
-			"AI_BINARY":      a.Provider.Binary,
-			"AI_INSTALL_CMD": a.Provider.InstallCmd,
-			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
+			"AI_USERNAME":           a.Provider.Username,
+			"AI_BINARY":             a.Provider.Binary,
+			"AI_INSTALL_CMD":        a.Provider.InstallCmd,
+			"AI_CONFIG_DIR":         a.Provider.ConfigDir,
+			"EXTRA_AI_INSTALL_CMDS": strings.Join(extraInstallCmds, " && "),
 		},
 		Verbose: a.Verbose,
 		NoCache: a.Rebuild,
 	})
+}
+
+func (a *App) workerCredentialFile(provider *Provider) string {
+	if provider == nil || provider.CredentialFile == "" || provider.UsingCustomBaseURL() {
+		return ""
+	}
+	if a.teamWorkerCredentials == nil {
+		a.teamWorkerCredentials = make(map[string]*CredentialManager)
+	}
+	if mgr, ok := a.teamWorkerCredentials[provider.Name]; ok {
+		return mgr.TmpFile()
+	}
+	mgr := NewCredentialManager(provider)
+	if err := mgr.Setup(); err != nil {
+		logWarn("worker credential setup (%s): %v", provider.Name, err)
+	}
+	a.teamWorkerCredentials[provider.Name] = mgr
+	return mgr.TmpFile()
 }
 
 // buildInitConfig creates the ContainerConfig struct that will be
@@ -1058,23 +1132,23 @@ func (a *App) buildImage() error {
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 	return &initcfg.ContainerConfig{
 		AI: initcfg.AIConfig{
-			Binary:         a.Provider.Binary,
-			ConfigDir:      a.Provider.ConfigDir,
-			CredFile:       a.Provider.CredentialFile,
-			PrefsFile:      a.Provider.UserPrefsFile,
-			SettingsFile:   a.Provider.SettingsFile,
-			ProjectFile:    a.Provider.ProjectFile,
-			TrustedDirsKey: a.Provider.TrustedDirsKey,
-			YoloKey:        a.Provider.YoloKey,
-			MCPServersKey:  a.Provider.MCPServersKey,
+			Binary:          a.Provider.Binary,
+			ConfigDir:       a.Provider.ConfigDir,
+			CredFile:        a.Provider.CredentialFile,
+			PrefsFile:       a.Provider.UserPrefsFile,
+			SettingsFile:    a.Provider.SettingsFile,
+			ProjectFile:     a.Provider.ProjectFile,
+			TrustedDirsKey:  a.Provider.TrustedDirsKey,
+			YoloKey:         a.Provider.YoloKey,
+			MCPServersKey:   a.Provider.MCPServersKey,
 			TrustedDirsFile: a.Provider.TrustedDirsFile,
-			InitSettingsJQ: a.Provider.InitSettingsJQ,
-			StopHookEvent:  a.Provider.StopHookEvent,
-			PersistFiles:   a.Provider.PersistFiles,
-			SettingsFormat: a.Provider.SettingsFormat,
-			ConfigSubdirs:  a.Provider.ConfigSubdirs,
-			PluginDir:      a.Provider.PluginDir,
-			PluginFiles:    a.Provider.PluginFiles,
+			InitSettingsJQ:  a.Provider.InitSettingsJQ,
+			StopHookEvent:   a.Provider.StopHookEvent,
+			PersistFiles:    a.Provider.PersistFiles,
+			SettingsFormat:  a.Provider.SettingsFormat,
+			ConfigSubdirs:   a.Provider.ConfigSubdirs,
+			PluginDir:       a.Provider.PluginDir,
+			PluginFiles:     a.Provider.PluginFiles,
 		},
 		Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
@@ -1082,12 +1156,54 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			NoNotify:  a.NoNotify,
 			Shell:     a.Shell,
 			PrintMode: argExists(a.ClaudeArgs, "--print"),
+			TeamMCP:   a.teamMode,
 		},
 		ContainerName:   a.ContainerName,
 		InstanceName:    a.InstanceName,
 		ImagePasteKey:   a.ImagePasteKey,
 		CredStagingDirs: a.credStagingDirs,
 	}
+}
+
+// addRuntimeProjectFileOverlay shadows the provider project file (for example
+// ~/.codex/AGENTS.md) with a per-run temp copy so mittens-init can append
+// runtime-specific instructions without mutating the host's persisted config.
+func (a *App) addRuntimeProjectFileOverlay(args []string, home string) []string {
+	if !a.Provider.HistoryMountsWholeConfig || a.Provider.ProjectFile == "" {
+		return args
+	}
+
+	hostProjectFile := filepath.Join(a.Provider.HostConfigDir(home), a.Provider.ProjectFile)
+	tmpFile, err := os.CreateTemp("", "mittens-project-file-*")
+	if err != nil {
+		logWarn("project file overlay: %v", err)
+		return args
+	}
+	tmpPath := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
+		logWarn("project file overlay close: %v", err)
+	}
+	a.tempDirs = append(a.tempDirs, tmpPath)
+
+	data, err := os.ReadFile(hostProjectFile)
+	switch {
+	case err == nil:
+		if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+			logWarn("project file overlay write: %v", err)
+			return args
+		}
+	case os.IsNotExist(err):
+		if err := os.WriteFile(tmpPath, nil, 0o644); err != nil {
+			logWarn("project file overlay init: %v", err)
+			return args
+		}
+	default:
+		logWarn("project file overlay read %s: %v", hostProjectFile, err)
+		return args
+	}
+
+	containerProjectFile := filepath.Join(a.Provider.ContainerConfigDir(), a.Provider.ProjectFile)
+	return append(args, "-v", tmpPath+":"+containerProjectFile)
 }
 
 // assembleDockerArgs builds the full docker run argument list.
@@ -1131,6 +1247,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Build mittens-init config and mount as JSON file.
 	initCfg := a.buildInitConfig()
+	initCfg.HostWorkspace = a.EffectiveWorkspace
 
 	// Credential broker — needs both config fields and docker args for mounts/networking.
 	if a.brokerSock != "" {
@@ -1152,6 +1269,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		ensureDir(hostConfigDir)
 		args = append(args, "-v", hostConfigDir+":"+containerConfigDir)
+		args = a.addRuntimeProjectFileOverlay(args, home)
 	} else if !a.NoHistory && a.HostProjectDir != "" {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
@@ -1166,7 +1284,6 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
 
-		initCfg.HostWorkspace = a.EffectiveWorkspace
 	}
 
 	// Extra directory mounts.
@@ -1360,6 +1477,32 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		logInfo("Drag-and-drop path translation: enabled")
 	}
 
+	// Team mode: add state directory mount, env vars, labels, and port mapping.
+	if a.teamMode {
+		args = append(args,
+			"-v", a.teamStateDir+":"+a.teamStateDir,
+			"-l", "mittens.pool="+a.teamSessionID,
+			"-l", "mittens.role=leader",
+			"-l", "mittens.workspace="+a.Workspace,
+			"-p", "0:8080", // Expose WorkerBroker port for worker containers
+		)
+		// Mount plans directory (identity mount — same path inside and outside).
+		if a.teamPlansDir != "" {
+			args = append(args, "-v", a.teamPlansDir+":"+a.teamPlansDir)
+		}
+		for k, v := range a.teamEnv {
+			args = append(args, "-e", k+"="+v)
+		}
+		// Pass broker port/token so team-mcp can reach the host broker for spawn/kill.
+		if a.brokerPort > 0 {
+			args = append(args, "-e", fmt.Sprintf("MITTENS_BROKER_PORT=%d", a.brokerPort))
+			args = append(args, "-e", "MITTENS_BROKER_TOKEN="+a.brokerToken)
+			if a.teamPoolToken != "" {
+				args = append(args, "-e", "MITTENS_POOL_TOKEN="+a.teamPoolToken)
+			}
+		}
+	}
+
 	// Write mittens-init JSON config and mount it into the container.
 	cfgFile, err := os.CreateTemp("", "mittens-config.*.json")
 	if err == nil {
@@ -1479,7 +1622,7 @@ func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
 // On macOS, if terminal-notifier is installed, clicking the notification
 // will focus the originating terminal session.
 // logFn is an optional logger (broker.blog); pass nil to skip logging.
-func notifyOnHost(container, event, message, displayName string, focus TerminalFocus, logFn func(string, ...interface{})) {
+func notifyOnHost(container, event, message, displayName string, focus TerminalFocus, logFn func(string, ...interface{}), verbose bool) {
 	log := func(format string, args ...interface{}) {
 		if logFn != nil {
 			logFn(format, args...)
@@ -1503,9 +1646,11 @@ func notifyOnHost(container, event, message, displayName string, focus TerminalF
 		body = container + ": " + event
 	}
 
-	log("notify: event=%s terminal=%s/%s", event, focus.Kind, focus.ID)
+	if verbose {
+		log("notify: event=%s terminal=%s/%s", event, focus.Kind, focus.ID)
+	}
 
-	platformNotify(title, body, focus, log)
+	platformNotify(title, body, focus, log, verbose)
 }
 
 // openOnHost opens a URL in the host's default browser.
@@ -1648,7 +1793,6 @@ Core flags:
   --session         Tweak settings for this run only (opens wizard, doesn't save)
   --no-config       Skip config file loading (user defaults + project config)
   --no-history      Disable session persistence (fully ephemeral)
-  --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
   --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
@@ -1666,7 +1810,9 @@ Core flags:
   --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
   --image-paste-key KEY  Clipboard image paste key: meta+v (default) or ctrl+v
   --extensions      List loaded extensions and their flags
-  --version, -V     Show version information`)
+  --version, -V     Show version information
+
+Everything after -- is passed through to the AI provider unchanged.`)
 
 	if len(exts) > 0 {
 		fmt.Println("\nExtension flags:")
@@ -1739,7 +1885,6 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--rebuild", Description: "Rebuild image without layer cache"},
-			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
 			{Name: "--dir", Description: "Mount an additional directory (repeatable)", ArgType: "path"},

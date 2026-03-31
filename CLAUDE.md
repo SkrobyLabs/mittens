@@ -2,6 +2,8 @@
 
 Run Claude Code in isolated Docker containers with credential forwarding, network firewall, Docker-in-Docker, and pluggable extensions.
 
+> **Directive**: When you add, rename, move, or delete source files, flags, CLI subcommands, MCP tools, environment variables, Docker labels, or extension manifests, update the relevant documentation in the same change. This includes the Project Structure tree and Core Flags list here, the Teams summary here plus `docs/TEAMS.md`, and any related runtime or extension docs. Do not leave documentation drift for a follow-up.
+
 ## Project Structure
 
 ```
@@ -20,6 +22,10 @@ cmd/
     terminal_focus.go        # detect terminal and re-focus on notification
     helpers.go               # logging, scriptDir, captureCommand
     embed.go                 # go:embed for extension YAMLs
+    team.go                  # team session launch, init wizard, status, resume
+    pool_handlers.go         # HostBroker HTTP handler callbacks for pool ops
+    team/
+      prompt.go              # leader system prompt, /mt:* skill definitions
     container/               # Docker image files (not embedded, must ship with binary)
       Dockerfile
       mittens-init           # container entrypoint binary (built from cmd/mittens-init)
@@ -48,39 +54,61 @@ cmd/
     broker_client.go         # shared HTTP client for host broker
     handlers.go              # xdg-open, notify, xclip, x11-clipboard handlers
   shim/                      # Windows WSL shim
+  team-mcp/                  # MCP sidecar for team leader container
+    main.go                  # MCP stdio server, WAL recovery, HostAPI setup
+    tools.go                 # MCP tool definitions and handlers
+    broker.go                # WorkerBroker HTTP server (:8080)
+    notify.go                # notification formatting and MCP push
+internal/
+  adapter/                   # worker execution adapters and handover parsing
+    adapter.go               # adapter factory + provider->adapter defaults
+    claude.go                # Claude Code worker adapter
+    codex.go                 # Codex exec-mode worker adapter
+    handover.go              # shared handover prompt suffix + parser
+  pool/                      # team pool state machine and coordination
+    types.go                 # Worker, Task, Pipeline, ModelConfig, ReviewRecord, Question
+    manager.go               # PoolManager — spawn/dispatch/kill, task queue
+    wal.go                   # write-ahead log (JSONL), replay, recovery
+    event.go                 # event types, marshaling
+    router.go                # ModelRouter — per-role model routing
+    pipeline.go              # PipelineExecutor — auto-advance stages
+    plan.go                  # PlanStore — persistent cross-session plan management
+    review.go                # DispatchReview, ReportReview, verdict handling
+    reaper.go                # heartbeat detection, mark stale workers dead
+    recovery.go              # WAL recovery, orphan requeue, container reconciliation
+    queue.go                 # priority queue, dependency resolution
 examples/
   redis-extension/           # example external extension (Python subprocess protocol)
 ```
 
-## Build
+## Developer Notes
 
-```
-make build               # build binary
-make install             # install to /usr/local/bin (or PREFIX=~/.local)
-make help                # all targets
-```
-
-Requires Go 1.23+. The binary embeds extension YAMLs but needs `cmd/mittens/container/` and `cmd/mittens/extensions/*/build.sh` at runtime (resolved relative to binary location).
-
-## Extension System
-
-See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAML manifest schema, Go resolver API, and external subprocess protocol.
-
-## Key Patterns
-
-- Extensions self-register via `init()` + blank imports in main.go
-- `go:embed extensions/*/extension.yaml` bakes manifests into the binary
-- Flag parsing: cobra with `DisableFlagParsing: true`, manual dispatch to core flags then extensions
-- Config files: one flag per line at `~/.mittens/projects/<project>/config`, loaded and split with `strings.Fields`
-- Docker image tags derived from enabled extensions (e.g. `mittens:aws-dotnet9`)
-- Credentials: compare Keychain + file freshness, mount read-only, extract via `docker cp` after exit
-- `HostBroker` (broker.go): single TCP server bridging host↔container for creds, URLs, OAuth, notifications, refresh coordination
-- `DropProxy` (drop.go): wraps stdin through a PTY to translate host paths in bracketed paste sequences
-- Container runs as root initially (for iptables/DinD), drops to AI user via syscall.Setuid/Setgid in mittens-init
-- `mittens-init` (cmd/mittens-init): container entrypoint binary; handles root setup (proxy, iptables, DinD, priv-drop), user setup (config staging, JSON settings, cred sync), and busybox-style argv[0] dispatch for xdg-open, xclip, notify.sh symlinks
+- Build: `make build`, `make install`, `make help`
+- Requires Go 1.23+ and runtime access to `cmd/mittens/container/` plus `cmd/mittens/extensions/*/build.sh`
+- Extension reference: [docs/EXTENSIONS.md](docs/EXTENSIONS.md)
+- Runtime reference: [docs/RUNTIME.md](docs/RUNTIME.md)
+- Key patterns: embedded extension manifests, manual flag dispatch, project-scoped config, host↔container broker flow, root setup followed by priv-drop in `mittens-init`
 
 ## Core Flags
 
-`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--rebuild`, `--docker MODE`, `--no-yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
+`--verbose`/`-v`, `--session`, `--no-config`, `--no-history`, `--no-build`, `--rebuild`, `--no-yolo`, `--no-notify`, `--network-host`, `--firewall-dev`, `--worktree`, `--shell`, `--dir PATH`, `--dir-ro PATH`, `--name NAME`, `--provider NAME`, `--image-paste-key KEY`, `--profile NAME`, `--extensions`, `--json-caps`, `--help`/`-h`, `--version`/`-V`
 
-Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).
+Use `--` to pass remaining arguments directly to the AI provider.
+
+## Teams Feature
+
+Multi-agent orchestration where a leader session coordinates planner, implementer, and reviewer workers in separate containers to parallelize complex tasks.
+
+The full architecture and operational reference now lives in [docs/TEAMS.md](docs/TEAMS.md).
+
+### Summary
+
+- Entry points: `mittens team`, `team init`, `team status`, `team resume`, `team clean`
+- Config: `~/.mittens/projects/<workspace>/team.yaml`
+- Runtime shape: host broker + leader container + `team-mcp` sidecar + worker containers
+- Worker roles: planner, implementer, reviewer
+- Worker execution: provider-routed adapters under `internal/adapter/`
+- Persistence: WAL-backed pool state under `~/.mittens/projects/<projDir>/pools/<session-id>/`
+- Cross-session artifacts: plans stored under `~/.mittens/projects/<projDir>/plans/`
+
+Implementation lives primarily in `cmd/mittens/team.go`, `cmd/team-mcp/`, `internal/pool/`, and `internal/adapter/`.

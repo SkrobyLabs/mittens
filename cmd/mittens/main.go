@@ -70,12 +70,15 @@ func runMain(args []string) error {
 			return runLogs(args[1:])
 		case "clean":
 			return runClean(args[1:])
+		case "team":
+			return handleTeam(args[1:])
 		case "extension":
 			return runExtension(args[1:])
 		}
 
 		// Flag-style aliases (can appear anywhere before "--").
-		if hasSubFlag(args, "--init") {
+		if hasSubFlag(args, "--init") { //deprecated-delete-after:2026-05-01
+			fmt.Fprintf(os.Stderr, "[mittens] warning: --init is deprecated, use \"mittens init\" instead\n")
 			return handleInit(args)
 		}
 		if hasSubFlag(args, "--help") || hasSubFlag(args, "-h") {
@@ -300,7 +303,7 @@ func resolveProviderFromArgs(args []string) (*Provider, error) {
 }
 
 func providerByName(name string) (*Provider, error) {
-	switch name {
+	switch canonicalProviderName(name) {
 	case "claude":
 		return ClaudeProvider(), nil
 	case "codex":
@@ -324,13 +327,17 @@ func runLogs(args []string) error {
 
 	follow := false
 	for _, a := range args {
-		if a == "-f" || a == "--follow" {
+		switch a {
+		case "-f", "--follow":
 			follow = true
+		default:
+			return fmt.Errorf("unknown flag %q for \"mittens logs\" (only -f/--follow is supported)", a)
 		}
 	}
 
 	if follow {
 		cmd := exec.Command("tail", "-f", logPath)
+		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()

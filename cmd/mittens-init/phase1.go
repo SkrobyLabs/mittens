@@ -209,7 +209,19 @@ func setupIPTables(cfg *config) error {
 		// Allow container to reach the host broker.
 		if cfg.BrokerPort != "" {
 			c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", cfg.BrokerPort, "-j", "ACCEPT")
-			_ = c.Run()
+			if err := c.Run(); err != nil {
+				logWarn("iptables ACCEPT rule for broker port %s failed: %v", cfg.BrokerPort, err)
+			}
+		}
+
+		// Allow worker containers to reach the leader's WorkerBroker.
+		if leaderAddr := os.Getenv("MITTENS_LEADER_ADDR"); leaderAddr != "" {
+			if _, port, err := net.SplitHostPort(leaderAddr); err == nil && port != "" {
+				c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", port, "-j", "ACCEPT")
+				if err := c.Run(); err != nil {
+					logWarn("iptables ACCEPT rule for leader port %s failed: %v", port, err)
+				}
+			}
 		}
 	}
 	return nil

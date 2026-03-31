@@ -7,7 +7,10 @@ import (
 
 // runClean removes stopped mittens containers, their DinD volumes, and optionally unused mittens images.
 func runClean(args []string) error {
-	dryRun, images := parseCleanFlags(args)
+	dryRun, images, err := parseCleanFlags(args)
+	if err != nil {
+		return err
+	}
 
 	// Find stopped mittens containers.
 	containers := listStoppedContainers()
@@ -80,13 +83,15 @@ func runClean(args []string) error {
 }
 
 // parseCleanFlags extracts --dry-run and --images from the argument list.
-func parseCleanFlags(args []string) (dryRun, images bool) {
+func parseCleanFlags(args []string) (dryRun, images bool, err error) {
 	for _, a := range args {
 		switch a {
 		case "--dry-run":
 			dryRun = true
 		case "--images":
 			images = true
+		default:
+			return false, false, fmt.Errorf("unknown flag %q for \"mittens clean\" (supported: --dry-run, --images)", a)
 		}
 	}
 	return

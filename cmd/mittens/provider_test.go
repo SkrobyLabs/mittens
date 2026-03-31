@@ -113,24 +113,6 @@ func TestProvider_StagingPaths(t *testing.T) {
 	}
 }
 
-func TestProvider_IsResumeFlag(t *testing.T) {
-	p := ClaudeProvider()
-
-	positive := []string{"--continue", "-c", "--resume", "-r"}
-	for _, f := range positive {
-		if !p.IsResumeFlag(f) {
-			t.Errorf("IsResumeFlag(%q) = false, want true", f)
-		}
-	}
-
-	negative := []string{"--verbose", "--model", "resume", "-v", ""}
-	for _, f := range negative {
-		if p.IsResumeFlag(f) {
-			t.Errorf("IsResumeFlag(%q) = true, want false", f)
-		}
-	}
-}
-
 func TestDefaultProvider_ReturnsClaude(t *testing.T) {
 	p := DefaultProvider()
 	if p.Name != "claude" {
@@ -187,9 +169,6 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 	if len(p.FirewallDomains) == 0 {
 		t.Error("CodexProvider().FirewallDomains is empty")
 	}
-	if len(p.ResumeFlags) == 0 {
-		t.Error("CodexProvider().ResumeFlags is empty")
-	}
 	if p.EffortFlag != "" {
 		t.Fatalf("CodexProvider().EffortFlag = %q, want empty", p.EffortFlag)
 	}
@@ -215,20 +194,3 @@ func TestCodexProvider_Paths(t *testing.T) {
 	}
 }
 
-func TestCodexProvider_IsResumeFlag(t *testing.T) {
-	p := CodexProvider()
-
-	positive := []string{"--resume", "-r", "--continue", "-l"}
-	for _, f := range positive {
-		if !p.IsResumeFlag(f) {
-			t.Errorf("IsResumeFlag(%q) = false, want true", f)
-		}
-	}
-
-	negative := []string{"--verbose", "--model", "resume", "-v", "-c"}
-	for _, f := range negative {
-		if p.IsResumeFlag(f) {
-			t.Errorf("IsResumeFlag(%q) = true, want false", f)
-		}
-	}
-}

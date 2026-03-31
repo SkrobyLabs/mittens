@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SkrobyLabs/mittens/internal/pool"
 )
 
 const oauthSuccessPage = `<!DOCTYPE html>
@@ -106,6 +108,17 @@ type HostBroker struct {
 	// Returns PNG bytes or nil if no image is available.
 	OnClipboardRead func() []byte
 
+	// OnPoolSpawn is called when a leader requests a worker container spawn.
+	OnPoolSpawn func(spec pool.WorkerSpec) (containerName, containerID string, err error)
+
+	// OnPoolKill is called when a leader requests a worker container kill.
+	OnPoolKill func(workerID string) error
+
+	// PoolToken is a separate token for pool management endpoints.
+	// Only the leader container receives this token; workers cannot
+	// call pool management endpoints (spawn, kill, containers, session-alive).
+	PoolToken string
+
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 }
@@ -130,6 +143,10 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/refresh", b.withAuth(b.handleRefresh))
 	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
 	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
+	mux.HandleFunc("/pool/spawn", b.withPoolAuth(b.handlePoolSpawn))
+	mux.HandleFunc("/pool/kill", b.withPoolAuth(b.handlePoolKill))
+	mux.HandleFunc("/pool/containers", b.withPoolAuth(b.handlePoolContainers))
+	mux.HandleFunc("/pool/session-alive", b.withPoolAuth(b.handleSessionAlive))
 	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b
@@ -507,6 +524,25 @@ func (b *HostBroker) withAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !b.authorize(w, r) {
 			return
+		}
+		handler(w, r)
+	}
+}
+
+// withPoolAuth wraps an HTTP handler with both standard auth and an additional
+// pool-management token check. Only the leader container receives the pool
+// token, so workers cannot call pool management endpoints.
+func (b *HostBroker) withPoolAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !b.authorize(w, r) {
+			return
+		}
+		if b.PoolToken != "" {
+			pt := r.Header.Get("X-Mittens-Pool-Token")
+			if subtle.ConstantTimeCompare([]byte(pt), []byte(b.PoolToken)) != 1 {
+				http.Error(w, "forbidden: missing or invalid pool token", http.StatusForbidden)
+				return
+			}
 		}
 		handler(w, r)
 	}

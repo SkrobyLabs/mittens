@@ -61,7 +61,9 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
 # The installer may create a symlink; cp -L follows it to copy the real binary.
 ARG AI_BINARY="claude"
 ARG AI_INSTALL_CMD="curl -fsSL https://claude.ai/install.sh | bash && cp -L /root/.local/bin/claude /usr/local/bin/claude && chmod +x /usr/local/bin/claude && /usr/local/bin/claude --version"
-RUN bash -c "${AI_INSTALL_CMD}"
+ARG EXTRA_AI_INSTALL_CMDS=""
+RUN bash -c "${AI_INSTALL_CMD}" && \
+    if [ -n "${EXTRA_AI_INSTALL_CMDS}" ]; then bash -lc "${EXTRA_AI_INSTALL_CMDS}"; fi
 
 # Build-time extension installer
 # Extensions live in extensions/<name>/build.sh
@@ -122,7 +124,8 @@ RUN cp /usr/bin/xclip /usr/local/bin/xclip-real && chmod +x /usr/local/bin/xclip
 # Busybox-style symlinks provide xdg-open, xclip, and notify.sh handlers.
 # Built as: CGO_ENABLED=0 GOOS=linux go build -o mittens-init ./cmd/mittens-init
 COPY container/mittens-init /usr/local/bin/mittens-init
-RUN chmod +x /usr/local/bin/mittens-init && \
+COPY container/team-mcp /usr/local/bin/team-mcp
+RUN chmod +x /usr/local/bin/mittens-init /usr/local/bin/team-mcp && \
     ln -sf mittens-init /usr/local/bin/xdg-open && \
     ln -sf mittens-init /usr/local/bin/xclip && \
     ln -sf mittens-init /usr/local/bin/notify.sh && \
