@@ -18,6 +18,7 @@ firewall:
   - "cloudresourcemanager.googleapis.com"
   - "compute.googleapis.com"
   - "storage.googleapis.com"
+  - "accounts.google.com"
 
 build:
   script: "gcp.sh"

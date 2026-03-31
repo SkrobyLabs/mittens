@@ -126,7 +126,7 @@ import (
 )
 ```
 
-**Current built-in extensions with resolvers:** aws, azure, gcp, kubectl, mcp, firewall
+**Current built-in extensions with resolvers:** aws, azure, gcp, helm, kubectl, mcp, firewall
 
 **Current built-in extensions without resolvers (YAML-only):** ssh, gh, dotnet, go
 

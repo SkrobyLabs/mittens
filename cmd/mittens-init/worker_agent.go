@@ -51,6 +51,19 @@ func (s *workerAgentState) getTool() string {
 	return s.currentTool
 }
 
+func workerRuntimeDescriptor(providerName, modelName, adapterName string) string {
+	if providerName == "" {
+		providerName = "default"
+	}
+	if modelName == "" {
+		modelName = "default"
+	}
+	if adapterName == "" {
+		adapterName = "default"
+	}
+	return fmt.Sprintf("provider=%s model=%s adapter=%s", providerName, modelName, adapterName)
+}
+
 // runWorkerAgent runs the worker agent poll loop.
 // It registers with the leader, heartbeats, polls for tasks, executes them
 // via an adapter, extracts structured handover, reports completion, clears
@@ -124,6 +137,7 @@ func runWorkerAgent(cfg *config) {
 		os.Exit(1)
 	}
 	logInfo("worker: registered as %s", workerID)
+	logInfo("worker: %s runtime: %s", workerID, workerRuntimeDescriptor(providerName, modelName, adapterName))
 
 	// 2. Start heartbeat goroutine with cancellable context.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -254,9 +268,19 @@ func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task
 	// Write task.md to team dir before executing.
 	writeTaskFile(state.teamDir, task, priorContext)
 
+	prompt := task.Prompt
+	if task.Status == pool.TaskReviewing {
+		implementerSummary := ""
+		if task.Result != nil {
+			implementerSummary = task.Result.Summary
+		}
+		prompt = adapter.BuildReviewPrompt(task.Prompt, implementerSummary, priorContext)
+		priorContext = ""
+	}
+
 	// Execute — BuildPrompt is called inside Execute(), do not call it here.
 	ctx := context.Background()
-	result, err := ad.Execute(ctx, task.Prompt, priorContext)
+	result, err := ad.Execute(ctx, prompt, priorContext)
 	if err != nil {
 		logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
 		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(err.Error()))
@@ -273,8 +297,20 @@ func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task
 			}
 		}
 
-		// Signal-only completion — data is on filesystem.
-		reportCompleteWithRetries(client, workerID, task.ID)
+		if task.Status == pool.TaskReviewing {
+			verdict, feedback, severity := adapter.ExtractReviewVerdict(result.Output)
+			if verdict == "" {
+				verdict = pool.ReviewFail
+				feedback = "review verdict not found in output"
+				if severity == "" {
+					severity = pool.SeverityMajor
+				}
+			}
+			reportReviewWithRetries(client, workerID, task.ID, verdict, feedback, severity)
+		} else {
+			// Signal-only completion — data is on filesystem.
+			reportCompleteWithRetries(client, workerID, task.ID)
+		}
 		logInfo("worker: %s completed task %s", workerID, task.ID)
 	}
 
@@ -345,6 +381,18 @@ func reportFailWithRetries(client *leaderClient, workerID, taskID, errMsg string
 		return
 	}
 	logWarn("worker: failed to report failure for task %s after retries", taskID)
+}
+
+func reportReviewWithRetries(client *leaderClient, workerID, taskID, verdict, feedback, severity string) {
+	for i := 0; i < workerAgentReportRetries; i++ {
+		if err := client.ReportReview(workerID, taskID, verdict, feedback, severity); err != nil {
+			logWarn("worker: report review attempt %d: %v", i+1, err)
+			time.Sleep(workerAgentReportBackoff)
+			continue
+		}
+		return
+	}
+	logWarn("worker: failed to report review for task %s after retries", taskID)
 }
 
 // parseDurationEnv reads an env var as seconds and returns a time.Duration.

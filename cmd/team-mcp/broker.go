@@ -41,6 +41,7 @@ func NewWorkerBroker(pm *pool.PoolManager, addr, token string) *WorkerBroker {
 	mux.HandleFunc("GET /task/{wid}", b.withAuth(b.handlePollTask))
 	mux.HandleFunc("POST /complete", b.withAuth(b.handleComplete))
 	mux.HandleFunc("POST /fail", b.withAuth(b.handleFail))
+	mux.HandleFunc("POST /report_review", b.withAuth(b.handleReportReview))
 	mux.HandleFunc("POST /question", b.withAuth(b.handleQuestion))
 	mux.HandleFunc("GET /answer/{qid}", b.withAuth(b.handleAnswer))
 
@@ -168,6 +169,14 @@ type failReq struct {
 	Error    string `json:"error"`
 }
 
+type reviewReportReq struct {
+	WorkerID string `json:"workerId"`
+	TaskID   string `json:"taskId"`
+	Verdict  string `json:"verdict"`
+	Feedback string `json:"feedback"`
+	Severity string `json:"severity"`
+}
+
 type questionReq struct {
 	WorkerID string        `json:"workerId"`
 	Question pool.Question `json:"question"`
@@ -283,11 +292,49 @@ func (b *WorkerBroker) handleFail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing workerId or taskId", http.StatusBadRequest)
 		return
 	}
+	if task, ok := b.pm.Task(req.TaskID); ok && task.Status == pool.TaskReviewing && task.ReviewerID == req.WorkerID {
+		if err := b.pm.AbortReview(req.WorkerID, req.TaskID); err != nil {
+			http.Error(w, err.Error(), errorCode(err))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := b.pm.FailTask(req.WorkerID, req.TaskID, req.Error); err != nil {
 		http.Error(w, err.Error(), errorCode(err))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (b *WorkerBroker) handleReportReview(w http.ResponseWriter, r *http.Request) {
+	var req reviewReportReq
+	if !b.decodeBody(w, r, &req, maxSmallBody) {
+		return
+	}
+	if req.WorkerID == "" || req.TaskID == "" || req.Verdict == "" {
+		http.Error(w, "missing workerId, taskId, or verdict", http.StatusBadRequest)
+		return
+	}
+	if req.Verdict != pool.ReviewPass && req.Verdict != pool.ReviewFail {
+		http.Error(w, fmt.Sprintf("invalid verdict %q", req.Verdict), http.StatusBadRequest)
+		return
+	}
+	task, ok := b.pm.Task(req.TaskID)
+	if !ok {
+		http.Error(w, fmt.Sprintf("task %q not found", req.TaskID), http.StatusNotFound)
+		return
+	}
+	if task.ReviewerID != req.WorkerID {
+		http.Error(w, fmt.Sprintf("worker %q is not reviewer for task %q", req.WorkerID, req.TaskID), http.StatusConflict)
+		return
+	}
+	if err := b.pm.ReportReview(req.TaskID, req.Verdict, req.Feedback, req.Severity); err != nil {
+		http.Error(w, err.Error(), errorCode(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func (b *WorkerBroker) handleQuestion(w http.ResponseWriter, r *http.Request) {
@@ -326,4 +373,3 @@ func (b *WorkerBroker) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(q)
 }
-

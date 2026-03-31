@@ -48,7 +48,7 @@ type App struct {
 	NetworkHost   bool
 	Worktree      bool
 	Shell         bool
-	Profile string // model profile name (e.g. "planner", "fast")
+	Profile       string // model profile name (e.g. "planner", "fast")
 	ImagePasteKey string // "ctrl+v" or "meta+v"
 	ExtraDirs     []string
 	InstanceName  string // user-provided name via --name
@@ -398,6 +398,7 @@ func (a *App) Run() error {
 		}
 		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
+		a.broker.Verbose = a.Verbose
 		if token, err := randomHex(16); err == nil {
 			a.brokerToken = token
 			a.broker.AuthToken = token
@@ -1149,6 +1150,7 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			ConfigSubdirs:   a.Provider.ConfigSubdirs,
 			PluginDir:       a.Provider.PluginDir,
 			PluginFiles:     a.Provider.PluginFiles,
+			SkipPermsFlag:   a.Provider.SkipPermsFlag,
 		},
 		Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
@@ -1400,21 +1402,19 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Extension mounts, env vars, capabilities (from YAML declarations).
 	var firewallDomains []string
+	for _, m := range expandedExtensionMounts(a.Extensions, home, a.Provider) {
+		mountStr := m.Src + ":" + m.Dst
+		if m.Mode != "" {
+			mountStr += ":" + m.Mode
+		}
+		args = append(args, "-v", mountStr)
+		for k, v := range m.Env {
+			args = append(args, "-e", k+"="+v)
+		}
+	}
 	for _, ext := range a.Extensions {
 		if !ext.Enabled {
 			continue
-		}
-
-		// Mounts from YAML.
-		for _, m := range ext.ExpandedMounts(home, a.Provider.HomePath()) {
-			mountStr := m.Src + ":" + m.Dst
-			if m.Mode != "" {
-				mountStr += ":" + m.Mode
-			}
-			args = append(args, "-v", mountStr)
-			for k, v := range m.Env {
-				args = append(args, "-e", k+"="+v)
-			}
 		}
 
 		// Env vars from YAML.

@@ -55,7 +55,7 @@ var mcpTools = []toolDef{
 			prop("prompt", "string", "Task prompt/instructions for the worker"),
 			prop("role", "string", "Preferred worker role for this task"),
 			prop("priority", "integer", "Priority (lower = higher priority, default 1)"),
-			prop("dependsOn", "array", "Task IDs this task depends on"),
+			propArray("dependsOn", "Task IDs this task depends on", map[string]any{"type": "string"}),
 			prop("planId", "string", "Optional plan ID to associate this task with"),
 		),
 		Handler: handleEnqueueTask,
@@ -77,13 +77,29 @@ var mcpTools = []toolDef{
 		Handler:     handleGetStatus,
 	},
 	{
+		Name:        "get_pool_state",
+		Description: "Get a compact pool summary for cheap scheduling and capacity checks. Prefer this over get_status unless you need full worker/task inventories.",
+		Schema:      obj(),
+		Handler:     handleGetPoolState,
+	},
+	{
 		Name:        "get_task_result",
-		Description: "Get details and result of a specific task. For completed tasks, full worker output is available via get_task_output.",
+		Description: "Get compact details and result of a specific task. Full worker output is available via get_task_output, and the full task prompt is optional via includePrompt.",
+		Schema: obj(
+			required("taskId"),
+			prop("taskId", "string", "ID of the task"),
+			prop("includePrompt", "boolean", "Include the full task prompt in the response (default false)"),
+		),
+		Handler: handleGetTaskResult,
+	},
+	{
+		Name:        "get_task_state",
+		Description: "Get a minimal per-task monitoring view for cheap polling. Use this for active task monitoring instead of get_status/get_task_result.",
 		Schema: obj(
 			required("taskId"),
 			prop("taskId", "string", "ID of the task"),
 		),
-		Handler: handleGetTaskResult,
+		Handler: handleGetTaskState,
 	},
 	{
 		Name:        "get_task_output",
@@ -101,7 +117,8 @@ var mcpTools = []toolDef{
 			required("goal", "stages"),
 			prop("goal", "string", "High-level goal for the pipeline"),
 			propObj("stages", "array", "Pipeline stages", map[string]any{
-				"type": "object",
+				"type":                 "object",
+				"additionalProperties": false,
 				"properties": map[string]any{
 					"name": map[string]any{"type": "string", "description": "Stage name"},
 					"role": map[string]any{"type": "string", "description": "Worker role for this stage"},
@@ -109,7 +126,8 @@ var mcpTools = []toolDef{
 					"tasks": map[string]any{
 						"type": "array",
 						"items": map[string]any{
-							"type": "object",
+							"type":                 "object",
+							"additionalProperties": false,
 							"properties": map[string]any{
 								"id":         map[string]any{"type": "string"},
 								"promptTmpl": map[string]any{"type": "string"},
@@ -385,6 +403,25 @@ type statusResult struct {
 	PendingQuestions int                `json:"pendingQuestions"`
 }
 
+type poolStateResult struct {
+	TotalWorkers      int            `json:"totalWorkers"`
+	AliveWorkers      int            `json:"aliveWorkers"`
+	MaxWorkers        int            `json:"maxWorkers"`
+	IdleWorkers       int            `json:"idleWorkers"`
+	WorkingWorkers    int            `json:"workingWorkers"`
+	BlockedWorkers    int            `json:"blockedWorkers"`
+	SpawningWorkers   int            `json:"spawningWorkers"`
+	DeadWorkers       int            `json:"deadWorkers"`
+	WorkersByRole     map[string]int `json:"workersByRole,omitempty"`
+	IdleWorkersByRole map[string]int `json:"idleWorkersByRole,omitempty"`
+	TotalTasks        int            `json:"totalTasks"`
+	QueuedTasks       int            `json:"queuedTasks"`
+	ActiveTasks       int            `json:"activeTasks"`
+	ReviewingTasks    int            `json:"reviewingTasks"`
+	TerminalTasks     int            `json:"terminalTasks"`
+	PendingQuestions  int            `json:"pendingQuestions"`
+}
+
 func handleGetStatus(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
 	summaries := pm.TaskSummaries()
 
@@ -413,7 +450,122 @@ func handleGetStatus(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
 	}, nil
 }
 
+func handleGetPoolState(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
+	workers := pm.Workers()
+	tasks := pm.Tasks()
+
+	result := poolStateResult{
+		TotalWorkers:      len(workers),
+		AliveWorkers:      pm.AliveWorkers(),
+		MaxWorkers:        pm.MaxWorkers(),
+		WorkersByRole:     map[string]int{},
+		IdleWorkersByRole: map[string]int{},
+		TotalTasks:        len(tasks),
+		PendingQuestions:  len(pm.PendingQuestions()),
+	}
+
+	for _, w := range workers {
+		if w.Role != "" {
+			result.WorkersByRole[w.Role]++
+		}
+		switch w.Status {
+		case pool.WorkerIdle:
+			result.IdleWorkers++
+			if w.Role != "" {
+				result.IdleWorkersByRole[w.Role]++
+			}
+		case pool.WorkerWorking:
+			result.WorkingWorkers++
+		case pool.WorkerBlocked:
+			result.BlockedWorkers++
+		case pool.WorkerSpawning:
+			result.SpawningWorkers++
+		case pool.WorkerDead:
+			result.DeadWorkers++
+		}
+	}
+
+	for _, t := range tasks {
+		switch t.Status {
+		case pool.TaskQueued:
+			result.QueuedTasks++
+		case pool.TaskDispatched:
+			result.ActiveTasks++
+		case pool.TaskReviewing:
+			result.ActiveTasks++
+			result.ReviewingTasks++
+		default:
+			if isTerminalTaskStatus(t.Status) {
+				result.TerminalTasks++
+			}
+		}
+	}
+
+	if len(result.WorkersByRole) == 0 {
+		result.WorkersByRole = nil
+	}
+	if len(result.IdleWorkersByRole) == 0 {
+		result.IdleWorkersByRole = nil
+	}
+
+	return result, nil
+}
+
+func isTerminalTaskStatus(status string) bool {
+	switch status {
+	case pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled, pool.TaskAccepted, pool.TaskRejected, pool.TaskEscalated:
+		return true
+	default:
+		return false
+	}
+}
+
 func handleGetTaskResult(pm *pool.PoolManager, params json.RawMessage) (any, error) {
+	var p struct {
+		TaskID        string `json:"taskId"`
+		IncludePrompt bool   `json:"includePrompt"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.TaskID == "" {
+		return nil, fmt.Errorf("missing required field: taskId")
+	}
+	t, ok := pm.Task(p.TaskID)
+	if !ok {
+		return nil, fmt.Errorf("task %q not found", p.TaskID)
+	}
+
+	type taskResultView struct {
+		pool.TaskSummary
+		PlanID          string           `json:"planId,omitempty"`
+		PipelineID      string           `json:"pipelineId,omitempty"`
+		MaxReviews      int              `json:"maxReviews"`
+		Result          *pool.TaskResult `json:"result,omitempty"`
+		Prompt          string           `json:"prompt,omitempty"`
+		PromptPreview   string           `json:"promptPreview,omitempty"`
+		PromptTruncated bool             `json:"promptTruncated,omitempty"`
+		OutputHint      string           `json:"_outputHint,omitempty"`
+	}
+	result := taskResultView{
+		TaskSummary: t.Summary(),
+		PlanID:      t.PlanID,
+		PipelineID:  t.PipelineID,
+		MaxReviews:  t.MaxReviews,
+		Result:      t.Result,
+	}
+	if p.IncludePrompt {
+		result.Prompt = t.Prompt
+	} else if t.Prompt != "" {
+		result.PromptPreview, result.PromptTruncated = compactPromptPreview(t.Prompt, 240)
+	}
+	if t.Result != nil && t.Result.Summary != "" {
+		result.OutputHint = "Full worker output available via get_task_output tool"
+	}
+	return result, nil
+}
+
+func handleGetTaskState(pm *pool.PoolManager, params json.RawMessage) (any, error) {
 	var p struct {
 		TaskID string `json:"taskId"`
 	}
@@ -428,15 +580,50 @@ func handleGetTaskResult(pm *pool.PoolManager, params json.RawMessage) (any, err
 		return nil, fmt.Errorf("task %q not found", p.TaskID)
 	}
 
-	type taskWithHint struct {
-		*pool.Task
-		OutputHint string `json:"_outputHint,omitempty"`
+	type taskStateView struct {
+		ID            string     `json:"id"`
+		Status        string     `json:"status"`
+		Role          string     `json:"role,omitempty"`
+		WorkerID      string     `json:"workerId,omitempty"`
+		ReviewerID    string     `json:"reviewerId,omitempty"`
+		PlanID        string     `json:"planId,omitempty"`
+		PipelineID    string     `json:"pipelineId,omitempty"`
+		ReviewCycles  int        `json:"reviewCycles"`
+		MaxReviews    int        `json:"maxReviews"`
+		DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
+		CompletedAt   *time.Time `json:"completedAt,omitempty"`
+		ResultSummary string     `json:"resultSummary,omitempty"`
+		HasOutput     bool       `json:"hasOutput,omitempty"`
 	}
-	result := taskWithHint{Task: t}
-	if t.Result != nil && t.Result.Summary != "" {
-		result.OutputHint = "Full worker output available via get_task_output tool"
+
+	result := taskStateView{
+		ID:           t.ID,
+		Status:       t.Status,
+		Role:         t.Role,
+		WorkerID:     t.WorkerID,
+		ReviewerID:   t.ReviewerID,
+		PlanID:       t.PlanID,
+		PipelineID:   t.PipelineID,
+		ReviewCycles: t.ReviewCycles,
+		MaxReviews:   t.MaxReviews,
+		DispatchedAt: t.DispatchedAt,
+		CompletedAt:  t.CompletedAt,
+	}
+	if t.Result != nil {
+		result.ResultSummary = t.Result.Summary
+		result.HasOutput = t.Result.Summary != ""
 	}
 	return result, nil
+}
+
+func compactPromptPreview(prompt string, maxLen int) (string, bool) {
+	if maxLen <= 0 || len(prompt) <= maxLen {
+		return prompt, false
+	}
+	if maxLen <= 3 {
+		return prompt[:maxLen], true
+	}
+	return prompt[:maxLen-3] + "...", true
 }
 
 func handleGetTaskOutput(pm *pool.PoolManager, params json.RawMessage) (any, error) {
@@ -766,8 +953,9 @@ type schemaPart func(map[string]any)
 
 func obj(parts ...schemaPart) map[string]any {
 	s := map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"additionalProperties": false,
 	}
 	for _, p := range parts {
 		p(s)
@@ -779,6 +967,13 @@ func prop(name, typ, desc string) schemaPart {
 	return func(s map[string]any) {
 		props := s["properties"].(map[string]any)
 		props[name] = map[string]any{"type": typ, "description": desc}
+	}
+}
+
+func propArray(name, desc string, items map[string]any) schemaPart {
+	return func(s map[string]any) {
+		props := s["properties"].(map[string]any)
+		props[name] = map[string]any{"type": "array", "description": desc, "items": items}
 	}
 }
 

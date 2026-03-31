@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
+	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
 	"github.com/SkrobyLabs/mittens/internal/adapter"
 	"github.com/SkrobyLabs/mittens/internal/initcfg"
 	"github.com/SkrobyLabs/mittens/internal/pool"
@@ -70,6 +71,20 @@ func extractTeamName(args []string) (string, []string) {
 		}
 	}
 	return name, remaining
+}
+
+func expandedExtensionMounts(exts []*registry.Extension, home string, provider *Provider) []registry.ResolvedMount {
+	if provider == nil {
+		return nil
+	}
+	var mounts []registry.ResolvedMount
+	for _, ext := range exts {
+		if !ext.Enabled {
+			continue
+		}
+		mounts = append(mounts, ext.ExpandedMounts(home, provider.HomePath())...)
+	}
+	return mounts
 }
 
 // runTeamSession launches a team session with a leader container.
@@ -376,19 +391,19 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 		"--security-opt", "no-new-privileges",
 	)
 	// Extension mounts, env vars, capabilities (matching leader — app.go assembleDockerArgs).
+	for _, m := range expandedExtensionMounts(a.Extensions, home, workerProvider) {
+		mountStr := m.Src + ":" + m.Dst
+		if m.Mode != "" {
+			mountStr += ":" + m.Mode
+		}
+		args = append(args, "-v", mountStr)
+		for k, v := range m.Env {
+			args = append(args, "-e", k+"="+v)
+		}
+	}
 	for _, ext := range a.Extensions {
 		if !ext.Enabled {
 			continue
-		}
-		for _, m := range ext.ExpandedMounts(home, a.Provider.HomePath()) {
-			mountStr := m.Src + ":" + m.Dst
-			if m.Mode != "" {
-				mountStr += ":" + m.Mode
-			}
-			args = append(args, "-v", mountStr)
-			for k, v := range m.Env {
-				args = append(args, "-e", k+"="+v)
-			}
 		}
 		for k, v := range ext.Env {
 			args = append(args, "-e", k+"="+v)
@@ -469,16 +484,20 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 // buildWorkerInitConfig creates a minimal initcfg for a worker container.
 // Workers run in --print mode and don't need DinD, X11 clipboard, team MCP, or notification hooks.
 func (a *App) buildWorkerInitConfig(provider *Provider, containerName string) *initcfg.ContainerConfig {
-	// Check if the firewall extension is enabled.
+	// Check if the firewall extension is enabled and collect extra domains from extensions.
 	firewallEnabled := false
+	var firewallDomains []string
 	for _, ext := range a.Extensions {
 		if ext.Name == "firewall" && ext.Enabled {
 			firewallEnabled = true
-			break
+		}
+		if ext.Enabled {
+			firewallDomains = append(firewallDomains, ext.FirewallDomains()...)
 		}
 	}
+	firewallDomains = append(firewallDomains, provider.FirewallDomains...)
 
-	return &initcfg.ContainerConfig{
+	cfg := &initcfg.ContainerConfig{
 		AI: initcfg.AIConfig{
 			Binary:          provider.Binary,
 			ConfigDir:       provider.ConfigDir,
@@ -508,7 +527,15 @@ func (a *App) buildWorkerInitConfig(provider *Provider, containerName string) *i
 		},
 		ContainerName: containerName,
 		HostWorkspace: a.EffectiveWorkspace,
+		Broker: initcfg.BrokerConfig{
+			Port:  a.brokerPort,
+			Token: a.brokerToken,
+		},
 	}
+	if len(firewallDomains) > 0 {
+		cfg.FirewallExtra = firewallDomains
+	}
+	return cfg
 }
 
 // killWorkerContainer stops and removes a worker container.

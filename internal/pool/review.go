@@ -175,6 +175,48 @@ func (pm *PoolManager) ResolveEscalation(taskID, action string, extraCycles int)
 	return nil
 }
 
+// AbortReview cleans up a failed review: reverts the task to completed and
+// releases the reviewer worker back to idle.
+func (pm *PoolManager) AbortReview(workerID, taskID string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	t := pm.tasks[taskID]
+	if t == nil {
+		return fmt.Errorf("abort review: task %q not found", taskID)
+	}
+	if t.Status != TaskReviewing {
+		return fmt.Errorf("abort review: task %q is %q, expected reviewing", taskID, t.Status)
+	}
+	if t.ReviewerID != workerID {
+		return fmt.Errorf("abort review: worker %q is not the reviewer for task %q", workerID, taskID)
+	}
+
+	// WAL: review aborted — clears ReviewerID and reverts task to completed.
+	e1 := Event{
+		Timestamp: time.Now(),
+		Type:      EventReviewAborted,
+		TaskID:    taskID,
+	}
+	if _, err := pm.wal.Append(e1); err != nil {
+		return fmt.Errorf("abort review wal: %w", err)
+	}
+	Apply(pm, e1)
+
+	// WAL: reviewer idle — releases the worker back to idle status.
+	e2 := Event{
+		Timestamp: time.Now(),
+		Type:      EventWorkerIdle,
+		WorkerID:  workerID,
+	}
+	if _, err := pm.wal.Append(e2); err != nil {
+		return fmt.Errorf("abort review wal (idle): %w", err)
+	}
+	Apply(pm, e2)
+
+	return nil
+}
+
 // PickReviewer selects an idle reviewer worker for a task.
 // Prefers workers with the "reviewer" role, avoids self-review, prefers fresh eyes.
 func (pm *PoolManager) PickReviewer(taskID string) (string, error) {

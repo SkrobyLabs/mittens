@@ -935,6 +935,11 @@ func (pm *PoolManager) StateDir() string {
 	return pm.cfg.StateDir
 }
 
+// MaxWorkers returns the configured maximum worker count for the pool.
+func (pm *PoolManager) MaxWorkers() int {
+	return pm.cfg.MaxWorkers
+}
+
 // PlanStore returns the configured PlanStore, or nil if not configured.
 func (pm *PoolManager) PlanStore() *PlanStore {
 	return pm.cfg.PlanStore

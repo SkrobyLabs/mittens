@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
@@ -32,6 +33,42 @@ func newTestPM(t *testing.T) *pool.PoolManager {
 	}
 	t.Cleanup(func() { wal.Close() })
 	return pool.NewPoolManager(pool.PoolConfig{MaxWorkers: 5, StateDir: dir}, wal, nil)
+}
+
+func TestEnqueueTaskSchema_DeclaresArrayItems(t *testing.T) {
+	var schema map[string]any
+	for _, td := range mcpTools {
+		if td.Name == "enqueue_task" {
+			schema = td.Schema
+			break
+		}
+	}
+	if schema == nil {
+		t.Fatal("enqueue_task schema not found")
+	}
+	props := schema["properties"].(map[string]any)
+	dependsOn := props["dependsOn"].(map[string]any)
+	if dependsOn["type"] != "array" {
+		t.Fatalf("dependsOn.type = %#v, want array", dependsOn["type"])
+	}
+	items, ok := dependsOn["items"].(map[string]any)
+	if !ok {
+		t.Fatal("dependsOn.items missing")
+	}
+	if items["type"] != "string" {
+		t.Fatalf("dependsOn.items.type = %#v, want string", items["type"])
+	}
+}
+
+func TestTopLevelToolSchemas_DisallowAdditionalProperties(t *testing.T) {
+	for _, td := range mcpTools {
+		if td.Schema["type"] != "object" {
+			t.Fatalf("%s schema type = %#v, want object", td.Name, td.Schema["type"])
+		}
+		if td.Schema["additionalProperties"] != false {
+			t.Fatalf("%s additionalProperties = %#v, want false", td.Name, td.Schema["additionalProperties"])
+		}
+	}
 }
 
 func TestHandleSpawnWorker(t *testing.T) {
@@ -189,9 +226,63 @@ func TestHandleGetStatus(t *testing.T) {
 	}
 }
 
+func TestHandleGetPoolState(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "planner"})
+	pm.RegisterWorker("w-1", "")
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-2", Role: "implementer"})
+	pm.RegisterWorker("w-2", "")
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "plan", Role: "planner", Priority: 1})
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-2", Prompt: "implement", Role: "implementer", Priority: 1})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handleGetPoolState(pm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := result.(poolStateResult)
+	if !ok {
+		t.Fatal("expected poolStateResult")
+	}
+	if got.TotalWorkers != 2 {
+		t.Fatalf("totalWorkers = %d, want 2", got.TotalWorkers)
+	}
+	if got.AliveWorkers != 2 {
+		t.Fatalf("aliveWorkers = %d, want 2", got.AliveWorkers)
+	}
+	if got.MaxWorkers != 5 {
+		t.Fatalf("maxWorkers = %d, want 5", got.MaxWorkers)
+	}
+	if got.IdleWorkers != 1 {
+		t.Fatalf("idleWorkers = %d, want 1", got.IdleWorkers)
+	}
+	if got.WorkingWorkers != 1 {
+		t.Fatalf("workingWorkers = %d, want 1", got.WorkingWorkers)
+	}
+	if got.QueuedTasks != 1 {
+		t.Fatalf("queuedTasks = %d, want 1", got.QueuedTasks)
+	}
+	if got.ActiveTasks != 1 {
+		t.Fatalf("activeTasks = %d, want 1", got.ActiveTasks)
+	}
+	if got.TerminalTasks != 0 {
+		t.Fatalf("terminalTasks = %d, want 0", got.TerminalTasks)
+	}
+	if got.WorkersByRole["planner"] != 1 || got.WorkersByRole["implementer"] != 1 {
+		t.Fatalf("workersByRole = %#v", got.WorkersByRole)
+	}
+	if got.IdleWorkersByRole["implementer"] != 1 {
+		t.Fatalf("idleWorkersByRole = %#v", got.IdleWorkersByRole)
+	}
+}
+
 func TestHandleGetTaskResult(t *testing.T) {
 	pm := newTestPM(t)
-	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "test", Priority: 1})
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: strings.Repeat("x", 300), Priority: 1})
 
 	params := json.RawMessage(`{"taskId":"t-1"}`)
 	result, err := handleGetTaskResult(pm, params)
@@ -199,19 +290,95 @@ func TestHandleGetTaskResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// result is a taskWithHint struct wrapping *pool.Task; marshal and check ID
 	b, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		ID string `json:"id"`
+		ID              string `json:"id"`
+		Prompt          string `json:"prompt"`
+		PromptPreview   string `json:"promptPreview"`
+		PromptTruncated bool   `json:"promptTruncated"`
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.ID != "t-1" {
 		t.Errorf("taskId = %q, want t-1", got.ID)
+	}
+	if got.Prompt != "" {
+		t.Fatal("get_task_result should omit full prompt by default")
+	}
+	if got.PromptPreview == "" {
+		t.Fatal("get_task_result should include promptPreview by default")
+	}
+	if !got.PromptTruncated {
+		t.Fatal("get_task_result should mark long prompt previews as truncated")
+	}
+}
+
+func TestHandleGetTaskResult_IncludePrompt(t *testing.T) {
+	pm := newTestPM(t)
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "full prompt", Priority: 1})
+
+	result, err := handleGetTaskResult(pm, json.RawMessage(`{"taskId":"t-1","includePrompt":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Prompt        string `json:"prompt"`
+		PromptPreview string `json:"promptPreview"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Prompt != "full prompt" {
+		t.Fatalf("prompt = %q, want full prompt", got.Prompt)
+	}
+	if got.PromptPreview != "" {
+		t.Fatal("includePrompt response should omit promptPreview")
+	}
+}
+
+func TestHandleGetTaskState(t *testing.T) {
+	pm := newTestPM(t)
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: strings.Repeat("x", 300), Role: "implementer", Priority: 1})
+
+	result, err := handleGetTaskState(pm, json.RawMessage(`{"taskId":"t-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ID            string `json:"id"`
+		Status        string `json:"status"`
+		Role          string `json:"role"`
+		Prompt        string `json:"prompt"`
+		PromptPreview string `json:"promptPreview"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "t-1" {
+		t.Fatalf("id = %q, want t-1", got.ID)
+	}
+	if got.Status != pool.TaskQueued {
+		t.Fatalf("status = %q, want queued", got.Status)
+	}
+	if got.Role != "implementer" {
+		t.Fatalf("role = %q, want implementer", got.Role)
+	}
+	if got.Prompt != "" || got.PromptPreview != "" {
+		t.Fatal("get_task_state should not include prompt fields")
 	}
 }
 
@@ -449,8 +616,8 @@ func TestHandleResolveEscalationMissingAction(t *testing.T) {
 }
 
 func TestToolSchemaCount(t *testing.T) {
-	if len(mcpTools) != 22 {
-		t.Errorf("expected 22 tools, got %d", len(mcpTools))
+	if len(mcpTools) != 24 {
+		t.Errorf("expected 24 tools, got %d", len(mcpTools))
 	}
 }
 

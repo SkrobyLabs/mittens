@@ -5,6 +5,7 @@ package aws
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -67,11 +68,18 @@ func listProfiles() ([]registry.ListItem, error) {
 // ---------------------------------------------------------------------------
 
 // setup mounts AWS credentials into the container, optionally filtered to
-// only the requested profiles.
+// only the requested profiles. It also discovers AWS regions and SSO URLs
+// to add region-specific service endpoints to the firewall whitelist.
 func setup(ctx *registry.SetupContext) error {
 	ext := ctx.Extension
 	home := ctx.Home
 	awsDir := filepath.Join(home, ".aws")
+
+	// Discover and add region-specific firewall domains.
+	domains := discoverFirewallDomains(home)
+	if len(domains) > 0 {
+		*ctx.FirewallExtra = append(*ctx.FirewallExtra, domains...)
+	}
 
 	credStagingPath := "/mnt/mittens-creds-aws"
 
@@ -198,6 +206,8 @@ var (
 	sectionRe       = regexp.MustCompile(`^\[(.+?)\]\s*$`)
 	sourceProfileRe = regexp.MustCompile(`^\s*source_profile\s*=\s*(.+?)\s*$`)
 	ssoKeyRe        = regexp.MustCompile(`^\s*sso_`)
+	regionRe        = regexp.MustCompile(`^\s*region\s*=\s*(\S+)\s*$`)
+	ssoStartURLRe   = regexp.MustCompile(`^\s*sso_start_url\s*=\s*(\S+)\s*$`)
 )
 
 // listINISections parses an INI file (credentials format) and returns section
@@ -328,6 +338,130 @@ func checkSourceProfiles(configPath string, profiles []string) []string {
 		}
 	}
 	return extra
+}
+
+// ---------------------------------------------------------------------------
+// Firewall domain discovery
+// ---------------------------------------------------------------------------
+
+// regionServices lists the AWS service prefixes that get per-region endpoints.
+var regionServices = []string{
+	"sts", "s3", "ec2", "ssm", "eks", "ecr",
+	"lambda", "logs", "monitoring",
+}
+
+// discoverFirewallDomains inspects ~/.aws/config and environment variables to
+// build a list of AWS service endpoints that should be whitelisted. If no
+// region can be discovered, it falls back to the `.amazonaws.com` wildcard.
+// Global endpoints (sts.amazonaws.com, signin.aws.amazon.com) are always
+// included in the YAML manifest, so they are not duplicated here.
+func discoverFirewallDomains(home string) []string {
+	regions := discoverRegions(home)
+	ssoURLs := discoverSSOURLs(home)
+
+	// No region discovered — fall back to wildcard so the user isn't blocked.
+	if len(regions) == 0 {
+		registry.LogWarn("aws: no region discovered, falling back to .amazonaws.com wildcard")
+		return []string{".amazonaws.com"}
+	}
+
+	seen := make(map[string]bool)
+	var domains []string
+	add := func(d string) {
+		if !seen[d] {
+			seen[d] = true
+			domains = append(domains, d)
+		}
+	}
+
+	for _, region := range regions {
+		for _, svc := range regionServices {
+			add(svc + "." + region + ".amazonaws.com")
+		}
+	}
+
+	for _, rawURL := range ssoURLs {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+		host := u.Hostname()
+		if host != "" {
+			add(host)
+		}
+	}
+
+	registry.LogInfo("aws: added %d firewall domain(s) for %d region(s)", len(domains), len(regions))
+	return domains
+}
+
+// discoverRegions collects unique AWS region identifiers from the config file
+// and environment variables.
+func discoverRegions(home string) []string {
+	seen := make(map[string]bool)
+	var regions []string
+	add := func(r string) {
+		r = strings.TrimSpace(r)
+		if r != "" && !seen[r] {
+			seen[r] = true
+			regions = append(regions, r)
+		}
+	}
+
+	// Environment variables take priority.
+	add(os.Getenv("AWS_REGION"))
+	add(os.Getenv("AWS_DEFAULT_REGION"))
+
+	// Parse ~/.aws/config for region = <value> lines.
+	configPath := filepath.Join(home, ".aws", "config")
+	f, err := os.Open(configPath)
+	if err != nil {
+		return regions
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if m := regionRe.FindStringSubmatch(scanner.Text()); m != nil {
+			add(m[1])
+		}
+	}
+
+	return regions
+}
+
+// discoverSSOURLs collects unique SSO start URLs from the config file and
+// environment variables.
+func discoverSSOURLs(home string) []string {
+	seen := make(map[string]bool)
+	var urls []string
+	add := func(u string) {
+		u = strings.TrimSpace(u)
+		if u != "" && !seen[u] {
+			seen[u] = true
+			urls = append(urls, u)
+		}
+	}
+
+	// Environment variable.
+	add(os.Getenv("AWS_SSO_START_URL"))
+
+	// Parse ~/.aws/config for sso_start_url = <value> lines.
+	configPath := filepath.Join(home, ".aws", "config")
+	f, err := os.Open(configPath)
+	if err != nil {
+		return urls
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if m := ssoStartURLRe.FindStringSubmatch(scanner.Text()); m != nil {
+			add(m[1])
+		}
+	}
+
+	return urls
 }
 
 // profilesUseSSO checks whether any of the given profiles in the config file

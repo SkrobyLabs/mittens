@@ -12,6 +12,10 @@ flags:
     description: "Mount filtered kubeconfig (repeatable, comma-separated)"
     arg: "csv"
 
+firewall:
+  - "k8s.io"
+  - "registry.k8s.io"
+
 build:
   script: "kubectl.sh"
   image_tag: "kubectl"

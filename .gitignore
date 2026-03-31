@@ -24,3 +24,6 @@ cmd/mittens/container/team-mcp
 clipboard-sync.exe
 
 *.exe
+
+.tmp_gomodcache/*
+.tmp_gocache/*

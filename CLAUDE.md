@@ -25,7 +25,7 @@ cmd/
     team.go                  # team session launch, init wizard, status, resume
     pool_handlers.go         # HostBroker HTTP handler callbacks for pool ops
     team/
-      prompt.go              # leader system prompt, /mt:* skill definitions
+      prompt.go              # provider-aware leader prompts and team helper skills
     container/               # Docker image files (not embedded, must ship with binary)
       Dockerfile
       mittens-init           # container entrypoint binary (built from cmd/mittens-init)
@@ -105,6 +105,7 @@ The full architecture and operational reference now lives in [docs/TEAMS.md](doc
 
 - Entry points: `mittens team`, `team init`, `team status`, `team resume`, `team clean`
 - Config: `~/.mittens/projects/<workspace>/team.yaml`
+- Leader provider: selected via normal `--provider` / project defaults
 - Runtime shape: host broker + leader container + `team-mcp` sidecar + worker containers
 - Worker roles: planner, implementer, reviewer
 - Worker execution: provider-routed adapters under `internal/adapter/`

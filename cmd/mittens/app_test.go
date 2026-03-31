@@ -67,6 +67,44 @@ func TestParseFlags_ProfileFlag(t *testing.T) {
 	}
 }
 
+func TestExpandedExtensionMounts_UsesSelectedProviderHome(t *testing.T) {
+	exts := []*registry.Extension{
+		{
+			Enabled: true,
+			Mounts: []registry.MountConfig{
+				{
+					Src:  "/host/tooling",
+					Dst:  "~/tooling",
+					Mode: "ro",
+					Env:  map[string]string{"TOOLING_HOME": "~/tooling"},
+				},
+			},
+		},
+	}
+
+	claudeMounts := expandedExtensionMounts(exts, "/Users/test", ClaudeProvider())
+	if len(claudeMounts) != 1 {
+		t.Fatalf("len(claudeMounts) = %d, want 1", len(claudeMounts))
+	}
+	if claudeMounts[0].Dst != "/home/claude/tooling" {
+		t.Fatalf("claude mount dst = %q, want /home/claude/tooling", claudeMounts[0].Dst)
+	}
+	if claudeMounts[0].Env["TOOLING_HOME"] != "/home/claude/tooling" {
+		t.Fatalf("claude env TOOLING_HOME = %q, want /home/claude/tooling", claudeMounts[0].Env["TOOLING_HOME"])
+	}
+
+	codexMounts := expandedExtensionMounts(exts, "/Users/test", CodexProvider())
+	if len(codexMounts) != 1 {
+		t.Fatalf("len(codexMounts) = %d, want 1", len(codexMounts))
+	}
+	if codexMounts[0].Dst != "/home/codex/tooling" {
+		t.Fatalf("codex mount dst = %q, want /home/codex/tooling", codexMounts[0].Dst)
+	}
+	if codexMounts[0].Env["TOOLING_HOME"] != "/home/codex/tooling" {
+		t.Fatalf("codex env TOOLING_HOME = %q, want /home/codex/tooling", codexMounts[0].Env["TOOLING_HOME"])
+	}
+}
+
 func TestMaybeApplyProfile_AppliesModelAndEffort(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmp)
@@ -1513,6 +1551,9 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 	}
 	if cfg.AI.SettingsFormat != "toml" {
 		t.Errorf("AI.SettingsFormat = %q, want toml", cfg.AI.SettingsFormat)
+	}
+	if cfg.AI.SkipPermsFlag != "--dangerously-bypass-approvals-and-sandbox" {
+		t.Errorf("AI.SkipPermsFlag = %q, want --dangerously-bypass-approvals-and-sandbox", cfg.AI.SkipPermsFlag)
 	}
 
 	// UserPrefsFile is empty — should NOT mount a user prefs file.

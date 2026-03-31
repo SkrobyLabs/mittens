@@ -144,12 +144,12 @@ func TestBuildWorkerInitConfig(t *testing.T) {
 		t.Errorf("AI.CredFile = %q, want %q", cfg.AI.CredFile, ".credentials.json")
 	}
 
-	// Workers should not inherit the host broker config.
-	if cfg.Broker.Port != 0 {
-		t.Errorf("Broker.Port = %d, want 0", cfg.Broker.Port)
+	// Workers must inherit the host broker config so they can sync credentials.
+	if cfg.Broker.Port != 12345 {
+		t.Errorf("Broker.Port = %d, want 12345", cfg.Broker.Port)
 	}
-	if cfg.Broker.Token != "" {
-		t.Errorf("Broker.Token = %q, want empty", cfg.Broker.Token)
+	if cfg.Broker.Token != "test-token" {
+		t.Errorf("Broker.Token = %q, want test-token", cfg.Broker.Token)
 	}
 
 	// Container name and workspace.
@@ -246,6 +246,58 @@ func TestBuildWorkerInitConfig_CodexProvider(t *testing.T) {
 	}
 	if cfg.AI.SkipPermsFlag != "--dangerously-bypass-approvals-and-sandbox" {
 		t.Fatalf("AI.SkipPermsFlag = %q", cfg.AI.SkipPermsFlag)
+	}
+}
+
+func TestBuildWorkerInitConfig_FirewallExtra(t *testing.T) {
+	codex := CodexProvider()
+	app := &App{
+		Provider: DefaultProvider(),
+		Extensions: []*registry.Extension{
+			{Name: "firewall", Enabled: true},
+			{Name: "aws", Enabled: true, Firewall: []string{"s3.amazonaws.com"}},
+			{Name: "disabled-ext", Enabled: false, Firewall: []string{"should-not-appear.example.com"}},
+		},
+	}
+
+	cfg := app.buildWorkerInitConfig(codex, "w-test")
+
+	// Provider domains must be present.
+	for _, domain := range codex.FirewallDomains {
+		found := false
+		for _, d := range cfg.FirewallExtra {
+			if d == domain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("FirewallExtra missing provider domain %q", domain)
+		}
+	}
+
+	// Enabled extension domain must be present.
+	found := false
+	for _, d := range cfg.FirewallExtra {
+		if d == "s3.amazonaws.com" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("FirewallExtra missing enabled extension domain s3.amazonaws.com")
+	}
+
+	// Disabled extension domain must not be present.
+	for _, d := range cfg.FirewallExtra {
+		if d == "should-not-appear.example.com" {
+			t.Error("FirewallExtra contains domain from disabled extension")
+		}
+	}
+
+	// FirewallExtra must be non-empty overall.
+	if len(cfg.FirewallExtra) == 0 {
+		t.Error("FirewallExtra is empty, expected provider and extension domains")
 	}
 }
 

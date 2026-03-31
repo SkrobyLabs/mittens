@@ -123,7 +123,8 @@ func (ps *PlanStore) OrphanPlan(planID string) error {
 	})
 }
 
-// ListPlans returns all plans sorted by creation time (newest first).
+// ListPlans returns plans sorted by status (active, pending, completed)
+// then by relevant time (newest first), capped at 30 entries.
 func (ps *PlanStore) ListPlans() ([]Plan, error) {
 	entries, err := os.ReadDir(ps.plansDir)
 	if err != nil {
@@ -143,9 +144,32 @@ func (ps *PlanStore) ListPlans() ([]Plan, error) {
 	}
 
 	sort.Slice(plans, func(i, j int) bool {
+		ri, rj := statusRank(plans[i].Status), statusRank(plans[j].Status)
+		if ri != rj {
+			return ri < rj
+		}
+		// Within same status: completed sorts by CompletedAt, others by CreatedAt.
+		if plans[i].Status == "completed" {
+			return plans[i].CompletedAt.After(plans[j].CompletedAt)
+		}
 		return plans[i].CreatedAt.After(plans[j].CreatedAt)
 	})
+	if len(plans) > 30 {
+		plans = plans[:30]
+	}
 	return plans, nil
+}
+
+// statusRank returns sort priority: active=0, pending=1, completed=2.
+func statusRank(status string) int {
+	switch status {
+	case "active":
+		return 0
+	case "pending":
+		return 1
+	default:
+		return 2
+	}
 }
 
 // ReadPlan returns the plan.md content for a plan.

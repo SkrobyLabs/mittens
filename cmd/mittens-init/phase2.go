@@ -503,8 +503,8 @@ func setJSONKey(path, key string, value interface{}) {
 	writeJSONFile(path, settings)
 }
 
-// setupTeamMCP registers the team MCP server via `claude mcp add` and writes
-// the leader system prompt and skill files.
+// setupTeamMCP registers the team MCP server and writes the provider-specific
+// leader prompt and helper skills.
 func setupTeamMCP(cfg *config) {
 	if !cfg.TeamMCP {
 		return
@@ -524,7 +524,7 @@ func setupTeamMCP(cfg *config) {
 	case "claude":
 		args = []string{"mcp", "add", "-s", "local", "team", "--", "/usr/local/bin/team-mcp"}
 	case "codex":
-		args = []string{"mcp", "add", "team", "--", "/usr/local/bin/team-mcp"}
+		args = codexTeamMCPAddArgs()
 	default:
 		args = []string{"mcp", "add", "team", "--", "/usr/local/bin/team-mcp"}
 	}
@@ -538,8 +538,28 @@ func setupTeamMCP(cfg *config) {
 	setupTeamPrompt(cfg)
 }
 
-// setupTeamPrompt writes the leader system prompt to the user-level project
-// file and creates skill files for /mt:* slash commands.
+func codexTeamMCPAddArgs() []string {
+	args := []string{"mcp", "add", "team"}
+	for _, key := range []string{
+		"MITTENS_STATE_DIR",
+		"MITTENS_SESSION_ID",
+		"MITTENS_BROKER_PORT",
+		"MITTENS_BROKER_TOKEN",
+		"MITTENS_POOL_TOKEN",
+		"MITTENS_MAX_WORKERS",
+		"MITTENS_TEAM_CONFIG",
+		"MITTENS_PLANS_DIR",
+	} {
+		if val := os.Getenv(key); val != "" {
+			args = append(args, "--env", key+"="+val)
+		}
+	}
+	args = append(args, "--", "/usr/local/bin/team-mcp")
+	return args
+}
+
+// setupTeamPrompt writes the provider-specific leader prompt to the user-level
+// project file and creates any helper skills needed by that provider.
 func setupTeamPrompt(cfg *config) {
 	if !cfg.TeamMCP {
 		return
@@ -547,18 +567,30 @@ func setupTeamPrompt(cfg *config) {
 
 	// Write leader prompt to user-level project file.
 	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
-	if err := os.WriteFile(projectFile, []byte(team.LeaderSystemPrompt()), 0644); err != nil {
+	provider := filepath.Base(cfg.AIBinary)
+	if err := os.WriteFile(projectFile, []byte(team.LeaderSystemPrompt(provider)), 0644); err != nil {
 		logWarn("write leader prompt to %s: %v", projectFile, err)
 	}
 
-	// Write skill files so /mt:* commands are real Claude Code slash commands.
-	skillsDir := cfg.AIDir + "/skills"
-	for _, skill := range team.LeaderSkills() {
-		dir := skillsDir + "/" + skill.Name
-		os.MkdirAll(dir, 0755)
-		if err := os.WriteFile(dir+"/SKILL.md", []byte(skill.Content), 0644); err != nil {
-			logWarn("write skill %s: %v", skill.Name, err)
+	// Claude reads helper skills from ~/.claude/skills. Codex reads them from
+	// the agent-skills user directory under $HOME.
+	for _, skillsDir := range teamSkillDirs(cfg) {
+		for _, skill := range team.LeaderSkills(provider) {
+			dir := skillsDir + "/" + skill.Name
+			os.MkdirAll(dir, 0755)
+			if err := os.WriteFile(dir+"/SKILL.md", []byte(skill.Content), 0644); err != nil {
+				logWarn("write skill %s: %v", skill.Name, err)
+			}
 		}
+	}
+}
+
+func teamSkillDirs(cfg *config) []string {
+	switch filepath.Base(cfg.AIBinary) {
+	case "codex":
+		return []string{filepath.Join(cfg.AIHome, ".agents", "skills")}
+	default:
+		return []string{filepath.Join(cfg.AIDir, "skills")}
 	}
 }
 

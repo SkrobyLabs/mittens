@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SkrobyLabs/mittens/internal/adapter"
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
 
@@ -23,8 +25,17 @@ type mockLeaderServer struct {
 	lastCurrentTool string
 	completed       []string
 	failed          []string
+	reviewed        []reviewPayload
 	task            *pool.Task // task to return on poll (consumed once)
 	srv             *httptest.Server
+}
+
+type reviewPayload struct {
+	WorkerID string `json:"workerId"`
+	TaskID   string `json:"taskId"`
+	Verdict  string `json:"verdict"`
+	Feedback string `json:"feedback"`
+	Severity string `json:"severity"`
 }
 
 func newMockLeaderServer(t *testing.T) *mockLeaderServer {
@@ -82,10 +93,50 @@ func newMockLeaderServer(t *testing.T) *mockLeaderServer {
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("POST /report_review", func(w http.ResponseWriter, r *http.Request) {
+		var req reviewPayload
+		json.NewDecoder(r.Body).Decode(&req)
+		m.mu.Lock()
+		m.reviewed = append(m.reviewed, req)
+		m.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
 
 	m.srv = httptest.NewServer(mux)
 	t.Cleanup(m.srv.Close)
 	return m
+}
+
+type fakeAdapter struct {
+	result      adapter.Result
+	err         error
+	prompts     []string
+	priorCtxs   []string
+	clearCalls  int
+	forceCleans int
+}
+
+func (a *fakeAdapter) Execute(ctx context.Context, prompt string, priorContext string) (adapter.Result, error) {
+	a.prompts = append(a.prompts, prompt)
+	a.priorCtxs = append(a.priorCtxs, priorContext)
+	if a.err != nil {
+		return adapter.Result{}, a.err
+	}
+	return a.result, nil
+}
+
+func (a *fakeAdapter) ClearSession() error {
+	a.clearCalls++
+	return nil
+}
+
+func (a *fakeAdapter) ForceClean() error {
+	a.forceCleans++
+	return nil
+}
+
+func (a *fakeAdapter) Healthy() bool {
+	return true
 }
 
 func TestLeaderClient_Register(t *testing.T) {
@@ -159,6 +210,20 @@ func TestLeaderClient_PollTask_WithTask(t *testing.T) {
 	}
 	if task.ID != "t-1" {
 		t.Errorf("task.ID = %q, want t-1", task.ID)
+	}
+}
+
+func TestWorkerRuntimeDescriptor(t *testing.T) {
+	got := workerRuntimeDescriptor("codex", "gpt-5.4", "codex")
+	want := "provider=codex model=gpt-5.4 adapter=codex"
+	if got != want {
+		t.Fatalf("workerRuntimeDescriptor() = %q, want %q", got, want)
+	}
+
+	got = workerRuntimeDescriptor("", "", "")
+	want = "provider=default model=default adapter=default"
+	if got != want {
+		t.Fatalf("workerRuntimeDescriptor(empty) = %q, want %q", got, want)
 	}
 }
 
@@ -487,4 +552,180 @@ func TestReportFailWithRetries_Success(t *testing.T) {
 		t.Errorf("failed = %v, want [t-1]", m.failed)
 	}
 	m.mu.Unlock()
+}
+
+// --- ReportReview tests ---
+
+func TestReportReview_Success(t *testing.T) {
+	var gotPayload struct {
+		WorkerID string `json:"workerId"`
+		TaskID   string `json:"taskId"`
+		Verdict  string `json:"verdict"`
+		Feedback string `json:"feedback"`
+		Severity string `json:"severity"`
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /report_review", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotPayload)
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := newLeaderClient(srv.Listener.Addr().String(), "")
+	err := client.ReportReview("w-1", "t-1", "approved", "looks good", "low")
+	if err != nil {
+		t.Fatalf("ReportReview: %v", err)
+	}
+	if gotPayload.WorkerID != "w-1" {
+		t.Errorf("workerId = %q, want w-1", gotPayload.WorkerID)
+	}
+	if gotPayload.TaskID != "t-1" {
+		t.Errorf("taskId = %q, want t-1", gotPayload.TaskID)
+	}
+	if gotPayload.Verdict != "approved" {
+		t.Errorf("verdict = %q, want approved", gotPayload.Verdict)
+	}
+	if gotPayload.Feedback != "looks good" {
+		t.Errorf("feedback = %q, want 'looks good'", gotPayload.Feedback)
+	}
+	if gotPayload.Severity != "low" {
+		t.Errorf("severity = %q, want low", gotPayload.Severity)
+	}
+}
+
+func TestReportReview_ServerError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /report_review", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := newLeaderClient(srv.Listener.Addr().String(), "")
+	err := client.ReportReview("w-1", "t-1", "rejected", "bad code", "high")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error %q should mention HTTP 500", err.Error())
+	}
+}
+
+func TestExecuteTask_ReviewTaskReportsReview(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		result: adapter.Result{
+			Output: "Review complete.\n<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>",
+		},
+	}
+	task := &pool.Task{
+		ID:     "t-review",
+		Prompt: "review this change",
+		Status: pool.TaskReviewing,
+		Result: &pool.TaskResult{Summary: "implemented feature"},
+		Handover: &pool.TaskHandover{
+			ContextForNext: "prior notes",
+		},
+	}
+	state := &workerAgentState{teamDir: t.TempDir()}
+
+	executeTask(client, ad, "w-1", task, state)
+
+	if len(ad.prompts) != 1 {
+		t.Fatalf("execute count = %d, want 1", len(ad.prompts))
+	}
+	if !strings.Contains(ad.prompts[0], "## Review Request") {
+		t.Errorf("prompt = %q, want review framing", ad.prompts[0])
+	}
+	if len(ad.priorCtxs) != 1 || ad.priorCtxs[0] != "" {
+		t.Errorf("priorContext = %q, want empty", ad.priorCtxs[0])
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.completed) != 0 {
+		t.Errorf("completed = %v, want none", m.completed)
+	}
+	if len(m.reviewed) != 1 {
+		t.Fatalf("reviewed = %d, want 1", len(m.reviewed))
+	}
+	if m.reviewed[0].TaskID != "t-review" || m.reviewed[0].Verdict != "pass" {
+		t.Errorf("review payload = %+v", m.reviewed[0])
+	}
+}
+
+func TestExecuteTask_ReviewTaskMissingVerdictDefaultsToFail(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		result: adapter.Result{Output: "review text without structured verdict"},
+	}
+	task := &pool.Task{
+		ID:     "t-review",
+		Prompt: "review this change",
+		Status: pool.TaskReviewing,
+		Result: &pool.TaskResult{Summary: "implemented feature"},
+	}
+
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.reviewed) != 1 {
+		t.Fatalf("reviewed = %d, want 1", len(m.reviewed))
+	}
+	if m.reviewed[0].Verdict != pool.ReviewFail {
+		t.Errorf("verdict = %q, want fail", m.reviewed[0].Verdict)
+	}
+	if m.reviewed[0].Severity != pool.SeverityMajor {
+		t.Errorf("severity = %q, want %q", m.reviewed[0].Severity, pool.SeverityMajor)
+	}
+}
+
+func TestExecuteTask_RegularTaskStillReportsComplete(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		result: adapter.Result{Output: "done\n<handover><summary>ok</summary></handover>"},
+	}
+	task := &pool.Task{
+		ID:     "t-regular",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.completed) != 1 || m.completed[0] != "t-regular" {
+		t.Errorf("completed = %v, want [t-regular]", m.completed)
+	}
+	if len(m.reviewed) != 0 {
+		t.Errorf("reviewed = %v, want none", m.reviewed)
+	}
+}
+
+func TestExecuteTask_ReviewTaskErrorReportsFail(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{err: errors.New("boom")}
+	task := &pool.Task{
+		ID:     "t-review",
+		Prompt: "review this change",
+		Status: pool.TaskReviewing,
+	}
+
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.failed) != 1 || m.failed[0] != "t-review" {
+		t.Errorf("failed = %v, want [t-review]", m.failed)
+	}
+	if len(m.reviewed) != 0 {
+		t.Errorf("reviewed = %v, want none", m.reviewed)
+	}
 }

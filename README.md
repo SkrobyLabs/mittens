@@ -70,6 +70,8 @@ Mittens supports multiple AI coding agents via `--provider`:
 
 Each provider brings its own credential layout, firewall domains, CLI flags, and config format. Mittens handles all the differences — same workflow regardless of provider.
 
+That provider selection also applies to `mittens team`: for example, `mittens team --provider codex` launches a Codex-led team session, while `team.yaml` continues to control worker routing.
+
 ## How It Works
 
 Mittens is built around a few core pieces:

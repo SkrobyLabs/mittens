@@ -124,6 +124,101 @@ I did the new work.
 	}
 }
 
+func TestBuildReviewPrompt(t *testing.T) {
+	prompt := BuildReviewPrompt("implement X", "I implemented X by doing Y", "some prior context")
+	if !strings.Contains(prompt, "implement X") {
+		t.Error("prompt should contain task prompt")
+	}
+	if !strings.Contains(prompt, "I implemented X by doing Y") {
+		t.Error("prompt should contain implementer summary")
+	}
+	if !strings.Contains(prompt, "<review>") {
+		t.Error("prompt should contain review block instructions")
+	}
+	if !strings.Contains(prompt, "some prior context") {
+		t.Error("prompt should contain prior context")
+	}
+	if !strings.Contains(prompt, "Review Request") {
+		t.Error("prompt should contain Review Request header")
+	}
+}
+
+func TestBuildReviewPrompt_NoContext(t *testing.T) {
+	prompt := BuildReviewPrompt("task", "summary", "")
+	if strings.Contains(prompt, "Prior Context") {
+		t.Error("prompt should not contain Prior Context header when empty")
+	}
+	if !strings.Contains(prompt, "task") {
+		t.Error("prompt should contain task prompt")
+	}
+}
+
+func TestExtractReviewVerdict_Pass(t *testing.T) {
+	output := `Looks good to me.
+<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>`
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "pass" {
+		t.Errorf("verdict = %q, want pass", v)
+	}
+	if f != "LGTM" {
+		t.Errorf("feedback = %q, want LGTM", f)
+	}
+	if s != "minor" {
+		t.Errorf("severity = %q, want minor", s)
+	}
+}
+
+func TestExtractReviewVerdict_Fail(t *testing.T) {
+	output := `<review><verdict>fail</verdict><feedback>Missing error handling</feedback><severity>major</severity></review>`
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "fail" {
+		t.Errorf("verdict = %q, want fail", v)
+	}
+	if f != "Missing error handling" {
+		t.Errorf("feedback = %q, want 'Missing error handling'", f)
+	}
+	if s != "major" {
+		t.Errorf("severity = %q, want major", s)
+	}
+}
+
+func TestExtractReviewVerdict_Missing(t *testing.T) {
+	output := "I reviewed the code and it looks fine."
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "" || f != "" || s != "" {
+		t.Errorf("expected empty strings, got (%q, %q, %q)", v, f, s)
+	}
+}
+
+func TestExtractReviewVerdict_Partial(t *testing.T) {
+	// Opening tag but no closing tag — malformed.
+	output := "<review><verdict>pass</verdict>"
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "" || f != "" || s != "" {
+		t.Errorf("expected empty strings for malformed block, got (%q, %q, %q)", v, f, s)
+	}
+}
+
+func TestExtractReviewVerdict_Multiline(t *testing.T) {
+	output := `<review>
+<verdict>fail</verdict>
+<feedback>Line one of feedback.
+Line two of feedback.
+Line three.</feedback>
+<severity>critical</severity>
+</review>`
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "fail" {
+		t.Errorf("verdict = %q, want fail", v)
+	}
+	if !strings.Contains(f, "Line one") || !strings.Contains(f, "Line three") {
+		t.Errorf("feedback = %q, missing expected lines", f)
+	}
+	if s != "critical" {
+		t.Errorf("severity = %q, want critical", s)
+	}
+}
+
 func TestBuildPrompt_WithContext(t *testing.T) {
 	prompt := BuildPrompt("do the thing", "prior stuff")
 	if !strings.Contains(prompt, "Prior Context") {

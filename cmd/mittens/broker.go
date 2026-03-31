@@ -121,6 +121,9 @@ type HostBroker struct {
 
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
+
+	// Verbose enables noisy per-request logging (routine GET polls).
+	Verbose bool
 }
 
 // refreshCoordTimeout is how long a refresh coordinator holds the lock before
@@ -250,11 +253,15 @@ func (b *HostBroker) handleGet(w http.ResponseWriter) {
 	b.mu.RUnlock()
 
 	if data == "" {
-		b.blog("GET → 204 (no credentials)")
+		if b.Verbose {
+			b.blog("GET → 204 (no credentials)")
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	b.blog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
+	if b.Verbose {
+		b.blog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, data)

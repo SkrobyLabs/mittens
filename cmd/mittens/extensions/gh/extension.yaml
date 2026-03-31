@@ -11,6 +11,10 @@ flags:
     description: "Mount GitHub CLI config with token forwarding"
     arg: "none"
 
+firewall:
+  - "objects.githubusercontent.com"
+  - "raw.githubusercontent.com"
+
 # No declarative mounts — the Go resolver in resolver.go handles mounting.
 # It copies ~/.config/gh to a staging dir, enriches hosts.yml with tokens
 # extracted from the host's credential store, and mounts the result.

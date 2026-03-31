@@ -425,6 +425,64 @@ func TestReviewRecord_MultipleReviewsAccumulate(t *testing.T) {
 	}
 }
 
+// --- AbortReview ---
+
+func TestAbortReview_Success(t *testing.T) {
+	pm := newReviewTestPM(t)
+	tid, _, revID := setupCompletedTask(t, pm, 3)
+
+	if err := pm.DispatchReview(tid, revID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pm.AbortReview(revID, tid); err != nil {
+		t.Fatal(err)
+	}
+
+	task, ok := pm.Task(tid)
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if task.Status != TaskCompleted {
+		t.Errorf("task status = %q, want %q", task.Status, TaskCompleted)
+	}
+	if task.ReviewerID != "" {
+		t.Errorf("reviewerID = %q, want empty", task.ReviewerID)
+	}
+
+	w, _ := pm.Worker(revID)
+	if w.Status != WorkerIdle {
+		t.Errorf("reviewer status = %q, want %q", w.Status, WorkerIdle)
+	}
+	if w.CurrentTaskID != "" {
+		t.Errorf("reviewer currentTaskID = %q, want empty", w.CurrentTaskID)
+	}
+}
+
+func TestAbortReview_WrongStatus(t *testing.T) {
+	pm := newReviewTestPM(t)
+	tid, _, _ := setupCompletedTask(t, pm, 3)
+
+	err := pm.AbortReview("rev-1", tid)
+	if err == nil {
+		t.Error("expected error when task is not in reviewing status")
+	}
+}
+
+func TestAbortReview_WrongWorker(t *testing.T) {
+	pm := newReviewTestPM(t)
+	tid, _, revID := setupCompletedTask(t, pm, 3)
+
+	if err := pm.DispatchReview(tid, revID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := pm.AbortReview("wrong-worker", tid)
+	if err == nil {
+		t.Error("expected error when workerID does not match ReviewerID")
+	}
+}
+
 // --- PickReviewer ---
 
 func TestPickReviewer_PrefersReviewerRole(t *testing.T) {

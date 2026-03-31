@@ -97,6 +97,60 @@ func ExtractHandover(taskID, output string) *pool.TaskHandover {
 	return h
 }
 
+// reviewSuffix is the XML block template the reviewer AI must output.
+const reviewSuffix = `
+
+At the end of your review, output a review block:
+<review>
+<verdict>pass|fail</verdict>
+<feedback>...</feedback>
+<severity>minor|major|critical</severity>
+</review>
+
+Use verdict=pass if the implementation is correct and complete, fail otherwise.
+Severity is only meaningful when verdict is fail: minor=small issues, major=significant gaps, critical=broken/unsafe.`
+
+// BuildReviewPrompt creates a prompt that instructs the reviewer AI to review an
+// implementation. The caller's Execute() will wrap this with BuildPrompt which
+// appends the handover suffix — do not call BuildPrompt here.
+func BuildReviewPrompt(taskPrompt, implementerSummary, priorContext string) string {
+	var b strings.Builder
+	if priorContext != "" {
+		b.WriteString("## Prior Context\n\n")
+		b.WriteString(priorContext)
+		b.WriteString("\n\n---\n\n")
+	}
+	b.WriteString("## Review Request\n\n")
+	b.WriteString("You are a code reviewer. Review the implementation described below.\n\n")
+	b.WriteString("### Original Task\n\n")
+	b.WriteString(taskPrompt)
+	b.WriteString("\n\n### Implementer Summary\n\n")
+	b.WriteString(implementerSummary)
+	b.WriteString(reviewSuffix)
+	return b.String()
+}
+
+// ExtractReviewVerdict parses a <review> block from reviewer AI output and returns
+// (verdict, feedback, severity). Returns ("", "", "") if no valid block is found.
+func ExtractReviewVerdict(output string) (verdict, feedback, severity string) {
+	end := strings.LastIndex(output, "</review>")
+	if end < 0 {
+		return "", "", ""
+	}
+	start := strings.LastIndex(output[:end], "<review>")
+	if start < 0 {
+		return "", "", ""
+	}
+	block := output[start+len("<review>") : end]
+	verdict = extractTag(block, "verdict")
+	feedback = extractTag(block, "feedback")
+	severity = extractTag(block, "severity")
+	if verdict == "" {
+		return "", "", ""
+	}
+	return verdict, feedback, severity
+}
+
 // extractTag finds <tag>content</tag> in a block and returns the trimmed content.
 func extractTag(block, tag string) string {
 	open := "<" + tag + ">"

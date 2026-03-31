@@ -1,6 +1,6 @@
 # mittens Teams
 
-Multi-agent orchestration where a leader Claude instance coordinates worker agents in separate containers to parallelize complex tasks.
+Multi-agent orchestration where a leader AI session coordinates worker agents in separate containers to parallelize complex tasks.
 
 Use this document for the full Teams feature reference. `CLAUDE.md` keeps only the condensed summary.
 
@@ -17,8 +17,8 @@ Use this document for the full Teams feature reference. `CLAUDE.md` keeps only t
 ├─────────┼───────────────────────────────────────────────┤
 │  Leader Container                                       │
 │  ┌──────────────┐   ┌────────────────────────────────┐  │
-│  │ Claude Code   │──│ team-mcp (MCP sidecar)         │  │
-│  │ (interactive) │   │  ├─ PoolManager (state machine)│  │
+│  │ AI CLI         │──│ team-mcp (MCP sidecar)         │  │
+│  │ (interactive)  │   │  ├─ PoolManager (state machine)│  │
 │  └──────────────┘   │  ├─ WorkerBroker (:8080)       │  │
 │                      │  ├─ PipelineExecutor           │  │
 │                      │  ├─ Heartbeat Reaper           │  │
@@ -51,6 +51,16 @@ mittens team clean --all            # Remove all non-running sessions
 mittens team clean --dry-run        # Preview what would be removed
 mittens team help                   # Show help
 ```
+
+## Leader Provider
+
+The team leader uses the normal mittens provider selection flow, not `team.yaml`.
+
+- `mittens team --provider codex` launches a Codex-led team session
+- `mittens team --provider claude` launches a Claude-led team session
+- project defaults from `mittens init` also apply to the leader
+
+`team.yaml` still controls worker routing only.
 
 ## Team Status
 
@@ -138,12 +148,23 @@ The leader-facing `team-mcp` server exposes:
 
 `spawn_worker`, `kill_worker`, `enqueue_task`, `dispatch_task`, `wait_for_task`, `get_status`, `get_task_result`, `get_task_output`, `submit_pipeline`, `cancel_pipeline`, `dispatch_review`, `report_review`, `answer_question`, `resolve_escalation`, `pending_questions`, `create_plan`, `list_plans`, `read_plan`, `claim_plan`, `update_plan_progress`, `complete_plan`, `check_session`
 
-## Slash Commands
+## Leader Commands
+
+Claude leaders register slash commands:
 
 - **`/mt:status`**: calls `get_status` and shows workers, tasks, pipelines, and pending questions
 - **`/mt:plan <description>`**: spawns a planner worker, presents a structured plan, and waits for approval
 - **`/mt:execute <plan-id>`**: executes a pending plan from the plans directory
 - **`/mt:plans`**: lists all plans with status and progress
+
+Codex leaders install user skills:
+
+- **`$mt-status`**: calls `get_status` and shows workers, tasks, pipelines, and pending questions
+- **`$mt-plan <description>`**: spawns a planner worker, presents a structured plan, and waits for approval
+- **`$mt-execute <plan-id>`**: executes a pending plan from the plans directory
+- **`$mt-plans`**: lists all plans with status and progress
+
+Codex built-ins such as `/mcp`, `/agent`, and `/plan` remain available alongside the team skills.
 
 ## Pipelines And Reviews
 

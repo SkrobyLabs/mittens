@@ -60,9 +60,13 @@ The AI CLI sees only container-valid paths.
 
 The firewall is enabled by default unless `--no-firewall` is used. Mittens runs a built-in Go forward proxy plus iptables rules to restrict outbound HTTP and HTTPS to an allowlist.
 
-The default whitelist includes provider APIs, major source hosts, package registries, Docker registries, Helm, and Terraform. Extensions can add domains, and MCP server domains are resolved from config plus `mcp-domains.conf`. SSH on port 22 bypasses the proxy.
+The base whitelist (`firewall.conf`) covers the Claude Code API, git hosting (GitHub, GitLab, Bitbucket), container registries, and common package registries (npm, pip, Cargo, NuGet, Go, Terraform). Cloud-provider and orchestration domains are **not** in the base whitelist — they are added by their respective extensions (e.g. `--aws`, `--azure`, `--gcp`, `--helm`, `--k8s`).
 
-Use `--firewall-dev` for a broader developer-focused allowlist.
+Extensions contribute firewall domains in two ways: static domains declared in their YAML manifests, and dynamic domains discovered at runtime by Go resolvers. For example, the AWS extension reads `~/.aws/config` to discover regions and generates per-region service endpoints (STS, S3, EC2, etc.) instead of a broad wildcard.
+
+MCP server domains are resolved from `mcp-domains.conf` plus any user overrides in `~/.claude/mcp-domains.conf`. MCP servers configured with a URL also have their hostname automatically extracted and whitelisted.
+
+SSH on port 22 bypasses the proxy. Use `--firewall-dev` for a broader developer-focused allowlist that is a superset of the base whitelist (adds cloud provider wildcards, system package repos, and CDN domains).
 
 ## Docker In Docker
 

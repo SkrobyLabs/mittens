@@ -500,3 +500,164 @@ func TestSetup_NoProfiles(t *testing.T) {
 		t.Errorf("expected no docker args when no profiles, got: %v", dockerArgs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Firewall domain discovery
+// ---------------------------------------------------------------------------
+
+func TestDiscoverRegions_FromConfig(t *testing.T) {
+	home := newAWSFixture(t)
+	regions := discoverRegions(home)
+
+	// The fixture config has us-east-1, eu-west-1, ap-southeast-1.
+	want := map[string]bool{
+		"us-east-1":      true,
+		"eu-west-1":      true,
+		"ap-southeast-1": true,
+	}
+	got := make(map[string]bool)
+	for _, r := range regions {
+		got[r] = true
+	}
+	for r := range want {
+		if !got[r] {
+			t.Errorf("expected region %q, got regions: %v", r, regions)
+		}
+	}
+}
+
+func TestDiscoverRegions_FromEnv(t *testing.T) {
+	home := t.TempDir() // no .aws directory
+
+	t.Setenv("AWS_REGION", "eu-central-1")
+	t.Setenv("AWS_DEFAULT_REGION", "us-west-2")
+
+	regions := discoverRegions(home)
+	want := map[string]bool{"eu-central-1": true, "us-west-2": true}
+	got := make(map[string]bool)
+	for _, r := range regions {
+		got[r] = true
+	}
+	for r := range want {
+		if !got[r] {
+			t.Errorf("expected region %q, got regions: %v", r, regions)
+		}
+	}
+}
+
+func TestDiscoverRegions_Dedup(t *testing.T) {
+	home := newAWSFixture(t)
+	// Set env to a region already in the config file.
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+
+	regions := discoverRegions(home)
+	count := 0
+	for _, r := range regions {
+		if r == "us-east-1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("us-east-1 appeared %d times, want 1; regions: %v", count, regions)
+	}
+}
+
+func TestDiscoverSSOURLs_FromConfig(t *testing.T) {
+	home := newAWSFixture(t)
+	urls := discoverSSOURLs(home)
+
+	if len(urls) != 1 || urls[0] != "https://example.awsapps.com/start" {
+		t.Errorf("expected [https://example.awsapps.com/start], got %v", urls)
+	}
+}
+
+func TestDiscoverSSOURLs_FromEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AWS_SSO_START_URL", "https://myorg.awsapps.com/start")
+
+	urls := discoverSSOURLs(home)
+	if len(urls) != 1 || urls[0] != "https://myorg.awsapps.com/start" {
+		t.Errorf("expected [https://myorg.awsapps.com/start], got %v", urls)
+	}
+}
+
+func TestDiscoverFirewallDomains_WithRegions(t *testing.T) {
+	home := newAWSFixture(t)
+	domains := discoverFirewallDomains(home)
+
+	// 3 regions × 9 services = 27 + 1 SSO hostname = 28 domains.
+	if len(domains) != 28 {
+		t.Errorf("expected 28 domains, got %d: %v", len(domains), domains)
+	}
+
+	// Spot-check a few expected entries.
+	domainSet := make(map[string]bool)
+	for _, d := range domains {
+		domainSet[d] = true
+	}
+	for _, want := range []string{
+		"sts.us-east-1.amazonaws.com",
+		"s3.eu-west-1.amazonaws.com",
+		"eks.ap-southeast-1.amazonaws.com",
+		"example.awsapps.com",
+	} {
+		if !domainSet[want] {
+			t.Errorf("missing expected domain %q", want)
+		}
+	}
+}
+
+func TestDiscoverFirewallDomains_NoRegion_Wildcard(t *testing.T) {
+	home := t.TempDir() // no .aws directory, no env vars
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_SSO_START_URL", "")
+
+	domains := discoverFirewallDomains(home)
+	if len(domains) != 1 || domains[0] != ".amazonaws.com" {
+		t.Errorf("expected [.amazonaws.com] wildcard fallback, got %v", domains)
+	}
+}
+
+func TestSetup_FirewallDomainsPopulated(t *testing.T) {
+	home := newAWSFixture(t)
+
+	var dockerArgs []string
+	var firewallExtra []string
+	var tempDirs []string
+	var credStagingDirs []string
+
+	ext := &registry.Extension{
+		Name:    "aws",
+		Enabled: true,
+		Args:    []string{"prod"},
+	}
+	ctx := &registry.SetupContext{
+		ContainerHome:   "/home/testuser",
+		Home:            home,
+		Extension:       ext,
+		DockerArgs:      &dockerArgs,
+		FirewallExtra:   &firewallExtra,
+		TempDirs:        &tempDirs,
+		StagingDir:      t.TempDir(),
+		CredStagingDirs: &credStagingDirs,
+	}
+
+	if err := setup(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(firewallExtra) == 0 {
+		t.Fatal("expected firewall domains to be populated")
+	}
+
+	// Should contain region-specific endpoints.
+	joined := strings.Join(firewallExtra, " ")
+	if !strings.Contains(joined, "sts.us-east-1.amazonaws.com") {
+		t.Error("firewall should include sts.us-east-1.amazonaws.com")
+	}
+	if !strings.Contains(joined, "example.awsapps.com") {
+		t.Error("firewall should include SSO hostname example.awsapps.com")
+	}
+}

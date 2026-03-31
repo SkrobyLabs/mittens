@@ -217,7 +217,9 @@ func (s *mcpServer) serve() {
 				"result": map[string]any{
 					"protocolVersion": "2024-11-05",
 					"capabilities": map[string]any{
-						"tools": map[string]any{},
+						"tools": map[string]any{
+							"listChanged": false,
+						},
 					},
 					"serverInfo": map[string]any{
 						"name":    "team-mcp",
