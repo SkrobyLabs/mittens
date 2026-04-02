@@ -66,14 +66,14 @@ func (b *HostBroker) handlePoolContainers(w http.ResponseWriter, r *http.Request
 		http.Error(w, "missing required sessionId parameter", http.StatusBadRequest)
 		return
 	}
-	if pool.ValidateID(sessionID) != nil {
+	if pool.ValidateSessionID(sessionID) != nil {
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
 		return
 	}
 
-	out, err := captureCommand("docker", "ps",
+	out, err := captureCommand("docker", "ps", "-a",
 		"--filter", "label=mittens.pool="+sessionID,
-		"--format", `{{.ID}}\t{{.Label "mittens.worker_id"}}\t{{.Status}}`)
+		"--format", `{{.ID}}\t{{.Label "mittens.worker_id"}}\t{{.State}}\t{{.Status}}`)
 	if err != nil {
 		b.blog("POOL CONTAINERS → error: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -85,14 +85,15 @@ func (b *HostBroker) handlePoolContainers(w http.ResponseWriter, r *http.Request
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 3 {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
 			continue
 		}
 		containers = append(containers, pool.ContainerInfo{
 			ContainerID: parts[0],
 			WorkerID:    parts[1],
-			Status:      parts[2],
+			State:       parts[2],
+			Status:      parts[3],
 		})
 	}
 
@@ -111,7 +112,7 @@ func (b *HostBroker) handleSessionAlive(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing required sessionId parameter", http.StatusBadRequest)
 		return
 	}
-	if pool.ValidateID(sessionID) != nil {
+	if pool.ValidateSessionID(sessionID) != nil {
 		http.Error(w, "invalid sessionId", http.StatusBadRequest)
 		return
 	}

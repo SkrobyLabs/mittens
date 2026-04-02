@@ -95,6 +95,10 @@ examples/
 
 Use `--` to pass remaining arguments directly to the AI provider.
 
+Top-level command: `mittens version [--json]`
+- `mittens version --json` prints machine-readable JSON
+- `mittens --version` and `mittens -V` remain the same version aliases
+
 ## Teams Feature
 
 Multi-agent orchestration where a leader session coordinates planner, implementer, and reviewer workers in separate containers to parallelize complex tasks.

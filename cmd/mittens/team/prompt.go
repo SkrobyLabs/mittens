@@ -97,7 +97,7 @@ Execute a persistent plan by ID ($ARGUMENTS):
 		Name: "mt:status",
 		Content: `---
 name: "mt:status"
-description: "Show current pool status — workers, tasks, queue, pipelines"
+description: "Show current pool status — workers, live activity, tasks, queue, pipelines"
 ---
 
 Call the get_status MCP tool (mcp__team__get_status) with no arguments and format the response as:
@@ -107,14 +107,17 @@ Call the get_status MCP tool (mcp__team__get_status) with no arguments and forma
 Workers: <alive>/<total> alive | by role breakdown
 Tasks:   <completed>/<total> completed | <in_progress> in progress | <queued> queued
 
-| Worker | Role     | State    | Current Task | Since      |
-|--------|----------|----------|--------------|------------|
-| <id>   | <role>   | <state>  | <task_desc>  | <spawned>  |
+| Worker | Role     | State    | Current Task | Activity / Blocker | Inspect | Since      |
+|--------|----------|----------|--------------|--------------------|---------|------------|
+| <id>   | <role>   | <state>  | <task_desc>  | <activitySummary>  | <get_worker_activity or —> | <spawned>  |
 
 | Task   | Status   | Role     | Worker  | Summary              |
 |--------|----------|----------|---------|----------------------|
 | <id>   | <status> | <role>   | <wid>   | <first 60 chars>     |
 ` + "```" + `
+
+Use the worker row's activity summary as the operator-facing current activity for live Claude and Codex workers.
+If a worker row exposes inspectionTool=get_worker_activity, mention that focused inspection is available and call it only when you need the worker's live task, blocker, or artifact context.
 
 If there are active pipelines, also show:
 
@@ -140,7 +143,7 @@ Create an execution plan for the user's request ($ARGUMENTS) by delegating
 research to a planner worker. Do NOT explore the codebase yourself.
 
 Steps:
-1. Call get_status (mcp__team__get_status) to check current pool capacity.
+1. Call get_pool_state (mcp__team__get_pool_state) to check current pool capacity.
 2. Spawn a planner worker (role: planner) if no idle planner exists.
 3. Enqueue a planning task with a prompt like:
 
@@ -249,19 +252,17 @@ Preflight:
    a. Spawn workers as needed (reuse idle ones)
    b. Enqueue tasks with proper dependencies via enqueue_task (include planId param)
    c. Dispatch queued tasks to idle workers via dispatch_task
-   d. Do NOT call wait_for_task directly from the main leader flow for worker tasks.
-      When several tasks are in flight, explicitly spawn Codex subagents to call
-      wait_for_task in parallel with timeoutSec <= 90.
-   e. If you stay on the main leader flow, monitor progress only through the
+   d. Do NOT use spawned Codex subagents for task monitoring in this workflow.
+      Do NOT call wait_for_task directly from the main leader flow for worker tasks.
+      Ensure every dispatched task always has an active monitoring path by planning
+      an immediate main-thread get_task_state follow-up after dispatch.
+   e. Monitor progress only through the
       ` + "`team`" + ` MCP tools by polling get_task_state. Reserve get_task_result
       for terminal inspection and get_pool_state for cheap capacity checks.
       Reserve get_status for explicit full status reports only. Poll at a coarse
       cadence only when you need a scheduling or user-facing update, not in a
-      tight loop. Preserve the specific terminal status that is returned.
-   f. If a subagent's bounded wait_for_task call times out, continue through the
-      ` + "`team`" + ` MCP tools only by polling get_task_state or retrying a bounded
-      wait. Call get_task_result only after the task reaches a terminal state, and
-      preserve the specific terminal status that is returned.
+      tight loop. Do not wait for the user to ask for status before checking on
+      active work. Preserve the specific terminal status that is returned.
 5. As tasks complete, call update_plan_progress (mcp__team__update_plan_progress)
    with a summary of what completed.
 6. Dispatch reviews for completed implementation tasks.
@@ -273,7 +274,7 @@ Preflight:
 		Name: "mt-status",
 		Content: `---
 name: "mt-status"
-description: "Show current pool status — workers, tasks, queue, pipelines"
+description: "Show current pool status — workers, live activity, tasks, queue, pipelines"
 ---
 
 Preflight:
@@ -289,14 +290,17 @@ Call the get_status MCP tool (mcp__team__get_status) with no arguments and forma
 Workers: <alive>/<total> alive | by role breakdown
 Tasks:   <completed>/<total> completed | <in_progress> in progress | <queued> queued
 
-| Worker | Role     | State    | Current Task | Since      |
-|--------|----------|----------|--------------|------------|
-| <id>   | <role>   | <state>  | <task_desc>  | <spawned>  |
+| Worker | Role     | State    | Current Task | Activity / Blocker | Inspect | Since      |
+|--------|----------|----------|--------------|--------------------|---------|------------|
+| <id>   | <role>   | <state>  | <task_desc>  | <activitySummary>  | <get_worker_activity or —> | <spawned>  |
 
 | Task   | Status   | Role     | Worker  | Summary              |
 |--------|----------|----------|---------|----------------------|
 | <id>   | <status> | <role>   | <wid>   | <first 60 chars>     |
 ` + "```" + `
+
+Use the worker row's activity summary as the operator-facing current activity for live Claude and Codex workers.
+If a worker row exposes inspectionTool=get_worker_activity, mention that focused inspection is available and call it only when you need the worker's live task, blocker, or artifact context.
 
 If there are active pipelines, also show:
 
@@ -343,20 +347,21 @@ Steps:
 
 4. Dispatch the task to the planner worker.
 5. Do NOT call wait_for_task directly from the main leader flow for the planner task.
-6. If you need non-blocking monitoring, explicitly spawn a Codex subagent to call
-   wait_for_task (mcp__team__wait_for_task) with the task ID and timeoutSec <= 90.
-7. If you stay on the main leader flow, monitor the planner only through the
+6. Do NOT use spawned Codex subagents for planner monitoring in this workflow.
+   Ensure the planner task has an active monitoring path immediately after dispatch
+   by planning a main-thread get_task_state follow-up.
+7. Monitor the planner only through the
    ` + "`team`" + ` MCP tools by polling get_task_state until the task reaches a
    terminal state. Reserve get_task_result for terminal inspection and
    get_pool_state for cheap capacity checks. Reserve get_status for explicit full
    status reports only. Poll at a coarse cadence only when you need a scheduling
-   or user-facing update, not in a tight loop.
-8. If a subagent's bounded wait_for_task call times out, continue monitoring through the
-   ` + "`team`" + ` MCP tools only: call get_task_state, then retry a bounded
-   wait or keep polling get_task_state until the task reaches a terminal state.
-   Call get_task_result only after the task reaches a terminal state.
-   Distinguish terminal outcomes such as completed, failed, canceled, accepted,
-   rejected, and escalated instead of collapsing them into generic completion.
+   or user-facing update, not in a tight loop. Do not wait for the user to ask
+   for status before checking on the planner again.
+8. Continue monitoring through the ` + "`team`" + ` MCP tools only: call
+   get_task_state until the task reaches a terminal state. Call get_task_result
+   only after the task reaches a terminal state. Distinguish terminal outcomes
+   such as completed, failed, canceled, accepted, rejected, and escalated instead
+   of collapsing them into generic completion.
 9. When the task completes, call get_task_output if you need the full stored
    planner output rather than the summarized task result.
 10. While waiting, handle any pending questions or other scheduling.
@@ -389,13 +394,16 @@ After the user approves, spawn workers and dispatch tasks phase-by-phase:
 2. Enqueue tasks with proper dependencies via enqueue_task
 3. Dispatch queued tasks to idle workers via dispatch_task
 4. Do NOT call wait_for_task directly from the main leader flow for worker tasks.
-5. Use explicit Codex subagents for non-blocking bounded wait_for_task monitoring when helpful.
-6. If you stay on the main leader flow, use get_task_state for routine task polling.
+5. Establish monitoring immediately for every dispatched task by planning a
+   main-thread get_task_state follow-up.
+6. Use get_task_state for routine task polling.
    Reserve get_task_result for terminal inspection and get_pool_state for cheap
    capacity checks. Reserve get_status for explicit full status reports only.
    Poll at a coarse cadence only when you need a scheduling or user-facing
-   update, not in a tight loop.
-7. If a subagent's wait_for_task call times out, switch to get_task_state polling through the ` + "`team`" + ` MCP tools, then call get_task_result only after the task reaches a terminal state and preserve the specific terminal status that is returned.
+   update, not in a tight loop. Do not wait for the user to ask for status
+   before checking on long-running active work again.
+7. Call get_task_result only after the task reaches a terminal state and
+   preserve the specific terminal status that is returned.
 8. When task results return, dispatch reviews for completed tasks
 `,
 	},
@@ -432,12 +440,13 @@ You are a pool leader — a coordinator that manages a team of AI worker agents 
 ### Task Queue
 - **enqueue_task**: Add a task to the priority queue. Params: prompt (required), role, priority (lower=higher), dependsOn (task IDs), planId (optional)
 - **dispatch_task**: Assign a queued task to a specific idle worker. Params: taskId, workerId
-- **wait_for_task**: Block until a task reaches a terminal state and return the full task with result. Params: taskId (required), timeoutSec (default 300; in Codex sessions use this from monitoring subagents, not from the main leader flow, and prefer bounded waits <= 90 seconds per call)
+- **wait_for_task**: Block until a task reaches a terminal state and return the full task with result. Params: taskId (required), timeoutSec (default 300; in Codex sessions prefer main-thread get_task_state polling instead of spawned subagent wait_for_task monitoring)
 - **get_pool_state**: Get a compact pool summary for cheap scheduling and capacity checks. Prefer this over get_status unless you need full worker/task inventories.
 - **get_task_state**: Get a minimal per-task monitoring view for cheap polling while work is still in flight. Params: taskId
 - **get_task_result**: Get compact details and result of a specific task. Use this after a task reaches a terminal state or when you need the summarized result. Params: taskId
 - **get_task_output**: Read the full stored worker output for a completed task (not just the summary). Params: taskId
-- **get_status**: Get the full pool overview — workers, tasks, queue, pipelines. Use this for explicit status reports, not routine scheduling checks.
+- **get_status**: Get the full pool overview — workers, live activity summaries, tasks, queue, pipelines, pending question metadata, and inspection hints. Use this for explicit status reports, not routine scheduling checks.
+- **get_worker_activity**: Inspect one worker's live activity in depth after get_status points you there. Use it for the worker's current task, pending blocker, and worker-side artifact context. Params: workerId
 
 ### Pipelines
 - **submit_pipeline**: Run a multi-stage pipeline autonomously. Params: goal, stages (each with name, role, fan mode, tasks)
@@ -478,7 +487,7 @@ const claudeLeaderWorkflow = `
 ## User-Facing Skills
 
 The following slash commands are registered:
-- /mt:status — Show pool status (workers, tasks, queue, pipelines)
+- /mt:status — Show current pool status — workers, live activity, tasks, queue, pipelines
 - /mt:plan <request> — Decompose request into execution plan, wait for approval
 - /mt:execute <plan-id> — Execute a pending plan from the plans directory
 - /mt:plans — List all plans with status and progress
@@ -518,7 +527,7 @@ const codexLeaderWorkflow = `
 ## User-Facing Skills
 
 The following Codex skills are installed:
-- $mt-status — Show pool status (workers, tasks, queue, pipelines)
+- $mt-status — Show current pool status — workers, live activity, tasks, queue, pipelines
 - $mt-plan <request> — Decompose request into an execution plan and wait for approval
 - $mt-execute <plan-id> — Execute a pending plan from the plans directory
 - $mt-plans — List all plans with status and progress
@@ -539,27 +548,27 @@ If the ` + "`team`" + ` MCP toolset is unavailable in this session:
 3. If the ` + "`team`" + ` MCP tools are missing, stop and tell the user the team session bootstrap is broken
 4. After approval: spawn workers, enqueue and dispatch tasks phase-by-phase
 5. Do NOT call wait_for_task directly from the main leader flow for worker tasks
-6. After each dispatch_task, if you need non-blocking monitoring, explicitly spawn a Codex subagent to call wait_for_task with timeoutSec <= 90
-7. If a bounded wait_for_task call times out, continue through the ` + "`team`" + ` MCP tools only by polling get_task_state or retrying a bounded wait, and preserve the specific terminal status that is returned
-8. If you choose not to use subagents, the main leader should use get_task_state for routine polling, get_pool_state for cheap capacity checks, and reserve get_status for explicit full status reports only
+6. After each dispatch_task, establish monitoring immediately with a planned main-thread get_task_state follow-up
+7. Every in-flight task must always have an active monitoring path; do not leave dispatched work unchecked indefinitely
+8. Continue through the ` + "`team`" + ` MCP tools only by polling get_task_state, and preserve the specific terminal status that is returned
+9. The main leader should use get_task_state for routine polling, get_pool_state for cheap capacity checks, and reserve get_status for explicit full status reports only
    and poll at a coarse cadence only when you need a scheduling or user-facing update, not in a tight loop
-9. Treat MCP notifications as hints only; verify the task state with get_task_state while work is active, then confirm the summarized result with get_task_result before dispatching reviews or advancing a plan
-10. Present final summary to user
+10. Do not wait for the user to ask for status before checking on active work again
+11. Treat MCP notifications as hints only; verify the task state with get_task_state while work is active, then confirm the summarized result with get_task_result before dispatching reviews or advancing a plan
+12. Present final summary to user
 
 ## Background Task Monitoring
 
-Codex only uses subagents when explicitly asked. When you need to monitor work
-without blocking the main thread:
+Do not rely on spawned Codex subagents for task monitoring in this workflow.
+Monitor from the main leader flow through the ` + "`team`" + ` MCP tools:
 
-1. After calling dispatch_task, explicitly spawn a subagent to call wait_for_task
-2. Use a prompt like: "Call the wait_for_task MCP tool (mcp__team__wait_for_task)
-   with taskId '<id>' and timeoutSec 60. If it times out, call get_task_state
-   and report whether the task is still active or which terminal status it reached
-   (for example completed, failed, canceled, accepted, rejected, or escalated)."
-3. You may launch multiple subagents in parallel (one per dispatched task)
-4. The main leader should not call wait_for_task directly for worker tasks; keep long waits off the foreground leader path
-5. For long-running tasks, prefer repeated bounded waits or get_task_state polling over a single long wait_for_task call, and keep polling at a coarse cadence rather than a tight loop
-6. Do NOT replace the team pool with local planner/worker subagents; subagents are only for non-blocking monitoring of team MCP tasks
+1. After calling dispatch_task, immediately establish monitoring for that task
+2. Every in-flight task must always have at least one active monitoring path; never leave dispatched work unchecked indefinitely
+3. The main leader should not call wait_for_task directly for worker tasks; keep monitoring on get_task_state
+4. Proactively call get_task_state again after a coarse interval for long-running active tasks even without user prompting
+5. Do not wait for the user to ask for status before checking on active work
+6. Keep polling at a coarse cadence rather than a tight loop
+7. Do NOT replace the team pool with local planner/worker subagents
 
 ## Session Startup
 On session start, call list_plans to check for existing plans. For any plan with
@@ -574,6 +583,7 @@ const leaderPromptSharedSections = `
 ### Pool Status
 Workers: <alive>/<total> alive | <idle> idle | <busy> busy
 Tasks:   <completed>/<total> completed | <in_progress> in progress | <queued> queued
+Worker rows: include current task, activity/blocker summary, and ` + "`get_worker_activity`" + ` inspection hint when available
 
 ### Execution Plan
 Goal: <one-line summary>

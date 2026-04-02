@@ -25,14 +25,14 @@ func newTestPoolManager(t *testing.T) *PoolManager {
 // This helper bridges the old test pattern (passing result/handover directly)
 // with the new filesystem-based CompleteTask.
 func completeTestTask(pm *PoolManager, workerID, taskID string, result TaskResult, handover *TaskHandover) error {
-	workerDir := filepath.Join(pm.cfg.StateDir, "workers", workerID)
+	workerDir := WorkerStateDir(pm.cfg.StateDir, workerID)
 	os.MkdirAll(workerDir, 0755)
 	if result.Summary != "" {
-		os.WriteFile(filepath.Join(workerDir, "result.txt"), []byte(result.Summary), 0644)
+		os.WriteFile(filepath.Join(workerDir, WorkerResultFile), []byte(result.Summary), 0644)
 	}
 	if handover != nil {
 		data, _ := json.Marshal(handover)
-		os.WriteFile(filepath.Join(workerDir, "handover.json"), data, 0644)
+		os.WriteFile(filepath.Join(workerDir, WorkerHandoverFile), data, 0644)
 	}
 	return pm.CompleteTask(workerID, taskID)
 }
@@ -122,12 +122,20 @@ func TestRegisterWorkerWrongState(t *testing.T) {
 func TestKillWorker(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	w, _ := pm.Worker("w-1")
+	token := w.Token
 	if err := pm.KillWorker("w-1"); err != nil {
 		t.Fatal(err)
 	}
-	w, _ := pm.Worker("w-1")
+	w, _ = pm.Worker("w-1")
 	if w.Status != WorkerDead {
 		t.Errorf("status = %q, want dead", w.Status)
+	}
+	if w.Token != "" {
+		t.Errorf("token = %q, want empty", w.Token)
+	}
+	if owner, ok := pm.ValidateWorkerToken(token); ok || owner != "" {
+		t.Fatalf("ValidateWorkerToken(old token) = (%q, %v), want revoked", owner, ok)
 	}
 }
 
@@ -144,12 +152,20 @@ func TestMarkDead(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
 	pm.RegisterWorker("w-1", "")
+	w, _ := pm.Worker("w-1")
+	token := w.Token
 	if err := pm.MarkDead("w-1"); err != nil {
 		t.Fatal(err)
 	}
-	w, _ := pm.Worker("w-1")
+	w, _ = pm.Worker("w-1")
 	if w.Status != WorkerDead {
 		t.Errorf("status = %q, want dead", w.Status)
+	}
+	if w.Token != "" {
+		t.Errorf("token = %q, want empty", w.Token)
+	}
+	if owner, ok := pm.ValidateWorkerToken(token); ok || owner != "" {
+		t.Fatalf("ValidateWorkerToken(old token) = (%q, %v), want revoked", owner, ok)
 	}
 }
 
@@ -157,7 +173,7 @@ func TestHeartbeat(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
 	pm.RegisterWorker("w-1", "")
-	if err := pm.Heartbeat("w-1", "idle", ""); err != nil {
+	if err := pm.Heartbeat("w-1", "idle", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	w, _ := pm.Worker("w-1")
@@ -166,20 +182,113 @@ func TestHeartbeat(t *testing.T) {
 	}
 }
 
-func TestHeartbeatCurrentTool(t *testing.T) {
+func TestHeartbeatRejectsDeadWorker(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
 	pm.RegisterWorker("w-1", "")
-	if err := pm.Heartbeat("w-1", "idle", "Read"); err != nil {
+	if err := pm.MarkDead("w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "idle", nil, ""); err == nil {
+		t.Fatal("expected heartbeat for dead worker to fail")
+	}
+}
+
+func TestHeartbeatCurrentActivity(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	activity := &WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "README.md",
+	}
+	if err := pm.Heartbeat("w-1", "idle", activity, ""); err != nil {
 		t.Fatal(err)
 	}
 	w, _ := pm.Worker("w-1")
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be set")
+	}
+	if *w.CurrentActivity != *activity {
+		t.Fatalf("CurrentActivity = %+v, want %+v", *w.CurrentActivity, *activity)
+	}
 	if w.CurrentTool != "Read" {
 		t.Errorf("CurrentTool = %q, want Read", w.CurrentTool)
 	}
-	// Clear tool.
-	pm.Heartbeat("w-1", "idle", "")
-	w, _ = pm.Worker("w-1")
+}
+
+func TestHeartbeatLegacyCurrentTool(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	if err := pm.Heartbeat("w-1", "idle", nil, "Read"); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := pm.Worker("w-1")
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be synthesized from currentTool")
+	}
+	if w.CurrentActivity.Kind != "tool" || w.CurrentActivity.Phase != "started" || w.CurrentActivity.Name != "Read" {
+		t.Fatalf("CurrentActivity = %+v, want synthesized tool activity", *w.CurrentActivity)
+	}
+	if w.CurrentTool != "Read" {
+		t.Errorf("CurrentTool = %q, want Read", w.CurrentTool)
+	}
+}
+
+func TestHeartbeatStatusActivityClearsLegacyCurrentTool(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	if err := pm.Heartbeat("w-1", "idle", nil, "Read"); err != nil {
+		t.Fatal(err)
+	}
+	statusActivity := &WorkerActivity{
+		Kind:    "status",
+		Phase:   "started",
+		Name:    "planning",
+		Summary: "Reviewing task context",
+	}
+	if err := pm.Heartbeat("w-1", "idle", statusActivity, ""); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := pm.Worker("w-1")
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be set")
+	}
+	if *w.CurrentActivity != *statusActivity {
+		t.Fatalf("CurrentActivity = %+v, want %+v", *w.CurrentActivity, *statusActivity)
+	}
+	if w.CurrentTool != "" {
+		t.Errorf("CurrentTool = %q, want empty", w.CurrentTool)
+	}
+}
+
+func TestHeartbeatCompletedToolActivityClearsCurrentTool(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	if err := pm.Heartbeat("w-1", "idle", nil, "Read"); err != nil {
+		t.Fatal(err)
+	}
+	completedActivity := &WorkerActivity{
+		Kind:    "tool",
+		Phase:   "completed",
+		Name:    "Read",
+		Summary: "finished README.md",
+	}
+	if err := pm.Heartbeat("w-1", "idle", completedActivity, ""); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := pm.Worker("w-1")
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be set")
+	}
+	if *w.CurrentActivity != *completedActivity {
+		t.Fatalf("CurrentActivity = %+v, want %+v", *w.CurrentActivity, *completedActivity)
+	}
 	if w.CurrentTool != "" {
 		t.Errorf("CurrentTool = %q, want empty", w.CurrentTool)
 	}
@@ -187,7 +296,7 @@ func TestHeartbeatCurrentTool(t *testing.T) {
 
 func TestHeartbeatNotFound(t *testing.T) {
 	pm := newTestPoolManager(t)
-	err := pm.Heartbeat("nope", "idle", "")
+	err := pm.Heartbeat("nope", "idle", nil, "")
 	if err == nil {
 		t.Error("expected error for non-existent worker")
 	}
@@ -466,6 +575,13 @@ func TestKillWorkerFromWorkingState(t *testing.T) {
 	if w.Status != WorkerDead {
 		t.Errorf("status = %q, want dead", w.Status)
 	}
+	task, _ := pm.Task("t-1")
+	if task.Status != TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
+	}
+	if task.WorkerID != "" {
+		t.Fatalf("task workerId = %q, want empty", task.WorkerID)
+	}
 }
 
 func TestKillWorkerNotFound(t *testing.T) {
@@ -581,6 +697,18 @@ func TestAskAndAnswerQuestion(t *testing.T) {
 	pending = pm.PendingQuestions()
 	if len(pending) != 0 {
 		t.Errorf("pending = %d, want 0 after answer", len(pending))
+	}
+}
+
+func TestAskQuestionRejectsDeadWorker(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	if err := pm.MarkDead("w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pm.AskQuestion("w-1", Question{Question: "still there?", Blocking: true}); err == nil {
+		t.Fatal("expected dead worker question to fail")
 	}
 }
 
@@ -759,6 +887,49 @@ func TestRecoverPoolManager(t *testing.T) {
 	}
 }
 
+func TestRecoverPoolManager_PreservesWorkerTokensForValidation(t *testing.T) {
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+
+	wal1, err := OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("open wal1: %v", err)
+	}
+	pm1 := NewPoolManager(PoolConfig{MaxWorkers: 10, StateDir: dir}, wal1, nil)
+	w, err := pm1.SpawnWorker(WorkerSpec{ID: "w-1"})
+	if err != nil {
+		t.Fatalf("spawn worker: %v", err)
+	}
+	token := w.Token
+	if token == "" {
+		t.Fatal("expected worker token")
+	}
+	if err := pm1.RegisterWorker("w-1", "cid"); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if err := wal1.Close(); err != nil {
+		t.Fatalf("close wal1: %v", err)
+	}
+
+	wal2, err := OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("open wal2: %v", err)
+	}
+	defer wal2.Close()
+	pm2, err := RecoverPoolManager(PoolConfig{MaxWorkers: 10, StateDir: dir}, wal2, nil)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+
+	workerID, ok := pm2.ValidateWorkerToken(token)
+	if !ok {
+		t.Fatal("expected recovered worker token to validate")
+	}
+	if workerID != "w-1" {
+		t.Fatalf("workerID = %q, want %q", workerID, "w-1")
+	}
+}
+
 // --- Notification channel test ---
 
 func TestNotificationsOnTaskComplete(t *testing.T) {
@@ -788,7 +959,7 @@ func (c *capturingHostAPI) SpawnWorker(_ context.Context, spec WorkerSpec) (stri
 	c.lastSpec = spec
 	return "test-container", "abc123", nil
 }
-func (c *capturingHostAPI) KillWorker(_ context.Context, _ string) error  { return nil }
+func (c *capturingHostAPI) KillWorker(_ context.Context, _ string) error { return nil }
 func (c *capturingHostAPI) ListContainers(_ context.Context, _ string) ([]ContainerInfo, error) {
 	return nil, nil
 }

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
@@ -86,5 +89,142 @@ func TestPoolSpawn_WrongMethod(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("wrong method: got %d, want 405", rr.Code)
+	}
+}
+
+func TestPoolContainers_IncludesNonRunningContainerState(t *testing.T) {
+	b := newTestHostBrokerWithPool(t)
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "docker-args.txt")
+	dockerPath := filepath.Join(tmp, "docker")
+	script := "#!/bin/sh\n" +
+		"printf '%s\n' \"$@\" > '" + argsPath + "'\n" +
+		"printf 'cid-running\tw-1\trunning\tUp 5 minutes\ncid-exited\tw-2\texited\tExited (0) 1 minute ago\n'\n"
+	if err := os.WriteFile(dockerPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rr := doPoolReq(t, b, http.MethodGet, "/pool/containers?sessionId=team-123", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list containers: got %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "ps\n-a\n") {
+		t.Fatalf("docker args = %q, want ps with -a", args)
+	}
+	if !strings.Contains(args, "label=mittens.pool=team-123") {
+		t.Fatalf("docker args = %q, want session filter", args)
+	}
+
+	var containers []pool.ContainerInfo
+	if err := json.NewDecoder(rr.Body).Decode(&containers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("len(containers) = %d, want 2", len(containers))
+	}
+	if containers[0].State != "running" {
+		t.Fatalf("containers[0].State = %q, want running", containers[0].State)
+	}
+	if containers[1].State != "exited" {
+		t.Fatalf("containers[1].State = %q, want exited", containers[1].State)
+	}
+	if containers[1].Status != "Exited (0) 1 minute ago" {
+		t.Fatalf("containers[1].Status = %q, want exited status", containers[1].Status)
+	}
+}
+
+func TestPoolContainers_AllowsDottedSessionID(t *testing.T) {
+	b := newTestHostBrokerWithPool(t)
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "docker-args.txt")
+	dockerPath := filepath.Join(tmp, "docker")
+	script := "#!/bin/sh\n" +
+		"printf '%s\n' \"$@\" > '" + argsPath + "'\n" +
+		"printf 'cid-running\tw-1\trunning\tUp 5 minutes\n'\n"
+	if err := os.WriteFile(dockerPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rr := doPoolReq(t, b, http.MethodGet, "/pool/containers?sessionId=release.v1", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list containers: got %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	if got := string(argsData); !strings.Contains(got, "label=mittens.pool=release.v1") {
+		t.Fatalf("docker args = %q, want dotted session filter", got)
+	}
+}
+
+func TestPoolContainers_AllowsLeadingPunctuationSessionID(t *testing.T) {
+	b := newTestHostBrokerWithPool(t)
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "docker-args.txt")
+	dockerPath := filepath.Join(tmp, "docker")
+	script := "#!/bin/sh\n" +
+		"printf '%s\n' \"$@\" > '" + argsPath + "'\n" +
+		"printf 'cid-running\tw-1\trunning\tUp 5 minutes\n'\n"
+	if err := os.WriteFile(dockerPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rr := doPoolReq(t, b, http.MethodGet, "/pool/containers?sessionId=.scratch", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list containers: got %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	if got := string(argsData); !strings.Contains(got, "label=mittens.pool=.scratch") {
+		t.Fatalf("docker args = %q, want dotted-leading session filter", got)
+	}
+}
+
+func TestSessionAlive_AllowsDottedSessionID(t *testing.T) {
+	b := newTestHostBrokerWithPool(t)
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "docker-args.txt")
+	dockerPath := filepath.Join(tmp, "docker")
+	script := "#!/bin/sh\n" +
+		"printf '%s\n' \"$@\" > '" + argsPath + "'\n" +
+		"printf 'leader-123\n'\n"
+	if err := os.WriteFile(dockerPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rr := doPoolReq(t, b, http.MethodGet, "/pool/session-alive?sessionId=release.v1", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("session alive: got %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "label=mittens.pool=release.v1") {
+		t.Fatalf("docker args = %q, want dotted session filter", args)
+	}
+	if !strings.Contains(args, "label=mittens.role=leader") {
+		t.Fatalf("docker args = %q, want leader filter", args)
 	}
 }

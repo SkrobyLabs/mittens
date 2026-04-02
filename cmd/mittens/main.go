@@ -74,6 +74,8 @@ func runMain(args []string) error {
 			return handleTeam(args[1:])
 		case "extension":
 			return runExtension(args[1:])
+		case "version":
+			return runVersion(args[1:])
 		}
 
 		// Flag-style aliases (can appear anywhere before "--").
@@ -85,8 +87,7 @@ func runMain(args []string) error {
 			return runHelp()
 		}
 		if hasSubFlag(args, "--version") || hasSubFlag(args, "-V") {
-			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
-			return nil
+			return runVersion(nil)
 		}
 	}
 
@@ -281,6 +282,26 @@ func runHelp() error {
 	}
 	printHelp(exts)
 	return nil
+}
+
+// runVersion handles the top-level `version` command, including optional JSON output.
+func runVersion(args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		default:
+			if arg == "--help" || arg == "-h" {
+				fmt.Println("Usage: mittens version [--json]")
+				fmt.Println("  --json   Output version information as JSON")
+				return nil
+			}
+			return fmt.Errorf("unknown flag %q for \"mittens version\" (supported: --json)", arg)
+		}
+	}
+
+	return printVersionOutput(jsonOutput)
 }
 
 func resolveProviderFromArgs(args []string) (*Provider, error) {

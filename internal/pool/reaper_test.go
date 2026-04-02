@@ -154,7 +154,7 @@ func TestReapStaleWorkers_FreshHeartbeat(t *testing.T) {
 
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
 	pm.RegisterWorker("w-1", "")
-	pm.Heartbeat("w-1", "idle", "")
+	pm.Heartbeat("w-1", "idle", nil, "")
 
 	reapStaleWorkers(pm, 90*time.Second)
 
@@ -176,7 +176,7 @@ func TestReapStaleWorkers_MixedWorkers(t *testing.T) {
 	// w-2: fresh idle — should survive.
 	pm.SpawnWorker(WorkerSpec{ID: "w-2"})
 	pm.RegisterWorker("w-2", "")
-	pm.Heartbeat("w-2", "idle", "")
+	pm.Heartbeat("w-2", "idle", nil, "")
 
 	// w-3: stale busy with task — should be reaped, task requeued.
 	pm.SpawnWorker(WorkerSpec{ID: "w-3"})

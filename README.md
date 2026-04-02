@@ -54,6 +54,8 @@ mittens init             # interactive project setup (extensions, dirs, firewall
 mittens init --defaults  # set user-wide defaults (provider, firewall, paste key)
 mittens init --help      # see all init subcommands
 mittens help             # see all flags and commands
+mittens version          # show version metadata
+mittens version --json   # show version metadata as JSON
 ```
 
 Project configs are saved to `~/.mittens/projects/` — one flag per line, loaded automatically next time.

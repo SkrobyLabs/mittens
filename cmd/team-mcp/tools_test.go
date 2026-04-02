@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
@@ -33,6 +36,42 @@ func newTestPM(t *testing.T) *pool.PoolManager {
 	}
 	t.Cleanup(func() { wal.Close() })
 	return pool.NewPoolManager(pool.PoolConfig{MaxWorkers: 5, StateDir: dir}, wal, nil)
+}
+
+func writeActivityRecords(t *testing.T, path string, records []pool.WorkerActivityRecord) {
+	t.Helper()
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	for _, record := range records {
+		if err := enc.Encode(record); err != nil {
+			t.Fatalf("encode %s: %v", path, err)
+		}
+	}
+}
+
+type capturingHostAPI struct {
+	lastSpec pool.WorkerSpec
+}
+
+func (c *capturingHostAPI) SpawnWorker(_ context.Context, spec pool.WorkerSpec) (string, string, error) {
+	c.lastSpec = spec
+	return "test-container", "test-container-id", nil
+}
+
+func (c *capturingHostAPI) KillWorker(_ context.Context, _ string) error { return nil }
+
+func (c *capturingHostAPI) ListContainers(_ context.Context, _ string) ([]pool.ContainerInfo, error) {
+	return nil, nil
+}
+
+func (c *capturingHostAPI) CheckSession(_ context.Context, _ string) (bool, error) {
+	return true, nil
 }
 
 func TestEnqueueTaskSchema_DeclaresArrayItems(t *testing.T) {
@@ -106,19 +145,106 @@ func TestHandleSpawnWorkerWithRouter(t *testing.T) {
 	}
 	t.Cleanup(func() { wal.Close() })
 
+	hostAPI := &capturingHostAPI{}
 	router := pool.NewModelRouter(map[string]pool.ModelConfig{
-		"planner": {Provider: "anthropic", Model: "opus-4", Adapter: "claude-code"},
+		"planner": {Provider: "openai", Model: "gpt-5.3-spark"},
 	})
 	pm := pool.NewPoolManager(pool.PoolConfig{
 		MaxWorkers: 5,
 		StateDir:   dir,
 		Router:     router,
-	}, wal, nil)
+	}, wal, hostAPI)
 
 	params := json.RawMessage(`{"role":"planner"}`)
 	_, err = handleSpawnWorker(pm, params)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if hostAPI.lastSpec.Provider != "openai" {
+		t.Fatalf("SpawnWorker provider = %q, want openai", hostAPI.lastSpec.Provider)
+	}
+	if hostAPI.lastSpec.Model != "gpt-5.3-spark" {
+		t.Fatalf("SpawnWorker model = %q, want gpt-5.3-spark", hostAPI.lastSpec.Model)
+	}
+	if hostAPI.lastSpec.Adapter != "openai-codex" {
+		t.Fatalf("SpawnWorker adapter = %q, want openai-codex", hostAPI.lastSpec.Adapter)
+	}
+}
+
+func TestHandleSpawnWorker_PersistsWorkerTokenInWorkerStateAndHostSpec(t *testing.T) {
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "test.wal")
+	wal, err := pool.OpenWAL(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walClosed := false
+	t.Cleanup(func() {
+		if !walClosed {
+			_ = wal.Close()
+		}
+	})
+
+	hostAPI := &capturingHostAPI{}
+	pm := pool.NewPoolManager(pool.PoolConfig{
+		MaxWorkers: 5,
+		StateDir:   dir,
+	}, wal, hostAPI)
+
+	result, err := handleSpawnWorker(pm, json.RawMessage(`{"role":"implementer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatal("expected map result")
+	}
+	w, ok := m["worker"].(*pool.Worker)
+	if !ok {
+		t.Fatal("expected *pool.Worker in worker key")
+	}
+	if w.Token == "" {
+		t.Fatal("expected worker token to be persisted in PoolManager state")
+	}
+	if hostAPI.lastSpec.Environment == nil {
+		t.Fatal("expected hostAPI spawn spec environment to be populated")
+	}
+	if got := hostAPI.lastSpec.Environment["MITTENS_WORKER_TOKEN"]; got != w.Token {
+		t.Fatalf("MITTENS_WORKER_TOKEN = %q, want %q", got, w.Token)
+	}
+
+	if err := wal.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+	walClosed = true
+
+	recoveredWAL, err := pool.OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	defer recoveredWAL.Close()
+
+	recoveredPM, err := pool.RecoverPoolManager(pool.PoolConfig{
+		MaxWorkers: 5,
+		StateDir:   dir,
+	}, recoveredWAL, nil)
+	if err != nil {
+		t.Fatalf("recover pool manager: %v", err)
+	}
+
+	recoveredWorker, ok := recoveredPM.Worker(w.ID)
+	if !ok {
+		t.Fatalf("recovered worker %q not found", w.ID)
+	}
+	if recoveredWorker.Token != w.Token {
+		t.Fatalf("recovered worker token = %q, want %q", recoveredWorker.Token, w.Token)
+	}
+	if recoveredWorker.ContainerID != w.ContainerID {
+		t.Fatalf("recovered container ID = %q, want %q", recoveredWorker.ContainerID, w.ContainerID)
+	}
+	if workerID, ok := recoveredPM.ValidateWorkerToken(w.Token); !ok || workerID != w.ID {
+		t.Fatalf("ValidateWorkerToken(%q) = (%q, %v), want (%q, true)", w.Token, workerID, ok, w.ID)
 	}
 }
 
@@ -226,6 +352,286 @@ func TestHandleGetStatus(t *testing.T) {
 	}
 }
 
+func TestHandleGetStatus_EnrichesLiveWorkerRows(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "inspect repository", Priority: 1})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "status",
+		Phase:   "started",
+		Name:    "planning",
+		Summary: "Inspecting repository state",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-2", Role: "reviewer"})
+	pm.RegisterWorker("w-2", "")
+	qid, err := pm.AskQuestion("w-2", pool.Question{Question: "Need review policy", Blocking: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handleGetStatus(pm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sr, ok := result.(statusResult)
+	if !ok {
+		t.Fatal("expected statusResult")
+	}
+	if len(sr.Workers) != 2 {
+		t.Fatalf("workers = %d, want 2", len(sr.Workers))
+	}
+
+	workers := map[string]statusWorkerView{}
+	for _, worker := range sr.Workers {
+		workers[worker.ID] = worker
+	}
+
+	if got := workers["w-1"].ActivitySummary; got != "Inspecting repository state" {
+		t.Fatalf("w-1 activitySummary = %q, want %q", got, "Inspecting repository state")
+	}
+	if got := workers["w-1"].InspectionTool; got != "get_worker_activity" {
+		t.Fatalf("w-1 inspectionTool = %q, want get_worker_activity", got)
+	}
+	if got := workers["w-2"].PendingQuestionID; got != qid {
+		t.Fatalf("w-2 pendingQuestionId = %q, want %q", got, qid)
+	}
+	if got := workers["w-2"].PendingQuestion; got != "Need review policy" {
+		t.Fatalf("w-2 pendingQuestion = %q, want %q", got, "Need review policy")
+	}
+	if got := workers["w-2"].ActivitySummary; got != "Need review policy" {
+		t.Fatalf("w-2 activitySummary = %q, want %q", got, "Need review policy")
+	}
+	if got := workers["w-2"].InspectionTool; got != "get_worker_activity" {
+		t.Fatalf("w-2 inspectionTool = %q, want get_worker_activity", got)
+	}
+}
+
+func TestHandleGetStatus_NonBlockingQuestionDoesNotOverrideLiveActivity(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "inspect repository", Priority: 1})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "status",
+		Phase:   "started",
+		Name:    "planning",
+		Summary: "Inspecting repository state",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	qid, err := pm.AskQuestion("w-1", pool.Question{Question: "Need preference on docs wording", Blocking: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handleGetStatus(pm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sr, ok := result.(statusResult)
+	if !ok {
+		t.Fatal("expected statusResult")
+	}
+	if len(sr.Workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(sr.Workers))
+	}
+
+	worker := sr.Workers[0]
+	if got := worker.PendingQuestionID; got != qid {
+		t.Fatalf("pendingQuestionId = %q, want %q", got, qid)
+	}
+	if got := worker.PendingQuestion; got != "Need preference on docs wording" {
+		t.Fatalf("pendingQuestion = %q, want question metadata", got)
+	}
+	if got := worker.ActivitySummary; got != "Inspecting repository state" {
+		t.Fatalf("activitySummary = %q, want live activity summary", got)
+	}
+	if got := worker.InspectionTool; got != "get_worker_activity" {
+		t.Fatalf("inspectionTool = %q, want get_worker_activity", got)
+	}
+}
+
+func TestHandleGetStatus_DoesNotSurfaceStaleIdleOrDeadActivity(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "finish work", Priority: 1})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading repository state",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	completeTestTask(pm, "w-1", "t-1", pool.TaskResult{Summary: "done"}, nil)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-2", Role: "reviewer"})
+	pm.RegisterWorker("w-2", "")
+	if err := pm.Heartbeat("w-2", "alive", &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading review context",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.KillWorker("w-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, workerID := range []string{"w-1", "w-2"} {
+		worker, ok := pm.Worker(workerID)
+		if !ok {
+			t.Fatalf("worker %s not found", workerID)
+		}
+		if worker.CurrentActivity != nil {
+			t.Fatalf("%s currentActivity = %+v, want nil after terminal transition", workerID, worker.CurrentActivity)
+		}
+		if worker.CurrentTool != "" {
+			t.Fatalf("%s currentTool = %q, want empty after terminal transition", workerID, worker.CurrentTool)
+		}
+		if worker.CurrentTaskID != "" {
+			t.Fatalf("%s currentTaskID = %q, want empty after terminal transition", workerID, worker.CurrentTaskID)
+		}
+	}
+
+	result, err := handleGetStatus(pm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sr, ok := result.(statusResult)
+	if !ok {
+		t.Fatal("expected statusResult")
+	}
+
+	workers := map[string]statusWorkerView{}
+	for _, worker := range sr.Workers {
+		workers[worker.ID] = worker
+	}
+
+	for _, workerID := range []string{"w-1", "w-2"} {
+		worker := workers[workerID]
+		if worker.CurrentActivity != nil {
+			t.Fatalf("%s status currentActivity = %+v, want nil", workerID, worker.CurrentActivity)
+		}
+		if worker.CurrentTool != "" {
+			t.Fatalf("%s status currentTool = %q, want empty", workerID, worker.CurrentTool)
+		}
+		if worker.ActivitySummary != "" {
+			t.Fatalf("%s activitySummary = %q, want empty", workerID, worker.ActivitySummary)
+		}
+		if worker.InspectionTool != "" {
+			t.Fatalf("%s inspectionTool = %q, want empty", workerID, worker.InspectionTool)
+		}
+	}
+}
+
+func TestHandleGetStatus_DoesNotSurfaceLiveActivityForCanceledDispatchedTask(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+
+	pipeID, err := pm.SubmitPipeline(pool.Pipeline{
+		Goal: "cancel in-flight work",
+		Stages: []pool.Stage{
+			{
+				Name:        "impl",
+				Role:        "implementer",
+				Fan:         pool.FanOut,
+				AutoAdvance: true,
+				Tasks: []pool.StageTask{
+					{ID: "a", PromptTmpl: "do work"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	taskID := pipeID + "-s0-t0"
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading active task context",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pm.CancelPipeline(pipeID); err != nil {
+		t.Fatal(err)
+	}
+
+	worker, ok := pm.Worker("w-1")
+	if !ok {
+		t.Fatal("worker w-1 not found")
+	}
+	if worker.Status != pool.WorkerIdle {
+		t.Fatalf("worker status = %q, want idle after cancellation", worker.Status)
+	}
+	if worker.CurrentTaskID != "" {
+		t.Fatalf("worker currentTaskID = %q, want empty after cancellation", worker.CurrentTaskID)
+	}
+	if worker.CurrentActivity != nil {
+		t.Fatalf("worker currentActivity = %+v, want nil after cancellation", worker.CurrentActivity)
+	}
+	if worker.CurrentTool != "" {
+		t.Fatalf("worker currentTool = %q, want empty after cancellation", worker.CurrentTool)
+	}
+
+	result, err := handleGetStatus(pm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sr, ok := result.(statusResult)
+	if !ok {
+		t.Fatal("expected statusResult")
+	}
+	if len(sr.Workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(sr.Workers))
+	}
+
+	got := sr.Workers[0]
+	if got.CurrentActivity != nil {
+		t.Fatalf("status currentActivity = %+v, want nil", got.CurrentActivity)
+	}
+	if got.CurrentTool != "" {
+		t.Fatalf("status currentTool = %q, want empty", got.CurrentTool)
+	}
+	if got.ActivitySummary != "" {
+		t.Fatalf("activitySummary = %q, want empty", got.ActivitySummary)
+	}
+	if got.InspectionTool != "" {
+		t.Fatalf("inspectionTool = %q, want empty", got.InspectionTool)
+	}
+}
+
 func TestHandleGetPoolState(t *testing.T) {
 	pm := newTestPM(t)
 
@@ -280,6 +686,265 @@ func TestHandleGetPoolState(t *testing.T) {
 	}
 }
 
+func TestHandleGetWorkerActivity(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+	pm.EnqueueTask(pool.TaskSpec{
+		ID:       "t-1",
+		Prompt:   strings.Repeat("implement carefully ", 20),
+		Role:     "implementer",
+		Priority: 1,
+	})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading current implementation",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	qid, err := pm.AskQuestion("w-1", pool.Question{Question: "Need signoff on approach", Blocking: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workerDir := filepath.Join(pm.StateDir(), "workers", "w-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "task.md"), []byte("---\ntaskId: t-1\n---\n\nwork item details"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "result.txt"), []byte("partial output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "handover.json"), []byte(`{"summary":"handover"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "error.txt"), []byte("temporary failure"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeActivityRecords(t, filepath.Join(workerDir, pool.WorkerActivityArchiveFile), []pool.WorkerActivityRecord{
+		{
+			RecordedAt: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+			TaskID:     "t-0",
+			Activity: pool.WorkerActivity{
+				Kind:    "tool",
+				Phase:   "completed",
+				Name:    "Glob",
+				Summary: "Scanned docs",
+			},
+		},
+	})
+	writeActivityRecords(t, filepath.Join(workerDir, pool.WorkerActivityLogFile), []pool.WorkerActivityRecord{
+		{
+			RecordedAt: time.Date(2026, 4, 1, 10, 1, 0, 0, time.UTC),
+			TaskID:     "t-1",
+			Activity: pool.WorkerActivity{
+				Kind:    "tool",
+				Phase:   "started",
+				Name:    "Read",
+				Summary: "Reading current implementation",
+			},
+		},
+		{
+			RecordedAt: time.Date(2026, 4, 1, 10, 2, 0, 0, time.UTC),
+			TaskID:     "t-1",
+			Activity: pool.WorkerActivity{
+				Kind:    "status",
+				Phase:   "completed",
+				Name:    "response",
+				Summary: "Prepared draft patch",
+			},
+		},
+	})
+
+	result, err := handleGetWorkerActivity(pm, json.RawMessage(`{"workerId":"w-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := result.(workerActivityResult)
+	if !ok {
+		t.Fatal("expected workerActivityResult")
+	}
+	if got.Worker.ID != "w-1" {
+		t.Fatalf("worker.id = %q, want w-1", got.Worker.ID)
+	}
+	if got.Worker.CurrentActivity == nil || got.Worker.CurrentActivity.Name != "Read" {
+		t.Fatalf("worker currentActivity = %+v, want tool Read", got.Worker.CurrentActivity)
+	}
+	if got.Worker.PendingQuestionID != qid {
+		t.Fatalf("worker pendingQuestionId = %q, want %q", got.Worker.PendingQuestionID, qid)
+	}
+	if got.PendingQuestion == nil || got.PendingQuestion.ID != qid {
+		t.Fatalf("pendingQuestion = %+v, want %q", got.PendingQuestion, qid)
+	}
+	if got.Task == nil || got.Task.ID != "t-1" {
+		t.Fatalf("task = %+v, want t-1", got.Task)
+	}
+	if got.Task.PromptPreview == "" {
+		t.Fatal("task promptPreview should be populated")
+	}
+	if !got.Task.PromptTruncated {
+		t.Fatal("task promptPreview should be truncated for long prompts")
+	}
+	if got.Artifacts == nil {
+		t.Fatal("artifacts should be populated")
+	}
+	if !got.Artifacts.HasTaskFile || !got.Artifacts.HasResultFile || !got.Artifacts.HasHandoverFile || !got.Artifacts.HasErrorFile {
+		t.Fatalf("artifacts = %+v, want all file markers", got.Artifacts)
+	}
+	if got.Artifacts.TaskPreview == "" {
+		t.Fatal("taskPreview should be populated")
+	}
+	if got.Artifacts.ErrorPreview != "temporary failure" {
+		t.Fatalf("errorPreview = %q, want %q", got.Artifacts.ErrorPreview, "temporary failure")
+	}
+	if len(got.RecentActivity) != 3 {
+		t.Fatalf("recentActivity len = %d, want 3", len(got.RecentActivity))
+	}
+	if got.RecentActivity[0].TaskID != "t-0" || got.RecentActivity[0].Activity == nil || got.RecentActivity[0].Activity.Name != "Glob" {
+		t.Fatalf("recentActivity[0] = %+v, want archive entry", got.RecentActivity[0])
+	}
+	if got.RecentActivity[2].Activity == nil || got.RecentActivity[2].Activity.Summary != "Prepared draft patch" {
+		t.Fatalf("recentActivity[2] = %+v, want latest current-log entry", got.RecentActivity[2])
+	}
+}
+
+func TestHandleGetWorkerActivity_SuppressesStaleArtifactsForIdleWorker(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "finish work", Priority: 1})
+	if err := pm.DispatchTask("t-1", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Heartbeat("w-1", "alive", &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading active task context",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	workerDir := filepath.Join(pm.StateDir(), "workers", "w-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "task.md"), []byte("---\ntaskId: t-1\n---\n\nstale work item details"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, "error.txt"), []byte("stale failure"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	completeTestTask(pm, "w-1", "t-1", pool.TaskResult{Summary: "done"}, nil)
+
+	result, err := handleGetWorkerActivity(pm, json.RawMessage(`{"workerId":"w-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := result.(workerActivityResult)
+	if !ok {
+		t.Fatal("expected workerActivityResult")
+	}
+	if got.Worker.Status != pool.WorkerIdle {
+		t.Fatalf("worker.status = %q, want idle", got.Worker.Status)
+	}
+	if got.Worker.ActivitySummary != "" {
+		t.Fatalf("worker.activitySummary = %q, want empty", got.Worker.ActivitySummary)
+	}
+	if got.Worker.InspectionTool != "" {
+		t.Fatalf("worker.inspectionTool = %q, want empty", got.Worker.InspectionTool)
+	}
+	if got.Task != nil {
+		t.Fatalf("task = %+v, want nil for idle worker", got.Task)
+	}
+	if got.Artifacts != nil {
+		t.Fatalf("artifacts = %+v, want nil for idle worker with stale files", got.Artifacts)
+	}
+}
+
+func TestHandleGetWorkerActivity_ShowsRecentHistoryForIdleWorker(t *testing.T) {
+	pm := newTestPM(t)
+
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"})
+	pm.RegisterWorker("w-1", "")
+
+	workerDir := filepath.Join(pm.StateDir(), "workers", "w-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var archive []pool.WorkerActivityRecord
+	for i := 0; i < 5; i++ {
+		archive = append(archive, pool.WorkerActivityRecord{
+			RecordedAt: time.Date(2026, 4, 1, 9, i, 0, 0, time.UTC),
+			TaskID:     "t-archive",
+			Activity: pool.WorkerActivity{
+				Kind:    "tool",
+				Phase:   "completed",
+				Name:    "Archive",
+				Summary: "archive entry",
+			},
+		})
+	}
+	writeActivityRecords(t, filepath.Join(workerDir, pool.WorkerActivityArchiveFile), archive)
+
+	var current []pool.WorkerActivityRecord
+	for i := 0; i < 6; i++ {
+		current = append(current, pool.WorkerActivityRecord{
+			RecordedAt: time.Date(2026, 4, 1, 10, i, 0, 0, time.UTC),
+			TaskID:     "t-current",
+			Activity: pool.WorkerActivity{
+				Kind:    "tool",
+				Phase:   "started",
+				Name:    fmt.Sprintf("Tool-%d", i),
+				Summary: fmt.Sprintf("summary-%d", i),
+			},
+		})
+	}
+	writeActivityRecords(t, filepath.Join(workerDir, pool.WorkerActivityLogFile), current)
+
+	result, err := handleGetWorkerActivity(pm, json.RawMessage(`{"workerId":"w-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := result.(workerActivityResult)
+	if !ok {
+		t.Fatal("expected workerActivityResult")
+	}
+	if got.Artifacts != nil {
+		t.Fatalf("artifacts = %+v, want nil for idle worker without live artifacts", got.Artifacts)
+	}
+	if len(got.RecentActivity) != workerActivityHistoryTail {
+		t.Fatalf("recentActivity len = %d, want %d", len(got.RecentActivity), workerActivityHistoryTail)
+	}
+	if got.RecentActivity[0].Activity == nil || got.RecentActivity[0].Activity.Name != "Archive" {
+		t.Fatalf("recentActivity[0] = %+v, want oldest kept archive entry", got.RecentActivity[0])
+	}
+	if got.RecentActivity[len(got.RecentActivity)-1].Activity == nil || got.RecentActivity[len(got.RecentActivity)-1].Activity.Name != "Tool-5" {
+		t.Fatalf("recentActivity last = %+v, want newest current entry", got.RecentActivity[len(got.RecentActivity)-1])
+	}
+}
+
+func TestHandleGetWorkerActivityMissingID(t *testing.T) {
+	pm := newTestPM(t)
+	_, err := handleGetWorkerActivity(pm, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected error for missing workerId")
+	}
+}
+
 func TestHandleGetTaskResult(t *testing.T) {
 	pm := newTestPM(t)
 	pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: strings.Repeat("x", 300), Priority: 1})
@@ -299,6 +964,7 @@ func TestHandleGetTaskResult(t *testing.T) {
 		Prompt          string `json:"prompt"`
 		PromptPreview   string `json:"promptPreview"`
 		PromptTruncated bool   `json:"promptTruncated"`
+		OutputHint      string `json:"_outputHint"`
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
@@ -314,6 +980,9 @@ func TestHandleGetTaskResult(t *testing.T) {
 	}
 	if !got.PromptTruncated {
 		t.Fatal("get_task_result should mark long prompt previews as truncated")
+	}
+	if got.OutputHint != "" {
+		t.Fatal("get_task_result should not include output hints")
 	}
 }
 
@@ -364,6 +1033,7 @@ func TestHandleGetTaskState(t *testing.T) {
 		Role          string `json:"role"`
 		Prompt        string `json:"prompt"`
 		PromptPreview string `json:"promptPreview"`
+		HasOutput     bool   `json:"hasOutput"`
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
@@ -379,6 +1049,9 @@ func TestHandleGetTaskState(t *testing.T) {
 	}
 	if got.Prompt != "" || got.PromptPreview != "" {
 		t.Fatal("get_task_state should not include prompt fields")
+	}
+	if got.HasOutput {
+		t.Fatal("get_task_state should not include output availability flags")
 	}
 }
 
@@ -616,8 +1289,8 @@ func TestHandleResolveEscalationMissingAction(t *testing.T) {
 }
 
 func TestToolSchemaCount(t *testing.T) {
-	if len(mcpTools) != 24 {
-		t.Errorf("expected 24 tools, got %d", len(mcpTools))
+	if len(mcpTools) != 25 {
+		t.Errorf("expected 25 tools, got %d", len(mcpTools))
 	}
 }
 

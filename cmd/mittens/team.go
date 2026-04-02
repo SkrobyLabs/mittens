@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,6 @@ import (
 
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
-	"github.com/SkrobyLabs/mittens/internal/adapter"
 	"github.com/SkrobyLabs/mittens/internal/initcfg"
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
@@ -29,6 +29,7 @@ import (
 // sessionMeta holds metadata about a team session for status display.
 type sessionMeta struct {
 	Workspace    string    `json:"workspace"`
+	TeamName     string    `json:"teamName,omitempty"`
 	SessionID    string    `json:"sessionId"`
 	StartedAt    time.Time `json:"startedAt"`
 	LastActivity time.Time `json:"lastActivity"`
@@ -37,12 +38,20 @@ type sessionMeta struct {
 	ProjectDir   string    `json:"projectDir"`
 }
 
+type teamConfigMeta struct {
+	Name         string `json:"name"`
+	ConfigPath   string `json:"configPath"`
+	SessionCount int    `json:"sessionCount"`
+}
+
 // handleTeam dispatches the "mittens team" subcommand.
 func handleTeam(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "init":
 			return handleTeamInit(args[1:])
+		case "list":
+			return handleTeamList(args[1:])
 		case "status":
 			return handleTeamStatus(args[1:])
 		case "resume":
@@ -73,6 +82,88 @@ func extractTeamName(args []string) (string, []string) {
 	return name, remaining
 }
 
+func teamConfigRootDir() string {
+	return filepath.Join(ConfigHome(), "teams")
+}
+
+func teamConfigDir(teamName string) string {
+	return filepath.Join(teamConfigRootDir(), teamName)
+}
+
+func teamConfigPath(teamName string) string {
+	return filepath.Join(teamConfigDir(teamName), "team.yaml")
+}
+
+func listTeamConfigs(configHome string) ([]teamConfigMeta, error) {
+	root := filepath.Join(configHome, "teams")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read teams dir: %w", err)
+	}
+
+	sessions, err := listAllTeamSessions(configHome, "", true)
+	if err != nil {
+		return nil, err
+	}
+	sessionCounts := map[string]int{}
+	for _, session := range sessions {
+		if session.TeamName != "" {
+			sessionCounts[session.TeamName]++
+		}
+	}
+
+	var teams []teamConfigMeta
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		configPath := filepath.Join(configHome, "teams", name, "team.yaml")
+		if _, err := os.Stat(configPath); err != nil {
+			continue
+		}
+		teams = append(teams, teamConfigMeta{
+			Name:         name,
+			ConfigPath:   configPath,
+			SessionCount: sessionCounts[name],
+		})
+	}
+
+	sort.Slice(teams, func(i, j int) bool {
+		return teams[i].Name < teams[j].Name
+	})
+	return teams, nil
+}
+
+func validateTeamName(teamName string) error {
+	if strings.TrimSpace(teamName) == "" {
+		return fmt.Errorf("team name is required")
+	}
+	if err := pool.ValidateSessionID(teamName); err != nil {
+		return fmt.Errorf("invalid team name %q: %w", teamName, err)
+	}
+	return nil
+}
+
+func generateTeamSessionID(teamName string) string {
+	return fmt.Sprintf("%s-%s", teamName, strconv.FormatInt(time.Now().UnixNano(), 36))
+}
+
+func defaultTeamInitProvider() string {
+	userArgs, err := LoadUserDefaults()
+	if err != nil {
+		return DefaultProvider().Name
+	}
+	provider, err := resolveProviderFromArgs(userArgs)
+	if err != nil || provider == nil || strings.TrimSpace(provider.Name) == "" {
+		return DefaultProvider().Name
+	}
+	return provider.Name
+}
+
 func expandedExtensionMounts(exts []*registry.Extension, home string, provider *Provider) []registry.ResolvedMount {
 	if provider == nil {
 		return nil
@@ -94,25 +185,32 @@ func runTeamSession(args []string) error {
 
 	// Extract --name flag before forwarding to ParseFlags.
 	teamName, args := extractTeamName(args)
+	if err := validateTeamName(teamName); err != nil {
+		return fmt.Errorf("%w — launch an existing team with 'mittens team --name <team>' or create one with 'mittens team init --name <team>'", err)
+	}
 
-	// Load team.yaml (returns defaults if file doesn't exist).
-	teamConfigPath := filepath.Join(ConfigHome(), "projects", projDir, "team.yaml")
-	tc, err := pool.LoadTeamConfig(teamConfigPath)
+	// Load the named global team config. Launch is explicit: new teams must be
+	// configured first via `mittens team init --name <team>`.
+	teamConfigSrc := teamConfigPath(teamName)
+	if _, err := os.Stat(teamConfigSrc); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("team %q is not configured — run 'mittens team init --name %s' first", teamName, teamName)
+		}
+		return fmt.Errorf("stat team config: %w", err)
+	}
+	tc, err := pool.LoadTeamConfig(teamConfigSrc)
 	if err != nil {
-		logWarn("team config: %v (using defaults)", err)
-		tc = &pool.TeamConfig{}
+		return fmt.Errorf("load team config: %w", err)
 	}
 
 	// Auto-prune stale pool state directories.
 	poolsDir := filepath.Join(ConfigHome(), "projects", projDir, "pools")
 	pruneStalePoolDirs(poolsDir)
 
-	// Generate session ID.
-	var sessionID string
-	if teamName != "" {
-		sessionID = teamName
-	} else {
-		sessionID = fmt.Sprintf("team-%d-%s", os.Getpid(), strconv.FormatInt(time.Now().Unix(), 36))
+	// Generate a unique runtime session ID distinct from the persistent team name.
+	sessionID := generateTeamSessionID(teamName)
+	if err := pool.ValidateSessionID(sessionID); err != nil {
+		return fmt.Errorf("invalid team session name %q: %w", sessionID, err)
 	}
 
 	// Create state directory.
@@ -132,6 +230,7 @@ func runTeamSession(args []string) error {
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		meta := map[string]interface{}{
 			"workspace": workspace,
+			"teamName":  teamName,
 			"sessionId": sessionID,
 			"startedAt": time.Now().UTC().Format(time.RFC3339),
 		}
@@ -140,10 +239,15 @@ func runTeamSession(args []string) error {
 		}
 	}
 
-	// Copy team.yaml into state dir so the container can read it.
+	// Copy the named team config into state dir so the container resumes
+	// against the launch-time snapshot even if the named team changes later.
 	teamConfigDst := filepath.Join(stateDir, "team.yaml")
-	if data, err := os.ReadFile(teamConfigPath); err == nil {
-		os.WriteFile(teamConfigDst, data, 0644)
+	data, err := os.ReadFile(teamConfigSrc)
+	if err != nil {
+		return fmt.Errorf("read team config: %w", err)
+	}
+	if err := os.WriteFile(teamConfigDst, data, 0644); err != nil {
+		return fmt.Errorf("copy team config: %w", err)
 	}
 
 	// Determine max workers from config.
@@ -244,7 +348,7 @@ func runTeamSession(args []string) error {
 	app.teamMaxWorkers = maxWorkers
 	app.teamSessionReuse = tc.SessionReuse
 
-	logInfo("Team session: %s (max workers: %d)", sessionID, maxWorkers)
+	logInfo("Team session: %s (team %s, max workers: %d)", sessionID, teamName, maxWorkers)
 
 	// Ensure worker containers are cleaned up on any exit path.
 	// sync.Once guards against the signal handler and defer racing.
@@ -263,6 +367,100 @@ func runTeamSession(args []string) error {
 	return app.Run()
 }
 
+type discoveredNamedContainer struct {
+	pool.ContainerInfo
+	Name string
+}
+
+func discoverExactNameContainers(containerName string) ([]discoveredNamedContainer, error) {
+	out, err := captureCommand("docker", "ps", "-a",
+		"--filter", "name=^/"+regexp.QuoteMeta(containerName)+"$",
+		"--format", `{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}`)
+	if err != nil {
+		return nil, err
+	}
+
+	var containers []discoveredNamedContainer
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 || parts[1] != containerName {
+			continue
+		}
+		containers = append(containers, discoveredNamedContainer{
+			ContainerInfo: pool.ContainerInfo{
+				ContainerID: parts[0],
+				State:       parts[2],
+				Status:      parts[3],
+			},
+			Name: parts[1],
+		})
+	}
+	return containers, nil
+}
+
+func removeStaleExactNameContainers(containerName string) error {
+	containers, err := discoverExactNameContainers(containerName)
+	if err != nil {
+		return fmt.Errorf("discover existing container %q: %w", containerName, err)
+	}
+
+	for _, c := range containers {
+		if c.IsRunning() {
+			state := strings.TrimSpace(c.State)
+			if state == "" {
+				state = strings.TrimSpace(c.Status)
+			}
+			if state == "" {
+				state = "active"
+			}
+			return fmt.Errorf("worker container %q already exists in %q state", containerName, state)
+		}
+	}
+
+	for _, c := range containers {
+		target := c.ContainerID
+		if target == "" {
+			target = c.Name
+		}
+		if err := exec.Command("docker", "rm", "-f", target).Run(); err != nil {
+			return fmt.Errorf("remove stale container %q: %w", containerName, err)
+		}
+	}
+
+	return nil
+}
+
+func discoverSessionWorkerContainers(sessionID string) ([]pool.ContainerInfo, error) {
+	out, err := captureCommand("docker", "ps", "-a",
+		"--filter", "label=mittens.pool="+sessionID,
+		"--filter", "label=mittens.role=worker",
+		"--format", `{{.ID}}\t{{.Label "mittens.worker_id"}}\t{{.State}}\t{{.Status}}`)
+	if err != nil {
+		return nil, err
+	}
+
+	var containers []pool.ContainerInfo
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		containers = append(containers, pool.ContainerInfo{
+			ContainerID: parts[0],
+			WorkerID:    parts[1],
+			State:       parts[2],
+			Status:      parts[3],
+		})
+	}
+	return containers, nil
+}
+
 // spawnWorkerContainer creates a worker Docker container for the team pool.
 func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error) {
 	wid := spec.ID
@@ -274,6 +472,9 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 		return "", "", fmt.Errorf("spawn worker: %w", err)
 	}
 	containerName := fmt.Sprintf("mittens-%s-%s", a.teamSessionID, wid)
+	if err := removeStaleExactNameContainers(containerName); err != nil {
+		return "", "", fmt.Errorf("spawn worker: %w", err)
+	}
 
 	// Create per-worker team directory for file-based data exchange.
 	workerDir := filepath.Join(a.teamStateDir, "workers", wid)
@@ -546,16 +747,20 @@ func (a *App) killWorkerContainer(workerID string) error {
 	return exec.Command("docker", "rm", "-f", containerName).Run()
 }
 
-// cleanupTeamSession stops worker containers but preserves the state directory
-// so the session can be resumed later. The auto-prune on startup and
+// cleanupTeamSession removes worker containers in any state but preserves the
+// state directory so the session can be resumed later. The auto-prune on startup and
 // `mittens team clean` handle old state dir cleanup.
 func cleanupTeamSession(stateDir, sessionID string) {
-	// Gracefully stop remaining worker containers with our session label.
-	out, err := captureCommand("docker", "ps", "-q", "--filter", "label=mittens.pool="+sessionID)
-	if err == nil && out != "" {
-		for _, cid := range strings.Fields(out) {
-			exec.Command("docker", "stop", "-t", "10", cid).Run()
-			exec.Command("docker", "rm", "-f", cid).Run()
+	containers, err := discoverSessionWorkerContainers(sessionID)
+	if err == nil {
+		for _, c := range containers {
+			if c.ContainerID == "" {
+				continue
+			}
+			if c.IsRunning() {
+				exec.Command("docker", "stop", "-t", "10", c.ContainerID).Run()
+			}
+			exec.Command("docker", "rm", "-f", c.ContainerID).Run()
 		}
 	}
 
@@ -636,6 +841,7 @@ func handleTeamResume(args []string) error {
 
 	// Backfill session.json if missing (best-effort).
 	metaPath := filepath.Join(stateDir, "session.json")
+	resumeTeamName := ""
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		meta := map[string]interface{}{
 			"workspace": workspace,
@@ -645,15 +851,26 @@ func handleTeamResume(args []string) error {
 		if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 			os.WriteFile(metaPath, data, 0644)
 		}
+	} else if data, err := os.ReadFile(metaPath); err == nil {
+		var meta struct {
+			TeamName string `json:"teamName"`
+		}
+		if json.Unmarshal(data, &meta) == nil {
+			resumeTeamName = meta.TeamName
+		}
 	}
 
-	// Load team config from state dir or project config.
-	teamConfigPath := filepath.Join(stateDir, "team.yaml")
-	if _, err := os.Stat(teamConfigPath); err != nil {
-		teamConfigPath = filepath.Join(ConfigHome(), "projects", projDir, "team.yaml")
+	// Load team config from state dir or named team config.
+	teamConfigFile := filepath.Join(stateDir, "team.yaml")
+	if _, err := os.Stat(teamConfigFile); err != nil {
+		if resumeTeamName != "" {
+			teamConfigFile = teamConfigPath(resumeTeamName)
+		} else {
+			return fmt.Errorf("resume team session: missing team config snapshot at %s", teamConfigFile)
+		}
 	}
 
-	tc, err := pool.LoadTeamConfig(teamConfigPath)
+	tc, err := pool.LoadTeamConfig(teamConfigFile)
 	if err != nil {
 		logWarn("team config: %v (using defaults)", err)
 		tc = &pool.TeamConfig{}
@@ -740,7 +957,7 @@ func handleTeamResume(args []string) error {
 		"MITTENS_STATE_DIR":   stateDir,
 		"MITTENS_SESSION_ID":  sessionID,
 		"MITTENS_MAX_WORKERS": strconv.Itoa(maxWorkers),
-		"MITTENS_TEAM_CONFIG": teamConfigPath,
+		"MITTENS_TEAM_CONFIG": teamConfigFile,
 		"MITTENS_PLANS_DIR":   plansDir,
 	}
 
@@ -972,11 +1189,13 @@ func listAllTeamSessions(configHome string, currentProjectDir string, allProject
 			if data, err := os.ReadFile(filepath.Join(sessionDir, "session.json")); err == nil {
 				var sj struct {
 					Workspace string `json:"workspace"`
+					TeamName  string `json:"teamName"`
 					SessionID string `json:"sessionId"`
 					StartedAt string `json:"startedAt"`
 				}
 				if json.Unmarshal(data, &sj) == nil {
 					meta.Workspace = sj.Workspace
+					meta.TeamName = sj.TeamName
 					if sj.SessionID != "" {
 						meta.SessionID = sj.SessionID
 					}
@@ -988,17 +1207,8 @@ func listAllTeamSessions(configHome string, currentProjectDir string, allProject
 
 			// Fallback: read first line of WAL for timestamp.
 			if meta.StartedAt.IsZero() {
-				if f, err := os.Open(walPath); err == nil {
-					defer f.Close()
-					scanner := bufio.NewScanner(f)
-					if scanner.Scan() {
-						var ev struct {
-							Ts time.Time `json:"ts"`
-						}
-						if json.Unmarshal(scanner.Bytes(), &ev) == nil {
-							meta.StartedAt = ev.Ts
-						}
-					}
+				if startedAt, ok := readSessionStartedAtFromWAL(walPath); ok {
+					meta.StartedAt = startedAt
 				}
 			}
 
@@ -1022,115 +1232,621 @@ func listAllTeamSessions(configHome string, currentProjectDir string, allProject
 	return sessions, nil
 }
 
+func readSessionStartedAtFromWAL(walPath string) (time.Time, bool) {
+	f, err := os.Open(walPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	scanner := bufio.NewScanner(f)
+	var startedAt time.Time
+	if scanner.Scan() {
+		var ev struct {
+			Ts time.Time `json:"ts"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &ev) == nil {
+			startedAt = ev.Ts
+		}
+	}
+	_ = f.Close()
+	if startedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return startedAt, true
+}
+
+const (
+	teamConfigDefaultMaxWorkers = 4
+	teamConfigFileHeader        = "# mittens team config — generated by mittens team init\n"
+)
+
+// teamConfigRoleSpec describes one editable team role.
+type teamConfigRoleSpec struct {
+	Key     string
+	Label   string
+	Summary string
+}
+
+// teamConfigRoleInput holds editable fields for a role route.
+type teamConfigRoleInput struct {
+	Provider string
+	Model    string
+}
+
+type teamModelMode struct {
+	Key   string
+	Label string
+}
+
+// teamConfigEditor isolates team.yaml defaults, normalization, and persistence
+// from the interactive wizard flow.
+type teamConfigEditor struct {
+	MaxWorkers   int
+	Models       map[string]teamConfigRoleInput
+	SessionReuse pool.SessionReuseConfig
+}
+
+func newTeamConfigEditor() *teamConfigEditor {
+	return &teamConfigEditor{
+		MaxWorkers:   teamConfigDefaultMaxWorkers,
+		Models:       map[string]teamConfigRoleInput{},
+		SessionReuse: pool.DefaultSessionReuseConfig(),
+	}
+}
+
+func loadTeamConfigEditor(path string) (*teamConfigEditor, error) {
+	cfg, err := pool.LoadTeamConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return newTeamConfigEditorFromPool(cfg), nil
+}
+
+func newTeamConfigEditorFromPool(cfg *pool.TeamConfig) *teamConfigEditor {
+	editor := newTeamConfigEditor()
+	if cfg == nil {
+		return editor
+	}
+	editor.MaxWorkers = normalizeTeamMaxWorkers(cfg.MaxWorkers)
+	editor.SessionReuse = cfg.SessionReuse
+	if editor.SessionReuse.TTLSeconds == 0 && editor.SessionReuse.MaxTasks == 0 && editor.SessionReuse.MaxTokens == 0 {
+		editor.SessionReuse = pool.DefaultSessionReuseConfig()
+	}
+	for role, modelCfg := range cfg.Models {
+		editor.SetModel(role, teamConfigRoleInput{
+			Provider: teamConfigProviderFromModel(modelCfg),
+			Model:    modelCfg.Model,
+		})
+	}
+	return editor
+}
+
+func (e *teamConfigEditor) SetMaxWorkers(raw string) {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		n = 0
+	}
+	e.MaxWorkers = normalizeTeamMaxWorkers(n)
+}
+
+func (e *teamConfigEditor) Model(role string) teamConfigRoleInput {
+	if e == nil || len(e.Models) == 0 {
+		return teamConfigRoleInput{}
+	}
+	return e.Models[normalizeTeamRoleKey(role)]
+}
+
+func (e *teamConfigEditor) SetModel(role string, input teamConfigRoleInput) {
+	role = normalizeTeamRoleKey(role)
+	if role == "" {
+		return
+	}
+	cfg, ok := normalizeTeamModelInput(input)
+	if !ok {
+		delete(e.Models, role)
+		return
+	}
+	if e.Models == nil {
+		e.Models = map[string]teamConfigRoleInput{}
+	}
+	e.Models[role] = teamConfigRoleInput{
+		Provider: cfg.Provider,
+		Model:    cfg.Model,
+	}
+}
+
+func (e *teamConfigEditor) YAMLConfig() teamYAMLConfig {
+	cfg := teamYAMLConfig{
+		MaxWorkers: normalizeTeamMaxWorkers(e.MaxWorkers),
+	}
+	cfg.SessionReuse = normalizeSessionReuseConfig(e.SessionReuse)
+	if len(e.Models) > 0 {
+		models := make(map[string]pool.ModelConfig, len(e.Models))
+		for role, input := range e.Models {
+			modelCfg, ok := normalizeTeamModelInput(input)
+			if !ok {
+				continue
+			}
+			models[normalizeTeamRoleKey(role)] = modelCfg
+		}
+		if len(models) > 0 {
+			cfg.Models = models
+		}
+	}
+	return cfg
+}
+
+func (e *teamConfigEditor) Save(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := yaml.Marshal(e.YAMLConfig())
+	if err != nil {
+		return fmt.Errorf("marshal team config: %w", err)
+	}
+	if err := os.WriteFile(path, append([]byte(teamConfigFileHeader), data...), 0644); err != nil {
+		return fmt.Errorf("write team config: %w", err)
+	}
+	return nil
+}
+
+func teamInitRoleSpecs() []teamConfigRoleSpec {
+	return []teamConfigRoleSpec{
+		{Key: "default", Label: "Default", Summary: "Fallback route used when a role has no explicit override."},
+		{Key: "planner", Label: "Planner", Summary: "Breaks work into steps and coordinates the team."},
+		{Key: "implementer", Label: "Implementer", Summary: "Executes tasks and makes the requested code changes."},
+		{Key: "reviewer", Label: "Reviewer", Summary: "Checks for bugs, regressions, and missing coverage."},
+	}
+}
+
+func teamRoleSpec(role string) teamConfigRoleSpec {
+	switch normalizeTeamRoleKey(role) {
+	case "planner":
+		return teamConfigRoleSpec{Key: "planner", Label: "Planner", Summary: "Breaks work into steps and coordinates the team."}
+	case "implementer":
+		return teamConfigRoleSpec{Key: "implementer", Label: "Implementer", Summary: "Executes tasks and makes the requested code changes."}
+	case "reviewer":
+		return teamConfigRoleSpec{Key: "reviewer", Label: "Reviewer", Summary: "Checks for bugs, regressions, and missing coverage."}
+	case "default":
+		return teamConfigRoleSpec{Key: "default", Label: "Default", Summary: "Fallback route used when a role has no explicit model override."}
+	default:
+		role = normalizeTeamRoleKey(role)
+		return teamConfigRoleSpec{Key: role, Label: titleCase(role), Summary: "Custom role route."}
+	}
+}
+
+func teamRolePromptDefaults(provider string) teamConfigRoleInput {
+	provider = teamPromptProvider(provider)
+	return teamConfigRoleInput{
+		Provider: provider,
+		Model:    defaultTeamModel(provider),
+	}
+}
+
+func teamProviderChoices() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("Claude", "claude"),
+		huh.NewOption("Codex", "codex"),
+		huh.NewOption("Gemini", "gemini"),
+	}
+}
+
+func normalizeSessionReuseConfig(cfg pool.SessionReuseConfig) pool.SessionReuseConfig {
+	defaults := pool.DefaultSessionReuseConfig()
+	if cfg.TTLSeconds <= 0 {
+		cfg.TTLSeconds = defaults.TTLSeconds
+	}
+	if cfg.MaxTasks <= 0 {
+		cfg.MaxTasks = defaults.MaxTasks
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = defaults.MaxTokens
+	}
+	return cfg
+}
+
+func teamProcessSummary(cfg pool.SessionReuseConfig) string {
+	cfg = normalizeSessionReuseConfig(cfg)
+	if !cfg.Enabled {
+		return "fresh session each task"
+	}
+	scope := "same role"
+	if !cfg.SameRoleOnly {
+		scope = "cross role"
+	}
+	return fmt.Sprintf("reuse %d tasks / %ds / %s", cfg.MaxTasks, cfg.TTLSeconds, scope)
+}
+
+func teamModelModes(provider string) []teamModelMode {
+	recommended := defaultTeamModel(provider)
+	return []teamModelMode{
+		{Key: "provider-default", Label: "Provider default"},
+		{Key: "recommended", Label: "Recommended preset (" + recommended + ")"},
+		{Key: "custom", Label: "Custom model"},
+	}
+}
+
+func teamRoleSummary(editor *teamConfigEditor, role, baseProvider string) string {
+	current := editor.Model(role)
+	if role == "default" {
+		if current.Provider == "" && current.Model == "" {
+			defaults := teamRolePromptDefaults(baseProvider)
+			return fmt.Sprintf("%s / %s", defaults.Provider, defaults.Model)
+		}
+		return teamRoleValueSummary(current)
+	}
+	if current.Provider == "" && current.Model == "" {
+		return "inherits default"
+	}
+	return teamRoleValueSummary(current)
+}
+
+func teamRoleValueSummary(input teamConfigRoleInput) string {
+	provider := normalizeTeamProvider(input.Provider)
+	model := strings.TrimSpace(input.Model)
+	switch {
+	case provider != "" && model != "":
+		return fmt.Sprintf("%s / %s", provider, model)
+	case provider != "":
+		return fmt.Sprintf("%s / provider default", provider)
+	default:
+		return "not configured"
+	}
+}
+
+func promptTeamMaxWorkers(editor *teamConfigEditor) error {
+	maxWorkersStr := strconv.Itoa(editor.MaxWorkers)
+	if err := huh.NewInput().
+		Title("Max concurrent workers").
+		Placeholder(strconv.Itoa(teamConfigDefaultMaxWorkers)).
+		Value(&maxWorkersStr).
+		Run(); err != nil {
+		return err
+	}
+	editor.SetMaxWorkers(maxWorkersStr)
+	return nil
+}
+
+func promptTeamProcess(editor *teamConfigEditor) error {
+	cfg := normalizeSessionReuseConfig(editor.SessionReuse)
+	mode := "fresh"
+	switch {
+	case !cfg.Enabled:
+		mode = "fresh"
+	case cfg.MaxTasks == 3 && cfg.TTLSeconds == 300 && cfg.MaxTokens == 100000 && cfg.SameRoleOnly:
+		mode = "balanced"
+	case cfg.MaxTasks == 8 && cfg.TTLSeconds == 900 && cfg.MaxTokens == 200000 && cfg.SameRoleOnly:
+		mode = "aggressive"
+	default:
+		mode = "custom"
+	}
+
+	if err := huh.NewSelect[string]().
+		Title("Worker session reuse").
+		Description("Controls whether workers keep their AI session between tasks to trade freshness for speed and cost.").
+		Options(
+			huh.NewOption("Fresh each task", "fresh"),
+			huh.NewOption("Balanced reuse", "balanced"),
+			huh.NewOption("Aggressive reuse", "aggressive"),
+			huh.NewOption("Custom", "custom"),
+		).
+		Value(&mode).
+		Run(); err != nil {
+		return err
+	}
+
+	switch mode {
+	case "fresh":
+		editor.SessionReuse = pool.DefaultSessionReuseConfig()
+		editor.SessionReuse.Enabled = false
+		return nil
+	case "balanced":
+		editor.SessionReuse = pool.SessionReuseConfig{
+			Enabled:      true,
+			TTLSeconds:   300,
+			MaxTasks:     3,
+			MaxTokens:    100000,
+			SameRoleOnly: true,
+		}
+		return nil
+	case "aggressive":
+		editor.SessionReuse = pool.SessionReuseConfig{
+			Enabled:      true,
+			TTLSeconds:   900,
+			MaxTasks:     8,
+			MaxTokens:    200000,
+			SameRoleOnly: true,
+		}
+		return nil
+	}
+
+	cfg.Enabled = true
+	ttl := strconv.Itoa(cfg.TTLSeconds)
+	maxTasks := strconv.Itoa(cfg.MaxTasks)
+	maxTokens := strconv.Itoa(cfg.MaxTokens)
+	sameRoleOnly := cfg.SameRoleOnly
+
+	if err := huh.NewInput().
+		Title("Reuse TTL in seconds").
+		Placeholder("300").
+		Value(&ttl).
+		Run(); err != nil {
+		return err
+	}
+	if err := huh.NewInput().
+		Title("Max tasks before session reset").
+		Placeholder("3").
+		Value(&maxTasks).
+		Run(); err != nil {
+		return err
+	}
+	if err := huh.NewInput().
+		Title("Max cumulative tokens before session reset").
+		Placeholder("100000").
+		Value(&maxTokens).
+		Run(); err != nil {
+		return err
+	}
+	if err := huh.NewConfirm().
+		Title("Keep reuse within the same worker role only?").
+		Value(&sameRoleOnly).
+		Run(); err != nil {
+		return err
+	}
+
+	cfg.TTLSeconds, _ = strconv.Atoi(strings.TrimSpace(ttl))
+	cfg.MaxTasks, _ = strconv.Atoi(strings.TrimSpace(maxTasks))
+	cfg.MaxTokens, _ = strconv.Atoi(strings.TrimSpace(maxTokens))
+	cfg.SameRoleOnly = sameRoleOnly
+	editor.SessionReuse = normalizeSessionReuseConfig(cfg)
+	editor.SessionReuse.Enabled = true
+	return nil
+}
+
+func promptTeamRoleEditor(editor *teamConfigEditor, role, baseProvider string) error {
+	spec := teamRoleSpec(role)
+	if role != "default" {
+		mode := "override"
+		if current := editor.Model(role); current.Provider == "" && current.Model == "" {
+			mode = "inherit"
+		}
+		if err := huh.NewSelect[string]().
+			Title(spec.Label+" route").
+			Description(spec.Summary).
+			Options(
+				huh.NewOption("Inherit default", "inherit"),
+				huh.NewOption("Custom override", "override"),
+			).
+			Value(&mode).
+			Run(); err != nil {
+			return err
+		}
+		if mode == "inherit" {
+			editor.SetModel(role, teamConfigRoleInput{})
+			return nil
+		}
+	}
+
+	current := editor.Model(role)
+	provider := current.Provider
+	if provider == "" {
+		if role == "default" {
+			provider = teamPromptProvider(baseProvider)
+		} else {
+			provider = teamPromptProvider(editor.Model("default").Provider)
+		}
+	}
+	if provider == "" {
+		provider = teamPromptProvider(baseProvider)
+	}
+
+	if err := huh.NewSelect[string]().
+		Title(spec.Label + " provider").
+		Description(spec.Summary).
+		Options(teamProviderChoices()...).
+		Value(&provider).
+		Run(); err != nil {
+		return err
+	}
+
+	modelMode := "recommended"
+	model := strings.TrimSpace(current.Model)
+	switch {
+	case model == "":
+		modelMode = "provider-default"
+	case model == defaultTeamModel(provider):
+		modelMode = "recommended"
+	default:
+		modelMode = "custom"
+	}
+
+	modeOptions := make([]huh.Option[string], 0, len(teamModelModes(provider)))
+	for _, mode := range teamModelModes(provider) {
+		modeOptions = append(modeOptions, huh.NewOption(mode.Label, mode.Key))
+	}
+	if err := huh.NewSelect[string]().
+		Title(spec.Label + " model").
+		Options(modeOptions...).
+		Value(&modelMode).
+		Run(); err != nil {
+		return err
+	}
+
+	switch modelMode {
+	case "provider-default":
+		model = ""
+	case "recommended":
+		model = defaultTeamModel(provider)
+	default:
+		if model == "" {
+			model = defaultTeamModel(provider)
+		}
+		if err := huh.NewInput().
+			Title(spec.Label + " custom model").
+			Placeholder(defaultTeamModel(provider)).
+			Value(&model).
+			Run(); err != nil {
+			return err
+		}
+	}
+
+	editor.SetModel(role, teamConfigRoleInput{
+		Provider: provider,
+		Model:    model,
+	})
+	return nil
+}
+
+func promptTeamConfigLoop(editor *teamConfigEditor, baseProvider string) error {
+	for {
+		selection := ""
+		options := []huh.Option[string]{
+			huh.NewOption(fmt.Sprintf("Max workers (%d)", editor.MaxWorkers), "max-workers"),
+			huh.NewOption(fmt.Sprintf("Process (%s)", teamProcessSummary(editor.SessionReuse)), "process"),
+		}
+		for _, role := range teamInitRoleSpecs() {
+			options = append(options, huh.NewOption(
+				fmt.Sprintf("%s (%s)", role.Label, teamRoleSummary(editor, role.Key, baseProvider)),
+				role.Key,
+			))
+		}
+		options = append(options, huh.NewOption("Save and launch", "save"))
+
+		if err := huh.NewSelect[string]().
+			Title("Team configuration").
+			Options(options...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
+		}
+
+		switch selection {
+		case "max-workers":
+			if err := promptTeamMaxWorkers(editor); err != nil {
+				return err
+			}
+		case "process":
+			if err := promptTeamProcess(editor); err != nil {
+				return err
+			}
+		case "save":
+			return nil
+		default:
+			if err := promptTeamRoleEditor(editor, selection, baseProvider); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func normalizeTeamRoleKey(role string) string {
+	return strings.ToLower(strings.TrimSpace(role))
+}
+
+func normalizeTeamMaxWorkers(n int) int {
+	if n < 1 {
+		return teamConfigDefaultMaxWorkers
+	}
+	return n
+}
+
+func normalizeTeamProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ""
+	}
+	return canonicalProviderName(provider)
+}
+
+func teamPromptProvider(provider string) string {
+	if normalized := normalizeTeamProvider(provider); normalized != "" {
+		return normalized
+	}
+	return DefaultProvider().Name
+}
+
+func teamConfigProviderFromModel(cfg pool.ModelConfig) string {
+	if provider := normalizeTeamProvider(cfg.Provider); provider != "" {
+		return provider
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Adapter)) {
+	case "claude", "claude-code":
+		return "claude"
+	case "codex", "openai", "openai-codex":
+		return "codex"
+	case "gemini", "google", "gemini-cli":
+		return "gemini"
+	default:
+		return ""
+	}
+}
+
+func normalizeTeamModelInput(input teamConfigRoleInput) (pool.ModelConfig, bool) {
+	cfg := pool.ModelConfig{
+		Provider: normalizeTeamProvider(input.Provider),
+		Model:    strings.TrimSpace(input.Model),
+	}
+	if cfg.Provider == "" && cfg.Model == "" {
+		return pool.ModelConfig{}, false
+	}
+	return cfg, true
+}
+
 // handleTeamInit runs the team configuration wizard.
 func handleTeamInit(args []string) error {
 	workspace := detectWorkspace()
-	projDir := ProjectDir(workspace)
-	configPath := filepath.Join(ConfigHome(), "projects", projDir, "team.yaml")
+	teamName, args := extractTeamName(args)
+	if len(args) > 0 {
+		return fmt.Errorf("unknown flag %q for \"mittens team init\" (supported: --name)", args[0])
+	}
+	if strings.TrimSpace(teamName) == "" {
+		if err := huh.NewInput().
+			Title("Team name").
+			Placeholder("strike-team-a").
+			Value(&teamName).
+			Run(); err != nil {
+			return gracefulAbort(err)
+		}
+	}
+	if err := validateTeamName(teamName); err != nil {
+		return err
+	}
+
+	configPath := teamConfigPath(teamName)
+	editor, err := loadTeamConfigEditor(configPath)
+	if err != nil {
+		return err
+	}
+	baseProvider := defaultTeamInitProvider()
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardTitle.Render("Team Mode Configuration"))
 	fmt.Fprintln(os.Stderr, wizardDim.Render("  Project: "+workspace))
+	fmt.Fprintln(os.Stderr, wizardDim.Render("  Team: "+teamName))
 	fmt.Fprintln(os.Stderr)
 
-	// Max workers.
-	maxWorkersStr := "4"
-	if err := huh.NewInput().
-		Title("Max concurrent workers").
-		Placeholder("4").
-		Value(&maxWorkersStr).
-		Run(); err != nil {
-		return gracefulAbort(err)
-	}
-	maxWorkers, err := strconv.Atoi(strings.TrimSpace(maxWorkersStr))
-	if err != nil || maxWorkers < 1 {
-		maxWorkers = 4
+	if editor.Model("default") == (teamConfigRoleInput{}) {
+		editor.SetModel("default", teamRolePromptDefaults(baseProvider))
 	}
 
-	// Model routing.
-	configRouting := false
-	if err := huh.NewConfirm().
-		Title("Configure per-role model routing?").
-		Value(&configRouting).
-		Run(); err != nil {
+	if err := promptTeamConfigLoop(editor, baseProvider); err != nil {
 		return gracefulAbort(err)
 	}
 
-	models := map[string]pool.ModelConfig{}
-	if configRouting {
-		for _, role := range []string{"planner", "implementer", "reviewer"} {
-			provider := ""
-			model := ""
-			adapterName := ""
-
-			if err := huh.NewInput().
-				Title(fmt.Sprintf("%s — provider", titleCase(role))).
-				Placeholder("claude").
-				Value(&provider).
-				Run(); err != nil {
-				return gracefulAbort(err)
-			}
-			provider = strings.TrimSpace(provider)
-			modelPlaceholder := defaultTeamModel(provider)
-			if err := huh.NewInput().
-				Title(fmt.Sprintf("%s — model", titleCase(role))).
-				Placeholder(modelPlaceholder).
-				Value(&model).
-				Run(); err != nil {
-				return gracefulAbort(err)
-			}
-			adapterPlaceholder := adapter.DefaultAdapterForProvider(provider)
-			if err := huh.NewInput().
-				Title(fmt.Sprintf("%s — adapter", titleCase(role))).
-				Placeholder(adapterPlaceholder).
-				Value(&adapterName).
-				Run(); err != nil {
-				return gracefulAbort(err)
-			}
-
-			if provider != "" || model != "" || adapterName != "" {
-				models[role] = pool.ModelConfig{
-					Provider: provider,
-					Model:    strings.TrimSpace(model),
-					Adapter:  strings.TrimSpace(adapterName),
-				}
-			}
-		}
-	}
-
-	// Build team config.
-	cfg := teamYAMLConfig{
-		MaxWorkers: maxWorkers,
-	}
-	if len(models) > 0 {
-		cfg.Models = models
-	}
-
-	// Write team.yaml.
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal team config: %w", err)
-	}
-
-	header := "# mittens team config — generated by mittens team init\n"
-	if err := os.WriteFile(configPath, append([]byte(header), data...), 0644); err != nil {
-		return fmt.Errorf("write team config: %w", err)
+	if err := editor.Save(configPath); err != nil {
+		return err
 	}
 
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Saved to "+configPath))
-	return nil
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Saved team "+teamName+" to "+configPath))
+	fmt.Fprintln(os.Stderr, wizardDim.Render("Launching team "+teamName+"..."))
+	return runTeamSession([]string{"--name", teamName})
 }
 
 // teamYAMLConfig is the serialization format for team.yaml.
 type teamYAMLConfig struct {
-	MaxWorkers int                         `yaml:"max_workers,omitempty"`
-	Models     map[string]pool.ModelConfig `yaml:"models,omitempty"`
+	MaxWorkers   int                         `yaml:"max_workers,omitempty"`
+	Models       map[string]pool.ModelConfig `yaml:"models,omitempty"`
+	SessionReuse pool.SessionReuseConfig     `yaml:"session_reuse,omitempty"`
 }
 
 func resolveWorkerProvider(name string, fallback *Provider) (*Provider, error) {
@@ -1169,12 +1885,49 @@ func extraTeamProviders(tc *pool.TeamConfig, primary *Provider) ([]*Provider, er
 func defaultTeamModel(provider string) string {
 	switch canonicalProviderName(provider) {
 	case "codex":
-		return "gpt-5.3-spark"
+		return "gpt-5.4"
 	case "gemini":
 		return "gemini-2.5-pro"
 	default:
 		return "claude-sonnet-4-6"
 	}
+}
+
+func handleTeamList(args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		default:
+			return fmt.Errorf("unknown flag %q for \"mittens team list\" (supported: --json)", arg)
+		}
+	}
+
+	teams, err := listTeamConfigs(ConfigHome())
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		if teams == nil {
+			teams = []teamConfigMeta{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(teams)
+	}
+
+	if len(teams) == 0 {
+		fmt.Println("No named teams configured. Run 'mittens team init --name <team>' to create one.")
+		return nil
+	}
+
+	fmt.Printf("%-20s %-8s %s\n", "TEAM", "SESSIONS", "CONFIG")
+	for _, team := range teams {
+		fmt.Printf("%-20s %-8d %s\n", team.Name, team.SessionCount, team.ConfigPath)
+	}
+	return nil
 }
 
 // handleTeamStatus lists running team sessions.
@@ -1262,16 +2015,20 @@ func handleTeamStatus(args []string) error {
 	}
 
 	if len(display) == 0 {
-		fmt.Println("No team sessions found. Run 'mittens team' to start one.")
+		fmt.Println("No team sessions found. Run 'mittens team init --name <team>' to create one.")
 		return nil
 	}
 
 	const timeFmt = "2006-01-02 15:04"
-	fmt.Printf("%-28s %-18s %-10s %-18s %-18s %s\n", "PROJECT", "SESSION", "STATUS", "STARTED", "LAST ACTIVITY", "WORKERS")
+	fmt.Printf("%-28s %-18s %-20s %-10s %-18s %-18s %s\n", "PROJECT", "TEAM", "SESSION", "STATUS", "STARTED", "LAST ACTIVITY", "WORKERS")
 	for _, s := range display {
 		status := "stopped"
 		if s.Running {
 			status = "running"
+		}
+		teamName := s.TeamName
+		if teamName == "" {
+			teamName = "-"
 		}
 		started := "-"
 		if !s.StartedAt.IsZero() {
@@ -1282,7 +2039,7 @@ func handleTeamStatus(args []string) error {
 		if s.Running {
 			workers = strconv.Itoa(s.WorkerCount)
 		}
-		fmt.Printf("%-28s %-18s %-10s %-18s %-18s %s\n", s.ProjectDir, s.SessionID, status, started, activity, workers)
+		fmt.Printf("%-28s %-18s %-20s %-10s %-18s %-18s %s\n", s.ProjectDir, teamName, s.SessionID, status, started, activity, workers)
 	}
 	return nil
 }
@@ -1302,26 +2059,30 @@ func printTeamHelp() error {
 Usage: mittens team [command] [flags] [-- provider-args...]
 
 Commands:
-  (none)     Launch a team session with a leader container
-  init       Interactive team configuration wizard
+  (none)     Launch an existing named team session
+  init       Create or edit a named team, then launch it
+  list       Show configured named teams
   status     Show team sessions (--all-projects, --limit N, --json)
   resume     Reconnect to a crashed team session
   clean      Remove old session state directories
 
 Team flags:
-  --name NAME    Give the session a human-readable name for easy resume
+  --name NAME    Team config name to launch or edit
 
 Other flags are forwarded to the leader container (same as normal mittens flags).
 Everything after -- is passed through to the AI provider unchanged.
 
 Configuration:
-  Team config is stored at ~/.mittens/projects/<workspace>/team.yaml
-  Run 'mittens team init' to create or edit it.
+  Team configs are stored globally at ~/.mittens/teams/<team>/team.yaml
+  Sessions are per-project launches of a named team config with a generated session ID.
+  Run 'mittens team init --name <team>' to create or edit a team before launching it.
 
 Examples:
-  mittens team                          Launch a team session
-  mittens team --name refactor-auth     Launch a named session
-  mittens team init                     Configure team settings
+  mittens team --name strike-team-a     Launch an existing named team
+  mittens team init                     Create a new named team interactively, then launch it
+  mittens team init --name strike-team-a Create or edit strike-team-a, then launch it
+  mittens team list                     List named team configs
+  mittens team list --json              Output named team configs as JSON
   mittens team status                   List team sessions for current project
   mittens team status --all-projects    List sessions across all projects
   mittens team status --limit 5         Show at most 5 stopped sessions

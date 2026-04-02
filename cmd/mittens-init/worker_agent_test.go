@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,9 +24,11 @@ type mockLeaderServer struct {
 	mu              sync.Mutex
 	registered      bool
 	heartbeats      int
+	lastActivity    *pool.WorkerActivity
 	lastCurrentTool string
 	completed       []string
 	failed          []string
+	failedErrors    []string
 	reviewed        []reviewPayload
 	task            *pool.Task // task to return on poll (consumed once)
 	srv             *httptest.Server
@@ -51,11 +55,18 @@ func newMockLeaderServer(t *testing.T) *mockLeaderServer {
 	})
 	mux.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			CurrentTool string `json:"currentTool"`
+			Activity    *pool.WorkerActivity `json:"activity"`
+			CurrentTool string               `json:"currentTool"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		m.mu.Lock()
 		m.heartbeats++
+		if req.Activity != nil {
+			cp := *req.Activity
+			m.lastActivity = &cp
+		} else {
+			m.lastActivity = nil
+		}
 		m.lastCurrentTool = req.CurrentTool
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
@@ -86,10 +97,12 @@ func newMockLeaderServer(t *testing.T) *mockLeaderServer {
 	mux.HandleFunc("POST /fail", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			TaskID string `json:"taskId"`
+			Error  string `json:"error"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		m.mu.Lock()
 		m.failed = append(m.failed, req.TaskID)
+		m.failedErrors = append(m.failedErrors, req.Error)
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
@@ -155,7 +168,7 @@ func TestLeaderClient_Heartbeat(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
 
-	if err := client.Heartbeat("w-1", ""); err != nil {
+	if err := client.Heartbeat("w-1", nil, ""); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	m.mu.Lock()
@@ -165,14 +178,43 @@ func TestLeaderClient_Heartbeat(t *testing.T) {
 	m.mu.Unlock()
 }
 
-func TestLeaderClient_HeartbeatWithTool(t *testing.T) {
+func TestLeaderClient_HeartbeatWithActivity(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	activity := &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "README.md",
+	}
 
-	if err := client.Heartbeat("w-1", "Read"); err != nil {
+	if err := client.Heartbeat("w-1", activity, "Read"); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	m.mu.Lock()
+	if m.lastActivity == nil {
+		t.Fatal("expected activity in heartbeat")
+	}
+	if *m.lastActivity != *activity {
+		t.Fatalf("activity = %+v, want %+v", *m.lastActivity, *activity)
+	}
+	if m.lastCurrentTool != "Read" {
+		t.Errorf("currentTool = %q, want Read", m.lastCurrentTool)
+	}
+	m.mu.Unlock()
+}
+
+func TestLeaderClient_HeartbeatLegacyToolOnly(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+
+	if err := client.Heartbeat("w-1", nil, "Read"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	m.mu.Lock()
+	if m.lastActivity != nil {
+		t.Fatalf("activity = %+v, want nil", *m.lastActivity)
+	}
 	if m.lastCurrentTool != "Read" {
 		t.Errorf("currentTool = %q, want Read", m.lastCurrentTool)
 	}
@@ -256,7 +298,29 @@ func TestLeaderClient_ReportFail(t *testing.T) {
 	if len(m.failed) != 1 || m.failed[0] != "t-1" {
 		t.Errorf("failed = %v", m.failed)
 	}
+	if len(m.failedErrors) != 1 || m.failedErrors[0] != "broke" {
+		t.Errorf("failedErrors = %v, want [broke]", m.failedErrors)
+	}
 	m.mu.Unlock()
+}
+
+func TestLeaderClient_ReportFailSanitizesLargeErrors(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+
+	longErr := "line1\n\n" + strings.Repeat("x", 700)
+	if err := client.ReportFail("w-1", "t-1", longErr); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if got := len([]rune(m.failedErrors[0])); got > maxFailureMessageLen {
+		t.Fatalf("sanitized error length = %d, want <= %d", got, maxFailureMessageLen)
+	}
+	if strings.Contains(m.failedErrors[0], "\n") {
+		t.Fatalf("sanitized error should not contain newlines: %q", m.failedErrors[0])
+	}
 }
 
 // --- Registration retry tests ---
@@ -294,10 +358,10 @@ func TestRegisterWithRetries_FailsAfterExhaustion(t *testing.T) {
 // --- heartbeatLoop killed detection ---
 
 func TestHeartbeatLoop_KilledCancelsContext(t *testing.T) {
-	// Server returns 404 on heartbeat (= worker killed).
+	// Server returns 401 on heartbeat (= worker token revoked / worker killed).
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -315,7 +379,7 @@ func TestHeartbeatLoop_KilledCancelsContext(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for the context to be cancelled (heartbeat returns 404 → errWorkerKilled → cancel).
+	// Wait for the context to be cancelled (heartbeat returns 401 → errWorkerKilled → cancel).
 	select {
 	case <-ctx.Done():
 		// Good — context was cancelled.
@@ -375,6 +439,23 @@ func TestCleanTeamDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "other.txt")); err != nil {
 		t.Error("other.txt should not have been removed")
+	}
+}
+
+func TestCleanTeamDir_PreservesActivityLogs(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{pool.WorkerActivityLogFile, pool.WorkerActivityArchiveFile} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("data\n"), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	cleanTeamDir(dir)
+
+	for _, name := range []string{pool.WorkerActivityLogFile, pool.WorkerActivityArchiveFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected %s to remain: %v", name, err)
+		}
 	}
 }
 
@@ -475,22 +556,147 @@ func TestWorkerAgentState_Concurrency(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			state.setTool("Read")
-			state.setTool("Write")
+			state.setTool("Read", "README.md")
+			state.setTool("Write", "main.go")
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			_ = state.getTool()
+			_, _ = state.snapshot()
 		}
 	}()
 
 	wg.Wait()
-	tool := state.getTool()
+	activity, tool := state.snapshot()
 	if tool != "Read" && tool != "Write" && tool != "" {
 		t.Errorf("unexpected tool: %q", tool)
+	}
+	if activity != nil && activity.Kind != "tool" {
+		t.Errorf("unexpected activity kind: %q", activity.Kind)
+	}
+}
+
+func TestWorkerAgentState_StatusActivityClearsLegacyTool(t *testing.T) {
+	state := &workerAgentState{}
+	state.setTool("Read", "README.md")
+	state.setActivity(&pool.WorkerActivity{
+		Kind:    "status",
+		Phase:   "started",
+		Name:    "planning",
+		Summary: "Reviewing repository state",
+	})
+
+	activity, tool := state.snapshot()
+	if activity == nil {
+		t.Fatal("expected current activity")
+	}
+	if activity.Kind != "status" || activity.Name != "planning" {
+		t.Fatalf("activity = %+v, want status planning", *activity)
+	}
+	if tool != "" {
+		t.Errorf("tool = %q, want empty", tool)
+	}
+}
+
+func TestWorkerAgentState_CompletedToolDoesNotPopulateCurrentTool(t *testing.T) {
+	state := &workerAgentState{}
+	state.setTool("Read", "README.md")
+	completed := &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "completed",
+		Name:    "Read",
+		Summary: "finished README.md",
+	}
+
+	state.setActivity(completed)
+
+	activity, tool := state.snapshot()
+	if activity == nil {
+		t.Fatal("expected current activity")
+	}
+	if *activity != *completed {
+		t.Fatalf("activity = %+v, want %+v", *activity, *completed)
+	}
+	if tool != "" {
+		t.Errorf("tool = %q, want empty", tool)
+	}
+}
+
+func TestWorkerAgentState_PersistsActivityHistory(t *testing.T) {
+	dir := t.TempDir()
+	state := &workerAgentState{teamDir: dir}
+	state.setCurrentTask("t-1")
+	activity := &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "README.md",
+	}
+
+	state.setActivity(activity)
+
+	records := readActivityRecords(t, filepath.Join(dir, pool.WorkerActivityLogFile))
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if records[0].TaskID != "t-1" {
+		t.Fatalf("taskId = %q, want t-1", records[0].TaskID)
+	}
+	if records[0].Activity != *activity {
+		t.Fatalf("activity = %+v, want %+v", records[0].Activity, *activity)
+	}
+	if records[0].RecordedAt.IsZero() {
+		t.Fatal("recordedAt should be set")
+	}
+}
+
+func TestWorkerAgentState_DeduplicatesIdenticalActivity(t *testing.T) {
+	dir := t.TempDir()
+	state := &workerAgentState{teamDir: dir}
+	state.setCurrentTask("t-1")
+	activity := &pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "README.md",
+	}
+
+	state.setActivity(activity)
+	state.setActivity(activity)
+	state.setTool("Read", "README.md")
+
+	records := readActivityRecords(t, filepath.Join(dir, pool.WorkerActivityLogFile))
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+}
+
+func TestWorkerAgentState_RotatesActivityHistory(t *testing.T) {
+	dir := t.TempDir()
+	state := &workerAgentState{teamDir: dir}
+	state.setCurrentTask("t-rotate")
+
+	for i := 0; i < pool.WorkerActivityLogMaxEntries+1; i++ {
+		state.setActivity(&pool.WorkerActivity{
+			Kind:    "tool",
+			Phase:   "started",
+			Name:    fmt.Sprintf("Tool-%03d", i),
+			Summary: "rotating history",
+		})
+	}
+
+	current := readActivityRecords(t, filepath.Join(dir, pool.WorkerActivityLogFile))
+	archive := readActivityRecords(t, filepath.Join(dir, pool.WorkerActivityArchiveFile))
+	if len(archive) != pool.WorkerActivityLogMaxEntries {
+		t.Fatalf("archive records = %d, want %d", len(archive), pool.WorkerActivityLogMaxEntries)
+	}
+	if len(current) != 1 {
+		t.Fatalf("current records = %d, want 1", len(current))
+	}
+	if current[0].Activity.Name != fmt.Sprintf("Tool-%03d", pool.WorkerActivityLogMaxEntries) {
+		t.Fatalf("current last tool = %q", current[0].Activity.Name)
 	}
 }
 
@@ -499,7 +705,7 @@ func TestWorkerAgentState_Concurrency(t *testing.T) {
 func TestLeaderClient_PollTask_Killed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /task/{wid}", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -514,13 +720,28 @@ func TestLeaderClient_PollTask_Killed(t *testing.T) {
 func TestLeaderClient_Heartbeat_Killed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
 	client := newLeaderClient(srv.Listener.Addr().String(), "")
-	err := client.Heartbeat("w-1", "")
+	err := client.Heartbeat("w-1", nil, "")
+	if err != errWorkerKilled {
+		t.Errorf("expected errWorkerKilled, got %v", err)
+	}
+}
+
+func TestLeaderClient_AskQuestion_Killed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /question", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := newLeaderClient(srv.Listener.Addr().String(), "")
+	_, err := client.AskQuestion("w-1", pool.Question{Question: "still there?", Blocking: true})
 	if err != errWorkerKilled {
 		t.Errorf("expected errWorkerKilled, got %v", err)
 	}
@@ -718,14 +939,67 @@ func TestExecuteTask_ReviewTaskErrorReportsFail(t *testing.T) {
 		Status: pool.TaskReviewing,
 	}
 
-	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
 	if len(m.failed) != 1 || m.failed[0] != "t-review" {
 		t.Errorf("failed = %v, want [t-review]", m.failed)
 	}
 	if len(m.reviewed) != 0 {
 		t.Errorf("reviewed = %v, want none", m.reviewed)
 	}
+}
+
+func TestExecuteTask_AuthErrorStopsWorkerAndReportsResetMessage(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newLeaderClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{err: errors.New("execute codex (exit 1): refresh_token_reused\nPlease log out and sign in again.")}
+	task := &pool.Task{
+		ID:     "t-auth",
+		Prompt: "plan this change",
+		Status: pool.TaskDispatched,
+	}
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !stopWorker {
+		t.Fatal("stopWorker = false, want true")
+	}
+	if len(m.failed) != 1 || m.failed[0] != "t-auth" {
+		t.Fatalf("failed = %v, want [t-auth]", m.failed)
+	}
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "run codex logout") {
+		t.Fatalf("failedErrors = %v, want host logout guidance", m.failedErrors)
+	}
+}
+
+func readActivityRecords(t *testing.T, path string) []pool.WorkerActivityRecord {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+
+	var records []pool.WorkerActivityRecord
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var record pool.WorkerActivityRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		records = append(records, record)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan %s: %v", path, err)
+	}
+	return records
 }

@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -40,6 +41,82 @@ type PoolManager struct {
 	notify      chan Notification
 	taskWaiters map[string][]chan Notification // taskID -> per-waiter channels
 	cfg         PoolConfig
+}
+
+func cloneTimePtr(ts *time.Time) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	cp := *ts
+	return &cp
+}
+
+func cloneWorkerActivity(activity *WorkerActivity) *WorkerActivity {
+	if activity == nil {
+		return nil
+	}
+	cp := *activity
+	return &cp
+}
+
+func cloneTaskResult(result *TaskResult) *TaskResult {
+	if result == nil {
+		return nil
+	}
+	cp := *result
+	if result.FilesChanged != nil {
+		cp.FilesChanged = append([]string(nil), result.FilesChanged...)
+	}
+	return &cp
+}
+
+func cloneTaskHandover(handover *TaskHandover) *TaskHandover {
+	if handover == nil {
+		return nil
+	}
+	cp := *handover
+	if handover.KeyDecisions != nil {
+		cp.KeyDecisions = append([]string(nil), handover.KeyDecisions...)
+	}
+	if handover.FilesChanged != nil {
+		cp.FilesChanged = append([]FileChange(nil), handover.FilesChanged...)
+	}
+	if handover.OpenQuestions != nil {
+		cp.OpenQuestions = append([]string(nil), handover.OpenQuestions...)
+	}
+	return &cp
+}
+
+func currentToolFromActivity(activity *WorkerActivity) string {
+	if activity == nil || activity.Kind != "tool" || activity.Phase != "started" {
+		return ""
+	}
+	return activity.Name
+}
+
+func normalizeWorkerHeartbeat(activity *WorkerActivity, legacyCurrentTool string) (*WorkerActivity, string) {
+	if activity != nil {
+		normalized := cloneWorkerActivity(activity)
+		if normalized.Kind == "" && normalized.Phase == "" && normalized.Name == "" && normalized.Summary == "" {
+			return nil, ""
+		}
+		return normalized, currentToolFromActivity(normalized)
+	}
+	if legacyCurrentTool == "" {
+		return nil, ""
+	}
+	return &WorkerActivity{
+		Kind:  "tool",
+		Phase: "started",
+		Name:  legacyCurrentTool,
+	}, legacyCurrentTool
+}
+
+func rejectDeadWorkerActivity(action string, w *Worker) error {
+	if w != nil && w.Status == WorkerDead {
+		return fmt.Errorf("%s: worker %q is dead", action, w.ID)
+	}
+	return nil
 }
 
 // NewPoolManager creates a fresh PoolManager.
@@ -190,9 +267,9 @@ func (pm *PoolManager) RegisterWorker(workerID, containerID string) error {
 	return nil
 }
 
-// Heartbeat updates the worker's last heartbeat timestamp and current tool.
+// Heartbeat updates the worker's last heartbeat timestamp and current activity.
 // Heartbeats are ephemeral and not WAL'd.
-func (pm *PoolManager) Heartbeat(workerID, state, currentTool string) error {
+func (pm *PoolManager) Heartbeat(workerID, state string, activity *WorkerActivity, currentTool string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -200,8 +277,13 @@ func (pm *PoolManager) Heartbeat(workerID, state, currentTool string) error {
 	if w == nil {
 		return fmt.Errorf("heartbeat: worker %q not found", workerID)
 	}
+	if err := rejectDeadWorkerActivity("heartbeat", w); err != nil {
+		return err
+	}
+	normalizedActivity, normalizedTool := normalizeWorkerHeartbeat(activity, currentTool)
 	w.LastHeartbeat = time.Now()
-	w.CurrentTool = currentTool
+	w.CurrentActivity = normalizedActivity
+	w.CurrentTool = normalizedTool
 	return nil
 }
 
@@ -233,6 +315,7 @@ func (pm *PoolManager) KillWorker(workerID string) error {
 		return fmt.Errorf("kill worker wal: %w", err)
 	}
 	Apply(pm, e)
+	pm.requeueWorkerTasksLocked(workerID)
 	return nil
 }
 
@@ -539,16 +622,16 @@ func (pm *PoolManager) readWorkerFiles(workerID, taskID string) (TaskResult, *Ta
 		State:    "completed",
 	}
 
-	workerDir := filepath.Join(pm.cfg.StateDir, "workers", workerID)
+	workerDir := WorkerStateDir(pm.cfg.StateDir, workerID)
 
 	// Read result.txt for the summary.
-	if data, err := os.ReadFile(filepath.Join(workerDir, "result.txt")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(workerDir, WorkerResultFile)); err == nil {
 		result.Summary = string(data)
 	}
 
 	// Read handover.json if present.
 	var handover *TaskHandover
-	if data, err := os.ReadFile(filepath.Join(workerDir, "handover.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(workerDir, WorkerHandoverFile)); err == nil {
 		var h TaskHandover
 		if json.Unmarshal(data, &h) == nil {
 			handover = &h
@@ -567,7 +650,7 @@ func (pm *PoolManager) readWorkerFiles(workerID, taskID string) (TaskResult, *Ta
 
 // readWorkerOutput reads the raw result.txt content for archival.
 func (pm *PoolManager) readWorkerOutput(workerID string) string {
-	data, err := os.ReadFile(filepath.Join(pm.cfg.StateDir, "workers", workerID, "result.txt"))
+	data, err := os.ReadFile(WorkerStatePath(pm.cfg.StateDir, workerID, WorkerResultFile))
 	if err != nil {
 		return ""
 	}
@@ -616,6 +699,9 @@ func (pm *PoolManager) AskQuestion(workerID string, q Question) (string, error) 
 	w := pm.workers[workerID]
 	if w == nil {
 		return "", fmt.Errorf("ask question: worker %q not found", workerID)
+	}
+	if err := rejectDeadWorkerActivity("ask question", w); err != nil {
+		return "", err
 	}
 
 	pm.qSeq++
@@ -839,7 +925,9 @@ func (pm *PoolManager) Workers() []Worker {
 	defer pm.mu.RUnlock()
 	result := make([]Worker, 0, len(pm.workers))
 	for _, w := range pm.workers {
-		result = append(result, *w)
+		cp := *w
+		cp.CurrentActivity = cloneWorkerActivity(w.CurrentActivity)
+		result = append(result, cp)
 	}
 	return result
 }
@@ -875,6 +963,7 @@ func (pm *PoolManager) Worker(id string) (*Worker, bool) {
 		return nil, false
 	}
 	cp := *w
+	cp.CurrentActivity = cloneWorkerActivity(w.CurrentActivity)
 	return &cp, true
 }
 
@@ -910,19 +999,24 @@ func (pm *PoolManager) AliveWorkers() int {
 	return pm.aliveWorkersLocked()
 }
 
-// WorkerTokens returns a map of token→workerID for all workers that have
-// a per-worker token. Used to restore the broker's token mapping after
-// WAL recovery.
-func (pm *PoolManager) WorkerTokens() map[string]string {
+// ValidateWorkerToken returns the owning worker ID when token matches a
+// persisted per-worker token. Tokens are stored in durable worker state via
+// the worker_spawned event, so callers do not need process-local replay.
+func (pm *PoolManager) ValidateWorkerToken(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	m := make(map[string]string)
 	for _, w := range pm.workers {
-		if w.Token != "" {
-			m[w.Token] = w.ID
+		if w.Token == "" {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(token), []byte(w.Token)) == 1 {
+			return w.ID, true
 		}
 	}
-	return m
+	return "", false
 }
 
 // Notify returns the notification channel for the leader to read.

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,16 +13,71 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func installDockerStub(t *testing.T, script string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	dockerPath := filepath.Join(tmp, "docker")
+	if err := os.WriteFile(dockerPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return tmp
+}
+
 func TestRunTeamSessionRejectsNoYolo(t *testing.T) {
 	// Use a temp dir for config home to avoid polluting real config.
-	t.Setenv("MITTENS_HOME", t.TempDir())
+	configHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", configHome)
+	configPath := teamConfigPath("strike-team-a")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir team config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(teamConfigFileHeader+"max_workers: 4\n"), 0644); err != nil {
+		t.Fatalf("write team config: %v", err)
+	}
 
-	err := runTeamSession([]string{"--no-yolo"})
+	err := runTeamSession([]string{"--name", "strike-team-a", "--no-yolo"})
 	if err == nil {
 		t.Fatal("expected error for --no-yolo with team mode")
 	}
 	if !strings.Contains(err.Error(), "--no-yolo is incompatible with team mode") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTeamSessionRejectsInvalidSessionName(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+
+	err := runTeamSession([]string{"--name", "../escape"})
+	if err == nil {
+		t.Fatal("expected error for invalid team session name")
+	}
+	if !strings.Contains(err.Error(), "invalid team name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTeamSessionRequiresNamedTeam(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+
+	err := runTeamSession(nil)
+	if err == nil {
+		t.Fatal("expected error when team name is missing")
+	}
+	if !strings.Contains(err.Error(), "team name is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTeamSessionRejectsMissingNamedTeamConfig(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+
+	err := runTeamSession([]string{"--name", "strike-team-a"})
+	if err == nil {
+		t.Fatal("expected error for missing named team config")
+	}
+	if !strings.Contains(err.Error(), `team "strike-team-a" is not configured`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -33,6 +90,113 @@ func TestHandleTeamDispatch(t *testing.T) {
 	}
 	if err := handleTeam([]string{"--help"}); err != nil {
 		t.Fatalf("handleTeam --help: %v", err)
+	}
+}
+
+func TestListTeamConfigs(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", configHome)
+
+	alphaPath := teamConfigPath("alpha")
+	if err := os.MkdirAll(filepath.Dir(alphaPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alphaPath, []byte(teamConfigFileHeader+"max_workers: 4\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	betaPath := teamConfigPath("beta")
+	if err := os.MkdirAll(filepath.Dir(betaPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(betaPath, []byte(teamConfigFileHeader+"max_workers: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(ConfigHome(), "projects", "proj", "pools", "alpha-abc123")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "events.jsonl"), []byte(`{"ts":"2026-04-01T00:00:00Z"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "session.json"), []byte(`{"workspace":"w","teamName":"alpha","sessionId":"alpha-abc123","startedAt":"2026-04-01T00:00:00Z"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	teams, err := listTeamConfigs(ConfigHome())
+	if err != nil {
+		t.Fatalf("listTeamConfigs: %v", err)
+	}
+	if len(teams) != 2 {
+		t.Fatalf("len(teams) = %d, want 2", len(teams))
+	}
+	if teams[0].Name != "alpha" || teams[0].SessionCount != 1 {
+		t.Fatalf("teams[0] = %+v, want alpha with one session", teams[0])
+	}
+	if teams[1].Name != "beta" || teams[1].SessionCount != 0 {
+		t.Fatalf("teams[1] = %+v, want beta with zero sessions", teams[1])
+	}
+}
+
+func TestListTeamConfigsRespectsConfigHomeArgument(t *testing.T) {
+	configHome := t.TempDir()
+	otherHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", otherHome)
+
+	configPath := filepath.Join(configHome, "teams", "alpha", "team.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(teamConfigFileHeader+"max_workers: 4\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	teams, err := listTeamConfigs(configHome)
+	if err != nil {
+		t.Fatalf("listTeamConfigs: %v", err)
+	}
+	if len(teams) != 1 {
+		t.Fatalf("len(teams) = %d, want 1", len(teams))
+	}
+	if teams[0].Name != "alpha" {
+		t.Fatalf("teams[0] = %+v, want alpha", teams[0])
+	}
+}
+
+func TestHandleTeamListJSON(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", configHome)
+	configPath := teamConfigPath("strike-team-a")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(teamConfigFileHeader+"max_workers: 4\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	if err := handleTeamList([]string{"--json"}); err != nil {
+		t.Fatalf("handleTeamList: %v", err)
+	}
+	_ = w.Close()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	var teams []teamConfigMeta
+	if err := json.Unmarshal(buf.Bytes(), &teams); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(teams) != 1 || teams[0].Name != "strike-team-a" {
+		t.Fatalf("teams = %+v, want strike-team-a", teams)
 	}
 }
 
@@ -54,18 +218,184 @@ func TestTeamYAMLConfigMarshal(t *testing.T) {
 	}
 }
 
-func TestTeamConfigPathConstruction(t *testing.T) {
-	// Verify config path is deterministic.
-	workspace := "/Users/test/src/my-project"
-	projDir := ProjectDir(workspace)
+func TestTeamRoleSpecIncludesDefaultFallback(t *testing.T) {
+	got := teamRoleSpec(" Default ")
+	if got.Key != "default" {
+		t.Fatalf("teamRoleSpec(default).Key = %q, want default", got.Key)
+	}
+	if got.Label != "Default" {
+		t.Fatalf("teamRoleSpec(default).Label = %q, want Default", got.Label)
+	}
+	if !strings.Contains(strings.ToLower(got.Summary), "fallback") {
+		t.Fatalf("teamRoleSpec(default).Summary = %q, want fallback summary", got.Summary)
+	}
+}
 
+func TestTeamRolePromptDefaults(t *testing.T) {
+	got := teamRolePromptDefaults(" openai ")
+	if got.Provider != "codex" {
+		t.Fatalf("teamRolePromptDefaults.Provider = %q, want codex", got.Provider)
+	}
+	if got.Model != "gpt-5.4" {
+		t.Fatalf("teamRolePromptDefaults.Model = %q, want gpt-5.4", got.Model)
+	}
+}
+
+func TestTeamConfigEditorSetModelNormalizesAndDropsEmpty(t *testing.T) {
+	editor := newTeamConfigEditor()
+	editor.SetModel(" Planner ", teamConfigRoleInput{
+		Provider: " openai ",
+		Model:    " gpt-5.4 ",
+	})
+
+	got := editor.Model("planner")
+	if got.Provider != "codex" {
+		t.Fatalf("editor.Model(planner).Provider = %q, want codex", got.Provider)
+	}
+	if got.Model != "gpt-5.4" {
+		t.Fatalf("editor.Model(planner).Model = %q, want gpt-5.4", got.Model)
+	}
+
+	editor.SetModel("planner", teamConfigRoleInput{})
+	if got := editor.Model("planner"); got != (teamConfigRoleInput{}) {
+		t.Fatalf("editor.Model(planner) after empty set = %#v, want zero value", got)
+	}
+}
+
+func TestLoadTeamConfigEditorNormalizesExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "team.yaml")
+	content := `max_workers: 0
+models:
+  Default:
+    provider: " openai "
+    model: " gpt-5.4 "
+  Planner:
+    provider: " openai "
+    model: " gpt-5.4 "
+    adapter: " openai-codex "
+  Implementer:
+    model: " claude-sonnet-4-6 "
+    adapter: " claude-code "
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	editor, err := loadTeamConfigEditor(path)
+	if err != nil {
+		t.Fatalf("loadTeamConfigEditor: %v", err)
+	}
+	if editor.MaxWorkers != teamConfigDefaultMaxWorkers {
+		t.Fatalf("editor.MaxWorkers = %d, want %d", editor.MaxWorkers, teamConfigDefaultMaxWorkers)
+	}
+	if got := editor.Model("planner").Provider; got != "codex" {
+		t.Fatalf("editor.Model(planner).Provider = %q, want codex", got)
+	}
+	if got := editor.Model("default").Model; got != "gpt-5.4" {
+		t.Fatalf("editor.Model(default).Model = %q, want gpt-5.4", got)
+	}
+	if got := editor.Model("implementer").Provider; got != "claude" {
+		t.Fatalf("editor.Model(implementer).Provider = %q, want claude", got)
+	}
+}
+
+func TestTeamRoleSummaryUsesInheritance(t *testing.T) {
+	editor := newTeamConfigEditor()
+	editor.SetModel("default", teamConfigRoleInput{Provider: "codex", Model: "gpt-5.4"})
+	if got := teamRoleSummary(editor, "planner", "claude"); got != "inherits default" {
+		t.Fatalf("teamRoleSummary(planner) = %q, want inherits default", got)
+	}
+	if got := teamRoleSummary(editor, "default", "claude"); got != "codex / gpt-5.4" {
+		t.Fatalf("teamRoleSummary(default) = %q, want codex / gpt-5.4", got)
+	}
+}
+
+func TestTeamProcessSummary(t *testing.T) {
+	if got := teamProcessSummary(pool.SessionReuseConfig{}); got != "fresh session each task" {
+		t.Fatalf("teamProcessSummary(disabled) = %q, want fresh session each task", got)
+	}
+	if got := teamProcessSummary(pool.SessionReuseConfig{
+		Enabled:      true,
+		TTLSeconds:   300,
+		MaxTasks:     3,
+		MaxTokens:    100000,
+		SameRoleOnly: true,
+	}); got != "reuse 3 tasks / 300s / same role" {
+		t.Fatalf("teamProcessSummary(enabled) = %q", got)
+	}
+}
+
+func TestTeamConfigEditorSaveWritesHeaderAndModels(t *testing.T) {
+	editor := newTeamConfigEditor()
+	editor.SetMaxWorkers("7")
+	editor.SetModel("default", teamConfigRoleInput{
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-6",
+	})
+	editor.SessionReuse = pool.SessionReuseConfig{
+		Enabled:      true,
+		TTLSeconds:   600,
+		MaxTasks:     5,
+		MaxTokens:    150000,
+		SameRoleOnly: false,
+	}
+
+	path := filepath.Join(t.TempDir(), "nested", "team.yaml")
+	if err := editor.Save(path); err != nil {
+		t.Fatalf("editor.Save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.HasPrefix(string(data), teamConfigFileHeader) {
+		t.Fatalf("saved file missing expected header: %q", string(data))
+	}
+	if strings.Contains(string(data), "adapter:") {
+		t.Fatalf("saved file unexpectedly preserved adapter field: %q", string(data))
+	}
+
+	cfg, err := pool.LoadTeamConfig(path)
+	if err != nil {
+		t.Fatalf("LoadTeamConfig(saved): %v", err)
+	}
+	if cfg.MaxWorkers != 7 {
+		t.Fatalf("saved MaxWorkers = %d, want 7", cfg.MaxWorkers)
+	}
+	if got := cfg.Models["default"].Provider; got != "claude" {
+		t.Fatalf("saved default provider = %q, want claude", got)
+	}
+	if got := cfg.Models["default"].Adapter; got != "" {
+		t.Fatalf("saved default adapter = %q, want empty", got)
+	}
+	if !cfg.SessionReuse.Enabled {
+		t.Fatal("saved session reuse should be enabled")
+	}
+	if cfg.SessionReuse.TTLSeconds != 600 {
+		t.Fatalf("saved session reuse ttl = %d, want 600", cfg.SessionReuse.TTLSeconds)
+	}
+	if cfg.SessionReuse.SameRoleOnly {
+		t.Fatal("saved session reuse same_role_only = true, want false")
+	}
+}
+
+func TestNamedTeamConfigPathConstruction(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", configHome)
 
-	expected := filepath.Join(configHome, "projects", projDir, "team.yaml")
-	got := filepath.Join(ConfigHome(), "projects", projDir, "team.yaml")
+	expected := filepath.Join(configHome, "teams", "strike-team-a", "team.yaml")
+	got := teamConfigPath("strike-team-a")
 	if got != expected {
 		t.Errorf("config path = %q, want %q", got, expected)
+	}
+}
+
+func TestGenerateTeamSessionIDUsesTeamPrefix(t *testing.T) {
+	got := generateTeamSessionID("strike-team-a")
+	if !strings.HasPrefix(got, "strike-team-a-") {
+		t.Fatalf("generateTeamSessionID = %q, want team prefix", got)
 	}
 }
 
@@ -90,6 +420,54 @@ func TestCleanupTeamSession(t *testing.T) {
 	// Workers dir removed (ephemeral).
 	if _, err := os.Stat(filepath.Join(subDir, "workers")); !os.IsNotExist(err) {
 		t.Error("expected workers dir to be removed")
+	}
+}
+
+func TestCleanupTeamSessionRemovesWorkersInAnyState(t *testing.T) {
+	stateDir := t.TempDir()
+	subDir := filepath.Join(stateDir, "test-session")
+	workersDir := filepath.Join(subDir, "workers", "w-1")
+	if err := os.MkdirAll(workersDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	installDockerStub(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$@\" >> '"+logPath+"'\n"+
+		"printf '--\\n' >> '"+logPath+"'\n"+
+		"case \"$1\" in\n"+
+		"  ps)\n"+
+		"    printf 'cid-running\\tw-1\\trunning\\tUp 5 minutes\\ncid-exited\\tw-2\\texited\\tExited (0) 1 minute ago\\n'\n"+
+		"    ;;\n"+
+		"esac\n")
+
+	cleanupTeamSession(subDir, "test-session")
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "ps\n-a\n") {
+		t.Fatalf("docker log = %q, want ps -a", log)
+	}
+	if !strings.Contains(log, "label=mittens.pool=test-session") {
+		t.Fatalf("docker log = %q, want pool label filter", log)
+	}
+	if !strings.Contains(log, "label=mittens.role=worker") {
+		t.Fatalf("docker log = %q, want worker label filter", log)
+	}
+	if !strings.Contains(log, "stop\n-t\n10\ncid-running\n") {
+		t.Fatalf("docker log = %q, want stop for running worker", log)
+	}
+	if strings.Contains(log, "stop\n-t\n10\ncid-exited\n") {
+		t.Fatalf("docker log = %q, did not expect stop for exited worker", log)
+	}
+	if !strings.Contains(log, "rm\n-f\ncid-running\n") || !strings.Contains(log, "rm\n-f\ncid-exited\n") {
+		t.Fatalf("docker log = %q, want rm -f for both workers", log)
+	}
+	if _, err := os.Stat(filepath.Join(subDir, "workers")); !os.IsNotExist(err) {
+		t.Fatal("expected workers dir to be removed")
 	}
 }
 
@@ -220,6 +598,194 @@ func TestSpawnWorkerContainerRequiresID(t *testing.T) {
 	}
 	if err.Error() != "spawn worker: spec.ID is required" {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSpawnWorkerContainerRemovesStaleExactNameContainer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	installDockerStub(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$@\" >> '"+logPath+"'\n"+
+		"printf '--\\n' >> '"+logPath+"'\n"+
+		"case \"$1\" in\n"+
+		"  ps)\n"+
+		"    printf 'cid-stale\\tmittens-test-session-w-1\\texited\\tExited (0) 1 minute ago\\n'\n"+
+		"    ;;\n"+
+		"  port)\n"+
+		"    exit 1\n"+
+		"    ;;\n"+
+		"  run)\n"+
+		"    printf 'cid-new\\n'\n"+
+		"    ;;\n"+
+		"esac\n")
+
+	app := &App{
+		Provider:           DefaultProvider(),
+		teamSessionID:      "test-session",
+		teamStateDir:       t.TempDir(),
+		WorkspaceMountSrc:  t.TempDir(),
+		EffectiveWorkspace: "/workspace",
+		ContainerName:      "mittens-team-test-session",
+		ImageName:          "mittens",
+		ImageTag:           "latest",
+		Yolo:               true,
+	}
+
+	containerName, containerID, err := app.spawnWorkerContainer(pool.WorkerSpec{ID: "w-1"})
+	if err != nil {
+		t.Fatalf("spawnWorkerContainer: %v", err)
+	}
+	if containerName != "mittens-test-session-w-1" {
+		t.Fatalf("containerName = %q, want mittens-test-session-w-1", containerName)
+	}
+	if containerID != "cid-new" {
+		t.Fatalf("containerID = %q, want cid-new", containerID)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "name=^/mittens-test-session-w-1$") {
+		t.Fatalf("docker log = %q, want exact-name filter", log)
+	}
+	rmIdx := strings.Index(log, "rm\n-f\ncid-stale\n")
+	runIdx := strings.Index(log, "run\n-d\n")
+	if rmIdx == -1 {
+		t.Fatalf("docker log = %q, want stale container removal", log)
+	}
+	if runIdx == -1 {
+		t.Fatalf("docker log = %q, want docker run", log)
+	}
+	if rmIdx > runIdx {
+		t.Fatalf("docker log = %q, want stale removal before docker run", log)
+	}
+}
+
+func TestSpawnWorkerContainerRemovesStaleExactNameContainerWithRegexMetaSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	installDockerStub(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$@\" >> '"+logPath+"'\n"+
+		"printf '--\\n' >> '"+logPath+"'\n"+
+		"case \"$1\" in\n"+
+		"  ps)\n"+
+		"    exact=0\n"+
+		"    for arg in \"$@\"; do\n"+
+		"      if [ \"$arg\" = 'name=^/mittens-release\\.v1-w-1$' ]; then\n"+
+		"        exact=1\n"+
+		"      fi\n"+
+		"    done\n"+
+		"    if [ \"$exact\" -eq 1 ]; then\n"+
+		"      printf 'cid-stale\\tmittens-release.v1-w-1\\texited\\tExited (0) 1 minute ago\\n'\n"+
+		"    else\n"+
+		"      printf 'cid-other\\tmittens-releaseXv1-w-1\\trunning\\tUp 5 minutes\\n'\n"+
+		"    fi\n"+
+		"    ;;\n"+
+		"  port)\n"+
+		"    exit 1\n"+
+		"    ;;\n"+
+		"  run)\n"+
+		"    printf 'cid-new\\n'\n"+
+		"    ;;\n"+
+		"esac\n")
+
+	app := &App{
+		Provider:           DefaultProvider(),
+		teamSessionID:      "release.v1",
+		teamStateDir:       t.TempDir(),
+		WorkspaceMountSrc:  t.TempDir(),
+		EffectiveWorkspace: "/workspace",
+		ContainerName:      "mittens-team-release.v1",
+		ImageName:          "mittens",
+		ImageTag:           "latest",
+		Yolo:               true,
+	}
+
+	containerName, containerID, err := app.spawnWorkerContainer(pool.WorkerSpec{ID: "w-1"})
+	if err != nil {
+		t.Fatalf("spawnWorkerContainer: %v", err)
+	}
+	if containerName != "mittens-release.v1-w-1" {
+		t.Fatalf("containerName = %q, want mittens-release.v1-w-1", containerName)
+	}
+	if containerID != "cid-new" {
+		t.Fatalf("containerID = %q, want cid-new", containerID)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "name=^/mittens-release\\.v1-w-1$") {
+		t.Fatalf("docker log = %q, want regexp-quoted exact-name filter", log)
+	}
+	if strings.Contains(log, "rm\n-f\ncid-other\n") {
+		t.Fatalf("docker log = %q, did not expect regex-neighbor container removal", log)
+	}
+	rmIdx := strings.Index(log, "rm\n-f\ncid-stale\n")
+	runIdx := strings.Index(log, "run\n-d\n")
+	if rmIdx == -1 {
+		t.Fatalf("docker log = %q, want stale exact-name container removal", log)
+	}
+	if runIdx == -1 {
+		t.Fatalf("docker log = %q, want docker run", log)
+	}
+	if rmIdx > runIdx {
+		t.Fatalf("docker log = %q, want stale removal before docker run", log)
+	}
+}
+
+func TestSpawnWorkerContainerFailsWhenExactNameContainerIsActive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	installDockerStub(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$@\" >> '"+logPath+"'\n"+
+		"printf '--\\n' >> '"+logPath+"'\n"+
+		"case \"$1\" in\n"+
+		"  ps)\n"+
+		"    printf 'cid-running\\tmittens-test-session-w-1\\trunning\\tUp 5 minutes\\n'\n"+
+		"    ;;\n"+
+		"esac\n")
+
+	app := &App{
+		Provider:           DefaultProvider(),
+		teamSessionID:      "test-session",
+		teamStateDir:       t.TempDir(),
+		WorkspaceMountSrc:  t.TempDir(),
+		EffectiveWorkspace: "/workspace",
+		ContainerName:      "mittens-team-test-session",
+		ImageName:          "mittens",
+		ImageTag:           "latest",
+		Yolo:               true,
+	}
+
+	_, _, err := app.spawnWorkerContainer(pool.WorkerSpec{ID: "w-1"})
+	if err == nil {
+		t.Fatal("expected spawnWorkerContainer to fail when exact-name container is active")
+	}
+	if !strings.Contains(err.Error(), `worker container "mittens-test-session-w-1" already exists in "running" state`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "rm\n-f\n") {
+		t.Fatalf("docker log = %q, did not expect stale removal", log)
+	}
+	if strings.Contains(log, "run\n-d\n") {
+		t.Fatalf("docker log = %q, did not expect docker run", log)
 	}
 }
 

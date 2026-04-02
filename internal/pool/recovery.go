@@ -55,45 +55,63 @@ func RequeueOrphanedTasks(pm *PoolManager) int {
 	return requeued
 }
 
-// Reconcile matches WAL-recovered pool state against running Docker containers.
-// Workers not found in the running set are marked dead.
-// Running containers not matching any pool worker are killed as orphans.
-// Returns counts of reconciled (marked dead) workers and killed orphans.
-func Reconcile(pm *PoolManager, running []ContainerInfo) (reconciled int, killed int) {
-	runningSet := make(map[string]ContainerInfo, len(running))
-	for _, c := range running {
-		if c.WorkerID != "" {
-			runningSet[c.WorkerID] = c
+// Reconcile matches WAL-recovered pool state against discovered session containers.
+// A worker counts as live only when at least one discovered container is running.
+// Workers without a running container are marked dead. Stale worker containers and
+// orphaned worker containers are removed best-effort during the same pass.
+// Returns counts of reconciled (marked dead) workers and removed worker containers.
+func Reconcile(pm *PoolManager, containers []ContainerInfo) (reconciled int, killed int) {
+	runningWorkers := make(map[string]bool, len(containers))
+	staleWorkers := make(map[string]bool, len(containers))
+	for _, c := range containers {
+		if c.WorkerID == "" {
+			continue
 		}
+		if c.IsRunning() {
+			runningWorkers[c.WorkerID] = true
+			continue
+		}
+		staleWorkers[c.WorkerID] = true
 	}
 
-	// Mark missing workers as dead.
-	for _, w := range pm.Workers() {
+	workers := pm.Workers()
+	knownWorkers := make(map[string]string, len(workers))
+
+	// Mark workers without a running container as dead.
+	for _, w := range workers {
+		knownWorkers[w.ID] = w.Status
 		if w.Status == WorkerDead {
 			continue
 		}
-		if _, found := runningSet[w.ID]; !found {
+		if !runningWorkers[w.ID] {
 			if err := pm.MarkDead(w.ID); err == nil {
 				reconciled++
 			}
 		}
 	}
 
-	// Kill orphan containers not in pool state.
-	pm.mu.RLock()
-	knownWorkers := make(map[string]bool, len(pm.workers))
-	for wid := range pm.workers {
-		knownWorkers[wid] = true
+	cleanupWorkers := make(map[string]struct{})
+	for wid := range staleWorkers {
+		status, known := knownWorkers[wid]
+		if !known || status == WorkerDead || !runningWorkers[wid] {
+			cleanupWorkers[wid] = struct{}{}
+		}
 	}
+	for wid := range runningWorkers {
+		status, known := knownWorkers[wid]
+		if !known || status == WorkerDead {
+			cleanupWorkers[wid] = struct{}{}
+		}
+	}
+
+	pm.mu.RLock()
 	hostAPI := pm.hostAPI
 	pm.mu.RUnlock()
 
 	if hostAPI != nil {
-		for _, c := range running {
-			if c.WorkerID != "" && !knownWorkers[c.WorkerID] {
-				if err := hostAPI.KillWorker(context.Background(), c.WorkerID); err == nil {
-					killed++
-				}
+		for wid := range cleanupWorkers {
+			if err := hostAPI.KillWorker(context.Background(), wid); err == nil {
+				killed++
 			}
 		}
 	}

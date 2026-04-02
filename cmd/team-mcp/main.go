@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,30 @@ import (
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
+
+const workerBrokerAddr = ":8080"
+
+func startWorkerBroker(pm *pool.PoolManager, addr, token string, stderr io.Writer) (*WorkerBroker, error) {
+	broker := NewWorkerBroker(pm, addr, token)
+	if err := broker.Listen(); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "startup: worker broker bind failed on %s: %v\n", addr, err)
+		}
+		return nil, err
+	}
+	if stderr != nil {
+		fmt.Fprintf(stderr, "startup: worker broker ready on %s\n", broker.ln.Addr().String())
+	}
+	return broker, nil
+}
+
+func serveWorkerBroker(broker *WorkerBroker, stderr io.Writer) {
+	go func() {
+		if err := broker.Serve(); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "worker broker: %v\n", err)
+		}
+	}()
+}
 
 func main() {
 	stateDir := os.Getenv("MITTENS_STATE_DIR")
@@ -45,6 +70,12 @@ func main() {
 
 	// Ensure state directory exists.
 	os.MkdirAll(stateDir, 0755)
+
+	runtimeLock, err := acquireRuntimeLock(stateDir, sessionID, os.Stderr)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer runtimeLock.Close()
 
 	walPath := filepath.Join(stateDir, "events.jsonl")
 	wal, err := pool.OpenWAL(walPath)
@@ -111,20 +142,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "recovery: re-queued %d orphaned tasks\n", requeued)
 	}
 
-	// Start WorkerBroker HTTP server on :8080 for workers.
-	broker := NewWorkerBroker(pm, ":8080", brokerToken)
-	activeBroker = broker
-
-	// Restore per-worker token mappings from WAL-recovered state.
-	for token, wid := range pm.WorkerTokens() {
-		broker.RegisterWorkerToken(wid, token)
+	// Start WorkerBroker HTTP server for workers. The bind must succeed
+	// before MCP stdio starts so split-brain runtimes fail fast.
+	broker, err := startWorkerBroker(pm, workerBrokerAddr, brokerToken, os.Stderr)
+	if err != nil {
+		os.Exit(1)
 	}
-
-	go func() {
-		if err := broker.Serve(); err != nil {
-			fmt.Fprintf(os.Stderr, "worker broker: %v\n", err)
-		}
-	}()
+	serveWorkerBroker(broker, os.Stderr)
 
 	// Create MCP server for leader communication.
 	srv := &mcpServer{pm: pm}

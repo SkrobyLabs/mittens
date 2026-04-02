@@ -29,7 +29,7 @@ type SessionReuseConfig struct {
 	Enabled      bool
 	TTL          time.Duration
 	MaxTasks     int
-	MaxTokens    int  // cumulative input+output tokens before forced clear
+	MaxTokens    int // cumulative input+output tokens before forced clear
 	SameRoleOnly bool
 }
 
@@ -38,6 +38,7 @@ type Config struct {
 	WorkDir       string
 	Model         string
 	SkipPermsFlag string
+	OnActivity    func(Activity)
 	OnToolUse     func(toolName, inputSummary string)
 	OnLog         func(string)
 	SessionReuse  SessionReuseConfig
@@ -55,6 +56,7 @@ func New(name string, workDir string, opts ...func(*Config)) (Adapter, error) {
 			workDir:       cfg.WorkDir,
 			model:         cfg.Model,
 			skipPermsFlag: cfg.SkipPermsFlag,
+			onActivity:    cfg.OnActivity,
 			onToolUse:     cfg.OnToolUse,
 			onLog:         cfg.OnLog,
 			reuse:         cfg.SessionReuse,
@@ -64,6 +66,7 @@ func New(name string, workDir string, opts ...func(*Config)) (Adapter, error) {
 			workDir:       cfg.WorkDir,
 			model:         cfg.Model,
 			skipPermsFlag: cfg.SkipPermsFlag,
+			onActivity:    cfg.OnActivity,
 			onToolUse:     cfg.OnToolUse,
 		}, nil
 	default:

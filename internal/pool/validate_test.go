@@ -39,19 +39,47 @@ func TestValidatePlanID(t *testing.T) {
 
 	invalid := []string{
 		"",
-		"ABCDEF01",         // uppercase hex not allowed
-		"abcdefg1",         // 'g' is not hex
-		"abcdef0",          // too short (7 chars)
-		"abcdef012",        // too long (9 chars)
-		"../abcd",          // path traversal
-		"/abcdef0",         // absolute path
-		"abcd ef0",         // space
-		"abcdef\x00",       // null byte
-		"w-1",              // general ID, not plan format
+		"ABCDEF01",   // uppercase hex not allowed
+		"abcdefg1",   // 'g' is not hex
+		"abcdef0",    // too short (7 chars)
+		"abcdef012",  // too long (9 chars)
+		"../abcd",    // path traversal
+		"/abcdef0",   // absolute path
+		"abcd ef0",   // space
+		"abcdef\x00", // null byte
+		"w-1",        // general ID, not plan format
 	}
 	for _, id := range invalid {
 		if err := ValidatePlanID(id); err == nil {
 			t.Errorf("ValidatePlanID(%q) expected error, got nil", id)
+		}
+	}
+}
+
+func TestValidateSessionID(t *testing.T) {
+	valid := []string{"team-123", "release.v1", "worker_pool-2", "A", "_hotfix", "-repro", ".scratch"}
+	for _, id := range valid {
+		if err := ValidateSessionID(id); err != nil {
+			t.Errorf("ValidateSessionID(%q) unexpected error: %v", id, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".",
+		"..",
+		"../escape",
+		"/absolute",
+		"has space",
+		"semi;colon",
+		"new\nline",
+		"tab\there",
+		"a/b",
+		"back\\slash",
+	}
+	for _, id := range invalid {
+		if err := ValidateSessionID(id); err == nil {
+			t.Errorf("ValidateSessionID(%q) expected error, got nil", id)
 		}
 	}
 }

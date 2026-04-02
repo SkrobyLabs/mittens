@@ -8,13 +8,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
 
-// errWorkerKilled is returned when the leader responds 404 to a heartbeat,
-// indicating the worker has been killed or is unknown.
+// errWorkerKilled is returned when the leader signals the worker identity is no
+// longer valid (for example, killed/unknown or token revoked).
 var errWorkerKilled = errors.New("worker killed or unknown")
 
 // leaderClient provides HTTP access to the WorkerBroker running in the leader container.
@@ -79,19 +80,26 @@ func (c *leaderClient) Register(workerID, containerID string) error {
 }
 
 // Heartbeat sends a heartbeat to the WorkerBroker.
-// Returns errWorkerKilled if the leader responds 404 (worker killed/unknown).
-func (c *leaderClient) Heartbeat(workerID, currentTool string) error {
-	payload := map[string]string{
-		"workerId":    workerID,
-		"state":       "alive",
-		"currentTool": currentTool,
+// Returns errWorkerKilled if the leader responds 401/404 (worker killed/unknown
+// or token revoked).
+func (c *leaderClient) Heartbeat(workerID string, activity *pool.WorkerActivity, currentTool string) error {
+	payload := struct {
+		WorkerID    string               `json:"workerId"`
+		State       string               `json:"state"`
+		Activity    *pool.WorkerActivity `json:"activity,omitempty"`
+		CurrentTool string               `json:"currentTool,omitempty"`
+	}{
+		WorkerID:    workerID,
+		State:       "alive",
+		Activity:    activity,
+		CurrentTool: currentTool,
 	}
 	resp, err := c.postJSON("/heartbeat", payload)
 	if err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound {
 		return errWorkerKilled
 	}
 	return nil
@@ -99,7 +107,8 @@ func (c *leaderClient) Heartbeat(workerID, currentTool string) error {
 
 // PollTask checks if a task is assigned to this worker.
 // Returns (nil, nil) when the leader reports no task yet (204 No Content).
-// Returns (nil, errWorkerKilled) if the leader returns 404 (worker unknown/killed).
+// Returns (nil, errWorkerKilled) if the leader returns 401/404 (worker
+// unknown/killed or token revoked).
 // Returns (nil, err) for network or unexpected server errors.
 func (c *leaderClient) PollTask(workerID string) (*pool.Task, error) {
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/task/"+workerID, nil)
@@ -115,7 +124,7 @@ func (c *leaderClient) PollTask(workerID string) (*pool.Task, error) {
 	switch resp.StatusCode {
 	case http.StatusNoContent:
 		return nil, nil
-	case http.StatusNotFound:
+	case http.StatusUnauthorized, http.StatusNotFound:
 		return nil, errWorkerKilled
 	case http.StatusOK:
 		// decode below
@@ -154,7 +163,7 @@ func (c *leaderClient) ReportFail(workerID, taskID, errMsg string) error {
 	payload := map[string]string{
 		"workerId": workerID,
 		"taskId":   taskID,
-		"error":    errMsg,
+		"error":    sanitizeFailureMessage(errMsg),
 	}
 	resp, err := c.postJSON("/fail", payload)
 	if err != nil {
@@ -166,6 +175,21 @@ func (c *leaderClient) ReportFail(workerID, taskID, errMsg string) error {
 		return fmt.Errorf("fail: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+const maxFailureMessageLen = 512
+
+func sanitizeFailureMessage(errMsg string) string {
+	msg := strings.Join(strings.Fields(strings.TrimSpace(errMsg)), " ")
+	if msg == "" {
+		return "task execution failed"
+	}
+
+	runes := []rune(msg)
+	if len(runes) <= maxFailureMessageLen {
+		return msg
+	}
+	return string(runes[:maxFailureMessageLen-3]) + "..."
 }
 
 // ReportReview submits a reviewer verdict to the leader.
@@ -200,6 +224,9 @@ func (c *leaderClient) AskQuestion(workerID string, q pool.Question) (string, er
 		return "", fmt.Errorf("ask question: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound {
+		return "", errWorkerKilled
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return "", fmt.Errorf("ask question: HTTP %d: %s", resp.StatusCode, string(body))

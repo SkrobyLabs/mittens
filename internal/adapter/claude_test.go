@@ -37,10 +37,10 @@ func TestNewSessionID_UUID(t *testing.T) {
 
 func TestSummarizeInput(t *testing.T) {
 	tests := []struct {
-		name     string
-		tool     string
-		input    string
-		want     string
+		name  string
+		tool  string
+		input string
+		want  string
 	}{
 		{"Read file_path", "Read", `{"file_path":"/foo/bar.go"}`, "/foo/bar.go"},
 		{"Edit file_path", "Edit", `{"file_path":"/a/b.go","old_string":"x","new_string":"y"}`, "/a/b.go"},
@@ -90,6 +90,19 @@ func TestStreamEvent_ToolUse(t *testing.T) {
 	if summary != "/foo.go" {
 		t.Errorf("summary = %q, want /foo.go", summary)
 	}
+
+	activities := claudeActivities(ev)
+	if len(activities) != 1 {
+		t.Fatalf("claudeActivities() count = %d, want 1", len(activities))
+	}
+	if activities[0] != (Activity{
+		Kind:    ActivityKindTool,
+		Phase:   ActivityPhaseStarted,
+		Name:    "Read",
+		Summary: "/foo.go",
+	}) {
+		t.Fatalf("claudeActivities() = %+v", activities[0])
+	}
 }
 
 func TestStreamEvent_ContentBlockStart(t *testing.T) {
@@ -111,6 +124,19 @@ func TestStreamEvent_ContentBlockStart(t *testing.T) {
 	summary := summarizeInput(ev.ContentBlock.Name, ev.ContentBlock.Input)
 	if summary != "/src/main.go" {
 		t.Errorf("summary = %q, want /src/main.go", summary)
+	}
+
+	activities := claudeActivities(ev)
+	if len(activities) != 1 {
+		t.Fatalf("claudeActivities() count = %d, want 1", len(activities))
+	}
+	if activities[0] != (Activity{
+		Kind:    ActivityKindTool,
+		Phase:   ActivityPhaseStarted,
+		Name:    "Edit",
+		Summary: "/src/main.go",
+	}) {
+		t.Fatalf("claudeActivities() = %+v", activities[0])
 	}
 }
 
@@ -169,6 +195,32 @@ func TestStreamEvent_Result(t *testing.T) {
 	}
 	if ev.Result != "task completed successfully" {
 		t.Errorf("Result = %q, want 'task completed successfully'", ev.Result)
+	}
+
+	activities := claudeActivities(ev)
+	if len(activities) != 1 {
+		t.Fatalf("claudeActivities() count = %d, want 1", len(activities))
+	}
+	if activities[0] != (Activity{
+		Kind:    ActivityKindStatus,
+		Phase:   ActivityPhaseCompleted,
+		Name:    "response",
+		Summary: "task completed successfully",
+	}) {
+		t.Fatalf("claudeActivities() = %+v", activities[0])
+	}
+}
+
+func TestClaudeActivities_IgnoresNonToolAssistantContent(t *testing.T) {
+	line := `{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`
+
+	var ev streamEvent
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatal(err)
+	}
+
+	if activities := claudeActivities(ev); len(activities) != 0 {
+		t.Fatalf("claudeActivities() count = %d, want 0", len(activities))
 	}
 }
 

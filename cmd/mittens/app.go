@@ -1787,6 +1787,7 @@ Commands:
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   extension list|install|remove Manage external extensions
+  version [--json]              Show version information
 
 Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
@@ -1826,6 +1827,24 @@ Everything after -- is passed through to the AI provider unchanged.`)
 			}
 		}
 	}
+}
+
+// printVersionOutput prints mittens version metadata.
+func printVersionOutput(jsonOutput bool) error {
+	if jsonOutput {
+		out := struct {
+			Version string `json:"version"`
+			Commit  string `json:"commit"`
+		}{
+			Version: version,
+			Commit:  commit,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		return enc.Encode(out)
+	}
+
+	fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
+	return nil
 }
 
 func printExtensions(exts []*registry.Extension) {

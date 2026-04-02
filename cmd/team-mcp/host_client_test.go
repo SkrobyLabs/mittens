@@ -116,8 +116,8 @@ func TestHostAPIClient_ListContainers(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]pool.ContainerInfo{
-			{ContainerID: "abc", WorkerID: "w-1", Status: "Up 5 minutes"},
-			{ContainerID: "def", WorkerID: "w-2", Status: "Up 3 minutes"},
+			{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
+			{ContainerID: "def", WorkerID: "w-2", State: "exited", Status: "Exited (0) 2 minutes ago"},
 		})
 	}))
 	defer srv.Close()
@@ -137,6 +137,88 @@ func TestHostAPIClient_ListContainers(t *testing.T) {
 	}
 	if containers[0].WorkerID != "w-1" {
 		t.Errorf("containers[0].WorkerID = %q, want w-1", containers[0].WorkerID)
+	}
+	if containers[0].State != "running" {
+		t.Errorf("containers[0].State = %q, want running", containers[0].State)
+	}
+	if containers[1].State != "exited" {
+		t.Errorf("containers[1].State = %q, want exited", containers[1].State)
+	}
+}
+
+func TestHostAPIClient_ListContainers_AllowsDottedSessionID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sid := r.URL.Query().Get("sessionId"); sid != "release.v1" {
+			t.Fatalf("sessionId = %q, want release.v1", sid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]pool.ContainerInfo{
+			{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
+		})
+	}))
+	defer srv.Close()
+
+	client := &hostAPIClient{
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	containers, err := client.ListContainers(context.Background(), "release.v1")
+	if err != nil {
+		t.Fatalf("list containers: %v", err)
+	}
+	if len(containers) != 1 || containers[0].WorkerID != "w-1" {
+		t.Fatalf("containers = %+v, want dotted-session response", containers)
+	}
+}
+
+func TestHostAPIClient_CheckSession_AllowsDottedSessionID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sid := r.URL.Query().Get("sessionId"); sid != "release.v1" {
+			t.Fatalf("sessionId = %q, want release.v1", sid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"alive": true})
+	}))
+	defer srv.Close()
+
+	client := &hostAPIClient{
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	alive, err := client.CheckSession(context.Background(), "release.v1")
+	if err != nil {
+		t.Fatalf("check session: %v", err)
+	}
+	if !alive {
+		t.Fatal("alive = false, want true")
+	}
+}
+
+func TestHostAPIClient_ListContainers_AllowsLeadingPunctuationSessionID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sid := r.URL.Query().Get("sessionId"); sid != ".scratch" {
+			t.Fatalf("sessionId = %q, want .scratch", sid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]pool.ContainerInfo{
+			{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
+		})
+	}))
+	defer srv.Close()
+
+	client := &hostAPIClient{
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	containers, err := client.ListContainers(context.Background(), ".scratch")
+	if err != nil {
+		t.Fatalf("list containers: %v", err)
+	}
+	if len(containers) != 1 || containers[0].WorkerID != "w-1" {
+		t.Fatalf("containers = %+v, want leading-punctuation session response", containers)
 	}
 }
 

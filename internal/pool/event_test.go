@@ -51,8 +51,24 @@ func TestApplyWorkerReady(t *testing.T) {
 
 func TestApplyWorkerDead(t *testing.T) {
 	pm := newTestPM()
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1", Data: marshalData(WorkerSpawnedData{Token: "tok-1"})})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerDead, WorkerID: "w-1"})
+	if pm.workers["w-1"].Status != WorkerDead {
+		t.Errorf("status = %q, want dead", pm.workers["w-1"].Status)
+	}
+	if pm.workers["w-1"].Token != "" {
+		t.Errorf("token = %q, want empty", pm.workers["w-1"].Token)
+	}
+}
+
+func TestApplyWorkerQuestionDoesNotReviveDeadWorker(t *testing.T) {
+	pm := newTestPM()
 	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1"})
 	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerDead, WorkerID: "w-1"})
+	Apply(pm, Event{
+		Timestamp: time.Now(), Type: EventWorkerQuestion, WorkerID: "w-1",
+		Data: marshalData(WorkerQuestionData{QuestionID: "q-1", Question: "which way?", Blocking: true}),
+	})
 	if pm.workers["w-1"].Status != WorkerDead {
 		t.Errorf("status = %q, want dead", pm.workers["w-1"].Status)
 	}
@@ -112,6 +128,61 @@ func TestApplyTaskFailed(t *testing.T) {
 	}
 	if pm.workers["w-1"].Status != WorkerIdle {
 		t.Errorf("worker status = %q, want idle", pm.workers["w-1"].Status)
+	}
+}
+
+func TestApplyTaskCompletedDoesNotReviveDeadWorker(t *testing.T) {
+	pm := newTestPM()
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1"})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerReady, WorkerID: "w-1"})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskCreated, TaskID: "t-1", Data: marshalData(TaskCreatedData{Prompt: "x"})})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskDispatched, TaskID: "t-1", WorkerID: "w-1"})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerDead, WorkerID: "w-1"})
+	Apply(pm, Event{
+		Timestamp: time.Now(), Type: EventTaskCompleted, TaskID: "t-1", WorkerID: "w-1",
+		Data: marshalData(TaskCompletedData{Summary: "done"}),
+	})
+	if pm.workers["w-1"].Status != WorkerDead {
+		t.Errorf("worker status = %q, want dead", pm.workers["w-1"].Status)
+	}
+}
+
+func TestApplyTaskCanceledReleasesAssignedWorker(t *testing.T) {
+	pm := newTestPM()
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1"})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerReady, WorkerID: "w-1"})
+	Apply(pm, Event{
+		Timestamp: time.Now(), Type: EventTaskCreated, TaskID: "t-1",
+		Data: marshalData(TaskCreatedData{Prompt: "x"}),
+	})
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskDispatched, TaskID: "t-1", WorkerID: "w-1"})
+
+	w := pm.workers["w-1"]
+	w.Status = WorkerBlocked
+	w.CurrentActivity = &WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    "Read",
+		Summary: "Reading cancellation context",
+	}
+	w.CurrentTool = "Read"
+
+	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskCanceled, TaskID: "t-1"})
+
+	if pm.tasks["t-1"].Status != TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", pm.tasks["t-1"].Status)
+	}
+	if w.Status != WorkerIdle {
+		t.Fatalf("worker status = %q, want idle", w.Status)
+	}
+	if w.CurrentTaskID != "" {
+		t.Fatalf("worker currentTaskID = %q, want empty", w.CurrentTaskID)
+	}
+	if w.CurrentActivity != nil {
+		t.Fatalf("worker currentActivity = %+v, want nil", w.CurrentActivity)
+	}
+	if w.CurrentTool != "" {
+		t.Fatalf("worker currentTool = %q, want empty", w.CurrentTool)
 	}
 }
 

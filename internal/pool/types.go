@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -16,15 +17,15 @@ const (
 
 // Task status constants.
 const (
-	TaskQueued    = "queued"
+	TaskQueued     = "queued"
 	TaskDispatched = "dispatched"
-	TaskCompleted = "completed"
-	TaskFailed    = "failed"
-	TaskCanceled  = "canceled"
-	TaskReviewing = "reviewing"
-	TaskAccepted  = "accepted"
-	TaskRejected  = "rejected"
-	TaskEscalated = "escalated"
+	TaskCompleted  = "completed"
+	TaskFailed     = "failed"
+	TaskCanceled   = "canceled"
+	TaskReviewing  = "reviewing"
+	TaskAccepted   = "accepted"
+	TaskRejected   = "rejected"
+	TaskEscalated  = "escalated"
 )
 
 // Pipeline status constants.
@@ -74,39 +75,49 @@ const (
 
 // Worker represents a container running an AI agent.
 type Worker struct {
-	ID            string    `json:"id"`
-	ContainerID   string    `json:"containerId,omitempty"`
-	ContainerName string    `json:"containerName,omitempty"`
-	Role          string    `json:"role,omitempty"`
-	Token         string    `json:"-"` // per-worker auth token (never serialised to clients)
-	Status        string    `json:"status"`
-	CurrentTaskID string    `json:"currentTaskId,omitempty"`
-	CurrentTool   string    `json:"currentTool,omitempty"`
-	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
-	SpawnedAt     time.Time `json:"spawnedAt"`
+	ID              string          `json:"id"`
+	ContainerID     string          `json:"containerId,omitempty"`
+	ContainerName   string          `json:"containerName,omitempty"`
+	Role            string          `json:"role,omitempty"`
+	Token           string          `json:"-"` // per-worker auth token (never serialised to clients)
+	Status          string          `json:"status"`
+	CurrentTaskID   string          `json:"currentTaskId,omitempty"`
+	CurrentActivity *WorkerActivity `json:"currentActivity,omitempty"`
+	CurrentTool     string          `json:"currentTool,omitempty"`
+	LastHeartbeat   time.Time       `json:"lastHeartbeat,omitempty"`
+	SpawnedAt       time.Time       `json:"spawnedAt"`
+}
+
+// WorkerActivity is the normalized live activity snapshot exposed by a worker.
+// It stores only the latest activity to keep heartbeats and status polling cheap.
+type WorkerActivity struct {
+	Kind    string `json:"kind,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // Task represents a unit of work dispatched to a worker.
 type Task struct {
-	ID           string        `json:"id"`
-	PipelineID   string        `json:"pipelineId,omitempty"`
-	PlanID       string        `json:"planId,omitempty"`
-	StageIndex   int           `json:"stageIndex,omitempty"`
-	Prompt       string        `json:"prompt"`
-	Role         string        `json:"role,omitempty"`
-	Priority     int           `json:"priority"`
-	DependsOn    []string      `json:"dependsOn,omitempty"`
-	Status       string        `json:"status"`
-	WorkerID     string        `json:"workerId,omitempty"`
-	ReviewerID   string        `json:"reviewerId,omitempty"`
-	ReviewCycles int           `json:"reviewCycles"`
-	MaxReviews   int           `json:"maxReviews"`
-	Result       *TaskResult   `json:"result,omitempty"`
-	Handover     *TaskHandover `json:"handover,omitempty"`
+	ID           string         `json:"id"`
+	PipelineID   string         `json:"pipelineId,omitempty"`
+	PlanID       string         `json:"planId,omitempty"`
+	StageIndex   int            `json:"stageIndex,omitempty"`
+	Prompt       string         `json:"prompt"`
+	Role         string         `json:"role,omitempty"`
+	Priority     int            `json:"priority"`
+	DependsOn    []string       `json:"dependsOn,omitempty"`
+	Status       string         `json:"status"`
+	WorkerID     string         `json:"workerId,omitempty"`
+	ReviewerID   string         `json:"reviewerId,omitempty"`
+	ReviewCycles int            `json:"reviewCycles"`
+	MaxReviews   int            `json:"maxReviews"`
+	Result       *TaskResult    `json:"result,omitempty"`
+	Handover     *TaskHandover  `json:"handover,omitempty"`
 	Reviews      []ReviewRecord `json:"reviews,omitempty"`
-	CreatedAt    time.Time     `json:"createdAt"`
-	DispatchedAt *time.Time    `json:"dispatchedAt,omitempty"`
-	CompletedAt  *time.Time    `json:"completedAt,omitempty"`
+	CreatedAt    time.Time      `json:"createdAt"`
+	DispatchedAt *time.Time     `json:"dispatchedAt,omitempty"`
+	CompletedAt  *time.Time     `json:"completedAt,omitempty"`
 }
 
 // TaskSummary is a lightweight projection of Task for status views.
@@ -285,11 +296,28 @@ type PoolConfig struct {
 	PlanStore  *PlanStore   `json:"-"`
 }
 
-// ContainerInfo describes a running container discovered via Docker.
+// ContainerInfo describes a session container discovered via Docker.
 type ContainerInfo struct {
 	ContainerID string `json:"containerId"`
 	WorkerID    string `json:"workerId"`
+	State       string `json:"state,omitempty"`
 	Status      string `json:"status"`
+}
+
+// IsRunning reports whether the container still counts as live for recovery.
+// Recovery now inspects `docker ps -a`, so only containers that are actually
+// running should keep a worker alive.
+func (c ContainerInfo) IsRunning() bool {
+	switch strings.ToLower(strings.TrimSpace(c.State)) {
+	case "running":
+		return true
+	default:
+		if c.State != "" {
+			return false
+		}
+		status := strings.ToLower(strings.TrimSpace(c.Status))
+		return strings.HasPrefix(status, "up ") && !strings.Contains(status, "paused")
+	}
 }
 
 // HostAPI defines the interface for container lifecycle operations.

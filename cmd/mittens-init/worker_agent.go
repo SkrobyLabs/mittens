@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,30 +27,110 @@ const (
 	workerAgentReportBackoff   = time.Second
 
 	// Team directory file names.
-	teamTaskFile     = "task.md"
-	teamResultFile   = "result.txt"
-	teamHandoverFile = "handover.json"
-	teamErrorFile    = "error.txt"
+	teamTaskFile            = pool.WorkerTaskFile
+	teamResultFile          = pool.WorkerResultFile
+	teamHandoverFile        = pool.WorkerHandoverFile
+	teamErrorFile           = pool.WorkerErrorFile
+	teamActivityLogFile     = pool.WorkerActivityLogFile
+	teamActivityArchiveFile = pool.WorkerActivityArchiveFile
+
+	teamActivityScannerMaxToken = 1 << 20
 )
 
-// workerAgentState tracks the currently executing tool for heartbeat reporting.
+// workerAgentState tracks the latest live activity for heartbeat reporting.
 // The worker agent is the main orchestrator that drives the AI adapter as a subprocess.
 type workerAgentState struct {
-	mu          sync.Mutex
-	currentTool string
-	teamDir     string // mounted team directory for file-based data exchange
+	mu              sync.Mutex
+	currentActivity *pool.WorkerActivity
+	currentTaskID   string
+	teamDir         string // mounted team directory for file-based data exchange
 }
 
-func (s *workerAgentState) setTool(name string) {
+func cloneWorkerActivity(activity *pool.WorkerActivity) *pool.WorkerActivity {
+	if activity == nil {
+		return nil
+	}
+	cp := *activity
+	return &cp
+}
+
+func currentToolFromActivity(activity *pool.WorkerActivity) string {
+	if activity == nil || activity.Kind != "tool" || activity.Phase != "started" {
+		return ""
+	}
+	return activity.Name
+}
+
+func workerActivityFromAdapter(activity adapter.Activity) *pool.WorkerActivity {
+	if activity.Kind == "" && activity.Phase == "" && activity.Name == "" && activity.Summary == "" {
+		return nil
+	}
+	return &pool.WorkerActivity{
+		Kind:    string(activity.Kind),
+		Phase:   string(activity.Phase),
+		Name:    activity.Name,
+		Summary: activity.Summary,
+	}
+}
+
+func sameWorkerActivity(a, b *pool.WorkerActivity) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	default:
+		return a.Kind == b.Kind &&
+			a.Phase == b.Phase &&
+			a.Name == b.Name &&
+			a.Summary == b.Summary
+	}
+}
+
+func (s *workerAgentState) setActivity(activity *pool.WorkerActivity) {
+	normalized := cloneWorkerActivity(activity)
 	s.mu.Lock()
-	s.currentTool = name
+	if sameWorkerActivity(s.currentActivity, normalized) {
+		s.mu.Unlock()
+		return
+	}
+	s.currentActivity = normalized
+	teamDir := s.teamDir
+	taskID := s.currentTaskID
+	s.mu.Unlock()
+
+	persistWorkerActivity(teamDir, taskID, normalized)
+}
+
+func (s *workerAgentState) setTool(name, summary string) {
+	if name == "" {
+		s.setActivity(nil)
+		return
+	}
+	s.setActivity(&pool.WorkerActivity{
+		Kind:    "tool",
+		Phase:   "started",
+		Name:    name,
+		Summary: summary,
+	})
+}
+
+func (s *workerAgentState) clearActivity() {
+	s.setActivity(nil)
+}
+
+func (s *workerAgentState) setCurrentTask(taskID string) {
+	s.mu.Lock()
+	s.currentTaskID = taskID
 	s.mu.Unlock()
 }
 
-func (s *workerAgentState) getTool() string {
+func (s *workerAgentState) clearCurrentTask() {
+	s.setCurrentTask("")
+}
+
+func (s *workerAgentState) snapshot() (*pool.WorkerActivity, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.currentTool
+	return cloneWorkerActivity(s.currentActivity), currentToolFromActivity(s.currentActivity)
 }
 
 func workerRuntimeDescriptor(providerName, modelName, adapterName string) string {
@@ -108,9 +190,12 @@ func runWorkerAgent(cfg *config) {
 	ad, err := adapter.New(adapterName, cfg.HostWorkspace, func(c *adapter.Config) {
 		c.SkipPermsFlag = cfg.AISkipPermsFlag
 		c.Model = modelName
+		c.OnActivity = func(activity adapter.Activity) {
+			state.setActivity(workerActivityFromAdapter(activity))
+		}
 		c.OnToolUse = func(toolName, inputSummary string) {
 			logInfo("worker: %s tool: %s → %s", workerID, toolName, inputSummary)
-			state.setTool(toolName)
+			state.setTool(toolName, inputSummary)
 		}
 		c.OnLog = func(msg string) {
 			logInfo("worker %s: %s", workerID, msg)
@@ -170,7 +255,8 @@ func heartbeatLoop(ctx context.Context, cancel context.CancelFunc, client *leade
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := client.Heartbeat(workerID, state.getTool()); err != nil {
+			activity, currentTool := state.snapshot()
+			if err := client.Heartbeat(workerID, activity, currentTool); err != nil {
 				if err == errWorkerKilled {
 					logWarn("worker: leader reports worker killed, shutting down")
 					cancel()
@@ -248,13 +334,19 @@ func taskLoop(ctx context.Context, client *leaderClient, ad adapter.Adapter, wor
 		}
 
 		logInfo("worker: %s executing task %s", workerID, task.ID)
-		executeTask(client, ad, workerID, task, state)
+		stopWorker := executeTask(client, ad, workerID, task, state)
 		lastTaskRole = task.Role
+		if stopWorker {
+			logWarn("worker: %s stopping after terminal authentication failure", workerID)
+			return
+		}
 	}
 }
 
-func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task *pool.Task, state *workerAgentState) {
-	defer state.setTool("")
+func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task *pool.Task, state *workerAgentState) bool {
+	state.setCurrentTask(task.ID)
+	defer state.clearCurrentTask()
+	defer state.clearActivity()
 
 	// Clean stale files from previous task.
 	cleanTeamDir(state.teamDir)
@@ -284,7 +376,12 @@ func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task
 	if err != nil {
 		logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
 		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(err.Error()))
-		reportFailWithRetries(client, workerID, task.ID, err.Error())
+		reportMsg, stopWorker := classifyTaskFailure(err)
+		reportFailWithRetries(client, workerID, task.ID, reportMsg)
+		if err := ad.ClearSession(); err != nil {
+			logWarn("worker: clear session: %v", err)
+		}
+		return stopWorker
 	} else {
 		// Write result.txt atomically.
 		writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
@@ -318,6 +415,7 @@ func executeTask(client *leaderClient, ad adapter.Adapter, workerID string, task
 	if err := ad.ClearSession(); err != nil {
 		logWarn("worker: clear session: %v", err)
 	}
+	return false
 }
 
 // cleanTeamDir removes stale files from previous task cycle.
@@ -359,6 +457,72 @@ func writeTeamFileAtomic(teamDir, name string, data []byte) {
 	}
 }
 
+func persistWorkerActivity(teamDir, taskID string, activity *pool.WorkerActivity) {
+	if teamDir == "" || activity == nil {
+		return
+	}
+	if rotateTeamActivityLog(teamDir) {
+		logInfo("worker: rotated %s", teamActivityLogFile)
+	}
+
+	record := pool.WorkerActivityRecord{
+		RecordedAt: time.Now().UTC(),
+		TaskID:     taskID,
+		Activity:   *activity,
+	}
+	path := filepath.Join(teamDir, teamActivityLogFile)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		logWarn("worker: open %s: %v", teamActivityLogFile, err)
+		return
+	}
+	defer f.Close()
+
+	if err := json.NewEncoder(f).Encode(record); err != nil {
+		logWarn("worker: append %s: %v", teamActivityLogFile, err)
+	}
+}
+
+func rotateTeamActivityLog(teamDir string) bool {
+	currentPath := filepath.Join(teamDir, teamActivityLogFile)
+	if !teamActivityLogNeedsRotation(currentPath) {
+		return false
+	}
+
+	archivePath := filepath.Join(teamDir, teamActivityArchiveFile)
+	if err := os.Remove(archivePath); err != nil && !os.IsNotExist(err) {
+		logWarn("worker: remove %s: %v", teamActivityArchiveFile, err)
+		return false
+	}
+	if err := os.Rename(currentPath, archivePath); err != nil {
+		logWarn("worker: rotate %s: %v", teamActivityLogFile, err)
+		return false
+	}
+	return true
+}
+
+func teamActivityLogNeedsRotation(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), teamActivityScannerMaxToken)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount >= pool.WorkerActivityLogMaxEntries {
+			return true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logWarn("worker: scan %s: %v", teamActivityLogFile, err)
+	}
+	return false
+}
+
 func reportCompleteWithRetries(client *leaderClient, workerID, taskID string) {
 	for i := 0; i < workerAgentReportRetries; i++ {
 		if err := client.ReportComplete(workerID, taskID); err != nil {
@@ -393,6 +557,34 @@ func reportReviewWithRetries(client *leaderClient, workerID, taskID, verdict, fe
 		return
 	}
 	logWarn("worker: failed to report review for task %s after retries", taskID)
+}
+
+func classifyTaskFailure(err error) (reportMsg string, stopWorker bool) {
+	if err == nil {
+		return "task execution failed", false
+	}
+
+	raw := strings.TrimSpace(err.Error())
+	if requiresAuthReset(raw) {
+		return "authentication failure: token expired or refresh token reused; run codex logout and sign in again on the host, then restart the worker", true
+	}
+	return sanitizeFailureMessage(raw), false
+}
+
+func requiresAuthReset(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, needle := range []string{
+		"refresh_token_reused",
+		"token_expired",
+		"log out and sign in again",
+		"provided authentication token is expired",
+		"access token could not be refreshed",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseDurationEnv reads an env var as seconds and returns a time.Duration.

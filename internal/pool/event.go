@@ -36,7 +36,7 @@ const (
 	EventTaskEscalated    = "task_escalated"
 
 	// Question lifecycle.
-	EventWorkerQuestion  = "worker_question"
+	EventWorkerQuestion   = "worker_question"
 	EventQuestionAnswered = "question_answered"
 
 	// Pipeline lifecycle.
@@ -151,6 +151,15 @@ func marshalData(v any) json.RawMessage {
 	return b
 }
 
+func clearWorkerLiveState(w *Worker) {
+	if w == nil {
+		return
+	}
+	w.CurrentTaskID = ""
+	w.CurrentActivity = nil
+	w.CurrentTool = ""
+}
+
 // Apply mutates the PoolManager's in-memory state based on an event.
 // INVARIANT: the caller holds pm.mu (write lock). Apply must never lock pm.mu.
 func Apply(pm *PoolManager, e Event) error {
@@ -175,7 +184,9 @@ func Apply(pm *PoolManager, e Event) error {
 	case EventWorkerReady:
 		w := pm.workers[e.WorkerID]
 		if w != nil {
-			w.Status = WorkerIdle
+			if w.Status != WorkerDead {
+				w.Status = WorkerIdle
+			}
 		}
 
 	case EventWorkerBusy:
@@ -190,8 +201,10 @@ func Apply(pm *PoolManager, e Event) error {
 	case EventWorkerIdle:
 		w := pm.workers[e.WorkerID]
 		if w != nil {
-			w.Status = WorkerIdle
-			w.CurrentTaskID = ""
+			if w.Status != WorkerDead {
+				w.Status = WorkerIdle
+			}
+			clearWorkerLiveState(w)
 		}
 
 	case EventWorkerBlocked:
@@ -204,7 +217,8 @@ func Apply(pm *PoolManager, e Event) error {
 		w := pm.workers[e.WorkerID]
 		if w != nil {
 			w.Status = WorkerDead
-			w.CurrentTaskID = ""
+			w.Token = ""
+			clearWorkerLiveState(w)
 		}
 
 	case EventTaskCreated:
@@ -258,8 +272,10 @@ func Apply(pm *PoolManager, e Event) error {
 		}
 		w := pm.workers[e.WorkerID]
 		if w != nil {
-			w.Status = WorkerIdle
-			w.CurrentTaskID = ""
+			if w.Status != WorkerDead {
+				w.Status = WorkerIdle
+			}
+			clearWorkerLiveState(w)
 		}
 
 	case EventTaskFailed:
@@ -279,16 +295,31 @@ func Apply(pm *PoolManager, e Event) error {
 		}
 		w := pm.workers[e.WorkerID]
 		if w != nil {
-			w.Status = WorkerIdle
-			w.CurrentTaskID = ""
+			if w.Status != WorkerDead {
+				w.Status = WorkerIdle
+			}
+			clearWorkerLiveState(w)
 		}
 
 	case EventTaskCanceled:
 		t := pm.tasks[e.TaskID]
+		assignedWorkerID := ""
+		if t != nil {
+			assignedWorkerID = t.WorkerID
+		}
 		if t != nil {
 			t.Status = TaskCanceled
 			now := e.Timestamp
 			t.CompletedAt = &now
+		}
+		if assignedWorkerID != "" {
+			w := pm.workers[assignedWorkerID]
+			if w != nil && w.CurrentTaskID == e.TaskID {
+				if w.Status != WorkerDead {
+					w.Status = WorkerIdle
+				}
+				clearWorkerLiveState(w)
+			}
 		}
 
 	case EventTaskRequeued:
@@ -343,8 +374,10 @@ func Apply(pm *PoolManager, e Event) error {
 		if t != nil && t.ReviewerID != "" {
 			w := pm.workers[t.ReviewerID]
 			if w != nil {
-				w.Status = WorkerIdle
-				w.CurrentTaskID = ""
+				if w.Status != WorkerDead {
+					w.Status = WorkerIdle
+				}
+				clearWorkerLiveState(w)
 			}
 		}
 
@@ -354,8 +387,10 @@ func Apply(pm *PoolManager, e Event) error {
 		if t != nil && t.ReviewerID != "" {
 			w := pm.workers[t.ReviewerID]
 			if w != nil {
-				w.Status = WorkerIdle
-				w.CurrentTaskID = ""
+				if w.Status != WorkerDead {
+					w.Status = WorkerIdle
+				}
+				clearWorkerLiveState(w)
 			}
 		}
 		if t != nil {
@@ -371,8 +406,10 @@ func Apply(pm *PoolManager, e Event) error {
 		if t != nil && t.ReviewerID != "" {
 			w := pm.workers[t.ReviewerID]
 			if w != nil {
-				w.Status = WorkerIdle
-				w.CurrentTaskID = ""
+				if w.Status != WorkerDead {
+					w.Status = WorkerIdle
+				}
+				clearWorkerLiveState(w)
 			}
 		}
 
@@ -393,7 +430,7 @@ func Apply(pm *PoolManager, e Event) error {
 		}
 		if d.Blocking {
 			w := pm.workers[e.WorkerID]
-			if w != nil {
+			if w != nil && w.Status != WorkerDead {
 				w.Status = WorkerBlocked
 			}
 		}

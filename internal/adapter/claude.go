@@ -17,6 +17,7 @@ type claudeAdapter struct {
 	workDir       string
 	model         string
 	skipPermsFlag string
+	onActivity    func(Activity)
 	onToolUse     func(toolName, inputSummary string)
 	onLog         func(string)
 	reuse         SessionReuseConfig
@@ -153,32 +154,26 @@ func (a *claudeAdapter) Execute(ctx context.Context, prompt string, priorContext
 		switch ev.Type {
 		case "assistant":
 			// Aggregated assistant events (some Claude Code versions).
-			if a.onToolUse != nil {
-				for _, block := range ev.Message.Content {
-					if block.Type == "tool_use" && block.Name != "" {
-						summary := summarizeInput(block.Name, block.Input)
-						a.onToolUse(block.Name, summary)
-					}
-				}
+			for _, activity := range claudeActivities(ev) {
+				emitActivity(a.onActivity, a.onToolUse, activity)
 			}
 		case "content_block_start":
 			// Streaming content block events — tool_use info is here.
-			if a.onToolUse != nil && ev.ContentBlock.Type == "tool_use" && ev.ContentBlock.Name != "" {
-				summary := summarizeInput(ev.ContentBlock.Name, ev.ContentBlock.Input)
-				a.onToolUse(ev.ContentBlock.Name, summary)
+			for _, activity := range claudeActivities(ev) {
+				emitActivity(a.onActivity, a.onToolUse, activity)
 			}
 		case "result":
 			output = ev.Result
 			inputTokens = ev.Usage.InputTokens
 			outputTokens = ev.Usage.OutputTokens
+			for _, activity := range claudeActivities(ev) {
+				emitActivity(a.onActivity, a.onToolUse, activity)
+			}
 		case "content_block_delta", "content_block_stop", "message_start", "message_delta", "message_stop":
 			// Known streaming events — no action needed.
 		default:
 			if ev.Type != "" && !seenTypes[ev.Type] {
 				seenTypes[ev.Type] = true
-				if a.onToolUse != nil {
-					a.onToolUse("_unknown_event", ev.Type)
-				}
 			}
 		}
 	}
@@ -217,6 +212,45 @@ func (a *claudeAdapter) Execute(ctx context.Context, prompt string, priorContext
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 	}, nil
+}
+
+func claudeActivities(ev streamEvent) []Activity {
+	switch ev.Type {
+	case "assistant":
+		activities := make([]Activity, 0, len(ev.Message.Content))
+		for _, block := range ev.Message.Content {
+			if activity, ok := claudeToolActivity(block.Type, block.Name, block.Input); ok {
+				activities = append(activities, activity)
+			}
+		}
+		return activities
+	case "content_block_start":
+		if activity, ok := claudeToolActivity(ev.ContentBlock.Type, ev.ContentBlock.Name, ev.ContentBlock.Input); ok {
+			return []Activity{activity}
+		}
+	case "result":
+		if summary := shortSummary(ev.Result); summary != "" {
+			return []Activity{{
+				Kind:    ActivityKindStatus,
+				Phase:   ActivityPhaseCompleted,
+				Name:    "response",
+				Summary: summary,
+			}}
+		}
+	}
+	return nil
+}
+
+func claudeToolActivity(blockType, name string, input json.RawMessage) (Activity, bool) {
+	if blockType != "tool_use" || name == "" {
+		return Activity{}, false
+	}
+	return Activity{
+		Kind:    ActivityKindTool,
+		Phase:   ActivityPhaseStarted,
+		Name:    name,
+		Summary: summarizeInput(name, input),
+	}, true
 }
 
 // summarizeInput extracts a human-readable summary from tool input JSON.

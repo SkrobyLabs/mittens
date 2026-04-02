@@ -44,6 +44,18 @@ func doReq(t *testing.T, handler http.Handler, method, path string, body any) *h
 	return rr
 }
 
+func workerAuthToken(t *testing.T, pm *pool.PoolManager, workerID string) string {
+	t.Helper()
+	w, ok := pm.Worker(workerID)
+	if !ok {
+		t.Fatalf("worker %q not found", workerID)
+	}
+	if w.Token == "" {
+		t.Fatalf("worker %q has no auth token", workerID)
+	}
+	return w.Token
+}
+
 func TestBrokerRegister(t *testing.T) {
 	b, pm := newTestBroker(t)
 
@@ -108,6 +120,42 @@ func TestBrokerHeartbeatWithTool(t *testing.T) {
 	w, _ := pm.Worker("w-1")
 	if w.CurrentTool != "Edit" {
 		t.Errorf("CurrentTool = %q, want Edit", w.CurrentTool)
+	}
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be synthesized from currentTool")
+	}
+	if w.CurrentActivity.Kind != "tool" || w.CurrentActivity.Phase != "started" || w.CurrentActivity.Name != "Edit" {
+		t.Fatalf("CurrentActivity = %+v, want synthesized tool activity", *w.CurrentActivity)
+	}
+}
+
+func TestBrokerHeartbeatWithActivity(t *testing.T) {
+	b, pm := newTestBroker(t)
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+
+	rr := doReq(t, b.srv.Handler, "POST", "/heartbeat", heartbeatReq{
+		WorkerID: "w-1",
+		State:    "alive",
+		Activity: &pool.WorkerActivity{
+			Kind:    "status",
+			Phase:   "started",
+			Name:    "planning",
+			Summary: "Inspecting repository state",
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Errorf("heartbeat: got %d, want 200", rr.Code)
+	}
+	w, _ := pm.Worker("w-1")
+	if w.CurrentActivity == nil {
+		t.Fatal("CurrentActivity should be set")
+	}
+	if w.CurrentActivity.Kind != "status" || w.CurrentActivity.Name != "planning" {
+		t.Fatalf("CurrentActivity = %+v, want status planning", *w.CurrentActivity)
+	}
+	if w.CurrentTool != "" {
+		t.Errorf("CurrentTool = %q, want empty", w.CurrentTool)
 	}
 }
 
@@ -379,12 +427,11 @@ func TestBrokerAuth_PerWorkerToken(t *testing.T) {
 	b, pm := newTestBroker(t)
 	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
 	pm.RegisterWorker("w-1", "")
-
-	b.RegisterWorkerToken("w-1", "worker-secret-1")
+	workerToken := workerAuthToken(t, pm, "w-1")
 
 	req := httptest.NewRequest("POST", "/heartbeat", bytes.NewBufferString(`{"workerId":"w-1","state":"alive"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Mittens-Token", "worker-secret-1")
+	req.Header.Set("X-Mittens-Token", workerToken)
 	rr := httptest.NewRecorder()
 	b.srv.Handler.ServeHTTP(rr, req)
 
@@ -399,13 +446,12 @@ func TestBrokerAuth_PerWorkerTokenIdentityMismatch(t *testing.T) {
 	pm.SpawnWorker(pool.WorkerSpec{ID: "w-2"})
 	pm.RegisterWorker("w-1", "")
 	pm.RegisterWorker("w-2", "")
-
-	b.RegisterWorkerToken("w-1", "worker-secret-1")
+	workerToken := workerAuthToken(t, pm, "w-1")
 
 	// Worker w-1's token used to impersonate w-2.
 	req := httptest.NewRequest("POST", "/heartbeat", bytes.NewBufferString(`{"workerId":"w-2","state":"alive"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Mittens-Token", "worker-secret-1")
+	req.Header.Set("X-Mittens-Token", workerToken)
 	rr := httptest.NewRecorder()
 	b.srv.Handler.ServeHTTP(rr, req)
 
@@ -419,16 +465,74 @@ func TestBrokerAuth_PerWorkerTokenGetTask(t *testing.T) {
 	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
 	pm.SpawnWorker(pool.WorkerSpec{ID: "w-2"})
 	pm.RegisterWorker("w-1", "")
-
-	b.RegisterWorkerToken("w-1", "worker-secret-1")
+	workerToken := workerAuthToken(t, pm, "w-1")
 
 	// w-1's token trying to poll w-2's tasks via GET /task/{wid}.
 	req := httptest.NewRequest("GET", "/task/w-2", nil)
-	req.Header.Set("X-Mittens-Token", "worker-secret-1")
+	req.Header.Set("X-Mittens-Token", workerToken)
 	rr := httptest.NewRecorder()
 	b.srv.Handler.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("GET task identity mismatch: got %d, want 403", rr.Code)
+	}
+}
+
+func TestBrokerAuth_DeadWorkerTokenHeartbeatRejected(t *testing.T) {
+	b, pm := newTestBroker(t)
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	workerToken := workerAuthToken(t, pm, "w-1")
+	if err := pm.MarkDead("w-1"); err != nil {
+		t.Fatalf("mark dead: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/heartbeat", bytes.NewBufferString(`{"workerId":"w-1","state":"alive"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Mittens-Token", workerToken)
+	rr := httptest.NewRecorder()
+	b.srv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("dead heartbeat: got %d, want 401: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBrokerAuth_DeadWorkerTokenQuestionRejected(t *testing.T) {
+	b, pm := newTestBroker(t)
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	workerToken := workerAuthToken(t, pm, "w-1")
+	if err := pm.MarkDead("w-1"); err != nil {
+		t.Fatalf("mark dead: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/question", bytes.NewBufferString(`{"workerId":"w-1","question":{"question":"which way?","blocking":true}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Mittens-Token", workerToken)
+	rr := httptest.NewRecorder()
+	b.srv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("dead question: got %d, want 401: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestBrokerAuth_DeadWorkerTokenPollRejected(t *testing.T) {
+	b, pm := newTestBroker(t)
+	pm.SpawnWorker(pool.WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	workerToken := workerAuthToken(t, pm, "w-1")
+	if err := pm.MarkDead("w-1"); err != nil {
+		t.Fatalf("mark dead: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/task/w-1", nil)
+	req.Header.Set("X-Mittens-Token", workerToken)
+	rr := httptest.NewRecorder()
+	b.srv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("dead poll: got %d, want 401: %s", rr.Code, rr.Body.String())
 	}
 }

@@ -1,19 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/adapter"
 	"github.com/SkrobyLabs/mittens/internal/pool"
 )
-
-// activeBroker is set by main after the WorkerBroker is created, so that
-// the spawn_worker handler can register per-worker tokens.
-var activeBroker *WorkerBroker
 
 // toolDef defines an MCP tool: its name, description, JSON Schema, and handler.
 type toolDef struct {
@@ -75,6 +74,15 @@ var mcpTools = []toolDef{
 		Description: "Get a structured overview of all workers, tasks, queued items, and pipelines.",
 		Schema:      obj(),
 		Handler:     handleGetStatus,
+	},
+	{
+		Name:        "get_worker_activity",
+		Description: "Inspect a specific worker's live activity with focused task, question, and worker-side artifact context. Use this after get_status when a live worker row needs deeper inspection.",
+		Schema: obj(
+			required("workerId"),
+			prop("workerId", "string", "ID of the worker to inspect"),
+		),
+		Handler: handleGetWorkerActivity,
 	},
 	{
 		Name:        "get_pool_state",
@@ -314,15 +322,10 @@ func handleSpawnWorker(pm *pool.PoolManager, params json.RawMessage) (any, error
 	}
 
 	// SpawnWorker generates a per-worker token, injects it into
-	// spec.Environment, and persists it via WAL.
+	// spec.Environment, and persists it in durable worker state via WAL.
 	w, err := pm.SpawnWorker(spec)
 	if err != nil {
 		return nil, err
-	}
-
-	// Register the token→workerID mapping so the broker can validate identity.
-	if activeBroker != nil && w.Token != "" {
-		activeBroker.RegisterWorkerToken(w.ID, w.Token)
 	}
 
 	return map[string]any{
@@ -395,12 +398,20 @@ func handleDispatchTask(pm *pool.PoolManager, params json.RawMessage) (any, erro
 }
 
 type statusResult struct {
-	Workers          []pool.Worker      `json:"workers"`
+	Workers          []statusWorkerView `json:"workers"`
 	AliveCount       int                `json:"aliveWorkers"`
 	Tasks            []pool.TaskSummary `json:"tasks"`
 	QueuedCount      int                `json:"queuedTasks"`
 	Pipelines        []pool.Pipeline    `json:"pipelines,omitempty"`
 	PendingQuestions int                `json:"pendingQuestions"`
+}
+
+type statusWorkerView struct {
+	pool.Worker
+	ActivitySummary   string `json:"activitySummary,omitempty"`
+	PendingQuestion   string `json:"pendingQuestion,omitempty"`
+	PendingQuestionID string `json:"pendingQuestionId,omitempty"`
+	InspectionTool    string `json:"inspectionTool,omitempty"`
 }
 
 type poolStateResult struct {
@@ -422,8 +433,58 @@ type poolStateResult struct {
 	PendingQuestions  int            `json:"pendingQuestions"`
 }
 
+type workerActivityResult struct {
+	Worker          statusWorkerView         `json:"worker"`
+	Task            *workerActivityTaskView  `json:"task,omitempty"`
+	PendingQuestion *pool.Question           `json:"pendingQuestion,omitempty"`
+	Artifacts       *workerActivityArtifacts `json:"artifacts,omitempty"`
+	RecentActivity  []workerActivityEntry    `json:"recentActivity,omitempty"`
+}
+
+type workerActivityTaskView struct {
+	ID              string     `json:"id"`
+	Status          string     `json:"status"`
+	Role            string     `json:"role,omitempty"`
+	PlanID          string     `json:"planId,omitempty"`
+	PipelineID      string     `json:"pipelineId,omitempty"`
+	ReviewCycles    int        `json:"reviewCycles"`
+	MaxReviews      int        `json:"maxReviews"`
+	DispatchedAt    *time.Time `json:"dispatchedAt,omitempty"`
+	PromptPreview   string     `json:"promptPreview,omitempty"`
+	PromptTruncated bool       `json:"promptTruncated,omitempty"`
+	ResultSummary   string     `json:"resultSummary,omitempty"`
+	HasHandover     bool       `json:"hasHandover,omitempty"`
+}
+
+type workerActivityArtifacts struct {
+	HasTaskFile           bool   `json:"hasTaskFile,omitempty"`
+	TaskPreview           string `json:"taskPreview,omitempty"`
+	TaskPreviewTruncated  bool   `json:"taskPreviewTruncated,omitempty"`
+	HasResultFile         bool   `json:"hasResultFile,omitempty"`
+	HasHandoverFile       bool   `json:"hasHandoverFile,omitempty"`
+	HasErrorFile          bool   `json:"hasErrorFile,omitempty"`
+	ErrorPreview          string `json:"errorPreview,omitempty"`
+	ErrorPreviewTruncated bool   `json:"errorPreviewTruncated,omitempty"`
+}
+
+type workerActivityEntry struct {
+	RecordedAt time.Time            `json:"recordedAt"`
+	TaskID     string               `json:"taskId,omitempty"`
+	Activity   *pool.WorkerActivity `json:"activity,omitempty"`
+}
+
+const liveWorkerActivityMaxAge = 90 * time.Second
+const workerActivityHistoryTail = 8
+
 func handleGetStatus(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
 	summaries := pm.TaskSummaries()
+	pendingQuestions := pm.PendingQuestions()
+	pendingByWorker := pendingQuestionsByWorker(pendingQuestions)
+	workers := pm.Workers()
+	workerViews := make([]statusWorkerView, 0, len(workers))
+	for _, w := range workers {
+		workerViews = append(workerViews, buildStatusWorkerView(w, pendingByWorker[w.ID]))
+	}
 
 	// Collect unique pipeline IDs from task summaries.
 	pipeIDs := map[string]bool{}
@@ -441,13 +502,328 @@ func handleGetStatus(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
 	}
 
 	return statusResult{
-		Workers:          pm.Workers(),
+		Workers:          workerViews,
 		AliveCount:       pm.AliveWorkers(),
 		Tasks:            summaries,
 		QueuedCount:      len(pm.QueuedTasks()),
 		Pipelines:        pipes,
-		PendingQuestions: len(pm.PendingQuestions()),
+		PendingQuestions: len(pendingQuestions),
 	}, nil
+}
+
+func handleGetWorkerActivity(pm *pool.PoolManager, params json.RawMessage) (any, error) {
+	var p struct {
+		WorkerID string `json:"workerId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.WorkerID == "" {
+		return nil, fmt.Errorf("missing required field: workerId")
+	}
+
+	worker, ok := pm.Worker(p.WorkerID)
+	if !ok {
+		return nil, fmt.Errorf("worker %q not found", p.WorkerID)
+	}
+
+	pendingByWorker := pendingQuestionsByWorker(pm.PendingQuestions())
+	pending := pendingByWorker[p.WorkerID]
+	result := workerActivityResult{
+		Worker: buildStatusWorkerView(*worker, pending),
+	}
+	if pending != nil {
+		q := *pending
+		result.PendingQuestion = &q
+	}
+	if worker.CurrentTaskID != "" {
+		if task, ok := pm.Task(worker.CurrentTaskID); ok {
+			result.Task = buildWorkerActivityTaskView(*task)
+		}
+	}
+	if shouldSurfaceWorkerArtifacts(*worker) {
+		artifacts, err := readWorkerActivityArtifacts(pm.StateDir(), worker.ID)
+		if err != nil {
+			return nil, err
+		}
+		result.Artifacts = artifacts
+	}
+	history, err := readWorkerActivityHistory(pm.StateDir(), worker.ID, workerActivityHistoryTail)
+	if err != nil {
+		return nil, err
+	}
+	result.RecentActivity = history
+	return result, nil
+}
+
+func pendingQuestionsByWorker(questions []pool.Question) map[string]*pool.Question {
+	if len(questions) == 0 {
+		return nil
+	}
+	byWorker := make(map[string]*pool.Question, len(questions))
+	for i := range questions {
+		q := questions[i]
+		existing := byWorker[q.WorkerID]
+		if existing != nil && !shouldPreferPendingQuestion(q, *existing) {
+			continue
+		}
+		cp := q
+		byWorker[q.WorkerID] = &cp
+	}
+	return byWorker
+}
+
+func shouldPreferPendingQuestion(candidate, existing pool.Question) bool {
+	if candidate.Blocking != existing.Blocking {
+		return candidate.Blocking
+	}
+	if existing.AskedAt.IsZero() {
+		return true
+	}
+	if candidate.AskedAt.IsZero() {
+		return false
+	}
+	if !candidate.AskedAt.Equal(existing.AskedAt) {
+		return candidate.AskedAt.Before(existing.AskedAt)
+	}
+	return candidate.ID < existing.ID
+}
+
+func buildStatusWorkerView(worker pool.Worker, pending *pool.Question) statusWorkerView {
+	if !canSurfaceLiveWorkerState(worker) {
+		worker.CurrentActivity = nil
+		worker.CurrentTool = ""
+	}
+	view := statusWorkerView{
+		Worker: worker,
+	}
+	if pending != nil {
+		view.PendingQuestionID = pending.ID
+		view.PendingQuestion = pending.Question
+	}
+	view.ActivitySummary = summarizeWorkerActivity(worker, pending)
+	if shouldOfferWorkerInspection(worker, pending) {
+		view.InspectionTool = "get_worker_activity"
+	}
+	return view
+}
+
+func summarizeWorkerActivity(worker pool.Worker, pending *pool.Question) string {
+	if shouldPrioritizePendingQuestion(pending) {
+		if question := strings.TrimSpace(pending.Question); question != "" {
+			return question
+		}
+		return fmt.Sprintf("Awaiting answer to %s", pending.ID)
+	}
+	if canSurfaceLiveWorkerState(worker) && worker.CurrentActivity != nil {
+		if summary := strings.TrimSpace(worker.CurrentActivity.Summary); summary != "" {
+			return summary
+		}
+		if label := formatActivityLabel(worker.CurrentActivity); label != "" {
+			return label
+		}
+	}
+	if canSurfaceLiveWorkerState(worker) && worker.CurrentTool != "" {
+		return fmt.Sprintf("Using %s", worker.CurrentTool)
+	}
+	if worker.CurrentTaskID != "" {
+		switch worker.Status {
+		case pool.WorkerBlocked:
+			return fmt.Sprintf("Blocked on %s", worker.CurrentTaskID)
+		case pool.WorkerWorking:
+			return fmt.Sprintf("Working on %s", worker.CurrentTaskID)
+		default:
+			return fmt.Sprintf("Assigned %s", worker.CurrentTaskID)
+		}
+	}
+	return ""
+}
+
+func shouldPrioritizePendingQuestion(pending *pool.Question) bool {
+	return pending != nil && pending.Blocking
+}
+
+func canSurfaceLiveWorkerState(worker pool.Worker) bool {
+	if worker.CurrentActivity == nil && worker.CurrentTool == "" {
+		return false
+	}
+	switch worker.Status {
+	case pool.WorkerWorking, pool.WorkerBlocked:
+	default:
+		return false
+	}
+	if worker.LastHeartbeat.IsZero() {
+		return false
+	}
+	return time.Since(worker.LastHeartbeat) <= liveWorkerActivityMaxAge
+}
+
+func formatActivityLabel(activity *pool.WorkerActivity) string {
+	if activity == nil {
+		return ""
+	}
+	kind := strings.TrimSpace(activity.Kind)
+	name := strings.TrimSpace(activity.Name)
+	phase := strings.TrimSpace(activity.Phase)
+
+	label := ""
+	switch {
+	case kind != "" && name != "":
+		label = fmt.Sprintf("%s %s", kind, name)
+	case name != "":
+		label = name
+	case kind != "":
+		label = kind
+	}
+	if phase == "" {
+		return label
+	}
+	if label == "" {
+		return phase
+	}
+	return fmt.Sprintf("%s (%s)", label, phase)
+}
+
+func shouldOfferWorkerInspection(worker pool.Worker, pending *pool.Question) bool {
+	return pending != nil || worker.CurrentTaskID != "" || canSurfaceLiveWorkerState(worker)
+}
+
+func shouldSurfaceWorkerArtifacts(worker pool.Worker) bool {
+	return worker.CurrentTaskID != "" || canSurfaceLiveWorkerState(worker)
+}
+
+func buildWorkerActivityTaskView(task pool.Task) *workerActivityTaskView {
+	view := &workerActivityTaskView{
+		ID:           task.ID,
+		Status:       task.Status,
+		Role:         task.Role,
+		PlanID:       task.PlanID,
+		PipelineID:   task.PipelineID,
+		ReviewCycles: task.ReviewCycles,
+		MaxReviews:   task.MaxReviews,
+		DispatchedAt: task.DispatchedAt,
+		HasHandover:  task.Handover != nil,
+	}
+	if task.Prompt != "" {
+		view.PromptPreview, view.PromptTruncated = compactTextPreview(task.Prompt, 240)
+	}
+	if task.Result != nil {
+		view.ResultSummary = task.Result.Summary
+	}
+	return view
+}
+
+func readWorkerActivityArtifacts(stateDir, workerID string) (*workerActivityArtifacts, error) {
+	dir := filepath.Join(stateDir, "workers", workerID)
+	result := &workerActivityArtifacts{}
+	var found bool
+
+	if preview, truncated, ok, err := readWorkerArtifactPreview(dir, "task.md", 400); err != nil {
+		return nil, fmt.Errorf("read worker activity task.md: %w", err)
+	} else if ok {
+		result.HasTaskFile = true
+		result.TaskPreview = preview
+		result.TaskPreviewTruncated = truncated
+		found = true
+	}
+
+	for _, name := range []string{"result.txt", "handover.json"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			found = true
+			if name == "result.txt" {
+				result.HasResultFile = true
+			} else {
+				result.HasHandoverFile = true
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("stat worker activity artifact %s: %w", name, err)
+		}
+	}
+
+	if preview, truncated, ok, err := readWorkerArtifactPreview(dir, "error.txt", 240); err != nil {
+		return nil, fmt.Errorf("read worker activity error.txt: %w", err)
+	} else if ok {
+		result.HasErrorFile = true
+		result.ErrorPreview = preview
+		result.ErrorPreviewTruncated = truncated
+		found = true
+	}
+
+	if !found {
+		return nil, nil
+	}
+	return result, nil
+}
+
+func readWorkerArtifactPreview(dir, name string, maxLen int) (string, bool, bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, false, nil
+		}
+		return "", false, false, err
+	}
+	preview, truncated := compactTextPreview(string(data), maxLen)
+	return preview, truncated, true, nil
+}
+
+func readWorkerActivityHistory(stateDir, workerID string, maxEntries int) ([]workerActivityEntry, error) {
+	if maxEntries <= 0 {
+		return nil, nil
+	}
+
+	dir := pool.WorkerStateDir(stateDir, workerID)
+	records, err := appendWorkerActivityRecords(nil, filepath.Join(dir, pool.WorkerActivityArchiveFile))
+	if err != nil {
+		return nil, fmt.Errorf("read worker activity archive: %w", err)
+	}
+	records, err = appendWorkerActivityRecords(records, filepath.Join(dir, pool.WorkerActivityLogFile))
+	if err != nil {
+		return nil, fmt.Errorf("read worker activity log: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	if len(records) > maxEntries {
+		records = records[len(records)-maxEntries:]
+	}
+
+	history := make([]workerActivityEntry, 0, len(records))
+	for _, record := range records {
+		activity := record.Activity
+		history = append(history, workerActivityEntry{
+			RecordedAt: record.RecordedAt,
+			TaskID:     record.TaskID,
+			Activity:   &activity,
+		})
+	}
+	return history, nil
+}
+
+func appendWorkerActivityRecords(dst []pool.WorkerActivityRecord, path string) ([]pool.WorkerActivityRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dst, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var record pool.WorkerActivityRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, err
+		}
+		dst = append(dst, record)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 func handleGetPoolState(pm *pool.PoolManager, _ json.RawMessage) (any, error) {
@@ -545,7 +921,6 @@ func handleGetTaskResult(pm *pool.PoolManager, params json.RawMessage) (any, err
 		Prompt          string           `json:"prompt,omitempty"`
 		PromptPreview   string           `json:"promptPreview,omitempty"`
 		PromptTruncated bool             `json:"promptTruncated,omitempty"`
-		OutputHint      string           `json:"_outputHint,omitempty"`
 	}
 	result := taskResultView{
 		TaskSummary: t.Summary(),
@@ -558,9 +933,6 @@ func handleGetTaskResult(pm *pool.PoolManager, params json.RawMessage) (any, err
 		result.Prompt = t.Prompt
 	} else if t.Prompt != "" {
 		result.PromptPreview, result.PromptTruncated = compactPromptPreview(t.Prompt, 240)
-	}
-	if t.Result != nil && t.Result.Summary != "" {
-		result.OutputHint = "Full worker output available via get_task_output tool"
 	}
 	return result, nil
 }
@@ -593,7 +965,6 @@ func handleGetTaskState(pm *pool.PoolManager, params json.RawMessage) (any, erro
 		DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
 		CompletedAt   *time.Time `json:"completedAt,omitempty"`
 		ResultSummary string     `json:"resultSummary,omitempty"`
-		HasOutput     bool       `json:"hasOutput,omitempty"`
 	}
 
 	result := taskStateView{
@@ -611,19 +982,22 @@ func handleGetTaskState(pm *pool.PoolManager, params json.RawMessage) (any, erro
 	}
 	if t.Result != nil {
 		result.ResultSummary = t.Result.Summary
-		result.HasOutput = t.Result.Summary != ""
 	}
 	return result, nil
 }
 
 func compactPromptPreview(prompt string, maxLen int) (string, bool) {
-	if maxLen <= 0 || len(prompt) <= maxLen {
-		return prompt, false
+	return compactTextPreview(prompt, maxLen)
+}
+
+func compactTextPreview(text string, maxLen int) (string, bool) {
+	if maxLen <= 0 || len(text) <= maxLen {
+		return text, false
 	}
 	if maxLen <= 3 {
-		return prompt[:maxLen], true
+		return text[:maxLen], true
 	}
-	return prompt[:maxLen-3] + "...", true
+	return text[:maxLen-3] + "...", true
 }
 
 func handleGetTaskOutput(pm *pool.PoolManager, params json.RawMessage) (any, error) {

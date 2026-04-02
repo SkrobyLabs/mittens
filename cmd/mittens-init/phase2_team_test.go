@@ -53,11 +53,20 @@ func TestSetupTeamPrompt_CodexWritesAGENTSAndSkills(t *testing.T) {
 	if strings.Contains(string(data), "/mt:plan") {
 		t.Fatal("codex AGENTS.md should not mention Claude slash commands")
 	}
-	if !strings.Contains(string(data), "timeoutSec <= 90") {
-		t.Fatal("codex AGENTS.md should include bounded wait guidance")
-	}
 	if !strings.Contains(string(data), "Do NOT call wait_for_task directly from the main leader flow") {
 		t.Fatal("codex AGENTS.md should keep wait_for_task off the main leader path")
+	}
+	if !strings.Contains(string(data), "planned main-thread get_task_state follow-up") {
+		t.Fatal("codex AGENTS.md should require main-thread get_task_state follow-up monitoring")
+	}
+	if !strings.Contains(string(data), "Do not rely on spawned Codex subagents for task monitoring in this workflow") {
+		t.Fatal("codex AGENTS.md should not rely on spawned Codex subagent monitoring")
+	}
+	if !strings.Contains(string(data), "Every in-flight task must always have an active monitoring path") {
+		t.Fatal("codex AGENTS.md should require active monitoring for every in-flight task")
+	}
+	if !strings.Contains(string(data), "Do not wait for the user to ask for status before checking on active work") {
+		t.Fatal("codex AGENTS.md should require proactive task check-ins")
 	}
 	if !strings.Contains(string(data), "terminal status") {
 		t.Fatal("codex AGENTS.md should preserve specific terminal statuses after timeout recovery")
@@ -88,11 +97,23 @@ func TestSetupTeamPrompt_CodexWritesAGENTSAndSkills(t *testing.T) {
 	if !strings.Contains(string(skillData), "name: \"mt-plan\"") {
 		t.Fatalf("codex skill missing expected name: %s", skillData)
 	}
-	if !strings.Contains(string(skillData), "timeoutSec <= 90") {
-		t.Fatal("codex skill should include bounded wait guidance")
-	}
 	if !strings.Contains(string(skillData), "Do NOT call wait_for_task directly from the main leader flow") {
 		t.Fatal("codex skill should keep wait_for_task off the main leader path")
+	}
+	if !strings.Contains(string(skillData), "main-thread get_task_state follow-up") {
+		t.Fatal("codex skill should require main-thread get_task_state follow-up monitoring")
+	}
+	if strings.Contains(string(skillData), "spawn a Codex subagent") ||
+		strings.Contains(string(skillData), "explicitly spawn Codex subagents") ||
+		strings.Contains(string(skillData), "Use Codex subagents only for non-blocking monitoring when helpful") ||
+		strings.Contains(string(skillData), "Use a subagent prompt like:") {
+		t.Fatal("codex skill should not recommend spawned Codex subagent monitoring")
+	}
+	if !strings.Contains(string(skillData), "active monitoring path") {
+		t.Fatal("codex skill should require active monitoring for dispatched tasks")
+	}
+	if !strings.Contains(string(skillData), "Do not wait for the user to ask for status") {
+		t.Fatal("codex skill should require proactive task check-ins")
 	}
 	if !strings.Contains(string(skillData), "get_task_state") {
 		t.Fatal("codex skill should use get_task_state for cheap routine polling")

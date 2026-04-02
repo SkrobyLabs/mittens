@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/pool"
@@ -22,18 +22,16 @@ const (
 // WorkerBroker is an HTTP server inside the leader container that exposes
 // PoolManager methods as REST endpoints for worker agents.
 type WorkerBroker struct {
-	pm           *pool.PoolManager
-	addr         string
-	token        string
-	srv          *http.Server
-	ln           net.Listener
-	mu           sync.RWMutex
-	workerTokens map[string]string // token → workerID
+	pm    *pool.PoolManager
+	addr  string
+	token string
+	srv   *http.Server
+	ln    net.Listener
 }
 
 // NewWorkerBroker creates a new WorkerBroker.
 func NewWorkerBroker(pm *pool.PoolManager, addr, token string) *WorkerBroker {
-	b := &WorkerBroker{pm: pm, addr: addr, token: token, workerTokens: make(map[string]string)}
+	b := &WorkerBroker{pm: pm, addr: addr, token: token}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", b.withAuth(b.handleRegister))
@@ -54,14 +52,29 @@ func NewWorkerBroker(pm *pool.PoolManager, addr, token string) *WorkerBroker {
 	return b
 }
 
-// Serve starts the broker and blocks until shut down.
-func (b *WorkerBroker) Serve() error {
+// Listen binds the broker listener synchronously.
+func (b *WorkerBroker) Listen() error {
+	if b.ln != nil {
+		return nil
+	}
 	ln, err := net.Listen("tcp", b.addr)
 	if err != nil {
 		return fmt.Errorf("worker broker listen: %w", err)
 	}
 	b.ln = ln
-	return b.srv.Serve(ln)
+	return nil
+}
+
+// Serve starts the broker and blocks until shut down.
+func (b *WorkerBroker) Serve() error {
+	if err := b.Listen(); err != nil {
+		return err
+	}
+	err := b.srv.Serve(b.ln)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 // Close shuts down the broker gracefully.
@@ -70,14 +83,6 @@ func (b *WorkerBroker) Close() error {
 		return b.srv.Close()
 	}
 	return nil
-}
-
-// RegisterWorkerToken registers a per-worker token so the broker can validate
-// that a bearer token belongs to a specific worker.
-func (b *WorkerBroker) RegisterWorkerToken(workerID, token string) {
-	b.mu.Lock()
-	b.workerTokens[token] = workerID
-	b.mu.Unlock()
 }
 
 // --- Auth middleware ---
@@ -97,12 +102,7 @@ func (b *WorkerBroker) withAuth(handler http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check per-worker tokens first.
-		b.mu.RLock()
-		authedWorkerID, isWorkerToken := b.workerTokens[reqToken]
-		b.mu.RUnlock()
-
-		if isWorkerToken {
+		if authedWorkerID, isWorkerToken := b.pm.ValidateWorkerToken(reqToken); isWorkerToken {
 			// Verify the token owner matches the worker claimed in the request.
 			if claimed := extractWorkerID(r); claimed != "" && claimed != authedWorkerID {
 				http.Error(w, "forbidden: worker identity mismatch", http.StatusForbidden)
@@ -153,9 +153,10 @@ type registerReq struct {
 }
 
 type heartbeatReq struct {
-	WorkerID    string `json:"workerId"`
-	State       string `json:"state"`
-	CurrentTool string `json:"currentTool"`
+	WorkerID    string               `json:"workerId"`
+	State       string               `json:"state"`
+	Activity    *pool.WorkerActivity `json:"activity,omitempty"`
+	CurrentTool string               `json:"currentTool"`
 }
 
 type completeSignal struct {
@@ -212,6 +213,9 @@ func errorCode(err error) int {
 	if strings.Contains(msg, "not found") {
 		return http.StatusNotFound
 	}
+	if strings.Contains(msg, " is dead") {
+		return http.StatusUnauthorized
+	}
 	if strings.Contains(msg, "expected") || strings.Contains(msg, "already") {
 		return http.StatusConflict
 	}
@@ -245,8 +249,8 @@ func (b *WorkerBroker) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing workerId", http.StatusBadRequest)
 		return
 	}
-	if err := b.pm.Heartbeat(req.WorkerID, req.State, req.CurrentTool); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err := b.pm.Heartbeat(req.WorkerID, req.State, req.Activity, req.CurrentTool); err != nil {
+		http.Error(w, err.Error(), errorCode(err))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -256,6 +260,10 @@ func (b *WorkerBroker) handlePollTask(w http.ResponseWriter, r *http.Request) {
 	wid := r.PathValue("wid")
 	if wid == "" {
 		http.Error(w, "missing worker ID", http.StatusBadRequest)
+		return
+	}
+	if worker, ok := b.pm.Worker(wid); ok && worker.Status == pool.WorkerDead {
+		http.Error(w, fmt.Sprintf("poll task: worker %q is dead", wid), http.StatusUnauthorized)
 		return
 	}
 	task := b.pm.PollTask(wid)
@@ -348,7 +356,7 @@ func (b *WorkerBroker) handleQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	qid, err := b.pm.AskQuestion(req.WorkerID, req.Question)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), errorCode(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

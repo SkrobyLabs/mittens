@@ -124,7 +124,7 @@ func TestReconcile_MarkMissingWorkersDead(t *testing.T) {
 
 	// Only w-1 is running.
 	running := []ContainerInfo{
-		{ContainerID: "abc", WorkerID: "w-1", Status: "Up"},
+		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up"},
 	}
 
 	reconciled, killed := Reconcile(pm, running)
@@ -161,8 +161,8 @@ func TestReconcile_KillOrphans(t *testing.T) {
 
 	// Container w-orphan is not in pool state.
 	running := []ContainerInfo{
-		{ContainerID: "abc", WorkerID: "w-1", Status: "Up"},
-		{ContainerID: "def", WorkerID: "w-orphan", Status: "Up"},
+		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up"},
+		{ContainerID: "def", WorkerID: "w-orphan", State: "running", Status: "Up"},
 	}
 
 	reconciled, killed := Reconcile(pm, running)
@@ -207,6 +207,90 @@ func TestReconcile_AlreadyDeadNotRecounted(t *testing.T) {
 	reconciled, _ := Reconcile(pm, nil)
 	if reconciled != 0 {
 		t.Errorf("reconciled = %d, want 0 (already dead)", reconciled)
+	}
+}
+
+func TestContainerInfoIsRunning(t *testing.T) {
+	cases := []struct {
+		name string
+		info ContainerInfo
+		want bool
+	}{
+		{name: "running state", info: ContainerInfo{State: "running"}, want: true},
+		{name: "paused state", info: ContainerInfo{State: "paused"}, want: false},
+		{name: "restarting state", info: ContainerInfo{State: "restarting"}, want: false},
+		{name: "created state", info: ContainerInfo{State: "created"}, want: false},
+		{name: "exited state", info: ContainerInfo{State: "exited"}, want: false},
+		{name: "status fallback up", info: ContainerInfo{Status: "Up 5 minutes"}, want: true},
+		{name: "status fallback paused", info: ContainerInfo{Status: "Up 5 minutes (Paused)"}, want: false},
+		{name: "status fallback restarting", info: ContainerInfo{Status: "Restarting (1) 5 seconds ago"}, want: false},
+		{name: "status fallback exited", info: ContainerInfo{Status: "Exited (0) 1 minute ago"}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.IsRunning(); got != tc.want {
+				t.Fatalf("IsRunning() = %v, want %v for %+v", got, tc.want, tc.info)
+			}
+		})
+	}
+}
+
+func TestReconcile_NonRunningWorkersAreMarkedDeadAndCleanedUp(t *testing.T) {
+	mock := &mockHostAPI{}
+	pm := newTestPoolManagerWithHostAPI(t, mock)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+
+	containers := []ContainerInfo{
+		{ContainerID: "abc", WorkerID: "w-1", State: "exited", Status: "Exited (0) 1 minute ago"},
+		{ContainerID: "def", WorkerID: "w-stale-orphan", State: "dead", Status: "Dead"},
+	}
+
+	reconciled, killed := Reconcile(pm, containers)
+	if reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", reconciled)
+	}
+	if killed != 2 {
+		t.Fatalf("killed = %d, want 2", killed)
+	}
+	if len(mock.killed) != 2 {
+		t.Fatalf("killed workers = %v, want [w-1 w-stale-orphan]", mock.killed)
+	}
+	gotKilled := make(map[string]bool, len(mock.killed))
+	for _, workerID := range mock.killed {
+		gotKilled[workerID] = true
+	}
+	if !gotKilled["w-1"] || !gotKilled["w-stale-orphan"] {
+		t.Fatalf("killed workers = %v, want w-1 and w-stale-orphan", mock.killed)
+	}
+
+	w1, _ := pm.Worker("w-1")
+	if w1.Status != WorkerDead {
+		t.Fatalf("w-1 status = %q, want dead", w1.Status)
+	}
+}
+
+func TestReconcile_RunningContainerForDeadWorkerIsCleanedUp(t *testing.T) {
+	mock := &mockHostAPI{}
+	pm := newTestPoolManagerWithHostAPI(t, mock)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	pm.MarkDead("w-1")
+
+	containers := []ContainerInfo{
+		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
+	}
+
+	reconciled, killed := Reconcile(pm, containers)
+	if reconciled != 0 {
+		t.Fatalf("reconciled = %d, want 0", reconciled)
+	}
+	if killed != 1 {
+		t.Fatalf("killed = %d, want 1", killed)
+	}
+	if len(mock.killed) != 1 || mock.killed[0] != "w-1" {
+		t.Fatalf("killed workers = %v, want [w-1]", mock.killed)
 	}
 }
 
@@ -396,16 +480,24 @@ func TestFullRecoverySequence(t *testing.T) {
 
 	// Phase 3: Reconcile — only w-1 is still running; w-2 and w-3 crashed.
 	running := []ContainerInfo{
-		{ContainerID: "cid-w-1", WorkerID: "w-1", Status: "running"},
-		{ContainerID: "cid-ghost", WorkerID: "w-ghost", Status: "running"}, // orphan
+		{ContainerID: "cid-w-1", WorkerID: "w-1", State: "running", Status: "Up 4 minutes"},
+		{ContainerID: "cid-w-2", WorkerID: "w-2", State: "exited", Status: "Exited (137) 10 seconds ago"},
+		{ContainerID: "cid-ghost", WorkerID: "w-ghost", State: "running", Status: "Up 30 seconds"}, // orphan
 	}
 	reconciled, killed := Reconcile(pm2, running)
 
 	if reconciled != 2 {
 		t.Errorf("reconciled = %d, want 2", reconciled)
 	}
-	if killed != 1 {
-		t.Errorf("killed = %d, want 1", killed)
+	if killed != 2 {
+		t.Errorf("killed = %d, want 2", killed)
+	}
+	gotKilled := make(map[string]bool, len(mock.killed))
+	for _, workerID := range mock.killed {
+		gotKilled[workerID] = true
+	}
+	if !gotKilled["w-2"] || !gotKilled["w-ghost"] {
+		t.Errorf("killed workers = %v, want w-2 and w-ghost", mock.killed)
 	}
 
 	// Phase 4: RequeueOrphanedTasks — nothing to do because MarkDead

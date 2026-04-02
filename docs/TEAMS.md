@@ -38,9 +38,9 @@ Use this document for the full Teams feature reference. `CLAUDE.md` keeps only t
 ## CLI Subcommands
 
 ```bash
-mittens team                        # Launch a team session
-mittens team --name myfeature       # Launch a named session
-mittens team init                   # Interactive wizard -> team.yaml
+mittens team --name strike-team-a   # Launch an existing named team
+mittens team init                   # Create a new named team, then launch it
+mittens team init --name review-lab # Create or edit a named team, then launch it
 mittens team status                 # Show sessions for the current project
 mittens team status --all-projects  # Show sessions across all projects
 mittens team status --limit 5       # Cap stopped sessions shown (default 10)
@@ -52,15 +52,25 @@ mittens team clean --dry-run        # Preview what would be removed
 mittens team help                   # Show help
 ```
 
+## Team Model
+
+Team configs are now global and named. A team is a reusable worker-routing preset, while a session is one concrete launch of that team in a project.
+
+- `mittens team --name strike-team-a` launches an already-configured team
+- `mittens team init --name strike-team-a` creates or edits that team config, then launches it
+- unnamed launches are not supported; new teams must be explicitly configured first
+
+Each launch gets a generated session ID derived from the team name, so you can run and resume multiple sessions of the same team without config-name collisions.
+
 ## Leader Provider
 
-The team leader uses the normal mittens provider selection flow, not `team.yaml`.
+The team leader uses the normal mittens provider selection flow, not the named team config.
 
-- `mittens team --provider codex` launches a Codex-led team session
-- `mittens team --provider claude` launches a Claude-led team session
+- `mittens team --name strike-team-a --provider codex` launches a Codex-led team session
+- `mittens team --name strike-team-a --provider claude` launches a Claude-led team session
 - project defaults from `mittens init` also apply to the leader
 
-`team.yaml` still controls worker routing only.
+The named team config still controls worker routing only.
 
 ## Team Status
 
@@ -79,32 +89,42 @@ The team leader uses the normal mittens provider selection flow, not `team.yaml`
 **Table output**:
 
 ```
-PROJECT              SESSION            STATUS     STARTED            LAST ACTIVITY      WORKERS
-my-project           team-12345-abc     running    2026-03-31 14:00   2026-03-31 14:12   3
-my-project           team-11111-xyz     stopped    2026-03-30 09:00   2026-03-30 10:30   -
+PROJECT              TEAM               SESSION              STATUS     STARTED            LAST ACTIVITY      WORKERS
+my-project           strike-team-a      strike-team-a-kx1    running    2026-03-31 14:00   2026-03-31 14:12   3
+my-project           review-lab         review-lab-kx2       stopped    2026-03-30 09:00   2026-03-30 10:30   -
 ```
 
-**Session metadata**: each session persists a `session.json` file in its state directory (`~/.mittens/projects/<projDir>/pools/<session-id>/session.json`) containing the workspace path, session ID, and start time. This enables `team status` to display accurate metadata for stopped sessions without requiring Docker.
+**Session metadata**: each session persists a `session.json` file in its state directory (`~/.mittens/projects/<projDir>/pools/<session-id>/session.json`) containing the workspace path, team name, session ID, and start time. This enables `team status` to display accurate metadata for stopped sessions without requiring Docker.
 
 ## Configuration
 
-`team.yaml` lives at `~/.mittens/projects/<workspace>/team.yaml`.
+Named team configs live at `~/.mittens/teams/<team>/team.yaml`.
+
+`mittens team init` now edits a named team in a role-first loop:
+
+- set `max_workers`
+- set the worker-session process (`fresh each task`, `balanced reuse`, `aggressive reuse`, or custom)
+- edit `default`, `planner`, `implementer`, or `reviewer`
+- for each role, choose provider from a preset list
+- then choose model as provider default, recommended preset, or custom
+
+`adapter` is no longer part of the normal team-init flow.
 
 ```yaml
 max_workers: 4
 models:
+  default:
+    provider: "codex"
+    model: "gpt-5.4"
   planner:
+    provider: "codex"
+    model: ""
+  implementer:
     provider: "claude"
     model: "claude-sonnet-4-6"
-    adapter: "claude-code"
-  implementer:
-    provider: "codex"
-    model: "gpt-5.3-spark"
-    adapter: "openai-codex"
   reviewer:
     provider: "claude"
     model: "claude-sonnet-4-6"
-    adapter: "claude-code"
 ```
 
 Canonical provider names are `claude`, `codex`, and `gemini`. The aliases `anthropic`, `openai`, and `google` are also accepted in `team.yaml`.
@@ -146,25 +166,45 @@ Canonical provider names are `claude`, `codex`, and `gemini`. The aliases `anthr
 
 The leader-facing `team-mcp` server exposes:
 
-`spawn_worker`, `kill_worker`, `enqueue_task`, `dispatch_task`, `wait_for_task`, `get_status`, `get_task_result`, `get_task_output`, `submit_pipeline`, `cancel_pipeline`, `dispatch_review`, `report_review`, `answer_question`, `resolve_escalation`, `pending_questions`, `create_plan`, `list_plans`, `read_plan`, `claim_plan`, `update_plan_progress`, `complete_plan`, `check_session`
+`spawn_worker`, `kill_worker`, `enqueue_task`, `dispatch_task`, `wait_for_task`, `get_pool_state`, `get_task_state`, `get_status`, `get_worker_activity`, `get_task_result`, `get_task_output`, `submit_pipeline`, `cancel_pipeline`, `dispatch_review`, `report_review`, `answer_question`, `resolve_escalation`, `pending_questions`, `create_plan`, `list_plans`, `read_plan`, `claim_plan`, `update_plan_progress`, `complete_plan`, `check_session`
+
+`get_pool_state` stays the cheap polling surface for scheduling and capacity checks.
+Use `get_status` for explicit full status reports. Its worker rows now surface the
+latest live activity summary for Claude and Codex workers, pending question
+metadata, and an `inspectionTool` hint when deeper inspection is available.
+Use `get_worker_activity` selectively after `get_status` points you at a worker
+that needs deeper inspection of its current task, pending blocker, or worker-side
+artifacts such as `task.md`, `result.txt`, `handover.json`, or `error.txt`.
 
 ## Leader Commands
 
 Claude leaders register slash commands:
 
-- **`/mt:status`**: calls `get_status` and shows workers, tasks, pipelines, and pending questions
+- **`/mt:status`**: calls `get_status` and shows workers with live activity/blocker summaries plus `get_worker_activity` inspection hints, alongside tasks, pipelines, and pending questions
 - **`/mt:plan <description>`**: spawns a planner worker, presents a structured plan, and waits for approval
 - **`/mt:execute <plan-id>`**: executes a pending plan from the plans directory
 - **`/mt:plans`**: lists all plans with status and progress
 
 Codex leaders install user skills:
 
-- **`$mt-status`**: calls `get_status` and shows workers, tasks, pipelines, and pending questions
+- **`$mt-status`**: calls `get_status` and shows workers with live activity/blocker summaries plus `get_worker_activity` inspection hints, alongside tasks, pipelines, and pending questions
 - **`$mt-plan <description>`**: spawns a planner worker, presents a structured plan, and waits for approval
 - **`$mt-execute <plan-id>`**: executes a pending plan from the plans directory
 - **`$mt-plans`**: lists all plans with status and progress
 
 Codex built-ins such as `/mcp`, `/agent`, and `/plan` remain available alongside the team skills.
+
+Codex leaders should follow up on every dispatched task with `get_task_state`
+from the main leader flow.
+Long-running active tasks should be re-checked proactively at a coarse cadence,
+even if the user has not asked for a status update yet.
+
+For leaders and operators, the intended inspection flow is:
+
+1. Use `get_pool_state` for routine scheduling and capacity polling.
+2. Use `get_status` when you need a user-facing or operator-facing full report.
+3. If a worker row shows a blocker, suspicious activity, or an `inspectionTool`
+   hint, call `get_worker_activity` for that worker only.
 
 ## Pipelines And Reviews
 
@@ -204,6 +244,18 @@ Recovery for `mittens team resume`:
 4. Mark missing workers dead
 5. `RequeueOrphanedTasks()`
 6. `PipelineExecutor.ScanStuckPipelines()`
+
+## Worker Activity Files
+
+High-churn worker activity does not go into the WAL.
+
+- Live worker status still comes from heartbeat-backed `CurrentActivity` / `CurrentTool`.
+- Recent worker activity history is persisted under the existing worker state directory:
+  `~/.mittens/projects/<projDir>/pools/<session-id>/workers/<worker-id>/`
+- The worker writes JSONL snapshots to `activity.jsonl`, one normalized `WorkerActivityRecord` per line:
+  `{"recordedAt":"...","taskId":"t-1","activity":{"kind":"tool","phase":"started","name":"Read","summary":"README.md"}}`
+- Retention is bounded with simple rotation: each `activity.jsonl` generation keeps up to 128 records, then the file is rotated to `activity.prev.jsonl` and a fresh `activity.jsonl` starts. This keeps recent debugging history on disk without unbounded growth or WAL churn.
+- `get_worker_activity` exposes a compact recent tail from `activity.prev.jsonl` + `activity.jsonl` so operators can inspect what a worker was doing even after the live heartbeat state has cleared.
 
 ## Session Reuse
 
