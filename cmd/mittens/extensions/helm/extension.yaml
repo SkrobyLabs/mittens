@@ -10,6 +10,10 @@ flags:
     description: "Install Helm CLI and mount config"
     arg: "none"
 
+firewall:
+  - "charts.helm.sh"
+  - "kubernetes-charts.storage.googleapis.com"
+
 mounts:
   - src: "~/.config/helm"
     dst: "~/.config/helm"

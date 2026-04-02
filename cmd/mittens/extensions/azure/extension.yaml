@@ -19,8 +19,10 @@ firewall:
   - "management.azure.com"
   - "graph.microsoft.com"
   - "prices.azure.com"
+  - ".blob.core.windows.net"
+  - ".vault.azure.net"
+  - ".azurecr.io"
 
 build:
   script: "azure.sh"
   image_tag: "azure"
-

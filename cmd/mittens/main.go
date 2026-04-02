@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,6 +71,8 @@ func runMain(args []string) error {
 			return runLogs(args[1:])
 		case "clean":
 			return runClean(args[1:])
+		case "version":
+			return runVersion(args[1:])
 		case "extension":
 			return runExtension(args[1:])
 		}
@@ -82,8 +85,7 @@ func runMain(args []string) error {
 			return runHelp()
 		}
 		if hasSubFlag(args, "--version") || hasSubFlag(args, "-V") {
-			fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
-			return nil
+			return runVersion(nil)
 		}
 	}
 
@@ -280,6 +282,36 @@ func runHelp() error {
 	return nil
 }
 
+func runVersion(args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--help", "-h":
+			fmt.Println("Usage: mittens version [--json]")
+			fmt.Println("  --json   Output version information as JSON")
+			return nil
+		default:
+			return fmt.Errorf("unknown flag %q for \"mittens version\" (supported: --json)", arg)
+		}
+	}
+
+	if jsonOutput {
+		out := struct {
+			Version string `json:"version"`
+			Commit  string `json:"commit"`
+		}{
+			Version: version,
+			Commit:  commit,
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+
+	fmt.Printf("mittens %s (commit: %s, built: %s)\n", version, commit, date)
+	return nil
+}
+
 func resolveProviderFromArgs(args []string) (*Provider, error) {
 	provider := DefaultProvider()
 	for i := 0; i < len(args); i++ {
@@ -300,7 +332,7 @@ func resolveProviderFromArgs(args []string) (*Provider, error) {
 }
 
 func providerByName(name string) (*Provider, error) {
-	switch name {
+	switch canonicalProviderName(name) {
 	case "claude":
 		return ClaudeProvider(), nil
 	case "codex":
@@ -324,13 +356,17 @@ func runLogs(args []string) error {
 
 	follow := false
 	for _, a := range args {
-		if a == "-f" || a == "--follow" {
+		switch a {
+		case "-f", "--follow":
 			follow = true
+		default:
+			return fmt.Errorf("unknown flag %q for \"mittens logs\" (only -f/--follow is supported)", a)
 		}
 	}
 
 	if follow {
 		cmd := exec.Command("tail", "-f", logPath)
+		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()

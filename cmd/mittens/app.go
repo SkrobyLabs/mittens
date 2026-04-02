@@ -74,8 +74,8 @@ type App struct {
 	worktreeDirs    []string
 	worktreeOrigins map[string]string // worktree path -> original HEAD sha
 	worktreeRepos   map[string]string // worktree path -> original repo root
-	clipboardDir string
-	clipboardReg string
+	clipboardDir    string
+	clipboardReg    string
 
 	// Worktree suffix (computed once per Run)
 	worktreeSuffix string
@@ -109,17 +109,17 @@ var coreFlags = map[string]func(*App){
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
 	"--shell":        func(a *App) { a.Shell = true },
-	"--worker":  func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--planner": func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--worker":       func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--planner":      func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	// --resume is handled specially in ParseFlags (optional argument).
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
 
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
-	"--dir":      func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
-	"--dir-ro":   func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
-	"--name":     func(a *App, val string) { a.InstanceName = val },
+	"--dir":             func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--dir-ro":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
+	"--name":            func(a *App, val string) { a.InstanceName = val },
 	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
 	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
 	"--profile":         func(a *App, val string) { a.Profile = val },
@@ -789,14 +789,14 @@ func newClipboardPathsAt(dir string) clipboardPaths {
 }
 
 func (cp clipboardPaths) pidFile() string       { return filepath.Join(cp.dir, "clipboard-sync.pid") }
-func (cp clipboardPaths) heartbeatFile() string  { return filepath.Join(cp.dir, "clipboard.heartbeat") }
-func (cp clipboardPaths) lockFile() string       { return filepath.Join(cp.dir, "clipboard-sync.lock") }
-func (cp clipboardPaths) logFile() string        { return filepath.Join(cp.dir, "clipboard-sync.log") }
-func (cp clipboardPaths) clientsDir() string     { return filepath.Join(cp.dir, "clients") }
-func (cp clipboardPaths) stateFile() string      { return filepath.Join(cp.dir, "clipboard.state") }
-func (cp clipboardPaths) updatedAtFile() string  { return filepath.Join(cp.dir, "clipboard.updated_at") }
-func (cp clipboardPaths) imageFile() string      { return filepath.Join(cp.dir, "clipboard.png") }
-func (cp clipboardPaths) errorFile() string      { return filepath.Join(cp.dir, "clipboard.error") }
+func (cp clipboardPaths) heartbeatFile() string { return filepath.Join(cp.dir, "clipboard.heartbeat") }
+func (cp clipboardPaths) lockFile() string      { return filepath.Join(cp.dir, "clipboard-sync.lock") }
+func (cp clipboardPaths) logFile() string       { return filepath.Join(cp.dir, "clipboard-sync.log") }
+func (cp clipboardPaths) clientsDir() string    { return filepath.Join(cp.dir, "clients") }
+func (cp clipboardPaths) stateFile() string     { return filepath.Join(cp.dir, "clipboard.state") }
+func (cp clipboardPaths) updatedAtFile() string { return filepath.Join(cp.dir, "clipboard.updated_at") }
+func (cp clipboardPaths) imageFile() string     { return filepath.Join(cp.dir, "clipboard.png") }
+func (cp clipboardPaths) errorFile() string     { return filepath.Join(cp.dir, "clipboard.error") }
 
 func (cp clipboardPaths) pid() (int, error) {
 	data, err := os.ReadFile(cp.pidFile())
@@ -1058,23 +1058,23 @@ func (a *App) buildImage() error {
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 	return &initcfg.ContainerConfig{
 		AI: initcfg.AIConfig{
-			Binary:         a.Provider.Binary,
-			ConfigDir:      a.Provider.ConfigDir,
-			CredFile:       a.Provider.CredentialFile,
-			PrefsFile:      a.Provider.UserPrefsFile,
-			SettingsFile:   a.Provider.SettingsFile,
-			ProjectFile:    a.Provider.ProjectFile,
-			TrustedDirsKey: a.Provider.TrustedDirsKey,
-			YoloKey:        a.Provider.YoloKey,
-			MCPServersKey:  a.Provider.MCPServersKey,
+			Binary:          a.Provider.Binary,
+			ConfigDir:       a.Provider.ConfigDir,
+			CredFile:        a.Provider.CredentialFile,
+			PrefsFile:       a.Provider.UserPrefsFile,
+			SettingsFile:    a.Provider.SettingsFile,
+			ProjectFile:     a.Provider.ProjectFile,
+			TrustedDirsKey:  a.Provider.TrustedDirsKey,
+			YoloKey:         a.Provider.YoloKey,
+			MCPServersKey:   a.Provider.MCPServersKey,
 			TrustedDirsFile: a.Provider.TrustedDirsFile,
-			InitSettingsJQ: a.Provider.InitSettingsJQ,
-			StopHookEvent:  a.Provider.StopHookEvent,
-			PersistFiles:   a.Provider.PersistFiles,
-			SettingsFormat: a.Provider.SettingsFormat,
-			ConfigSubdirs:  a.Provider.ConfigSubdirs,
-			PluginDir:      a.Provider.PluginDir,
-			PluginFiles:    a.Provider.PluginFiles,
+			InitSettingsJQ:  a.Provider.InitSettingsJQ,
+			StopHookEvent:   a.Provider.StopHookEvent,
+			PersistFiles:    a.Provider.PersistFiles,
+			SettingsFormat:  a.Provider.SettingsFormat,
+			ConfigSubdirs:   a.Provider.ConfigSubdirs,
+			PluginDir:       a.Provider.PluginDir,
+			PluginFiles:     a.Provider.PluginFiles,
 		},
 		Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
@@ -1642,6 +1642,7 @@ Commands:
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   extension list|install|remove Manage external extensions
+  version [--json]              Show version information
 
 Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)

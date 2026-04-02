@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProfilePreset defines a model + effort combination for a named profile.
@@ -190,8 +191,8 @@ func ClaudeProvider() *Provider {
 		ContinueArgs:    []string{"--continue"},
 		TrustedDirsFile: "",
 		StopHookEvent:   "Stop",
-		ModelFlag:  "--model",
-		EffortFlag: "--effort",
+		ModelFlag:       "--model",
+		EffortFlag:      "--effort",
 	}
 }
 
@@ -237,8 +238,8 @@ func CodexProvider() *Provider {
 		ContinueArgs:             []string{"--resume", "latest"},
 		TrustedDirsFile:          "",
 		HistoryMountsWholeConfig: true,
-		ModelFlag:  "--model",
-		EffortFlag: "",
+		ModelFlag:                "--model",
+		EffortFlag:               "",
 		// Codex expects reasoning effort via -c key-value configuration.
 		EffortTemplate: "-c model_reasoning_effort=%s",
 	}
@@ -300,7 +301,7 @@ func GeminiProvider() *Provider {
 		ResumeFlags:   []string{"--resume", "-r"},
 		SkipPermsFlag: "--approval-mode=yolo",
 		ContinueArgs:  []string{"--resume", "latest"},
-		ModelFlag: "--model",
+		ModelFlag:     "--model",
 
 		ContainerHostname: "gemini-cli",
 		ContainerEnv: map[string]string{
@@ -334,4 +335,17 @@ func GeminiProvider() *Provider {
 // DefaultProvider returns the default provider (Claude).
 func DefaultProvider() *Provider {
 	return ClaudeProvider()
+}
+
+func canonicalProviderName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "claude", "anthropic":
+		return "claude"
+	case "codex", "openai":
+		return "codex"
+	case "gemini", "google":
+		return "gemini"
+	default:
+		return strings.ToLower(strings.TrimSpace(name))
+	}
 }

@@ -14,7 +14,7 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 		"InitSettingsJQ":           true, // Gemini-only: post-init settings patch
 		"PersistFiles":             true, // Gemini-only: state files to survive between runs
 		"HistoryMountsWholeConfig": true, // Codex-only: mount whole config dir for history
-		"EffortTemplate":          true, // some providers don't use template mode
+		"EffortTemplate":           true, // some providers don't use template mode
 	}
 	p := ClaudeProvider()
 	v := reflect.ValueOf(*p)
@@ -138,6 +138,26 @@ func TestDefaultProvider_ReturnsClaude(t *testing.T) {
 	}
 	if p.Binary != "claude" {
 		t.Errorf("DefaultProvider().Binary = %q, want claude", p.Binary)
+	}
+}
+
+func TestCanonicalProviderName(t *testing.T) {
+	tests := map[string]string{
+		"":            "claude",
+		"claude":      "claude",
+		"Anthropic":   "claude",
+		"codex":       "codex",
+		"openai":      "codex",
+		"gemini":      "gemini",
+		"google":      "gemini",
+		"custom-ai":   "custom-ai",
+		" CUSTOM-AI ": "custom-ai",
+	}
+
+	for input, want := range tests {
+		if got := canonicalProviderName(input); got != want {
+			t.Errorf("canonicalProviderName(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

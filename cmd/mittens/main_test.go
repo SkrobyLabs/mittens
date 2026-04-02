@@ -40,6 +40,24 @@ func TestResolveProviderFromArgs_LastWins(t *testing.T) {
 	}
 }
 
+func TestResolveProviderFromArgs_Aliases(t *testing.T) {
+	p, err := resolveProviderFromArgs([]string{"--provider", "openai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "codex" {
+		t.Fatalf("expected openai alias to resolve to codex, got %q", p.Name)
+	}
+
+	p, err = resolveProviderFromArgs([]string{"--provider", "anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "claude" {
+		t.Fatalf("expected anthropic alias to resolve to claude, got %q", p.Name)
+	}
+}
+
 func TestResolveProviderFromArgs_MissingArg(t *testing.T) {
 	_, err := resolveProviderFromArgs([]string{"--provider"})
 	if err == nil {
