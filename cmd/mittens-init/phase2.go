@@ -86,6 +86,12 @@ func runPhase2(cfg *config) error {
 		os.Chdir(cfg.HostWorkspace)
 	}
 
+	// Worker containers run the worker agent instead of the AI CLI.
+	if os.Getenv("MITTENS_WORKER_ID") != "" {
+		runWorkerAgent(cfg)
+		return nil
+	}
+
 	// Exec the remaining args (typically the AI CLI binary).
 	return execArgs(cfg.AIBinary)
 }
@@ -402,14 +408,18 @@ func setupNotificationHooks(cfg *config) {
 
 	notifyCmd := `MSG=$(jq -r '.message // "needs attention"'); /usr/local/bin/notify.sh notification "$MSG"`
 
-	hooks := map[string]interface{}{
-		"Notification": []interface{}{
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": notifyCmd,
-					},
+	// Merge notification hooks into existing hooks (preserve user/plugin hooks).
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = map[string]interface{}{}
+	}
+
+	hooks["Notification"] = []interface{}{
+		map[string]interface{}{
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": notifyCmd,
 				},
 			},
 		},

@@ -67,6 +67,8 @@ func runMain(args []string) error {
 			return handleInit(args)
 		case "help":
 			return runHelp()
+		case "daemon":
+			return runDaemon(args[1:])
 		case "logs":
 			return runLogs(args[1:])
 		case "clean":
@@ -100,6 +102,27 @@ func runMain(args []string) error {
 		}
 	}
 
+	app, err := newConfiguredApp(args)
+	if err != nil {
+		return err
+	}
+	if app == nil {
+		return nil
+	}
+	return app.Run()
+}
+
+func newConfiguredApp(args []string) (*App, error) {
+	sessionMode := hasSubFlag(args, "--session")
+	if sessionMode {
+		if hasSubFlag(args, "--no-config") {
+			return nil, fmt.Errorf("--session and --no-config cannot be used together")
+		}
+		if hasSubFlag(args, "--init") {
+			return nil, fmt.Errorf("--session and --init cannot be used together")
+		}
+	}
+
 	app := &App{
 		Provider:        DefaultProvider(),
 		ImageName:       "mittens",
@@ -109,21 +132,16 @@ func runMain(args []string) error {
 		worktreeRepos:   make(map[string]string),
 	}
 
-	// Load all extensions: bundled (disk-first, embed fallback) + user-installed.
 	exts, err := loadExtensions()
 	if err != nil {
-		return fmt.Errorf("loading extensions: %w", err)
+		return nil, fmt.Errorf("loading extensions: %w", err)
 	}
 	app.Extensions = exts
 
-	// Set the default firewall.conf path for the firewall extension.
-	// Also provide the embedded copy so the binary works standalone
-	// (e.g. after "make install" to /usr/local/bin).
 	firewallext.DefaultConfPath = filepath.Join(containerDir(), "firewall.conf")
 	firewallext.EmbeddedConf = embeddedFirewallConf
 	firewallext.EmbeddedDevConf = embeddedFirewallDevConf
 
-	// 3. Load config: either ephemeral (--session wizard) or from disk.
 	var userArgs []string
 	var configArgs []string
 
@@ -134,13 +152,12 @@ func runMain(args []string) error {
 		if err != nil {
 			if err == huh.ErrUserAborted {
 				fmt.Fprintln(os.Stderr, "\nCancelled.")
-				return nil
+				return nil, nil
 			}
-			return err
+			return nil, err
 		}
 		configArgs = splitConfigFlags(ephemeralLines)
 
-		// Strip --session from args before merging.
 		var filtered []string
 		for _, a := range args {
 			if a != "--session" {
@@ -148,52 +165,36 @@ func runMain(args []string) error {
 			}
 		}
 		args = filtered
-	} else {
-		noConfig := false
-		for _, a := range args {
-			if a == "--no-config" {
-				noConfig = true
-				break
-			}
+	} else if !hasSubFlag(args, "--no-config") {
+		userArgs, _ = LoadUserDefaults()
+		if len(userArgs) > 0 {
+			logInfo("Loaded user defaults")
 		}
 
-		if !noConfig {
-			userArgs, _ = LoadUserDefaults()
-			if len(userArgs) > 0 {
-				logInfo("Loaded user defaults")
-			}
-
-			workspace := detectWorkspace()
-			configArgs, err = LoadProjectConfig(workspace)
-			if err != nil {
-				return fmt.Errorf("loading project config: %w", err)
-			}
-			if len(configArgs) > 0 {
-				logInfo("Loaded project config for %s", ProjectDir(workspace))
-			}
+		workspace := detectWorkspace()
+		configArgs, err = LoadProjectConfig(workspace)
+		if err != nil {
+			return nil, fmt.Errorf("loading project config: %w", err)
+		}
+		if len(configArgs) > 0 {
+			logInfo("Loaded project config for %s", ProjectDir(workspace))
 		}
 	}
 
-	// 5. Merge: user defaults → project config → CLI args (last wins).
 	merged := append(userArgs, configArgs...)
 	merged = append(merged, args...)
 
-	// 6. Resolve provider from merged flags (project config first, then CLI).
 	provider, err := resolveProviderFromArgs(merged)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	app.Provider = provider
 
-	// 7. Parse all flags from the merged list.
 	if err := app.ParseFlags(merged); err != nil {
-		return err
+		return nil, err
 	}
-
 	app.NoConfig = hasSubFlag(args, "--no-config")
-
-	// 8. Run.
-	return app.Run()
+	return app, nil
 }
 
 // hasSubFlag checks whether a flag appears in the args (before "--").

@@ -30,6 +30,7 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 		{"--no-yolo", func(a *App) bool { return !a.Yolo }},
 		{"--network-host", func(a *App) bool { return a.NetworkHost }},
 		{"--worktree", func(a *App) bool { return a.Worktree }},
+		{"--pool", func(a *App) bool { return a.PoolMode }},
 		{"--shell", func(a *App) bool { return a.Shell }},
 		{"--no-notify", func(a *App) bool { return a.NoNotify }},
 		{"--rebuild", func(a *App) bool { return a.Rebuild }},
@@ -1684,6 +1685,19 @@ func TestAssembleDockerArgs_ProviderFirewallDomains(t *testing.T) {
 		if !found {
 			t.Errorf("FirewallExtra missing provider domain %s", domain)
 		}
+	}
+}
+
+func TestResolvedPoolRuntimeStateHonorsExplicitOverrides(t *testing.T) {
+	t.Setenv("MITTENS_POOL_SESSION", "kitchen-explicit")
+	t.Setenv("MITTENS_POOL_STATE_DIR", "/tmp/kitchen-pool-state")
+
+	session, dir := resolvedPoolRuntimeState("/Users/test/repo")
+	if session != "kitchen-explicit" {
+		t.Fatalf("session = %q, want kitchen-explicit", session)
+	}
+	if dir != "/tmp/kitchen-pool-state" {
+		t.Fatalf("dir = %q, want /tmp/kitchen-pool-state", dir)
 	}
 }
 

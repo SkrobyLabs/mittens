@@ -3,6 +3,7 @@
 # firewall, DinD, and pluggable extensions.
 
 BINARY   := mittens
+KITCHEN_BINARY := kitchen
 MODULE   := github.com/SkrobyLabs/mittens
 
 # ─── Windows detection ───────────────────────────────────────────────────────
@@ -23,11 +24,17 @@ LDFLAGS  := -s -w \
 	-X '$(MODULE)/cmd/mittens.version=$(VERSION)' \
 	-X '$(MODULE)/cmd/mittens.commit=$(COMMIT)' \
 	-X '$(MODULE)/cmd/mittens.date=$(DATE)'
+KITCHEN_LDFLAGS := -s -w \
+	-X '$(MODULE)/cmd/kitchen.version=$(VERSION)' \
+	-X '$(MODULE)/cmd/kitchen.commit=$(COMMIT)' \
+	-X '$(MODULE)/cmd/kitchen.date=$(DATE)'
 
 # Disable Go's automatic VCS stamping — version info is already injected via
 # LDFLAGS above, and the automatic stamping can fail in some environments
 # (worktrees, detached HEAD, cross-compilation).
 export GOFLAGS := -buildvcs=false
+export GOMODCACHE ?= $(CURDIR)/.gomodcache
+export GOCACHE ?= $(CURDIR)/.gocache
 
 # Install destination: ~/.local on Linux (no sudo), /usr/local on macOS
 UNAME_S  := $(shell uname -s)
@@ -55,17 +62,25 @@ ifeq ($(OS),Windows_NT)
 # On Windows: build both the Linux binary and a .exe shim via WSL.
 #   mittens.exe       - Windows shim (run this from PowerShell/cmd)
 #   mittens-linux     - real binary (executed inside WSL by the shim)
-build: tidy init-binary # (internal) Build mittens for Windows (Linux binary + WSL shim + clipboard helper)
+build: tidy init-binary mittens kitchen # (internal) Build mittens and kitchen for Windows (Linux binaries + WSL shim + clipboard helper)
+mittens: ## Build the mittens binary
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux ./cmd/mittens
 	wsl.exe env GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY).exe ./cmd/shim
 	-@powershell -NoProfile -c "Stop-Process -Name '$(BINARY)-clipboard-helper' -Force -EA 0; sleep 1"
 	wsl.exe env GOOS=windows GOARCH=amd64 go build -o $(BINARY)-clipboard-helper.exe ./cmd/mittens-clipboard-helper
 	@echo "Built $(BINARY).exe (WSL shim) + $(BINARY)-linux + $(BINARY)-clipboard-helper.exe"
 	@echo "Run mittens.exe - it transparently uses WSL under the hood."
+kitchen: ## Build the kitchen binary
+	$(GO) build -ldflags "$(KITCHEN_LDFLAGS)" -o $(KITCHEN_BINARY)-linux ./cmd/kitchen
+	@echo "Built ./$(KITCHEN_BINARY)-linux"
 else
-build: tidy init-binary ## Build the mittens binary
+build: tidy init-binary mittens kitchen ## Build the mittens and kitchen binaries
+mittens: ## Build the mittens binary
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/mittens
 	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
+kitchen: ## Build the kitchen binary
+	$(GO) build -ldflags "$(KITCHEN_LDFLAGS)" -o $(KITCHEN_BINARY) ./cmd/kitchen
+	@echo "Built ./$(KITCHEN_BINARY)"
 endif
 
 # Container-side init binary (always linux, matches container arch).
@@ -77,6 +92,7 @@ init-binary: ## Build the container-side mittens-init binary
 install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
 	ln -sf $(CURDIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
+	ln -sf $(CURDIR)/$(KITCHEN_BINARY) $(PREFIX)/bin/$(KITCHEN_BINARY)
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 
@@ -202,6 +218,7 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 
 clean: ## Remove build artifacts
 	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux $(BINARY)-clipboard-helper.exe
+	rm -f $(KITCHEN_BINARY) $(KITCHEN_BINARY)-linux
 	rm -f cmd/mittens/container/$(INIT_BINARY)
 	rm -rf $(DIST)
 	$(GO) clean
@@ -218,4 +235,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary
+.PHONY: all build mittens kitchen init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary

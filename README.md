@@ -178,6 +178,73 @@ The container's `xdg-open` is replaced with a shim that forwards all URLs to the
 
 Run `mittens help` for all flags and commands, or `mittens init --help` for setup subcommands.
 
+## Kitchen — Parallel AI Orchestration
+
+Kitchen is a headless control plane that orchestrates parallel AI coding work across multiple Mittens containers. You describe what you want, a planner breaks it into tasks, and a deterministic scheduler dispatches them to workers running in isolated containers.
+
+```bash
+kitchen submit "Add typed parser errors"           # submit an idea
+kitchen plans                                       # see active plans
+kitchen approve PLAN_ID                             # approve a plan for execution
+kitchen status                                      # queue, workers, progress
+kitchen merge --squash parser-errors                # merge completed lineage
+```
+
+### How It Works
+
+```
+Operator                Kitchen                  Mittens Daemon
+   │                       │                          │
+   ├── submit idea ──────► │                          │
+   │                       ├── spawn planner ────────►│
+   │                       │◄── plan artifact ────────┤
+   │◄── review plan ────── │                          │
+   ├── approve ──────────► │                          │
+   │                       ├── create worktrees       │
+   │                       ├── spawn workers ────────►│
+   │                       │◄── task complete ────────┤
+   │                       ├── merge child branch     │
+   │                       ├── dispatch next task ───►│
+   │                       │         ...              │
+   │◄── plan complete ──── │                          │
+   ├── merge lineage ────► │                          │
+```
+
+- **Planner workers** break ideas into dependency-aware task graphs with complexity ratings
+- **Complexity routing** sends trivial tasks to fast/cheap models, hard tasks to capable/expensive ones
+- **Each task** runs in its own git worktree inside an isolated Mittens container
+- **Merge-back** with conflict detection, classification, and automatic retry from updated lineage HEAD
+- **Adversarial review** (`--review`) runs an independent reviewer worker before plan approval
+
+### Kitchen + Mittens Runtime
+
+Recommended operator flow:
+
+```bash
+# terminal 1: start Kitchen and supervise one daemon per configured provider
+kitchen serve
+
+# terminal 2: submit and operate on work
+kitchen submit "Add feature X"
+```
+
+Plain `kitchen serve` starts:
+
+- the Kitchen HTTP API
+- the scheduler and worker broker
+- one supervised Mittens runtime daemon per provider referenced by the
+  effective Kitchen routing config
+
+`kitchen serve --provider <name>` remains available as the single-provider
+debug/testing override.
+
+Manual `mittens daemon` startup still works as an advanced/debug path. The
+explicit external-runtime override is `MITTENS_RUNTIME_SOCKET` plus
+`MITTENS_POOL_TOKEN`, which tells `kitchen serve` to use that daemon
+instead of supervising child runtimes.
+
+See [Kitchen docs](docs/kitchen/README.md) for the full CLI reference, HTTP API, configuration, and runtime architecture.
+
 ## Debugging
 
 - `mittens logs [-f]` — view broker logs (credential sync, OAuth intercept, URL forwarding). `-f` follows the log.

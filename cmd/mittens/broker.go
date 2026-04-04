@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
 const oauthSuccessPage = `<!DOCTYPE html>
@@ -106,8 +108,28 @@ type HostBroker struct {
 	// Returns PNG bytes or nil if no image is available.
 	OnClipboardRead func() []byte
 
+	// OnPoolSpawn is called when Kitchen requests a worker container spawn.
+	OnPoolSpawn func(spec pool.WorkerSpec) (containerName, containerID string, err error)
+
+	// OnPoolKill is called when Kitchen requests a worker container kill.
+	OnPoolKill func(workerID string) error
+
+	// Runtime API callbacks exposed on /v1/workers/*.
+	OnRuntimeListWorkers       func() ([]pool.RuntimeWorker, error)
+	OnRuntimeGetWorker         func(workerID string) (*pool.RuntimeWorker, error)
+	OnRuntimeRecycleWorker     func(workerID string) error
+	OnRuntimeGetWorkerActivity func(workerID string) (*pool.WorkerActivity, []pool.WorkerActivityRecord, error)
+	OnRuntimeSubmitAssignment  func(workerID string, assignment pool.Assignment) error
+
+	// PoolToken is a separate token for pool management endpoints.
+	PoolToken string
+
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
+
+	runtimeNotifyMu   sync.RWMutex
+	runtimeNotifySubs map[int]chan pool.RuntimeEvent
+	runtimeNotifySeq  int
 }
 
 // refreshCoordTimeout is how long a refresh coordinator holds the lock before
@@ -119,10 +141,11 @@ const refreshCoordTimeout = 2 * time.Minute
 // stores are host credential stores used for bidirectional sync.
 func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker {
 	b := &HostBroker{
-		sockPath: sockPath,
-		creds:    seed,
-		stores:   stores,
-		done:     make(chan struct{}),
+		sockPath:          sockPath,
+		creds:             seed,
+		stores:            stores,
+		done:              make(chan struct{}),
+		runtimeNotifySubs: make(map[int]chan pool.RuntimeEvent),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/open", b.withAuth(b.handleOpen))
@@ -130,6 +153,14 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/refresh", b.withAuth(b.handleRefresh))
 	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
 	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
+	mux.HandleFunc("POST /v1/workers", b.withPoolAuth(b.handleRuntimeSpawnWorker))
+	mux.HandleFunc("DELETE /v1/workers/{id}", b.withPoolAuth(b.handleRuntimeKillWorker))
+	mux.HandleFunc("GET /v1/workers", b.withPoolAuth(b.handleRuntimeWorkers))
+	mux.HandleFunc("GET /v1/workers/{id}", b.withPoolAuth(b.handleRuntimeWorker))
+	mux.HandleFunc("POST /v1/workers/{id}/recycle", b.withPoolAuth(b.handleRuntimeRecycleWorker))
+	mux.HandleFunc("GET /v1/workers/{id}/activity", b.withPoolAuth(b.handleRuntimeWorkerActivity))
+	mux.HandleFunc("POST /v1/workers/{id}/assignments", b.withPoolAuth(b.handleRuntimeWorkerAssignment))
+	mux.HandleFunc("GET /v1/events", b.withPoolAuth(b.handleRuntimeEvents))
 	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b
@@ -512,6 +543,24 @@ func (b *HostBroker) withAuth(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// withPoolAuth wraps an HTTP handler with both standard auth and an additional
+// pool-management token check. Only Kitchen receives the pool token.
+func (b *HostBroker) withPoolAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !b.authorize(w, r) {
+			return
+		}
+		if b.PoolToken != "" {
+			pt := r.Header.Get("X-Mittens-Pool-Token")
+			if subtle.ConstantTimeCompare([]byte(pt), []byte(b.PoolToken)) != 1 {
+				http.Error(w, "forbidden: missing or invalid pool token", http.StatusForbidden)
+				return
+			}
+		}
+		handler(w, r)
+	}
+}
+
 func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {
 	if b.AuthToken == "" {
 		return true
@@ -521,6 +570,44 @@ func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {
 	}
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
+}
+
+func (b *HostBroker) subscribeRuntimeEvents(buffer int) (<-chan pool.RuntimeEvent, func()) {
+	if buffer <= 0 {
+		buffer = 1
+	}
+	ch := make(chan pool.RuntimeEvent, buffer)
+
+	b.runtimeNotifyMu.Lock()
+	id := b.runtimeNotifySeq
+	b.runtimeNotifySeq++
+	b.runtimeNotifySubs[id] = ch
+	b.runtimeNotifyMu.Unlock()
+
+	cancel := func() {
+		b.runtimeNotifyMu.Lock()
+		sub, ok := b.runtimeNotifySubs[id]
+		if ok {
+			delete(b.runtimeNotifySubs, id)
+			close(sub)
+		}
+		b.runtimeNotifyMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (b *HostBroker) sendRuntimeEvent(event pool.RuntimeEvent) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	b.runtimeNotifyMu.RLock()
+	defer b.runtimeNotifyMu.RUnlock()
+	for _, ch := range b.runtimeNotifySubs {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
 }
 
 // interceptOAuthCallback starts a temporary HTTP server on the host at the

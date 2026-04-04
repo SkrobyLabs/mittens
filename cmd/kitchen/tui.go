@@ -1,0 +1,1544 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
+)
+
+const tuiRefreshInterval = 2 * time.Second
+
+type kitchenTUIBackend interface {
+	Label() string
+	Status() (tuiStatusSnapshot, error)
+	ListPlans() ([]PlanRecord, error)
+	PlanDetail(planID string) (PlanDetail, error)
+	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
+	ListQuestions() ([]pool.Question, error)
+	SubmitIdea(idea string) (string, error)
+	ApprovePlan(planID string) error
+	CancelPlan(planID string) error
+	DeletePlan(planID string) error
+	CancelTask(taskID string) error
+	RetryTask(taskID string, requireFreshWorker bool) error
+	ReplanPlan(planID, reason string) (string, error)
+	MergeCheck(lineage string) (string, error)
+	MergeLineage(lineage string) (string, error)
+}
+
+type tuiStatusSnapshot struct {
+	RepoPath string         `json:"repoPath"`
+	Anchor   PlanAnchor     `json:"anchor"`
+	Lineages []LineageState `json:"lineages"`
+	Plans    []PlanProgress `json:"plans"`
+	Queue    struct {
+		AliveWorkers     int                `json:"aliveWorkers"`
+		MaxWorkers       int                `json:"maxWorkers"`
+		PendingQuestions int                `json:"pendingQuestions"`
+		Tasks            []pool.TaskSummary `json:"tasks"`
+	} `json:"queue"`
+	Workers   []pool.Worker          `json:"workers"`
+	Providers map[string]HealthEntry `json:"providers"`
+}
+
+type kitchenAPIBackend struct {
+	client *kitchenAPIClient
+}
+
+func (b *kitchenAPIBackend) Label() string { return "server" }
+func (b *kitchenAPIBackend) Status() (tuiStatusSnapshot, error) {
+	resp, err := b.client.Status(-1)
+	if err != nil {
+		return tuiStatusSnapshot{}, err
+	}
+	return decodeTUIStatus(resp)
+}
+func (b *kitchenAPIBackend) ListPlans() ([]PlanRecord, error) { return b.client.ListPlans(true) }
+func (b *kitchenAPIBackend) PlanDetail(planID string) (PlanDetail, error) {
+	return b.client.PlanDetail(planID)
+}
+func (b *kitchenAPIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
+	return b.client.TaskActivity(taskID)
+}
+func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
+func (b *kitchenAPIBackend) SubmitIdea(idea string) (string, error) {
+	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1)
+	if err != nil {
+		return "", err
+	}
+	planID, _ := resp["planId"].(string)
+	if strings.TrimSpace(planID) == "" {
+		return "", fmt.Errorf("submit response missing planId")
+	}
+	return planID, nil
+}
+func (b *kitchenAPIBackend) ApprovePlan(planID string) error {
+	_, err := b.client.ApprovePlan(planID)
+	return err
+}
+func (b *kitchenAPIBackend) CancelPlan(planID string) error {
+	_, err := b.client.CancelPlan(planID)
+	return err
+}
+func (b *kitchenAPIBackend) DeletePlan(planID string) error {
+	_, err := b.client.DeletePlan(planID)
+	return err
+}
+func (b *kitchenAPIBackend) CancelTask(taskID string) error {
+	_, err := b.client.CancelTask(taskID)
+	return err
+}
+func (b *kitchenAPIBackend) RetryTask(taskID string, requireFreshWorker bool) error {
+	_, err := b.client.RetryTask(taskID, requireFreshWorker)
+	return err
+}
+func (b *kitchenAPIBackend) ReplanPlan(planID, reason string) (string, error) {
+	resp, err := b.client.ReplanPlan(planID, reason)
+	if err != nil {
+		return "", err
+	}
+	newPlanID, _ := resp["newPlanId"].(string)
+	if strings.TrimSpace(newPlanID) == "" {
+		return "", fmt.Errorf("replan response missing newPlanId")
+	}
+	return newPlanID, nil
+}
+func (b *kitchenAPIBackend) MergeCheck(lineage string) (string, error) {
+	resp, err := b.client.MergeCheck(lineage)
+	if err != nil {
+		return "", err
+	}
+	return summarizeMergeCheck(resp), nil
+}
+func (b *kitchenAPIBackend) MergeLineage(lineage string) (string, error) {
+	resp, err := b.client.MergeLineage(lineage, "squash", false)
+	if err != nil {
+		return "", err
+	}
+	return summarizeMerge(resp), nil
+}
+
+type kitchenLocalBackend struct {
+	repoPath string
+}
+
+func (b *kitchenLocalBackend) Label() string { return "local" }
+
+func (b *kitchenLocalBackend) withKitchen(fn func(*Kitchen) error) error {
+	k, closeFn, err := openKitchen(b.repoPath)
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	return fn(k)
+}
+
+func (b *kitchenLocalBackend) Status() (tuiStatusSnapshot, error) {
+	var snapshot tuiStatusSnapshot
+	err := b.withKitchen(func(k *Kitchen) error {
+		resp, err := k.StatusSnapshot()
+		if err != nil {
+			return err
+		}
+		snapshot, err = decodeTUIStatus(resp)
+		return err
+	})
+	return snapshot, err
+}
+
+func (b *kitchenLocalBackend) ListPlans() ([]PlanRecord, error) {
+	var plans []PlanRecord
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		plans, err = k.ListPlans(true)
+		return err
+	})
+	return plans, err
+}
+
+func (b *kitchenLocalBackend) PlanDetail(planID string) (PlanDetail, error) {
+	var detail PlanDetail
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		detail, err = k.PlanDetail(planID)
+		return err
+	})
+	return detail, err
+}
+
+func (b *kitchenLocalBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
+	var transcript []pool.WorkerActivityRecord
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		transcript, err = k.TaskActivity(taskID)
+		return err
+	})
+	return transcript, err
+}
+
+func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
+	var questions []pool.Question
+	err := b.withKitchen(func(k *Kitchen) error {
+		questions = k.ListQuestions()
+		return nil
+	})
+	return questions, err
+}
+
+func (b *kitchenLocalBackend) SubmitIdea(idea string) (string, error) {
+	var planID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1)
+		if err != nil {
+			return err
+		}
+		planID = bundle.Plan.PlanID
+		return nil
+	})
+	return planID, err
+}
+
+func (b *kitchenLocalBackend) ApprovePlan(planID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.ApprovePlan(planID)
+	})
+}
+
+func (b *kitchenLocalBackend) CancelPlan(planID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.CancelPlan(planID)
+	})
+}
+
+func (b *kitchenLocalBackend) DeletePlan(planID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.DeletePlan(planID)
+	})
+}
+
+func (b *kitchenLocalBackend) CancelTask(taskID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.CancelTask(taskID)
+	})
+}
+
+func (b *kitchenLocalBackend) RetryTask(taskID string, requireFreshWorker bool) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.RetryTask(taskID, requireFreshWorker)
+	})
+}
+
+func (b *kitchenLocalBackend) ReplanPlan(planID, reason string) (string, error) {
+	var newPlanID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		newPlanID, err = k.Replan(planID, reason)
+		return err
+	})
+	return newPlanID, err
+}
+
+func (b *kitchenLocalBackend) MergeCheck(lineage string) (string, error) {
+	var summary string
+	err := b.withKitchen(func(k *Kitchen) error {
+		gitMgr, err := k.gitManager()
+		if err != nil {
+			return err
+		}
+		baseBranch := k.baseBranchForLineage(lineage)
+		clean, conflicts, err := gitMgr.MergeCheck(lineage, baseBranch)
+		if err != nil {
+			return err
+		}
+		summary = fmt.Sprintf("merge-check: clean=%t base=%s", clean, baseBranch)
+		if len(conflicts) > 0 {
+			summary += " conflicts=" + strings.Join(conflicts, ", ")
+		}
+		return nil
+	})
+	return summary, err
+}
+
+func (b *kitchenLocalBackend) MergeLineage(lineage string) (string, error) {
+	var summary string
+	err := b.withKitchen(func(k *Kitchen) error {
+		resp, err := k.MergeLineage(lineage, "squash")
+		if err != nil {
+			return err
+		}
+		summary = summarizeMerge(resp)
+		return nil
+	})
+	return summary, err
+}
+
+func openKitchenTUIBackend(repoPath string) (kitchenTUIBackend, error) {
+	client, ok, err := openKitchenAPIClient(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return &kitchenAPIBackend{client: client}, nil
+	}
+	return &kitchenLocalBackend{repoPath: repoPath}, nil
+}
+
+func decodeTUIStatus(src map[string]any) (tuiStatusSnapshot, error) {
+	var snapshot tuiStatusSnapshot
+	data, err := json.Marshal(src)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
+type kitchenTUILoadedMsg struct {
+	status    tuiStatusSnapshot
+	plans     []PlanRecord
+	questions []pool.Question
+	detail    *PlanDetail
+	taskLog   []pool.WorkerActivityRecord
+	err       error
+}
+
+type kitchenTUIActionMsg struct {
+	status         string
+	selectedPlanID string
+	err            error
+}
+
+type kitchenTUITickMsg time.Time
+
+type kitchenTUIInputMode string
+type kitchenTUILeftMode string
+type kitchenTUITaskPaneMode string
+
+const (
+	kitchenTUIInputNone   kitchenTUIInputMode = ""
+	kitchenTUIInputSubmit kitchenTUIInputMode = "submit"
+	kitchenTUIInputReplan kitchenTUIInputMode = "replan"
+
+	kitchenTUILeftPlans kitchenTUILeftMode = "plans"
+	kitchenTUILeftTasks kitchenTUILeftMode = "tasks"
+
+	kitchenTUITaskPaneDetail kitchenTUITaskPaneMode = "detail"
+	kitchenTUITaskPaneLogs   kitchenTUITaskPaneMode = "logs"
+)
+
+type kitchenTUIPlanItem struct {
+	Record   PlanRecord
+	Progress *PlanProgress
+	Active   bool
+}
+
+type kitchenTUITaskItem struct {
+	ID         string
+	RuntimeID  string
+	Kind       string
+	Title      string
+	State      string
+	WorkerID   string
+	Complexity string
+	Prompt     string
+	Summary    string
+}
+
+type kitchenTUIModel struct {
+	backend           kitchenTUIBackend
+	width             int
+	height            int
+	status            tuiStatusSnapshot
+	plans             []kitchenTUIPlanItem
+	tasks             []kitchenTUITaskItem
+	questions         []pool.Question
+	selectedPlan      int
+	selectedTask      int
+	leftMode          kitchenTUILeftMode
+	taskPaneMode      kitchenTUITaskPaneMode
+	detail            *PlanDetail
+	taskLog           []pool.WorkerActivityRecord
+	input             textinput.Model
+	inputMode         kitchenTUIInputMode
+	flash             string
+	flashUntil        time.Time
+	errText           string
+	loading           bool
+	pendingSelectedID string
+}
+
+func runKitchenTUI(repoPath string) error {
+	if !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("interactive terminal required; use kitchen status/plan/evidence in headless mode")
+	}
+	backend, err := openKitchenTUIBackend(repoPath)
+	if err != nil {
+		return err
+	}
+	input := textinput.New()
+	input.CharLimit = 1000
+	input.Prompt = "> "
+	model := kitchenTUIModel{
+		backend:      backend,
+		input:        input,
+		loading:      true,
+		leftMode:     kitchenTUILeftPlans,
+		taskPaneMode: kitchenTUITaskPaneDetail,
+	}
+	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
+	return err
+}
+
+func (m kitchenTUIModel) Init() tea.Cmd {
+	return tea.Batch(m.loadCmd(), kitchenTUITick())
+}
+
+func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		if m.inputMode != kitchenTUIInputNone {
+			m.input.Width = max(20, msg.Width-14)
+		}
+		return m, nil
+	case kitchenTUILoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.errText = ""
+		m.status = msg.status
+		m.plans = buildPlanItems(msg.plans, msg.status)
+		m.questions = append([]pool.Question(nil), msg.questions...)
+		m.syncPlanSelection()
+		m.detail = msg.detail
+		m.taskLog = append([]pool.WorkerActivityRecord(nil), msg.taskLog...)
+		m.tasks = buildTaskItems(m.detail, m.status)
+		if m.selectedTask >= len(m.tasks) {
+			m.selectedTask = max(0, len(m.tasks)-1)
+		}
+		if m.leftMode == kitchenTUILeftTasks && len(m.tasks) == 0 {
+			m.leftMode = kitchenTUILeftPlans
+			m.taskPaneMode = kitchenTUITaskPaneDetail
+			m.taskLog = nil
+		}
+		if m.flash == "refreshing..." {
+			m.flash = ""
+			m.flashUntil = time.Time{}
+		}
+		return m, nil
+	case kitchenTUIActionMsg:
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.closeInput()
+		m.errText = ""
+		m.flash = msg.status
+		m.flashUntil = time.Now().Add(4 * time.Second)
+		if strings.TrimSpace(msg.selectedPlanID) != "" {
+			m.pendingSelectedID = msg.selectedPlanID
+		}
+		return m, m.loadCmd()
+	case kitchenTUITickMsg:
+		if !m.flashUntil.IsZero() && time.Now().After(m.flashUntil) {
+			m.flash = ""
+			m.flashUntil = time.Time{}
+		}
+		return m, tea.Batch(m.loadCmd(), kitchenTUITick())
+	case tea.KeyMsg:
+		if m.inputMode != kitchenTUIInputNone {
+			return m.updateInput(msg)
+		}
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "r":
+			m.flash = "refreshing..."
+			m.flashUntil = time.Now().Add(5 * time.Second)
+			return m, m.loadCmd()
+		case "up", "k":
+			if m.leftMode == kitchenTUILeftTasks {
+				if m.selectedTask > 0 {
+					m.selectedTask--
+				}
+				if m.taskPaneMode == kitchenTUITaskPaneLogs {
+					return m, m.loadCmd()
+				}
+				return m, nil
+			}
+			if m.selectedPlan > 0 {
+				m.selectedPlan--
+				m.pendingSelectedID = m.selectedPlanID()
+				m.selectedTask = 0
+				return m, m.loadCmd()
+			}
+			return m, nil
+		case "down", "j":
+			if m.leftMode == kitchenTUILeftTasks {
+				if m.selectedTask < len(m.tasks)-1 {
+					m.selectedTask++
+				}
+				if m.taskPaneMode == kitchenTUITaskPaneLogs {
+					return m, m.loadCmd()
+				}
+				return m, nil
+			}
+			if m.selectedPlan < len(m.plans)-1 {
+				m.selectedPlan++
+				m.pendingSelectedID = m.selectedPlanID()
+				m.selectedTask = 0
+				return m, m.loadCmd()
+			}
+			return m, nil
+		case "enter", "right", "l":
+			if m.leftMode == kitchenTUILeftPlans && len(m.tasks) > 0 {
+				m.leftMode = kitchenTUILeftTasks
+				m.taskPaneMode = kitchenTUITaskPaneDetail
+				return m, nil
+			}
+			if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneDetail && len(m.tasks) > 0 {
+				m.taskPaneMode = kitchenTUITaskPaneLogs
+				return m, m.loadCmd()
+			}
+			return m, nil
+		case "left", "h", "backspace", "esc":
+			if m.leftMode == kitchenTUILeftTasks {
+				if m.taskPaneMode == kitchenTUITaskPaneLogs {
+					m.taskPaneMode = kitchenTUITaskPaneDetail
+					return m, nil
+				}
+				m.leftMode = kitchenTUILeftPlans
+				m.taskPaneMode = kitchenTUITaskPaneDetail
+			}
+			return m, nil
+		case "n":
+			m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+			return m, nil
+		case "a":
+			if plan := m.selectedPlanItem(); plan != nil {
+				if planDisplayState(*plan) == planStatePendingApproval {
+					return m, m.actionCmd(func() (string, string, error) {
+						err := m.backend.ApprovePlan(plan.Record.PlanID)
+						return "approved " + plan.Record.PlanID, plan.Record.PlanID, err
+					})
+				}
+				m.flash = "selected plan is not awaiting approval"
+				m.flashUntil = time.Now().Add(4 * time.Second)
+			}
+			return m, nil
+		case "c":
+			if m.leftMode == kitchenTUILeftTasks {
+				if task := m.selectedTaskItem(); task != nil {
+					if !m.canCancelSelectedTask() {
+						m.flash = "selected task cannot be cancelled"
+						m.flashUntil = time.Now().Add(4 * time.Second)
+						return m, nil
+					}
+					return m, m.actionCmd(func() (string, string, error) {
+						err := m.backend.CancelTask(task.RuntimeID)
+						return "cancelled " + task.RuntimeID, m.selectedPlanID(), err
+					})
+				}
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				if !m.canCancelSelectedPlan() {
+					m.flash = "selected plan cannot be cancelled"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.CancelPlan(plan.Record.PlanID)
+					return "cancelled " + plan.Record.PlanID, plan.Record.PlanID, err
+				})
+			}
+			return m, nil
+		case "D":
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				nextPlanID := m.nextPlanSelectionAfterDeletion()
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.DeletePlan(plan.Record.PlanID)
+					return "deleted " + plan.Record.PlanID, nextPlanID, err
+				})
+			}
+			return m, nil
+		case "p":
+			if m.selectedPlanItem() != nil {
+				m.openInput(kitchenTUIInputReplan, "Replan reason", "Need a narrower retry")
+			}
+			return m, nil
+		case "m":
+			if plan := m.selectedPlanItem(); plan != nil {
+				return m, m.actionCmd(func() (string, string, error) {
+					summary, err := m.backend.MergeCheck(plan.Record.Lineage)
+					return summary, plan.Record.PlanID, err
+				})
+			}
+			return m, nil
+		case "M":
+			if plan := m.selectedPlanItem(); plan != nil {
+				return m, m.actionCmd(func() (string, string, error) {
+					summary, err := m.backend.MergeLineage(plan.Record.Lineage)
+					return summary, plan.Record.PlanID, err
+				})
+			}
+			return m, nil
+		case "R":
+			if m.leftMode != kitchenTUILeftTasks {
+				return m, nil
+			}
+			if task := m.selectedTaskItem(); task != nil {
+				if !m.canRetrySelectedTask() {
+					m.flash = "selected task cannot be retried"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.RetryTask(task.RuntimeID, true)
+					return m.selectedTaskRetryStatus() + " " + task.RuntimeID, m.selectedPlanID(), err
+				})
+			}
+			return m, nil
+		case "U":
+			if m.leftMode != kitchenTUILeftTasks {
+				return m, nil
+			}
+			if task := m.selectedTaskItem(); task != nil {
+				if !m.canRetrySelectedTask() {
+					m.flash = "selected task cannot be retried"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.RetryTask(task.RuntimeID, false)
+					return m.selectedTaskRetryStatus() + " " + task.RuntimeID + " (reuse allowed)", m.selectedPlanID(), err
+				})
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeInput()
+		return m, nil
+	case "enter":
+		value := strings.TrimSpace(m.input.Value())
+		switch m.inputMode {
+		case kitchenTUIInputSubmit:
+			if value == "" {
+				m.errText = "idea must not be empty"
+				return m, nil
+			}
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				planID, err := m.backend.SubmitIdea(value)
+				if err != nil {
+					return "", "", err
+				}
+				return "submitted " + planID, planID, nil
+			})
+		case kitchenTUIInputReplan:
+			plan := m.selectedPlanItem()
+			if plan == nil {
+				m.closeInput()
+				return m, nil
+			}
+			if value == "" {
+				value = "Retry with revised plan."
+			}
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				newPlanID, err := m.backend.ReplanPlan(plan.Record.PlanID, value)
+				if err != nil {
+					return "", "", err
+				}
+				return "replanned as " + newPlanID, newPlanID, nil
+			})
+		}
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m kitchenTUIModel) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Loading Kitchen..."
+	}
+
+	header := m.renderHeader()
+	footer := m.renderFooter()
+	bodyHeight := max(10, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-2)
+	leftWidth := max(54, (m.width*2)/5)
+	rightWidth := max(58, m.width-leftWidth-4)
+
+	left := m.renderLeftPane(leftWidth, bodyHeight)
+	right := m.renderDetailPane(rightWidth, bodyHeight)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+
+	if m.inputMode != kitchenTUIInputNone {
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, m.renderInputBar(), footer)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m *kitchenTUIModel) syncPlanSelection() {
+	if len(m.plans) == 0 {
+		m.selectedPlan = 0
+		m.detail = nil
+		m.tasks = nil
+		return
+	}
+	target := strings.TrimSpace(m.pendingSelectedID)
+	if target != "" {
+		for i, plan := range m.plans {
+			if plan.Record.PlanID == target {
+				m.selectedPlan = i
+				m.pendingSelectedID = ""
+				break
+			}
+		}
+	}
+	if m.selectedPlan >= len(m.plans) {
+		m.selectedPlan = len(m.plans) - 1
+	}
+}
+
+func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholder string) {
+	m.inputMode = mode
+	m.input.Prompt = prompt + ": "
+	m.input.Placeholder = placeholder
+	m.input.SetValue("")
+	m.input.CursorEnd()
+	m.input.Focus()
+}
+
+func (m *kitchenTUIModel) closeInput() {
+	m.inputMode = kitchenTUIInputNone
+	m.input.Blur()
+	m.input.SetValue("")
+}
+
+func (m kitchenTUIModel) selectedPlanID() string {
+	if plan := m.selectedPlanItem(); plan != nil {
+		return plan.Record.PlanID
+	}
+	return ""
+}
+
+func (m kitchenTUIModel) selectedPlanItem() *kitchenTUIPlanItem {
+	if m.selectedPlan < 0 || m.selectedPlan >= len(m.plans) {
+		return nil
+	}
+	return &m.plans[m.selectedPlan]
+}
+
+func (m kitchenTUIModel) selectedTaskItem() *kitchenTUITaskItem {
+	if m.selectedTask < 0 || m.selectedTask >= len(m.tasks) {
+		return nil
+	}
+	return &m.tasks[m.selectedTask]
+}
+
+func (m kitchenTUIModel) canApproveSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	return plan != nil && planDisplayState(*plan) == planStatePendingApproval
+}
+
+func (m kitchenTUIModel) canCancelSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil {
+		return false
+	}
+	switch planDisplayState(*plan) {
+	case "", "cancelled", planStateCompleted, planStateMerged, planStateClosed, planStateRejected:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m kitchenTUIModel) canCancelSelectedTask() bool {
+	task := m.selectedTaskItem()
+	if task == nil || strings.TrimSpace(task.RuntimeID) == "" {
+		return false
+	}
+	switch strings.TrimSpace(task.State) {
+	case "", "planned", pool.TaskCompleted, pool.TaskAccepted, pool.TaskFailed, pool.TaskCanceled, pool.TaskRejected, pool.TaskEscalated:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m kitchenTUIModel) canRetrySelectedTask() bool {
+	task := m.selectedTaskItem()
+	if task == nil {
+		return false
+	}
+	switch strings.TrimSpace(task.State) {
+	case pool.TaskFailed, pool.TaskCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m kitchenTUIModel) selectedTaskRetryLabel() string {
+	task := m.selectedTaskItem()
+	if task != nil && strings.TrimSpace(task.State) == pool.TaskCompleted {
+		return "again"
+	}
+	return "retry"
+}
+
+func (m kitchenTUIModel) selectedTaskRetryStatus() string {
+	task := m.selectedTaskItem()
+	if task != nil && strings.TrimSpace(task.State) == pool.TaskCompleted {
+		return "queued again"
+	}
+	return "retried"
+}
+
+func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil || strings.TrimSpace(plan.Record.Lineage) == "" {
+		return false
+	}
+	switch planDisplayState(*plan) {
+	case "", "cancelled", planStatePlanning, planStateReviewing, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m kitchenTUIModel) canMergeSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	return plan != nil && strings.TrimSpace(plan.Record.Lineage) != "" && planDisplayState(*plan) == planStateCompleted
+}
+
+func (m kitchenTUIModel) nextPlanSelectionAfterDeletion() string {
+	if len(m.plans) <= 1 {
+		return ""
+	}
+	if m.selectedPlan > 0 && m.selectedPlan < len(m.plans) {
+		return m.plans[m.selectedPlan-1].Record.PlanID
+	}
+	if m.selectedPlan+1 < len(m.plans) {
+		return m.plans[m.selectedPlan+1].Record.PlanID
+	}
+	return ""
+}
+
+func (m kitchenTUIModel) footerActions() []string {
+	if m.inputMode != kitchenTUIInputNone {
+		switch m.inputMode {
+		case kitchenTUIInputSubmit:
+			return []string{"enter submit", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputReplan:
+			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
+		default:
+			return []string{"esc cancel", "ctrl+c quit"}
+		}
+	}
+
+	actions := []string{"n submit"}
+	if m.leftMode == kitchenTUILeftTasks {
+		if m.canCancelSelectedTask() {
+			actions = append(actions, "c cancel")
+		}
+		if m.canRetrySelectedTask() {
+			actions = append(actions, "R "+m.selectedTaskRetryLabel())
+			actions = append(actions, "U reuse")
+		}
+	} else {
+		if m.canApproveSelectedPlan() {
+			actions = append(actions, "a approve")
+		}
+		if m.canCancelSelectedPlan() {
+			actions = append(actions, "c cancel")
+		}
+		if m.selectedPlanItem() != nil {
+			actions = append(actions, "p replan")
+			actions = append(actions, "D delete")
+			if m.canCheckMergeSelectedPlan() {
+				actions = append(actions, "m check")
+			}
+			if m.canMergeSelectedPlan() {
+				actions = append(actions, "M merge")
+			}
+		}
+	}
+	actions = append(actions, "r refresh", "q quit")
+	return actions
+}
+
+func (m kitchenTUIModel) loadCmd() tea.Cmd {
+	selectedPlanID := m.selectedPlanID()
+	selectedTaskID := ""
+	if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneLogs {
+		if task := m.selectedTaskItem(); task != nil {
+			selectedTaskID = strings.TrimSpace(task.RuntimeID)
+		}
+	}
+	if strings.TrimSpace(m.pendingSelectedID) != "" {
+		selectedPlanID = m.pendingSelectedID
+	}
+	return func() tea.Msg {
+		status, err := m.backend.Status()
+		if err != nil {
+			return kitchenTUILoadedMsg{err: err}
+		}
+		plans, err := m.backend.ListPlans()
+		if err != nil {
+			return kitchenTUILoadedMsg{err: err}
+		}
+		questions, err := m.backend.ListQuestions()
+		if err != nil {
+			return kitchenTUILoadedMsg{err: err}
+		}
+		planID := strings.TrimSpace(selectedPlanID)
+		if planID != "" {
+			found := false
+			for _, plan := range plans {
+				if plan.PlanID == planID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				planID = ""
+				selectedTaskID = ""
+			}
+		}
+		if planID == "" && len(plans) > 0 {
+			planID = plans[0].PlanID
+		}
+		var detail *PlanDetail
+		if planID != "" {
+			got, err := m.backend.PlanDetail(planID)
+			if err != nil {
+				return kitchenTUILoadedMsg{err: err}
+			}
+			detail = &got
+		}
+		var taskLog []pool.WorkerActivityRecord
+		if selectedTaskID != "" {
+			taskLog, err = m.backend.TaskActivity(selectedTaskID)
+			if err != nil {
+				return kitchenTUILoadedMsg{err: err}
+			}
+		}
+		return kitchenTUILoadedMsg{
+			status:    status,
+			plans:     plans,
+			questions: questions,
+			detail:    detail,
+			taskLog:   taskLog,
+		}
+	}
+}
+
+func (m kitchenTUIModel) actionCmd(fn func() (string, string, error)) tea.Cmd {
+	return func() tea.Msg {
+		status, selectedPlanID, err := fn()
+		return kitchenTUIActionMsg{
+			status:         status,
+			selectedPlanID: selectedPlanID,
+			err:            err,
+		}
+	}
+}
+
+func (m kitchenTUIModel) renderHeader() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24")).Padding(0, 1)
+	metaStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	repo := m.status.RepoPath
+	if repo == "" {
+		repo = "."
+	}
+	branch := m.status.Anchor.Branch
+	if branch == "" {
+		branch = "unknown"
+	}
+	headline := fmt.Sprintf("Kitchen  %s  %s@%s", repo, branch, shortenSHA(m.status.Anchor.Commit))
+	summary := fmt.Sprintf("backend=%s  workers=%d/%d  pendingQuestions=%d  plans=%d", m.backend.Label(), m.status.Queue.AliveWorkers, m.status.Queue.MaxWorkers, len(m.questions), len(m.plans))
+	return lipgloss.JoinVertical(lipgloss.Left, titleStyle.Render(headline), metaStyle.Render(summary))
+}
+
+func (m kitchenTUIModel) renderLeftPane(width, height int) string {
+	if m.leftMode == kitchenTUILeftTasks {
+		return m.renderTasksPane(width, height)
+	}
+	return m.renderPlansPane(width, height)
+}
+
+func (m kitchenTUIModel) renderPlansPane(width, height int) string {
+	title := paneTitle("Plans", true)
+	if len(m.plans) == 0 {
+		return paneBox(width, height, title+"\n\nNo plans.")
+	}
+	innerWidth := max(20, width-6)
+	lines := make([]string, 0, len(m.plans)*2)
+	for i, plan := range m.plans {
+		state := padRight(compactState(planDisplayState(plan)), 6)
+		marker := rowMarker(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans)
+		primary := truncate(fmt.Sprintf("%s %s %s", marker, state, plan.Record.Title), innerWidth)
+		secondary := truncate(fmt.Sprintf("    lineage: %s  plan: %s", firstNonEmpty(plan.Record.Lineage, "-"), plan.Record.PlanID), innerWidth)
+		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, primary, secondary)...)
+	}
+	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+}
+
+func (m kitchenTUIModel) renderTasksPane(width, height int) string {
+	titleText := "Tasks"
+	if plan := m.selectedPlanItem(); plan != nil {
+		titleText = "Tasks · " + truncate(plan.Record.Title, max(10, width-18))
+	}
+	title := paneTitle(titleText, true)
+	if len(m.tasks) == 0 {
+		return paneBox(width, height, title+"\n\nSelected plan has no task list.")
+	}
+	innerWidth := max(20, width-6)
+	lines := make([]string, 0, len(m.tasks)*2)
+	for i, task := range m.tasks {
+		marker := rowMarker(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks)
+		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 6), task.Title), innerWidth)
+		secondary := truncate("    "+task.ID+" · "+task.Kind, innerWidth)
+		lines = append(lines, renderSelectableRow(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks, primary, secondary)...)
+	}
+	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+}
+
+func (m kitchenTUIModel) renderDetailPane(width, height int) string {
+	if m.detail == nil {
+		return paneBox(width, height, "Detail\n\nNo selected plan.")
+	}
+	innerWidth := max(24, width-6)
+	var lines []string
+	if m.leftMode == kitchenTUILeftTasks {
+		if m.taskPaneMode == kitchenTUITaskPaneLogs {
+			lines = m.renderTaskLogLines(innerWidth)
+		} else {
+			lines = m.renderTaskDetailLines(innerWidth)
+		}
+	} else {
+		lines = m.renderPlanDetailLines(innerWidth)
+	}
+	return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+}
+
+func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
+	detail := *m.detail
+	state := firstNonEmpty(detail.Execution.State, detail.Plan.State)
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render(detail.Plan.Title),
+		fmt.Sprintf("Plan ID: %s", detail.Plan.PlanID),
+		fmt.Sprintf("State: %s", state),
+		fmt.Sprintf("Phase: %s", detail.Progress.Phase),
+		fmt.Sprintf("Lineage: %s", detail.Plan.Lineage),
+		fmt.Sprintf("Anchor: %s@%s", detail.Plan.Anchor.Branch, shortenSHA(detail.Plan.Anchor.Commit)),
+		fmt.Sprintf("Tasks: %d", len(m.tasks)),
+		fmt.Sprintf("Pending questions: %s", pendingQuestionSummaryForPlan(detail.Plan.PlanID, m.questions)),
+		"",
+		"Summary:",
+	}
+	lines = append(lines, wrapText(firstNonEmpty(detail.Plan.Summary, "-"), innerWidth)...)
+	lines = append(lines,
+		"",
+		fmt.Sprintf("Active tasks: %s", joinOrDash(detail.Progress.ActiveTaskIDs)),
+		fmt.Sprintf("Completed tasks: %s", joinOrDash(detail.Progress.CompletedTaskIDs)),
+		fmt.Sprintf("Failed tasks: %s", joinOrDash(detail.Progress.FailedTaskIDs)),
+		"",
+		"Recent history:",
+	)
+	history := detail.History
+	if len(history) > 6 {
+		history = history[len(history)-6:]
+	}
+	if len(history) == 0 {
+		lines = append(lines, "No history.")
+	} else {
+		for _, entry := range history {
+			lines = append(lines, fmt.Sprintf("%s: %s", entry.Type, summarizePlanHistoryEntry(entry)))
+		}
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
+	task := m.selectedTaskItem()
+	if task == nil {
+		return []string{"No selected task."}
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render(task.Title),
+		fmt.Sprintf("Task ID: %s", task.ID),
+		fmt.Sprintf("Runtime ID: %s", task.RuntimeID),
+		fmt.Sprintf("Kind: %s", task.Kind),
+		fmt.Sprintf("State: %s", task.State),
+	}
+	if task.WorkerID != "" {
+		lines = append(lines, fmt.Sprintf("Worker: %s", task.WorkerID))
+	}
+	if task.Complexity != "" {
+		lines = append(lines, fmt.Sprintf("Complexity: %s", task.Complexity))
+	}
+	if task.Summary != "" {
+		lines = append(lines, "", "Latest summary:")
+		lines = append(lines, wrapText(task.Summary, innerWidth)...)
+	}
+	if task.Prompt != "" {
+		lines = append(lines, "", "Prompt:")
+		lines = append(lines, wrapText(task.Prompt, innerWidth)...)
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
+	task := m.selectedTaskItem()
+	if task == nil {
+		return []string{"No selected task."}
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render(task.Title + " · activity log"),
+		fmt.Sprintf("Task ID: %s", task.ID),
+		fmt.Sprintf("Runtime ID: %s", task.RuntimeID),
+		"",
+	}
+	if len(m.taskLog) == 0 {
+		lines = append(lines, "No activity log available for this task.")
+		return lines
+	}
+	for i := len(m.taskLog) - 1; i >= 0; i-- {
+		record := m.taskLog[i]
+		ts := record.RecordedAt.UTC().Format("2006-01-02 15:04:05")
+		label := strings.Join(strings.Fields(strings.TrimSpace(strings.Join([]string{
+			firstNonEmpty(record.Activity.Kind, "activity"),
+			record.Activity.Phase,
+			record.Activity.Name,
+		}, " "))), " ")
+		if label == "" {
+			label = "activity"
+		}
+		line := fmt.Sprintf("%s  %s", ts, label)
+		if strings.TrimSpace(record.Activity.Summary) != "" {
+			line += "  " + strings.TrimSpace(record.Activity.Summary)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderInputBar() string {
+	label := "Input"
+	switch m.inputMode {
+	case kitchenTUIInputSubmit:
+		label = "Submit"
+	case kitchenTUIInputReplan:
+		label = "Replan"
+	}
+	return paneBox(m.width, 3, label+"\n"+m.input.View())
+}
+
+func (m kitchenTUIModel) renderFooter() string {
+	help := strings.Join(m.footerActions(), "  ")
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(help)
+	if strings.TrimSpace(m.errText) != "" {
+		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(m.errText)
+	} else if strings.TrimSpace(m.flash) != "" {
+		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("84")).Render(m.flash)
+	}
+	return footer
+}
+
+func paneTitle(title string, focused bool) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
+	if focused {
+		style = style.Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
+	}
+	return style.Render(title)
+}
+
+func paneBox(width, height int, body string) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 1).
+		Width(width).
+		Height(height).
+		Render(body)
+}
+
+func buildPlanItems(plans []PlanRecord, snapshot tuiStatusSnapshot) []kitchenTUIPlanItem {
+	progressByID := make(map[string]*PlanProgress, len(snapshot.Plans))
+	for i := range snapshot.Plans {
+		progress := snapshot.Plans[i]
+		progressByID[progress.PlanID] = &progress
+	}
+	activePlanIDs := make(map[string]bool, len(snapshot.Lineages))
+	for _, lineage := range snapshot.Lineages {
+		if strings.TrimSpace(lineage.ActivePlan) != "" {
+			activePlanIDs[lineage.ActivePlan] = true
+		}
+	}
+
+	items := make([]kitchenTUIPlanItem, 0, len(plans))
+	for _, plan := range plans {
+		items = append(items, kitchenTUIPlanItem{
+			Record:   plan,
+			Progress: progressByID[plan.PlanID],
+			Active:   activePlanIDs[plan.PlanID],
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].Record.UpdatedAt.After(items[j].Record.UpdatedAt)
+	})
+	return items
+}
+
+func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUITaskItem {
+	if detail == nil {
+		return nil
+	}
+	taskSummaryByID := make(map[string]pool.TaskSummary, len(snapshot.Queue.Tasks))
+	for _, task := range snapshot.Queue.Tasks {
+		taskSummaryByID[task.ID] = task
+	}
+
+	var items []kitchenTUITaskItem
+	for _, cycle := range detail.Progress.Cycles {
+		if cycle.PlannerTaskID != "" {
+			items = append(items, buildCycleTaskItem("planner", cycle.PlannerTaskID, "Planner cycle "+fmt.Sprint(cycle.Index), cycle.PlannerTaskState, taskSummaryByID[cycle.PlannerTaskID]))
+		}
+		if cycle.ReviewTaskID != "" {
+			items = append(items, buildCycleTaskItem("reviewer", cycle.ReviewTaskID, "Review cycle "+fmt.Sprint(cycle.Index), cycle.ReviewTaskState, taskSummaryByID[cycle.ReviewTaskID]))
+		}
+	}
+	for _, task := range detail.Plan.Tasks {
+		runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
+		state := planTaskRuntimeState(*detail, task.ID)
+		summary := taskSummaryByID[runtimeID]
+		if strings.TrimSpace(summary.Status) != "" {
+			state = summary.Status
+		}
+		items = append(items, kitchenTUITaskItem{
+			ID:         task.ID,
+			RuntimeID:  runtimeID,
+			Kind:       "implementation",
+			Title:      firstNonEmpty(task.Title, task.ID),
+			State:      state,
+			WorkerID:   summary.WorkerID,
+			Complexity: string(task.Complexity),
+			Prompt:     task.Prompt,
+			Summary:    summarizeTaskHistory(detail.History, runtimeID),
+		})
+	}
+	return items
+}
+
+func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskSummary) kitchenTUITaskItem {
+	if strings.TrimSpace(summary.Status) != "" {
+		state = summary.Status
+	}
+	return kitchenTUITaskItem{
+		ID:        runtimeID,
+		RuntimeID: runtimeID,
+		Kind:      kind,
+		Title:     title,
+		State:     state,
+		WorkerID:  summary.WorkerID,
+	}
+}
+
+func planDisplayState(plan kitchenTUIPlanItem) string {
+	if plan.Progress != nil && strings.TrimSpace(plan.Progress.State) != "" {
+		return plan.Progress.State
+	}
+	return firstNonEmpty(plan.Record.State, "-")
+}
+
+func planTaskRuntimeState(detail PlanDetail, logicalTaskID string) string {
+	taskID := planTaskRuntimeID(detail.Plan.PlanID, logicalTaskID)
+	if contains(detail.Progress.ActiveTaskIDs, taskID) {
+		return "active"
+	}
+	if contains(detail.Progress.CompletedTaskIDs, taskID) {
+		return "completed"
+	}
+	if contains(detail.Progress.FailedTaskIDs, taskID) {
+		return "failed"
+	}
+	return "planned"
+}
+
+func summarizeTaskHistory(history []PlanHistoryEntry, runtimeID string) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].TaskID == runtimeID {
+			return summarizePlanHistoryEntry(history[i])
+		}
+	}
+	return ""
+}
+
+func pendingQuestionSummaryForPlan(planID string, questions []pool.Question) string {
+	if strings.TrimSpace(planID) == "" {
+		return "-"
+	}
+	var ids []string
+	prefix := strings.TrimSpace(planID) + "-"
+	for _, q := range questions {
+		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+			ids = append(ids, q.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return "-"
+	}
+	return strings.Join(ids, ", ")
+}
+
+func renderSelectableRow(selected bool, primary, secondary string) []string {
+	if selected {
+		main := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+		sub := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("252"))
+		return []string{main.Render(primary), sub.Render(secondary)}
+	}
+	return []string{
+		primary,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(secondary),
+	}
+}
+
+func fitListLines(lines []string, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	out := make([]string, 0, height)
+	out = append(out, lines...)
+	for len(out) < height {
+		out = append(out, "")
+	}
+	return strings.Join(out, "\n")
+}
+
+func fitAndWrapLines(lines []string, width, height int) string {
+	if width <= 0 {
+		width = 1
+	}
+	if height <= 0 {
+		return ""
+	}
+	var out []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			out = append(out, "")
+			continue
+		}
+		for _, wrapped := range wrapText(line, width) {
+			out = append(out, truncate(wrapped, width))
+		}
+	}
+	if len(out) > height {
+		out = out[:height]
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapText(s string, width int) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if width <= 0 {
+		return []string{s}
+	}
+	var out []string
+	for _, paragraph := range strings.Split(s, "\n") {
+		paragraph = strings.TrimSpace(paragraph)
+		if paragraph == "" {
+			out = append(out, "")
+			continue
+		}
+		words := strings.Fields(paragraph)
+		line := words[0]
+		for _, word := range words[1:] {
+			if len(line)+1+len(word) <= width {
+				line += " " + word
+			} else {
+				out = append(out, line)
+				line = word
+			}
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func joinOrDash(items []string) string {
+	if len(items) == 0 {
+		return "-"
+	}
+	return strings.Join(items, ", ")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func padRight(v string, width int) string {
+	if len(v) >= width {
+		return v[:width]
+	}
+	return v + strings.Repeat(" ", width-len(v))
+}
+
+func truncate(v string, width int) string {
+	if width <= 0 || len(v) <= width {
+		return v
+	}
+	if width <= 1 {
+		return v[:width]
+	}
+	return v[:width-1] + "…"
+}
+
+func shortenSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) <= 7 {
+		return sha
+	}
+	return sha[:7]
+}
+
+func kitchenTUITick() tea.Cmd {
+	return tea.Tick(tuiRefreshInterval, func(t time.Time) tea.Msg {
+		return kitchenTUITickMsg(t)
+	})
+}
+
+func summarizeMergeCheck(resp map[string]any) string {
+	clean, _ := resp["clean"].(bool)
+	baseBranch, _ := resp["baseBranch"].(string)
+	conflicts := stringSliceFromAny(resp["conflicts"])
+	summary := fmt.Sprintf("merge-check: clean=%t base=%s", clean, baseBranch)
+	if len(conflicts) > 0 {
+		summary += " conflicts=" + strings.Join(conflicts, ", ")
+	}
+	return summary
+}
+
+func summarizeMerge(resp map[string]any) string {
+	status, _ := resp["status"].(string)
+	baseBranch, _ := resp["baseBranch"].(string)
+	mode, _ := resp["mode"].(string)
+	if status == "" {
+		status = "merged"
+	}
+	return fmt.Sprintf("%s %s into %s", status, mode, baseBranch)
+}
+
+func stringSliceFromAny(v any) []string {
+	switch got := v.(type) {
+	case []string:
+		return append([]string(nil), got...)
+	case []any:
+		out := make([]string, 0, len(got))
+		for _, item := range got {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func rowMarker(selected bool) string {
+	if selected {
+		return ">"
+	}
+	return " "
+}
+
+func compactState(state string) string {
+	switch strings.TrimSpace(state) {
+	case planStatePendingApproval:
+		return "await"
+	case planStatePlanningFailed:
+		return "failed"
+	case planStatePlanning:
+		return "plan"
+	case planStateReviewing:
+		return "review"
+	case planStateActive:
+		return "active"
+	case planStateCompleted:
+		return "done"
+	case planStateMerged:
+		return "merged"
+	case pool.TaskQueued:
+		return "queued"
+	case pool.TaskDispatched:
+		return "active"
+	case pool.TaskFailed:
+		return "failed"
+	case pool.TaskCanceled:
+		return "cancel"
+	case "":
+		return "-"
+	default:
+		return state
+	}
+}

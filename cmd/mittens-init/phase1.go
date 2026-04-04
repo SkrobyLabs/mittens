@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -209,7 +210,19 @@ func setupIPTables(cfg *config) error {
 		// Allow container to reach the host broker.
 		if cfg.BrokerPort != "" {
 			c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", cfg.BrokerPort, "-j", "ACCEPT")
-			_ = c.Run()
+			if err := c.Run(); err != nil {
+				logWarn("iptables ACCEPT rule for broker port %s failed: %v", cfg.BrokerPort, err)
+			}
+		}
+
+		// Allow worker containers to reach Kitchen's WorkerBroker.
+		if kitchenAddr := os.Getenv("MITTENS_KITCHEN_ADDR"); kitchenAddr != "" {
+			if _, port, err := net.SplitHostPort(kitchenAddr); err == nil && port != "" {
+				c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", port, "-j", "ACCEPT")
+				if err := c.Run(); err != nil {
+					logWarn("iptables ACCEPT rule for Kitchen port %s failed: %v", port, err)
+				}
+			}
 		}
 	}
 	return nil
@@ -246,8 +259,11 @@ func resolveMCPDomains(cfg *config) []string {
 			continue
 		}
 
-		// Check for SSE/HTTP URL in config.
+		// Check for SSE/HTTP URL in config files (user prefs, then workspace .mcp.json).
 		resolved := extractMCPServerURL(cfg.ConfigMount+"/"+cfg.AIPrefsFile, cfg.AIMCPServersKey, server)
+		if resolved == "" && cfg.HostWorkspace != "" {
+			resolved = extractMCPServerURL(cfg.HostWorkspace+"/.mcp.json", "mcpServers", server)
+		}
 
 		// Fall back to lookup table.
 		if resolved == "" {
@@ -348,17 +364,33 @@ func extractMCPServerURL(path, key, server string) string {
 	if !ok {
 		return ""
 	}
-	var url string
-	if json.Unmarshal(urlRaw, &url) != nil {
+	var rawURL string
+	if json.Unmarshal(urlRaw, &rawURL) != nil {
 		return ""
 	}
-	// Extract hostname from URL.
-	url = strings.TrimPrefix(url, "http://")
-	url = strings.TrimPrefix(url, "https://")
-	if idx := strings.IndexAny(url, ":/"); idx >= 0 {
-		url = url[:idx]
+	return hostnameFromURL(rawURL)
+}
+
+// hostnameFromURL extracts the hostname from a URL string.
+// Handles missing schemes, trailing paths, and port numbers.
+func hostnameFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
 	}
-	return url
+	// Add scheme if missing so url.Parse doesn't treat host as path.
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "https://" + rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	if host == "" || host == "localhost" || net.ParseIP(host) != nil {
+		return ""
+	}
+	return host
 }
 
 // dropPrivileges drops from root to the AI user and re-execs this binary.

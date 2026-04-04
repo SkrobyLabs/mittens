@@ -1,0 +1,252 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
+)
+
+type kitchenAPIClient struct {
+	baseURL    string
+	token      string
+	httpClient *http.Client
+}
+
+func newKitchenAPIClient(meta serveMetadata) *kitchenAPIClient {
+	return &kitchenAPIClient{
+		baseURL: strings.TrimRight(strings.TrimSpace(meta.URL), "/"),
+		token:   strings.TrimSpace(meta.Token),
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+	}
+}
+
+func openKitchenAPIClient(repoPath string) (*kitchenAPIClient, bool, error) {
+	meta, ok, err := detectKitchenServer(repoPath)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return newKitchenAPIClient(meta), true, nil
+}
+
+func (c *kitchenAPIClient) request(method, path string, body any, dst any) error {
+	if c == nil {
+		return fmt.Errorf("kitchen api client not configured")
+	}
+
+	var payload io.Reader
+	if body != nil {
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			return err
+		}
+		payload = &buf
+	}
+
+	req, err := http.NewRequest(method, c.baseURL+path, payload)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("X-Kitchen-Token", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
+			return fmt.Errorf(apiErr.Error)
+		}
+		return fmt.Errorf("%s %s returned %d", method, path, resp.StatusCode)
+	}
+	if dst == nil {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(dst)
+}
+
+func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, review bool, reviewRounds, maxReviewRevisions int) (map[string]any, error) {
+	req := map[string]any{
+		"idea":         idea,
+		"lineage":      lineage,
+		"auto":         auto,
+		"review":       review,
+		"reviewRounds": reviewRounds,
+	}
+	if maxReviewRevisions >= 0 {
+		req["maxReviewRevisions"] = maxReviewRevisions
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)
+}
+
+func (c *kitchenAPIClient) ListPlans(includeCompleted bool) ([]PlanRecord, error) {
+	path := "/v1/plans"
+	if includeCompleted {
+		path += "?completed=true"
+	}
+	var resp struct {
+		Plans []PlanRecord `json:"plans"`
+	}
+	err := c.request(http.MethodGet, path, nil, &resp)
+	return resp.Plans, err
+}
+
+func (c *kitchenAPIClient) PlanDetail(planID string) (PlanDetail, error) {
+	var detail PlanDetail
+	err := c.request(http.MethodGet, "/v1/plans/"+url.PathEscape(planID), nil, &detail)
+	return detail, err
+}
+
+func (c *kitchenAPIClient) PlanHistory(planID string, cycle int) (map[string]any, []PlanHistoryEntry, error) {
+	path := "/v1/plans/" + url.PathEscape(planID) + "/history"
+	if cycle > 0 {
+		path += fmt.Sprintf("?cycle=%d", cycle)
+	}
+	var resp struct {
+		PlanID  string             `json:"planId"`
+		Cycle   int                `json:"cycle"`
+		History []PlanHistoryEntry `json:"history"`
+	}
+	if err := c.request(http.MethodGet, path, nil, &resp); err != nil {
+		return nil, nil, err
+	}
+	payload := map[string]any{
+		"planId":  resp.PlanID,
+		"cycle":   resp.Cycle,
+		"history": resp.History,
+	}
+	return payload, resp.History, nil
+}
+
+func (c *kitchenAPIClient) Evidence(planID, tier string) (map[string]any, error) {
+	path := "/v1/plans/" + url.PathEscape(planID) + "/evidence"
+	if tier != "" && tier != evidenceTierRich {
+		path += "?tier=" + url.QueryEscape(tier)
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodGet, path, nil, &resp)
+}
+
+func (c *kitchenAPIClient) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
+	var resp struct {
+		Transcript []pool.WorkerActivityRecord `json:"transcript"`
+	}
+	err := c.request(http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/activity", nil, &resp)
+	return resp.Transcript, err
+}
+
+func (c *kitchenAPIClient) ApprovePlan(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/approve", map[string]any{}, &resp)
+}
+
+func (c *kitchenAPIClient) RejectPlan(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/reject", map[string]any{}, &resp)
+}
+
+func (c *kitchenAPIClient) ReplanPlan(planID, reason string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/replan", map[string]any{"reason": reason}, &resp)
+}
+
+func (c *kitchenAPIClient) CancelPlan(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodDelete, "/v1/plans/"+url.PathEscape(planID), nil, &resp)
+}
+
+func (c *kitchenAPIClient) DeletePlan(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodDelete, "/v1/plans/"+url.PathEscape(planID)+"/purge", nil, &resp)
+}
+
+func (c *kitchenAPIClient) CancelTask(taskID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodDelete, "/v1/tasks/"+url.PathEscape(taskID), nil, &resp)
+}
+
+func (c *kitchenAPIClient) RetryTask(taskID string, requireFreshWorker bool) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/tasks/"+url.PathEscape(taskID)+"/retry", map[string]any{
+		"requireFreshWorker": requireFreshWorker,
+	}, &resp)
+}
+
+func (c *kitchenAPIClient) Status(historyLimit int) (map[string]any, error) {
+	path := "/v1/status"
+	if historyLimit >= 0 {
+		path += fmt.Sprintf("?historyLimit=%d", historyLimit)
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodGet, path, nil, &resp)
+}
+
+func (c *kitchenAPIClient) ListQuestions() ([]pool.Question, error) {
+	var resp struct {
+		Questions []pool.Question `json:"questions"`
+	}
+	err := c.request(http.MethodGet, "/v1/questions", nil, &resp)
+	return resp.Questions, err
+}
+
+func (c *kitchenAPIClient) AnswerQuestion(questionID, answer string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/questions/"+url.PathEscape(questionID)+"/answer", map[string]any{"answer": answer}, &resp)
+}
+
+func (c *kitchenAPIClient) MarkUnhelpful(questionID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/questions/"+url.PathEscape(questionID)+"/unhelpful", map[string]any{}, &resp)
+}
+
+func (c *kitchenAPIClient) ListLineages() ([]LineageState, error) {
+	var resp struct {
+		Lineages []LineageState `json:"lineages"`
+	}
+	err := c.request(http.MethodGet, "/v1/lineages", nil, &resp)
+	return resp.Lineages, err
+}
+
+func (c *kitchenAPIClient) MergeLineage(lineage, mode string, noCommit bool) (map[string]any, error) {
+	req := map[string]any{
+		"mode":     mode,
+		"noCommit": noCommit,
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/lineages/"+url.PathEscape(lineage)+"/merge", req, &resp)
+}
+
+func (c *kitchenAPIClient) MergeCheck(lineage string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodGet, "/v1/lineages/"+url.PathEscape(lineage)+"/merge-check", nil, &resp)
+}
+
+func (c *kitchenAPIClient) ResetProviderKey(key string) (map[string]any, error) {
+	provider, model, ok := strings.Cut(strings.TrimSpace(key), "/")
+	if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("provider key must be in provider/model form")
+	}
+	var resp map[string]any
+	path := "/v1/providers/" + url.PathEscape(strings.TrimSpace(provider)) + "/models/" + url.PathEscape(strings.TrimSpace(model)) + "/reset"
+	return resp, c.request(http.MethodPost, path, map[string]any{}, &resp)
+}

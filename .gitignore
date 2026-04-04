@@ -8,12 +8,15 @@
 !.claude/skills/
 
 # Go build artifacts
+/kitchen
 /mittens
 /mittens-*
 dist/
 
-# Container init binary (built by `make init-binary`)
+# Container binaries (built by `make init-binary` / `make team-mcp-binary`)
 cmd/mittens/container/mittens-init
+cmd/mittens/container/team-mcp
+/team-mcp
 
 .vscode/settings.json
 
@@ -22,3 +25,10 @@ cmd/mittens/container/mittens-init
 clipboard-sync.exe
 
 *.exe
+
+.tmp_gomodcache/*
+.tmp_gocache/*
+.cache/*
+.gocache/*
+.gomodcache/*
+.gopath/*

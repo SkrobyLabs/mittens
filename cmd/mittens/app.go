@@ -46,6 +46,8 @@ type App struct {
 	NoNotify      bool
 	NetworkHost   bool
 	Worktree      bool
+	PoolMode      bool
+	DaemonMode    bool
 	Shell         bool
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
 	Profile       string // model profile name (e.g. "planner", "fast")
@@ -90,10 +92,14 @@ type App struct {
 	terminalFocus TerminalFocus
 
 	// Host broker (credentials, URLs, notifications, OAuth)
-	broker      *HostBroker
-	brokerPort  int
-	brokerToken string
-	brokerSock  string // Unix socket path (Linux mode)
+	broker       *HostBroker
+	brokerPort   int
+	brokerToken  string
+	brokerSock   string // Unix socket path (Linux mode)
+	runtimeSock  string
+	poolToken    string
+	poolSession  string
+	poolStateDir string
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -108,6 +114,7 @@ var coreFlags = map[string]func(*App){
 	"--no-notify":    func(a *App) { a.NoNotify = true },
 	"--network-host": func(a *App) { a.NetworkHost = true },
 	"--worktree":     func(a *App) { a.Worktree = true },
+	"--pool":         func(a *App) { a.PoolMode = true },
 	"--shell":        func(a *App) { a.Shell = true },
 	"--worker":       func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	"--planner":      func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
@@ -420,7 +427,37 @@ func (a *App) Run() error {
 			a.broker.LogFile = lf
 		}
 
-		platformStartBroker(a)
+		if a.PoolMode {
+			a.broker.OnPoolSpawn = a.spawnWorkerContainer
+			a.broker.OnPoolKill = a.killWorkerContainer
+			a.broker.OnRuntimeListWorkers = a.runtimeWorkers
+			a.broker.OnRuntimeGetWorker = a.runtimeWorkerView
+			a.broker.OnRuntimeRecycleWorker = a.recycleRuntimeWorker
+			a.broker.OnRuntimeGetWorkerActivity = a.runtimeActivity
+			a.broker.OnRuntimeSubmitAssignment = a.submitRuntimeAssignment
+			pt, err := randomHex(16)
+			if err != nil {
+				return fmt.Errorf("generate pool token: %w", err)
+			}
+			a.poolToken = pt
+			a.broker.PoolToken = pt
+			a.poolSession, a.poolStateDir = resolvedPoolRuntimeState(a.Workspace)
+			if err := os.MkdirAll(a.poolStateDir, 0755); err != nil {
+				return fmt.Errorf("create pool state dir: %w", err)
+			}
+			if a.DaemonMode {
+				if err := a.startRuntimeBroker(); err != nil {
+					return err
+				}
+			} else {
+				startBrokerTCP(a)
+				if a.brokerPort == 0 {
+					return fmt.Errorf("start pool broker: broker port not available")
+				}
+			}
+		} else {
+			platformStartBroker(a)
+		}
 	}
 
 	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
@@ -439,6 +476,14 @@ func (a *App) Run() error {
 		if err := a.buildImage(); err != nil {
 			return err
 		}
+	}
+
+	if a.DaemonMode {
+		return a.runRuntimeDaemon()
+	}
+
+	if a.PoolMode {
+		return a.runPoolHost()
 	}
 
 	// Resume session if --resume was given.
@@ -469,6 +514,18 @@ func (a *App) Run() error {
 	}
 
 	return a.runContainer(dockerArgs)
+}
+
+func resolvedPoolRuntimeState(workspace string) (string, string) {
+	poolSession := strings.TrimSpace(os.Getenv("MITTENS_POOL_SESSION"))
+	if poolSession == "" {
+		poolSession = kitchenPoolSessionID(workspace)
+	}
+	poolStateDir := strings.TrimSpace(os.Getenv("MITTENS_POOL_STATE_DIR"))
+	if poolStateDir == "" {
+		poolStateDir = filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "pools", poolSession)
+	}
+	return poolSession, poolStateDir
 }
 
 func (a *App) maybeApplyResumeArgs() {
@@ -531,6 +588,22 @@ func (a *App) maybeApplyProfile() error {
 		a.ClaudeArgs = append(extras, a.ClaudeArgs...)
 	}
 	return nil
+}
+
+func (a *App) currentRuntimeModel() string {
+	if a == nil || a.Provider == nil || a.Provider.ModelFlag == "" {
+		return ""
+	}
+	for i := 0; i < len(a.ClaudeArgs); i++ {
+		if a.ClaudeArgs[i] != a.Provider.ModelFlag {
+			continue
+		}
+		if i+1 >= len(a.ClaudeArgs) {
+			return ""
+		}
+		return strings.TrimSpace(a.ClaudeArgs[i+1])
+	}
+	return ""
 }
 
 // promptNewProfile interactively creates a new profile preset.
@@ -1639,6 +1712,7 @@ Commands:
   init --defaults               Edit user-wide defaults (provider, firewall, paste key)
   init --profile NAME           Configure a model profile (model + effort)
   init --profile NAME --delete  Delete a model profile
+  daemon [--socket PATH]        Start a Kitchen runtime daemon on a Unix socket
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   extension list|install|remove Manage external extensions
@@ -1659,6 +1733,7 @@ Core flags:
   --no-notify       Disable desktop notifications
   --network-host    Use host networking (default: bridge)
   --worktree        Git worktree isolation per invocation
+  --pool            Run as a Kitchen pool host (broker + worker spawner only)
   --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
   --dir PATH        Mount an additional directory (repeatable)
@@ -1737,6 +1812,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-yolo", Description: "Restore permission prompts (YOLO is the default)"},
 			{Name: "--no-notify", Description: "Disable desktop notifications"},
 			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
+			{Name: "--pool", Description: "Run as a Kitchen pool host (broker + worker spawner only)"},
 			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--rebuild", Description: "Rebuild image without layer cache"},

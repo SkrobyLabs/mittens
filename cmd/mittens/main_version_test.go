@@ -95,6 +95,9 @@ func TestRunHelp_HasVersionCommandEntry(t *testing.T) {
 	if !strings.Contains(out, "Show version information") {
 		t.Fatalf("help output missing version command description: %s", out)
 	}
+	if !strings.Contains(out, "--pool") {
+		t.Fatalf("help output missing --pool flag: %s", out)
+	}
 }
 
 func TestRunMain_VersionAliasesStillSupported(t *testing.T) {

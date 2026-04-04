@@ -47,7 +47,48 @@ cmd/
     credsync.go              # credential sync goroutine
     broker_client.go         # shared HTTP client for host broker
     handlers.go              # xdg-open, notify, xclip, x11-clipboard handlers
+  kitchen/                   # Kitchen orchestrator binary
+    main.go                  # CLI entry point (cobra commands)
+    kitchen.go               # Kitchen struct initialization
+    api.go                   # 22 HTTP API endpoints
+    scheduler.go             # deterministic task scheduler with timeout enforcement
+    planner.go               # plan lifecycle (submit, approve, reject, replan, evidence)
+    plan_store.go            # atomic JSON plan persistence
+    lineage.go               # lineage state management
+    broker.go                # WorkerBroker — worker↔Kitchen task delivery
+    router.go                # complexity → provider/model routing with health awareness
+    provider_health.go       # provider cooldown and auth failure tracking
+    classifier.go            # 8-class failure classifier
+    git.go                   # lineage branches, child worktrees, merge-back, orphan cleanup
+    runtime.go               # runtime event forwarding, recycle bridge
+    runtime_client.go        # Unix socket client for Mittens daemon RuntimeAPI
+    config.go                # Kitchen config, paths, concurrency limits
+    capabilities.go          # machine-readable capability metadata
+    history.go               # planning/review timeline tracking
+    progress.go              # plan progress and phase detection
+    operations.go            # status snapshots, merges, worktree cleanup
+    questions.go             # operator question routing
+    events.go                # notification formatting for SSE
+    notify.go                # notification subscription management
+    runtime_lock.go          # exclusive runtime lock
+    runtime_metadata.go      # daemon discovery metadata
   shim/                      # Windows WSL shim
+pkg/
+  pool/                      # reusable scheduler/state machine (extracted from internal/pool)
+    manager.go               # PoolManager — workers, tasks, queue, WAL, notifications
+    types.go                 # HostAPI, RuntimeAPI interfaces, Worker, Task, WorkerSpec
+    event.go                 # WAL event types and state application
+    wal.go                   # write-ahead log (JSONL, fsync, poisoning)
+    queue.go                 # priority queue with dependency tracking
+    pipeline.go              # multi-stage pipeline executor
+    plan.go                  # pool-level plan store
+    review.go                # review dispatch, verdict, escalation
+    reaper.go                # worker health monitoring (heartbeat timeout)
+    recovery.go              # WAL replay and state recovery
+  adapter/                   # provider-agnostic AI execution
+    adapter.go               # Adapter interface (Execute, ClearSession, ForceClean)
+    claude.go                # Claude Code adapter (NDJSON streaming)
+    codex.go                 # OpenAI Codex adapter
 examples/
   redis-extension/           # example external extension (Python subprocess protocol)
 ```
@@ -84,3 +125,20 @@ See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAM
 `--verbose`, `--no-config`, `--no-history`, `--no-build`, `--rebuild`, `--docker MODE`, `--no-yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
 
 Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).
+
+## Kitchen
+
+Kitchen is a separate binary (`cmd/kitchen/`) that orchestrates parallel AI coding work. See [Kitchen docs](docs/kitchen/README.md) for full documentation.
+
+Key patterns:
+
+- `Kitchen` struct owns all orchestration state (scheduler, planner, plan store, lineage manager, router, provider health)
+- Deterministic scheduler — no AI logic in the dispatch loop
+- Workers get tasks via WorkerBroker poll (`GET /task/{wid}`), not push
+- Recycle signals ride the broker poll channel (`{"recycle": true}`)
+- Git operations serialized via per-repo mutex; worker execution in worktrees is concurrent
+- Plan store uses atomic writes (temp file + rename) for crash safety
+- Failure classification drives retry policy (8 classes, configurable actions)
+- Conflict retry revives the same task ID (preserves dependency graph) with `RequireFreshWorker`
+- RuntimeAPI over Unix socket; Kitchen discovers daemon via `~/.mittens/runtime.json`
+- `mittens daemon` starts the long-lived runtime; `kitchen serve` starts the control plane
