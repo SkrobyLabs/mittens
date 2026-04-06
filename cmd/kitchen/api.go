@@ -610,18 +610,9 @@ func (k *Kitchen) handleLineages(w http.ResponseWriter, r *http.Request) {
 
 func (k *Kitchen) handleMergeLineage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Mode     string `json:"mode"`
-		NoCommit bool   `json:"noCommit"`
+		NoCommit bool `json:"noCommit"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
-		return
-	}
-	mode := strings.TrimSpace(req.Mode)
-	if mode == "" {
-		mode = "direct"
-	}
-	if mode != "direct" && mode != "squash" {
-		writeAPIError(w, http.StatusBadRequest, "mode must be direct or squash")
 		return
 	}
 	var (
@@ -629,9 +620,9 @@ func (k *Kitchen) handleMergeLineage(w http.ResponseWriter, r *http.Request) {
 		err  error
 	)
 	if req.NoCommit {
-		resp, err = k.PreviewMergeLineage(r.PathValue("name"), mode)
+		resp, err = k.PreviewMergeLineage(r.PathValue("name"))
 	} else {
-		resp, err = k.MergeLineage(r.PathValue("name"), mode)
+		resp, err = k.MergeLineage(r.PathValue("name"))
 	}
 	if err != nil {
 		status := apiErrorStatus(err)

@@ -148,7 +148,7 @@ func (b *kitchenAPIBackend) FixLineageConflicts(lineage string) (string, error) 
 }
 
 func (b *kitchenAPIBackend) MergeLineage(lineage string) (string, error) {
-	resp, err := b.client.MergeLineage(lineage, "squash", false)
+	resp, err := b.client.MergeLineage(lineage, false)
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +325,7 @@ func (b *kitchenLocalBackend) FixLineageConflicts(lineage string) (string, error
 func (b *kitchenLocalBackend) MergeLineage(lineage string) (string, error) {
 	var summary string
 	err := b.withKitchen(func(k *Kitchen) error {
-		resp, err := k.MergeLineage(lineage, "squash")
+		resp, err := k.MergeLineage(lineage)
 		if err != nil {
 			return err
 		}

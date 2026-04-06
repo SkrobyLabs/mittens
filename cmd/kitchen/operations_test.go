@@ -297,7 +297,7 @@ func TestKitchenMergeLineageMarksPlanMergedAndClearsActivePlan(t *testing.T) {
 		t.Fatalf("MergeChild: %v", err)
 	}
 
-	resp, err := k.MergeLineage(bundle.Plan.Lineage, "direct")
+	resp, err := k.MergeLineage(bundle.Plan.Lineage)
 	if err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}

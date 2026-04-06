@@ -78,17 +78,9 @@ func (k *Kitchen) ResetProviderKey(key string) error {
 	return k.health.Reset(strings.TrimSpace(provider) + "/" + strings.TrimSpace(model))
 }
 
-func (k *Kitchen) MergeLineage(lineage, mode string) (map[string]any, error) {
+func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 	if k == nil {
 		return nil, fmt.Errorf("kitchen not configured")
-	}
-
-	mode = strings.TrimSpace(mode)
-	if mode == "" {
-		mode = "direct"
-	}
-	if mode != "direct" && mode != "squash" {
-		return nil, fmt.Errorf("mode must be direct or squash")
 	}
 
 	var activePlanID string
@@ -107,11 +99,7 @@ func (k *Kitchen) MergeLineage(lineage, mode string) (map[string]any, error) {
 	}
 
 	baseBranch := k.baseBranchForLineage(lineage)
-	mergeMode := ""
-	if mode == "squash" {
-		mergeMode = "squash"
-	}
-	if err := gitMgr.MergeLineage(lineage, baseBranch, mergeMode); err != nil {
+	if err := gitMgr.MergeLineage(lineage, baseBranch, "squash"); err != nil {
 		return nil, err
 	}
 
@@ -125,7 +113,7 @@ func (k *Kitchen) MergeLineage(lineage, mode string) (map[string]any, error) {
 	resp := map[string]any{
 		"status":     "merged",
 		"baseBranch": baseBranch,
-		"mode":       mode,
+		"mode":       "squash",
 	}
 	if activePlanID != "" {
 		resp["planId"] = activePlanID
@@ -133,17 +121,9 @@ func (k *Kitchen) MergeLineage(lineage, mode string) (map[string]any, error) {
 	return resp, nil
 }
 
-func (k *Kitchen) PreviewMergeLineage(lineage, mode string) (map[string]any, error) {
+func (k *Kitchen) PreviewMergeLineage(lineage string) (map[string]any, error) {
 	if k == nil {
 		return nil, fmt.Errorf("kitchen not configured")
-	}
-
-	mode = strings.TrimSpace(mode)
-	if mode == "" {
-		mode = "direct"
-	}
-	if mode != "direct" && mode != "squash" {
-		return nil, fmt.Errorf("mode must be direct or squash")
 	}
 
 	gitMgr, err := k.gitManager()
@@ -152,7 +132,7 @@ func (k *Kitchen) PreviewMergeLineage(lineage, mode string) (map[string]any, err
 	}
 
 	baseBranch := k.baseBranchForLineage(lineage)
-	previewHead, err := gitMgr.PreviewMergeLineage(lineage, baseBranch, mode)
+	previewHead, err := gitMgr.PreviewMergeLineage(lineage, baseBranch, "squash")
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +144,7 @@ func (k *Kitchen) PreviewMergeLineage(lineage, mode string) (map[string]any, err
 	resp := map[string]any{
 		"status":      "preview",
 		"baseBranch":  baseBranch,
-		"mode":        mode,
+		"mode":        "squash",
 		"currentHead": strings.TrimSpace(currentHead),
 		"previewHead": strings.TrimSpace(previewHead),
 	}

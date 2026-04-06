@@ -238,9 +238,8 @@ func (c *kitchenAPIClient) ListLineages() ([]LineageState, error) {
 	return resp.Lineages, err
 }
 
-func (c *kitchenAPIClient) MergeLineage(lineage, mode string, noCommit bool) (map[string]any, error) {
+func (c *kitchenAPIClient) MergeLineage(lineage string, noCommit bool) (map[string]any, error) {
 	req := map[string]any{
-		"mode":     mode,
 		"noCommit": noCommit,
 	}
 	var resp map[string]any

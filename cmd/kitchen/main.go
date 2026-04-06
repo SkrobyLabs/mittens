@@ -81,7 +81,6 @@ func newRootCommand() *cobra.Command {
 	var capabilitiesCLIOnly bool
 	var replanReason string
 	var retrySameWorker bool
-	var mergeSquash bool
 	var mergeNoCommit bool
 	var serveAddr string
 	var serveToken string
@@ -633,17 +632,13 @@ func newRootCommand() *cobra.Command {
 
 	mergeCmd := &cobra.Command{
 		Use:   "merge LINEAGE",
-		Short: "Merge a lineage branch",
+		Short: "Squash-merge a lineage branch into its base",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mode := "direct"
-			if mergeSquash {
-				mode = "squash"
-			}
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.MergeLineage(args[0], mode, mergeNoCommit)
+				resp, err := client.MergeLineage(args[0], mergeNoCommit)
 				if err != nil {
 					return err
 				}
@@ -658,9 +653,9 @@ func newRootCommand() *cobra.Command {
 
 			var resp map[string]any
 			if mergeNoCommit {
-				resp, err = k.PreviewMergeLineage(args[0], mode)
+				resp, err = k.PreviewMergeLineage(args[0])
 			} else {
-				resp, err = k.MergeLineage(args[0], mode)
+				resp, err = k.MergeLineage(args[0])
 			}
 			if err != nil {
 				return err
@@ -668,7 +663,6 @@ func newRootCommand() *cobra.Command {
 			return writeJSON(cmd.OutOrStdout(), resp)
 		},
 	}
-	mergeCmd.Flags().BoolVar(&mergeSquash, "squash", false, "squash merge the lineage")
 	mergeCmd.Flags().BoolVar(&mergeNoCommit, "no-commit", false, "preview the merge result without updating the base branch")
 
 	mergeCheckCmd := &cobra.Command{

@@ -257,15 +257,18 @@ func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
 	}
 	lineageBranch := lineageBranchName(lineage)
 
-	ff, err := g.isAncestor(baseBranch, lineageBranch)
-	if err != nil {
-		return err
-	}
-	if ff {
-		return g.forceBranchTo(baseBranch, lineageBranch)
+	squash := strings.EqualFold(mode, "squash")
+
+	if !squash {
+		ff, err := g.isAncestor(baseBranch, lineageBranch)
+		if err != nil {
+			return err
+		}
+		if ff {
+			return g.forceBranchTo(baseBranch, lineageBranch)
+		}
 	}
 
-	squash := strings.EqualFold(mode, "squash")
 	head, err := g.mergeIntoTemp(baseBranch, lineageBranch, squash)
 	if err != nil {
 		return err
@@ -285,19 +288,22 @@ func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (stri
 	}
 	lineageBranch := lineageBranchName(lineage)
 
-	ff, err := g.isAncestor(baseBranch, lineageBranch)
-	if err != nil {
-		return "", err
-	}
-	if ff {
-		sha, err := runGit(g.repoPath, "rev-parse", lineageBranch)
+	squash := strings.EqualFold(mode, "squash")
+
+	if !squash {
+		ff, err := g.isAncestor(baseBranch, lineageBranch)
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(sha), nil
+		if ff {
+			sha, err := runGit(g.repoPath, "rev-parse", lineageBranch)
+			if err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(sha), nil
+		}
 	}
 
-	squash := strings.EqualFold(mode, "squash")
 	return g.mergeIntoTemp(baseBranch, lineageBranch, squash)
 }
 
