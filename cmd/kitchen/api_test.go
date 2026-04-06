@@ -74,7 +74,7 @@ func TestKitchenAPIStatusEndpoint(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	if _, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1); err != nil {
+	if _, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false); err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestKitchenAPIPlanHistoryCycleFilter(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestKitchenAPIActivePlanCancel(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestKitchenAPIDeletePlanEndpointRemovesPlanTasksAndQuestions(t *testing.T) 
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestKitchenAPIRetryTaskEndpointSupportsSameWorker(t *testing.T) {
 
 func TestKitchenAPIRetryTaskEndpointRejectsNonFailedTask(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestKitchenAPIPlanEvidenceCompactTier(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestKitchenAPIPlanEvidenceRejectsUnknownTier(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestKitchenAPIEventsStreamsPlanLifecycleNotifications(t *testing.T) {
 		t.Fatalf("first event = %q, want snapshot", event)
 	}
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}

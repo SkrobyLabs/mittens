@@ -13,35 +13,40 @@ import (
 const defaultPlanProgressHistoryLimit = 8
 
 type PlanCycleProgress struct {
-	Index            int    `json:"index"`
-	PlannerTaskID    string `json:"plannerTaskId,omitempty"`
-	PlannerTaskState string `json:"plannerTaskState,omitempty"`
-	ReviewTaskID     string `json:"reviewTaskId,omitempty"`
-	ReviewTaskState  string `json:"reviewTaskState,omitempty"`
+	Index               int    `json:"index"`
+	PlannerTaskID       string `json:"plannerTaskId,omitempty"`
+	PlannerTaskState    string `json:"plannerTaskState,omitempty"`
+	ReviewTaskID        string `json:"reviewTaskId,omitempty"`
+	ReviewTaskState     string `json:"reviewTaskState,omitempty"`
+	ImplReviewTaskID    string `json:"implReviewTaskId,omitempty"`
+	ImplReviewTaskState string `json:"implReviewTaskState,omitempty"`
 }
 
 type PlanProgress struct {
-	PlanID             string              `json:"planId"`
-	Lineage            string              `json:"lineage,omitempty"`
-	Title              string              `json:"title,omitempty"`
-	State              string              `json:"state,omitempty"`
-	Phase              string              `json:"phase,omitempty"`
-	ReviewRequested    bool                `json:"reviewRequested,omitempty"`
-	ReviewStatus       string              `json:"reviewStatus,omitempty"`
-	ReviewRounds       int                 `json:"reviewRounds,omitempty"`
-	ReviewAttempts     int                 `json:"reviewAttempts,omitempty"`
-	ReviewRevisions    int                 `json:"reviewRevisions,omitempty"`
-	MaxReviewRevisions int                 `json:"maxReviewRevisions,omitempty"`
-	PendingQuestions   int                 `json:"pendingQuestions"`
-	PendingQuestionIDs []string            `json:"pendingQuestionIds,omitempty"`
-	ActiveTaskIDs      []string            `json:"activeTaskIds,omitempty"`
-	CompletedTaskIDs   []string            `json:"completedTaskIds,omitempty"`
-	FailedTaskIDs      []string            `json:"failedTaskIds,omitempty"`
-	Cycles             []PlanCycleProgress `json:"cycles,omitempty"`
-	History            []PlanHistoryEntry  `json:"history,omitempty"`
-	HistoryTotal       int                 `json:"historyTotal,omitempty"`
-	HistoryIncluded    int                 `json:"historyIncluded,omitempty"`
-	HistoryTruncated   bool                `json:"historyTruncated,omitempty"`
+	PlanID               string              `json:"planId"`
+	Lineage              string              `json:"lineage,omitempty"`
+	Title                string              `json:"title,omitempty"`
+	State                string              `json:"state,omitempty"`
+	Phase                string              `json:"phase,omitempty"`
+	ReviewRequested      bool                `json:"reviewRequested,omitempty"`
+	ReviewStatus         string              `json:"reviewStatus,omitempty"`
+	ReviewRounds         int                 `json:"reviewRounds,omitempty"`
+	ReviewAttempts       int                 `json:"reviewAttempts,omitempty"`
+	ReviewRevisions      int                 `json:"reviewRevisions,omitempty"`
+	MaxReviewRevisions   int                 `json:"maxReviewRevisions,omitempty"`
+	ImplReviewRequested  bool                `json:"implReviewRequested,omitempty"`
+	ImplReviewStatus     string              `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings   []string            `json:"implReviewFindings,omitempty"`
+	PendingQuestions     int                 `json:"pendingQuestions"`
+	PendingQuestionIDs   []string            `json:"pendingQuestionIds,omitempty"`
+	ActiveTaskIDs        []string            `json:"activeTaskIds,omitempty"`
+	CompletedTaskIDs     []string            `json:"completedTaskIds,omitempty"`
+	FailedTaskIDs        []string            `json:"failedTaskIds,omitempty"`
+	Cycles               []PlanCycleProgress `json:"cycles,omitempty"`
+	History              []PlanHistoryEntry  `json:"history,omitempty"`
+	HistoryTotal         int                 `json:"historyTotal,omitempty"`
+	HistoryIncluded      int                 `json:"historyIncluded,omitempty"`
+	HistoryTruncated     bool                `json:"historyTruncated,omitempty"`
 }
 
 type PlanDetail struct {
@@ -157,21 +162,24 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 	sort.Strings(pendingQuestionIDs)
 
 	progress := PlanProgress{
-		PlanID:             planID,
-		Lineage:            bundle.Plan.Lineage,
-		Title:              bundle.Plan.Title,
-		State:              bundle.Execution.State,
-		ReviewRequested:    bundle.Execution.ReviewRequested,
-		ReviewStatus:       bundle.Execution.ReviewStatus,
-		ReviewRounds:       bundle.Execution.ReviewRounds,
-		ReviewAttempts:     bundle.Execution.ReviewAttempts,
-		ReviewRevisions:    bundle.Execution.ReviewRevisions,
-		MaxReviewRevisions: bundle.Execution.MaxReviewRevisions,
-		PendingQuestions:   len(pendingQuestionIDs),
-		PendingQuestionIDs: pendingQuestionIDs,
-		ActiveTaskIDs:      append([]string(nil), bundle.Execution.ActiveTaskIDs...),
-		CompletedTaskIDs:   append([]string(nil), bundle.Execution.CompletedTaskIDs...),
-		FailedTaskIDs:      append([]string(nil), bundle.Execution.FailedTaskIDs...),
+		PlanID:              planID,
+		Lineage:             bundle.Plan.Lineage,
+		Title:               bundle.Plan.Title,
+		State:               bundle.Execution.State,
+		ReviewRequested:     bundle.Execution.ReviewRequested,
+		ReviewStatus:        bundle.Execution.ReviewStatus,
+		ReviewRounds:        bundle.Execution.ReviewRounds,
+		ReviewAttempts:      bundle.Execution.ReviewAttempts,
+		ReviewRevisions:     bundle.Execution.ReviewRevisions,
+		MaxReviewRevisions:  bundle.Execution.MaxReviewRevisions,
+		ImplReviewRequested: bundle.Execution.ImplReviewRequested,
+		ImplReviewStatus:    bundle.Execution.ImplReviewStatus,
+		ImplReviewFindings:  append([]string(nil), bundle.Execution.ImplReviewFindings...),
+		PendingQuestions:    len(pendingQuestionIDs),
+		PendingQuestionIDs:  pendingQuestionIDs,
+		ActiveTaskIDs:       append([]string(nil), bundle.Execution.ActiveTaskIDs...),
+		CompletedTaskIDs:    append([]string(nil), bundle.Execution.CompletedTaskIDs...),
+		FailedTaskIDs:       append([]string(nil), bundle.Execution.FailedTaskIDs...),
 	}
 	sort.Strings(progress.ActiveTaskIDs)
 	sort.Strings(progress.CompletedTaskIDs)
@@ -271,6 +279,18 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 		cycles = append(cycles, cycle)
 	}
 
+	implAttempts := bundle.Execution.ImplReviewAttempts
+	if bundle.Execution.State == planStateImplementationReview && implAttempts < 1 {
+		implAttempts = 1
+	}
+	for i := 1; i <= implAttempts; i++ {
+		irTaskID := planImplReviewRuntimeID(planID, i)
+		cycles = append(cycles, PlanCycleProgress{
+			ImplReviewTaskID:    irTaskID,
+			ImplReviewTaskState: string(tasks[irTaskID]),
+		})
+	}
+
 	return cycles
 }
 
@@ -289,6 +309,8 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 		return "planning"
 	case planStateReviewing:
 		return "reviewing"
+	case planStateImplementationReview:
+		return "reviewing_implementation"
 	case planStatePendingApproval:
 		if pendingQuestions > 0 {
 			return "awaiting_questions"

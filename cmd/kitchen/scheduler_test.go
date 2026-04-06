@@ -2,18 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
 type schedulerHostAPI struct {
-	spawnSpecs []pool.WorkerSpec
-	containers []pool.ContainerInfo
+	spawnSpecs    []pool.WorkerSpec
+	containers    []pool.ContainerInfo
+	killedWorkers []string
 }
 
 func (h *schedulerHostAPI) SpawnWorker(_ context.Context, spec pool.WorkerSpec) (string, string, error) {
@@ -21,7 +24,10 @@ func (h *schedulerHostAPI) SpawnWorker(_ context.Context, spec pool.WorkerSpec) 
 	return "worker-" + spec.ID, "container-" + spec.ID, nil
 }
 
-func (h *schedulerHostAPI) KillWorker(_ context.Context, _ string) error { return nil }
+func (h *schedulerHostAPI) KillWorker(_ context.Context, workerID string) error {
+	h.killedWorkers = append(h.killedWorkers, workerID)
+	return nil
+}
 
 func (h *schedulerHostAPI) ListContainers(_ context.Context, _ string) ([]pool.ContainerInfo, error) {
 	return h.containers, nil
@@ -131,7 +137,7 @@ func TestSchedulerScheduleSpawnsAndDispatchesTask(t *testing.T) {
 	}
 }
 
-func TestSchedulerOnTaskCompletedMergesAndCleansWorktree(t *testing.T) {
+func TestSchedulerOnTaskCompletedMergesAndKillsWorker(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
 	project, err := paths.Project(repo)
@@ -214,6 +220,13 @@ func TestSchedulerOnTaskCompletedMergesAndCleansWorktree(t *testing.T) {
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatalf("expected worktree to be removed, stat err = %v", err)
 	}
+	// Kitchen workers are single-use: once the child worktree is
+	// discarded, the container's bind mount is stale, so the worker
+	// must be marked dead so the next task spawns a fresh container.
+	worker, ok := pm.Worker("w-1")
+	if !ok || worker.Status != pool.WorkerDead {
+		t.Fatalf("worker state = %+v, want dead after task completion", worker)
+	}
 
 	bundle, err := store.Get(planID)
 	if err != nil {
@@ -233,6 +246,258 @@ func TestSchedulerOnTaskCompletedMergesAndCleansWorktree(t *testing.T) {
 	}
 	if bundle.Execution.CompletedAt == nil {
 		t.Fatal("expected completedAt to be set")
+	}
+}
+
+func TestSchedulerOnPlannerTaskCompletedMigratesLineageMarker(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		planID     = "plan_rename"
+		oldLineage = "original-lineage"
+		newLineage = "renamed-lineage"
+	)
+
+	store := NewPlanStore(project.PlansDir)
+	if _, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: oldLineage,
+			Title:   "Initial plan",
+			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	// Simulate the active-plan marker that will be written when the
+	// plan is eventually approved under its original lineage, or that
+	// lingers from a previous approval. This is the state we want to
+	// heal when the planner renames the lineage.
+	if err := lineages.ActivatePlan(oldLineage, planID); err != nil {
+		t.Fatalf("seed active plan: %v", err)
+	}
+
+	plannerTaskRuntimeID := planTaskRuntimeID(planID, plannerTaskID)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         plannerTaskRuntimeID,
+		PlanID:     planID,
+		Prompt:     "plan this work",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1", len(host.spawnSpecs))
+	}
+	workerID := "w-1"
+	if err := pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch): %v", err)
+	}
+	dispatched, ok := pm.Task(plannerTaskRuntimeID)
+	if !ok || dispatched.Status != pool.TaskDispatched || dispatched.WorkerID != workerID {
+		t.Fatalf("planner task = %+v, want dispatched to %s", dispatched, workerID)
+	}
+
+	// Write a planner artifact that renames the lineage before the
+	// task is marked completed.
+	artifact := adapter.PlanArtifact{
+		Lineage: newLineage,
+		Title:   "Renamed plan",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID:         "t1",
+			Title:      "Do work",
+			Prompt:     "execute",
+			Complexity: string(ComplexityLow),
+		}},
+	}
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("marshal artifact: %v", err)
+	}
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), workerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
+		t.Fatalf("write plan artifact: %v", err)
+	}
+
+	if err := pm.CompleteTask(workerID, plannerTaskRuntimeID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if err := s.onTaskCompleted(plannerTaskRuntimeID); err != nil {
+		t.Fatalf("onTaskCompleted: %v", err)
+	}
+
+	// The old-lineage marker must be gone and the new one must point
+	// at this plan.
+	if _, err := lineages.ActivePlan(oldLineage); !os.IsNotExist(err) {
+		t.Fatalf("old-lineage marker still present: err=%v", err)
+	}
+	active, err := lineages.ActivePlan(newLineage)
+	if err != nil {
+		t.Fatalf("ActivePlan(%s): %v", newLineage, err)
+	}
+	if active != planID {
+		t.Fatalf("ActivePlan(%s) = %q, want %q", newLineage, active, planID)
+	}
+
+	// Plan record should now record the renamed lineage.
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if bundle.Plan.Lineage != newLineage {
+		t.Fatalf("plan.Lineage = %q, want %q", bundle.Plan.Lineage, newLineage)
+	}
+}
+
+func TestSchedulerKeepDeadWorkersRetainsThenEvictsUnderCap(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	const planID = "plan_keepdead"
+	if _, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "keep-dead",
+			Title:   "Keep dead workers",
+			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	cfg := DefaultKitchenConfig().Concurrency
+	cfg.MaxWorkersTotal = 1
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, cfg, "kitchen-test")
+	s.keepDeadWorkers = true
+
+	// First task: spawn w-1, dispatch, make worker edit a file,
+	// complete. With keepDeadWorkers the container must NOT be killed
+	// yet — only MarkDead'd — and the ID tracked for later eviction.
+	task1ID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-1",
+		PlanID:     planID,
+		Prompt:     "first",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask t1: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn t1): %v", err)
+	}
+	wt := host.spawnSpecs[0].WorkspacePath
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker w-1: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch t1): %v", err)
+	}
+	writeFile(t, filepath.Join(wt, "one.txt"), "1\n")
+	mustRunGit(t, wt, "add", "one.txt")
+	mustRunGit(t, wt, "commit", "-m", "t1")
+	if err := pm.CompleteTask("w-1", task1ID); err != nil {
+		t.Fatalf("CompleteTask t1: %v", err)
+	}
+	if err := s.onTaskCompleted(task1ID); err != nil {
+		t.Fatalf("onTaskCompleted(t1): %v", err)
+	}
+
+	if len(host.killedWorkers) != 0 {
+		t.Fatalf("killedWorkers = %v, want empty while worker is retained", host.killedWorkers)
+	}
+	worker1, ok := pm.Worker("w-1")
+	if !ok || worker1.Status != pool.WorkerDead {
+		t.Fatalf("worker w-1 = %+v, want dead", worker1)
+	}
+	if len(s.retainedDeadWorkers) != 1 || s.retainedDeadWorkers[0] != "w-1" {
+		t.Fatalf("retainedDeadWorkers = %v, want [w-1]", s.retainedDeadWorkers)
+	}
+
+	// Second task: enqueuing and scheduling should evict w-1 (host
+	// KillWorker) to make room under MaxWorkersTotal=1, then spawn a
+	// fresh w-2 for t2.
+	task2ID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-2",
+		PlanID:     planID,
+		Prompt:     "second",
+		Complexity: string(ComplexityMedium),
+		Priority:   2,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask t2: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn t2): %v", err)
+	}
+
+	if len(host.killedWorkers) != 1 || host.killedWorkers[0] != "w-1" {
+		t.Fatalf("killedWorkers = %v, want [w-1] after eviction", host.killedWorkers)
+	}
+	if len(s.retainedDeadWorkers) != 0 {
+		t.Fatalf("retainedDeadWorkers = %v, want empty after eviction", s.retainedDeadWorkers)
+	}
+	if len(host.spawnSpecs) != 2 {
+		t.Fatalf("spawnSpecs count = %d, want 2 after eviction + fresh spawn", len(host.spawnSpecs))
+	}
+	if _, ok := pm.Task(task2ID); !ok {
+		t.Fatal("task t-2 missing after schedule")
 	}
 }
 
@@ -1159,6 +1424,452 @@ func TestSchedulerEnforceTaskTimeoutsSkipsPlannerTask(t *testing.T) {
 	}
 	if task.Result != nil {
 		t.Fatalf("task result = %+v, want nil", task.Result)
+	}
+}
+
+func TestSyncPlanExecution_ImplReviewEnqueued(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_enqueue",
+			Lineage: "feat-ir",
+			Title:   "Impl review enqueue test",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateActive,
+			ImplReviewRequested: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-enqueue"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         planTaskRuntimeID(planID, "t1"),
+		PlanID:     planID,
+		Prompt:     "implement change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("expected completedAt to be nil while review pending, got %v", bundle.Execution.CompletedAt)
+	}
+
+	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTask, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("impl review task %q not found in pool", reviewTaskID)
+	}
+	if reviewTask.Status != pool.TaskQueued {
+		t.Fatalf("impl review task status = %q, want %q", reviewTask.Status, pool.TaskQueued)
+	}
+	if reviewTask.PlanID != planID {
+		t.Fatalf("impl review task planID = %q, want %q", reviewTask.PlanID, planID)
+	}
+}
+
+func TestSyncPlanExecution_NoImplReview(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_no_ir",
+			Lineage: "feat-no-ir",
+			Title:   "No impl review test",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateActive,
+			ImplReviewRequested: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-no-ir"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         planTaskRuntimeID(planID, "t1"),
+		PlanID:     planID,
+		Prompt:     "implement change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set after completion")
+	}
+}
+
+func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_pass",
+			Lineage: "feat-ir-pass",
+			Title:   "Impl review pass test",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateImplementationReview,
+			ImplReviewRequested: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-pass"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := implReviewRuntimeID(planID)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), "w-rev")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := "<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>"
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask("w-rev", reviewTaskID); err != nil {
+		t.Fatalf("CompleteTask review: %v", err)
+	}
+
+	if err := s.onTaskCompleted(reviewTaskID); err != nil {
+		t.Fatalf("onTaskCompleted(review): %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusPassed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusPassed)
+	}
+	if len(bundle.Execution.ImplReviewFindings) != 0 {
+		t.Fatalf("impl review findings = %v, want empty for pass", bundle.Execution.ImplReviewFindings)
+	}
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set after impl review pass")
+	}
+}
+
+func TestOnImplementationReviewCompleted_Fail(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_fail",
+			Lineage: "feat-ir-fail",
+			Title:   "Impl review fail test",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateImplementationReview,
+			ImplReviewRequested: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-fail"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := implReviewRuntimeID(planID)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), "w-rev")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := "<review><verdict>fail</verdict><feedback>Missing error handling in the new path</feedback><severity>major</severity></review>"
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask("w-rev", reviewTaskID); err != nil {
+		t.Fatalf("CompleteTask review: %v", err)
+	}
+
+	if err := s.onTaskCompleted(reviewTaskID); err != nil {
+		t.Fatalf("onTaskCompleted(review): %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusFailed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusFailed)
+	}
+	if len(bundle.Execution.ImplReviewFindings) == 0 {
+		t.Fatal("expected impl review findings to be populated on fail")
+	}
+	foundFeedback := false
+	for _, f := range bundle.Execution.ImplReviewFindings {
+		if strings.Contains(f, "Missing error handling") {
+			foundFeedback = true
+			break
+		}
+	}
+	if !foundFeedback {
+		t.Fatalf("impl review findings = %v, want feedback included", bundle.Execution.ImplReviewFindings)
+	}
+}
+
+func TestOnImplementationReviewFailed(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_infra_fail",
+			Lineage: "feat-ir-infra",
+			Title:   "Impl review infra failure test",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateImplementationReview,
+			ImplReviewRequested: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-infra"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := implReviewRuntimeID(planID)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+	if err := pm.FailTask("w-rev", reviewTaskID, "container crashed"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+
+	if err := s.onTaskFailed(reviewTaskID, FailureEnvironment); err != nil {
+		t.Fatalf("onTaskFailed(review): %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q (infra failure should not block completion)", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
 	}
 }
 

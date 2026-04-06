@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,6 +50,11 @@ type Kitchen struct {
 	repoPath   string
 	paths      KitchenPaths
 	project    ProjectPaths
+	// keepDeadWorkers retains finished worker containers via docker
+	// instead of removing them when their task ends, for post-mortem
+	// debugging. When set, the scheduler evicts the oldest retained
+	// container before spawning if the total would exceed MaxWorkersTotal.
+	keepDeadWorkers bool
 }
 
 func main() {
@@ -64,6 +70,7 @@ func newRootCommand() *cobra.Command {
 	var submitReview bool
 	var submitReviewRounds int
 	var submitMaxReviewRevisions int
+	var submitImplReview bool
 	var submitFile string
 	var plansCompleted bool
 	var historyCycle int
@@ -82,6 +89,7 @@ func newRootCommand() *cobra.Command {
 	var brokerAddr string
 	var brokerToken string
 	var advertiseAddr string
+	var keepDeadWorkers bool
 
 	rootCmd := &cobra.Command{
 		Use:           "kitchen",
@@ -113,7 +121,7 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions)
+				resp, err := client.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions, submitImplReview)
 				if err != nil {
 					return err
 				}
@@ -126,7 +134,7 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions)
+			bundle, err := k.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions, submitImplReview)
 			if err != nil {
 				return err
 			}
@@ -150,6 +158,7 @@ func newRootCommand() *cobra.Command {
 	submitCmd.Flags().IntVar(&submitReviewRounds, "review-rounds", 0, "number of review passes to request from the plan reviewer")
 	submitCmd.Flags().IntVar(&submitMaxReviewRevisions, "max-review-revisions", -1, "automatic planner revisions after failed review; -1 keeps the default and 0 disables retries")
 	submitCmd.Flags().StringVar(&submitFile, "file", "", "read the idea body from a file path or '-' for stdin")
+	submitCmd.Flags().BoolVar(&submitImplReview, "impl-review", false, "request a post-implementation adversarial review")
 
 	plansCmd := &cobra.Command{
 		Use:   "plans",
@@ -706,6 +715,35 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
+	fixMergeCmd := &cobra.Command{
+		Use:   "fix-merge LINEAGE",
+		Short: "Queue a worker to resolve lineage→base merge conflicts",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.FixLineageConflicts(args[0])
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			newTaskID, err := k.FixLineageConflicts(args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), map[string]any{"newTaskId": newTaskID})
+		},
+	}
+
 	lineagesCmd := &cobra.Command{
 		Use:   "lineages",
 		Short: "List lineage state",
@@ -862,9 +900,26 @@ func newRootCommand() *cobra.Command {
 				}
 			}
 
+			// If the user left the default --addr / --broker-addr flags,
+			// probe a small range for free ports so a second `kitchen
+			// serve` (for a different repo) doesn't collide with the
+			// first. Explicit flag values are honored as-is and will
+			// fail hard on bind conflict below.
+			if !cmd.Flags().Changed("addr") {
+				if picked, err := pickAvailableAddr(serveAddr, 20); err == nil {
+					serveAddr = picked
+				}
+			}
+			if !cmd.Flags().Changed("broker-addr") {
+				if picked, err := pickAvailableAddr(brokerAddr, 20); err == nil {
+					brokerAddr = picked
+				}
+			}
+
 			k, closeFn, err := openKitchenWithOptions(".", kitchenOpenOptions{
-				hostAPI:  hostAPI,
-				hostPool: hostPool,
+				hostAPI:         hostAPI,
+				hostPool:        hostPool,
+				keepDeadWorkers: keepDeadWorkers,
 			})
 			if err != nil {
 				return err
@@ -914,6 +969,7 @@ func newRootCommand() *cobra.Command {
 	serveCmd.Flags().StringVar(&brokerAddr, "broker-addr", "127.0.0.1:7682", "listen address for the Kitchen worker broker")
 	serveCmd.Flags().StringVar(&brokerToken, "broker-token", os.Getenv("KITCHEN_BROKER_TOKEN"), "shared token for the Kitchen worker broker")
 	serveCmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "worker broker address advertised to spawned workers")
+	serveCmd.Flags().BoolVar(&keepDeadWorkers, "keep-dead-workers", false, "retain finished worker containers for debugging; oldest is evicted when the container count reaches maxWorkersTotal")
 
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -921,6 +977,33 @@ func newRootCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "kitchen %s (%s, %s)\n", version, commit, date)
 			return nil
+		},
+	}
+
+	mittensCmd := &cobra.Command{
+		Use:                "mittens [mittens args...]",
+		Short:              "Launch mittens with the kitchen home directory mounted",
+		Long:               "Resolves the mittens binary next to kitchen, then execs it with --dir $KITCHEN_HOME (default ~/.kitchen) so the running AI has read-write access to kitchen's plans, lineages, and config. Any additional flags/args are forwarded to mittens.",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+				return cmd.Help()
+			}
+			mittensPath, err := resolveMittensBinary()
+			if err != nil {
+				return fmt.Errorf("locate mittens binary: %w", err)
+			}
+			kitchenHome, err := DefaultKitchenHome()
+			if err != nil {
+				return err
+			}
+			if info, err := os.Stat(kitchenHome); err != nil {
+				return fmt.Errorf("kitchen home %q: %w", kitchenHome, err)
+			} else if !info.IsDir() {
+				return fmt.Errorf("kitchen home %q is not a directory", kitchenHome)
+			}
+			mittensArgs := append([]string{"mittens", "--dir", kitchenHome}, args...)
+			return syscall.Exec(mittensPath, mittensArgs, os.Environ())
 		},
 	}
 
@@ -945,10 +1028,12 @@ func newRootCommand() *cobra.Command {
 		lineagesCmd,
 		mergeCmd,
 		mergeCheckCmd,
+		fixMergeCmd,
 		providerCmd,
 		cleanCmd,
 		tuiCmd,
 		serveCmd,
+		mittensCmd,
 		versionCmd,
 	)
 
@@ -957,6 +1042,36 @@ func newRootCommand() *cobra.Command {
 
 func notImplemented(feature string) error {
 	return fmt.Errorf("%s not implemented yet", feature)
+}
+
+// pickAvailableAddr probes ports starting at the port in base and walks
+// upward by 1 until it finds one it can bind, up to maxTries candidates.
+// Used for default --addr / --broker-addr only, so that a second
+// `kitchen serve` on the same host doesn't fail with EADDRINUSE. There
+// is an inherent TOCTOU window between probe-close and actual-bind; if
+// another process races us, the caller's net.Listen will surface the
+// collision.
+func pickAvailableAddr(base string, maxTries int) (string, error) {
+	host, portStr, err := net.SplitHostPort(base)
+	if err != nil {
+		return "", fmt.Errorf("parse %q: %w", base, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", fmt.Errorf("parse port %q: %w", portStr, err)
+	}
+	if maxTries <= 0 {
+		maxTries = 1
+	}
+	for i := 0; i < maxTries; i++ {
+		candidate := net.JoinHostPort(host, strconv.Itoa(port+i))
+		ln, err := net.Listen("tcp", candidate)
+		if err == nil {
+			_ = ln.Close()
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no free port in range %d-%d on %s", port, port+maxTries-1, host)
 }
 
 func writeJSON(out io.Writer, v any) error {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +26,7 @@ func TestKitchenEndToEndMultiLineageDispatchesIndependentWorktrees(t *testing.T)
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	planA, err := k.SubmitIdea("Implement lineage one task", "lineage-one", false, false, 0, -1)
+	planA, err := k.SubmitIdea("Implement lineage one task", "lineage-one", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea(planA): %v", err)
 	}
@@ -47,7 +46,7 @@ func TestKitchenEndToEndMultiLineageDispatchesIndependentWorktrees(t *testing.T)
 		return err == nil && got.Execution.State == planStatePendingApproval
 	})
 
-	planB, err := k.SubmitIdea("Implement lineage two task", "lineage-two", false, false, 0, -1)
+	planB, err := k.SubmitIdea("Implement lineage two task", "lineage-two", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea(planB): %v", err)
 	}
@@ -108,13 +107,13 @@ func TestKitchenEndToEndMultiLineageDispatchesIndependentWorktrees(t *testing.T)
 	})
 }
 
-func TestKitchenEndToEndRecycleSignalPrecedesNextTask(t *testing.T) {
+func TestKitchenEndToEndSpawnsFreshWorkerPerTask(t *testing.T) {
 	runtime := newFakeRuntimeDaemon(t, "broker-token", "pool-token")
 	defer runtime.Close()
 
 	hostAPI := newRuntimeClient(runtime.socketPath, "broker-token", "pool-token")
 	k := newTestKitchenWithHostAPI(t, hostAPI)
-	k.cfg.Concurrency.MaxWorkersTotal = 1
+	k.cfg.Concurrency.MaxWorkersTotal = 2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -122,15 +121,15 @@ func TestKitchenEndToEndRecycleSignalPrecedesNextTask(t *testing.T) {
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Exercise recycle before next task", "recycle-e2e", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Exercise per-task worker spawning", "per-task-e2e", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 
 	plannerSpawn := waitForSpawnByRole(t, runtime, plannerTaskRole, 1)[0]
 	completePlannerSpawn(t, k, plannerSpawn, adapter.PlanArtifact{
-		Title:   "Recycle flow",
-		Summary: "Two implementation tasks so the same worker can recycle before task two.",
+		Title:   "Per-task worker flow",
+		Summary: "Two sequential tasks to verify each gets its own worker.",
 		Tasks: []adapter.PlanArtifactTask{
 			{
 				ID:         "t1",
@@ -159,44 +158,34 @@ func TestKitchenEndToEndRecycleSignalPrecedesNextTask(t *testing.T) {
 		t.Fatalf("ApprovePlan: %v", err)
 	}
 
-	implSpawn := waitForSpawnByRole(t, runtime, "implementer", 1)[0]
-	firstTask := registerAndPollWorkerTask(t, k, implSpawn.ID, implSpawn.containerID)
+	// First task dispatches to a freshly spawned implementer.
+	firstSpawn := waitForSpawnByRole(t, runtime, "implementer", 1)[0]
+	firstTask := registerAndPollWorkerTask(t, k, firstSpawn.ID, firstSpawn.containerID)
 	if !strings.HasSuffix(firstTask.ID, "-t1") {
 		t.Fatalf("first task ID = %q, want runtime task ending in -t1", firstTask.ID)
 	}
-	writeWorkerResult(t, k, implSpawn.ID, "done\n")
-	completeWorkerTask(t, k, implSpawn.ID, firstTask.ID)
+	writeWorkerResult(t, k, firstSpawn.ID, "done\n")
+	completeWorkerTask(t, k, firstSpawn.ID, firstTask.ID)
 
-	secondTaskID := planTaskRuntimeID(bundle.Plan.PlanID, "t2")
+	// After completion Kitchen must kill the worker since its
+	// container is bind-mounted to a now-discarded worktree.
 	waitFor(t, 2*time.Second, func() bool {
-		task, ok := k.pm.Task(secondTaskID)
-		return ok && task.Status == pool.TaskDispatched
+		w, ok := k.pm.Worker(firstSpawn.ID)
+		return ok && w.Status == pool.WorkerDead
 	})
 
-	if err := k.hostAPI.RecycleWorker(context.Background(), implSpawn.ID); err != nil {
-		t.Fatalf("RecycleWorker: %v", err)
+	// Second task must get its own spawn, not reuse the first worker.
+	implSpawns := waitForSpawnByRole(t, runtime, "implementer", 2)
+	if len(implSpawns) < 2 {
+		t.Fatalf("expected two implementer spawns, got %d", len(implSpawns))
 	}
-	waitFor(t, time.Second, func() bool {
-		return k.pm.RecycleRequested(implSpawn.ID)
-	})
-
-	statusCode, poll := pollBrokerTaskOnce(t, k, implSpawn.ID)
-	if statusCode != http.StatusOK {
-		t.Fatalf("recycle poll status = %d, want 200", statusCode)
+	secondSpawn := implSpawns[1]
+	if secondSpawn.ID == firstSpawn.ID {
+		t.Fatalf("second task reused worker %q instead of fresh spawn", firstSpawn.ID)
 	}
-	if !poll.Recycle || poll.Task != nil {
-		t.Fatalf("recycle poll = %+v, want recycle=true and no task", poll)
-	}
-
-	statusCode, poll = pollBrokerTaskOnce(t, k, implSpawn.ID)
-	if statusCode != http.StatusOK {
-		t.Fatalf("next poll status = %d, want 200", statusCode)
-	}
-	if poll.Recycle {
-		t.Fatalf("next poll = %+v, want task delivery after single recycle signal", poll)
-	}
-	if poll.Task == nil || !strings.HasSuffix(poll.Task.ID, "-t2") {
-		t.Fatalf("next poll task = %+v, want runtime task ending in -t2", poll.Task)
+	secondTask := registerAndPollWorkerTask(t, k, secondSpawn.ID, secondSpawn.containerID)
+	if !strings.HasSuffix(secondTask.ID, "-t2") {
+		t.Fatalf("second task ID = %q, want runtime task ending in -t2", secondTask.ID)
 	}
 }
 
@@ -219,7 +208,7 @@ func TestKitchenEndToEndMergeConflictFailsSecondTask(t *testing.T) {
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Exercise merge conflict handling", "merge-conflict-e2e", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Exercise merge conflict handling", "merge-conflict-e2e", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -329,7 +318,7 @@ func TestKitchenEndToEndMergeConflictRetriesFromUpdatedLineageHead(t *testing.T)
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Exercise merge conflict retry", "merge-conflict-retry-e2e", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Exercise merge conflict retry", "merge-conflict-retry-e2e", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -437,7 +426,7 @@ func TestKitchenEndToEndTimeoutUsesSchedulerClockSeam(t *testing.T) {
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Exercise timeout handling", "timeout-e2e", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Exercise timeout handling", "timeout-e2e", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -522,7 +511,7 @@ func TestKitchenEndToEndPlanningFailureCanBeReplannedAndRecovered(t *testing.T) 
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	original, err := k.SubmitIdea("Review this branch and come up with a squash commit message", "review-branch", false, false, 0, -1)
+	original, err := k.SubmitIdea("Review this branch and come up with a squash commit message", "review-branch", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -594,7 +583,7 @@ func TestKitchenEndToEndRuntimeMuxRoutesPlannerAndImplementationToDifferentProvi
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Route planning to codex and implementation to claude", "provider-routing", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Route planning to codex and implementation to claude", "provider-routing", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}

@@ -103,6 +103,82 @@ func (g *GitManager) CreateChildWorktree(lineage, taskID string) (string, error)
 	return worktreePath, nil
 }
 
+// CommitChildIfDirty stages and commits any changes left in a child
+// worktree by the worker. Kitchen does not tell workers to `git commit`
+// themselves, so without this step workers that only edit files would
+// see MergeChild no-op (child branch still at lineage HEAD) and
+// DiscardChild would then erase the uncommitted work. Returns (true,
+// nil) when a commit was created, (false, nil) when the worktree was
+// clean or missing.
+func (g *GitManager) CommitChildIfDirty(lineage, taskID, message string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return false, err
+	}
+	if err := validatePathComponent("task ID", taskID); err != nil {
+		return false, err
+	}
+	worktreePath := filepath.Join(g.worktreeBase, lineage, taskID)
+	if _, err := os.Stat(worktreePath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat child worktree: %w", err)
+	}
+	status, err := runGit(worktreePath, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(status) == "" {
+		return false, nil
+	}
+	if _, err := runGit(worktreePath, "add", "-A"); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Kitchen task " + taskID
+	}
+	if _, err := runGit(worktreePath, "commit", "-m", message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// commitWorktreeIfDirty stages and commits any pending changes in the
+// given worktree path directly, bypassing the lineage/taskID lookup
+// that CommitChildIfDirty uses. It's the fallback for worker-managed
+// worktrees (e.g. the fix-lineage-merge worktree) where the path does
+// not match the standard lineage/<task-id> layout.
+func (g *GitManager) commitWorktreeIfDirty(worktreePath, message string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, err := os.Stat(worktreePath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat worktree: %w", err)
+	}
+	status, err := runGit(worktreePath, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(status) == "" {
+		return false, nil
+	}
+	if _, err := runGit(worktreePath, "add", "-A"); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Kitchen auto-commit"
+	}
+	if _, err := runGit(worktreePath, "commit", "-m", message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (g *GitManager) MergeChild(lineage, taskID string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -194,7 +270,7 @@ func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
 	if err != nil {
 		return err
 	}
-	return g.updateBranchRef(baseBranch, head)
+	return g.advanceBranchToSHA(baseBranch, head)
 }
 
 func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (string, error) {
@@ -270,6 +346,126 @@ func (g *GitManager) MergeCheck(lineage, baseBranch string) (bool, []string, err
 	return false, conflicts, nil
 }
 
+// CreateFixLineageMergeWorktree prepares a worker worktree pre-loaded
+// with an in-progress merge of base INTO lineage that hit conflicts,
+// so an AI worker can resolve it and commit on the lineage branch
+// itself. The worktree starts at the LINEAGE branch HEAD, runs
+// `git merge --no-ff --no-commit <baseBranch>`, and leaves the
+// index/WT in its conflicted state. The worker resolves, `git add`s,
+// and `git commit`s, producing a merge commit on the lineage whose
+// parents are lineage + base. The scheduler then fast-forwards the
+// lineage branch onto that commit — the base branch is left alone,
+// and a subsequent `kitchen merge` / `M merge` becomes a trivial
+// fast-forward because the lineage now strictly contains base.
+//
+// Returns the worktree path and the fix branch name (a dedicated
+// `kitchen/<lineage>/fix-merge/<ts>` head that the worker commits
+// onto). If the merge turns out to be clean (no conflicts), the
+// worktree is torn down and ("", "", nil) is returned so the caller
+// can treat it as a no-op.
+func (g *GitManager) CreateFixLineageMergeWorktree(lineage, baseBranch, fixTaskID string) (string, string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return "", "", err
+	}
+	if err := g.validateBranchName("base branch", baseBranch); err != nil {
+		return "", "", err
+	}
+	if err := validatePathComponent("fix task ID", fixTaskID); err != nil {
+		return "", "", err
+	}
+	lineageBranch := lineageBranchName(lineage)
+	fixBranch := "kitchen/" + lineage + "/fix-merge/" + fixTaskID
+	worktreePath := filepath.Join(g.worktreeBase, lineage, "fix-merge-"+fixTaskID)
+
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0755); err != nil {
+		return "", "", fmt.Errorf("create fix-merge worktree dir: %w", err)
+	}
+	if _, err := os.Stat(worktreePath); err == nil {
+		if _, err := runGit(g.repoPath, "worktree", "remove", "--force", worktreePath); err != nil {
+			if !isRecoverableWorktreeRemoveError(err) {
+				return "", "", err
+			}
+			_, _ = runGit(g.repoPath, "worktree", "prune")
+		}
+		_ = os.RemoveAll(worktreePath)
+		_, _ = runGit(g.repoPath, "worktree", "prune")
+	}
+
+	// Fork the worktree off the lineage tip and carry edits on a
+	// dedicated fix branch so the worker can't accidentally rewrite
+	// the live lineage branch while it's running.
+	if _, err := runGit(g.repoPath, "worktree", "add", "--detach", worktreePath, lineageBranch); err != nil {
+		return "", "", err
+	}
+	if _, err := runGit(worktreePath, "checkout", "-B", fixBranch); err != nil {
+		_, _ = runGit(g.repoPath, "worktree", "remove", "--force", worktreePath)
+		return "", "", err
+	}
+
+	_, err := runGit(worktreePath, "merge", "--no-ff", "--no-commit", baseBranch)
+	if err == nil {
+		// Merge was clean after all — no fix needed. Tear down.
+		_, _ = runGit(worktreePath, "merge", "--abort")
+		_, _ = runGit(g.repoPath, "worktree", "remove", "--force", worktreePath)
+		_, _ = runGit(g.repoPath, "branch", "-D", fixBranch)
+		return "", "", nil
+	}
+	// Leave the worktree in its conflicted state for the worker.
+	return worktreePath, fixBranch, nil
+}
+
+// FinalizeFixLineageMerge fast-forwards the lineage branch onto the
+// resolved fix-branch head. The resolution commit has lineage + base
+// as parents, so advancing lineage to it means lineage now strictly
+// contains base — a subsequent `kitchen merge` into base becomes a
+// fast-forward. The base branch is left untouched.
+//
+// Advancing the lineage ref is the only step that MUST succeed; the
+// temporary fix branch and worktree are cleaned up on a best-effort
+// basis (worker containers can leave root-owned files behind, which
+// makes `git worktree remove` fail with EACCES) and any cleanup
+// failure is returned via the second result so the caller can log
+// it without losing the successful ref advance.
+func (g *GitManager) FinalizeFixLineageMerge(lineage, fixBranch, worktreePath string) (cleanupErr error, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return nil, err
+	}
+	sha, err := runGit(g.repoPath, "rev-parse", fixBranch)
+	if err != nil {
+		return nil, fmt.Errorf("rev-parse fix branch: %w", err)
+	}
+	if err := g.advanceBranchToSHA(lineageBranchName(lineage), strings.TrimSpace(sha)); err != nil {
+		return nil, fmt.Errorf("advance lineage to fix head: %w", err)
+	}
+	if _, statErr := os.Stat(worktreePath); statErr == nil {
+		if _, removeErr := runGit(g.repoPath, "worktree", "remove", "--force", worktreePath); removeErr != nil {
+			if !isRecoverableWorktreeRemoveError(removeErr) {
+				cleanupErr = fmt.Errorf("worktree remove %s: %w", worktreePath, removeErr)
+			}
+			_, _ = runGit(g.repoPath, "worktree", "prune")
+		}
+		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+			if cleanupErr == nil {
+				cleanupErr = fmt.Errorf("rm worktree %s: %w", worktreePath, rmErr)
+			}
+		}
+	}
+	if _, branchErr := runGit(g.repoPath, "branch", "-D", fixBranch); branchErr != nil {
+		// Branch delete failing on its own is rare but shouldn't
+		// block the ref advance either.
+		if !strings.Contains(branchErr.Error(), "not found") && cleanupErr == nil {
+			cleanupErr = fmt.Errorf("delete fix branch %s: %w", fixBranch, branchErr)
+		}
+	}
+	return cleanupErr, nil
+}
+
 func (g *GitManager) CleanOrphans(activeTasks map[string]bool) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -304,6 +500,17 @@ func (g *GitManager) CleanOrphans(activeTasks map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// ConflictDiff returns the diff of the given files between baseSHA and lineageBranch.
+// It shows what the lineage branch changed in the conflicting files since the task's
+// base commit, giving context for why the merge conflict occurred.
+func (g *GitManager) ConflictDiff(baseSHA, lineageBranch string, files []string) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+	args := append([]string{"diff", baseSHA + ".." + lineageBranch, "--"}, files...)
+	return runGit(g.repoPath, args...)
 }
 
 func (g *GitManager) AnchorDrift(lineage string, anchorCommit string) (int, error) {
@@ -385,11 +592,48 @@ func (g *GitManager) forceBranchTo(branch, target string) error {
 	if err != nil {
 		return err
 	}
-	return g.updateBranchRef(branch, strings.TrimSpace(sha))
+	return g.advanceBranchToSHA(branch, strings.TrimSpace(sha))
 }
 
 func (g *GitManager) updateBranchRef(branch, sha string) error {
 	_, err := runGit(g.repoPath, "update-ref", "refs/heads/"+branch, sha)
+	return err
+}
+
+// advanceBranchToSHA points `branch` at `sha` and, when HEAD is the
+// symbolic ref for that branch in the main repo, also updates the
+// working tree and index so the operator's checkout stays in sync.
+// Plain `update-ref` would move the ref without touching the WT,
+// leaving phantom "deleted" entries in the operator's next
+// `git status` that get swept into unrelated commits. Dirty worktrees
+// are preserved (with a warning logged) so we never clobber
+// operator-in-flight work.
+func (g *GitManager) advanceBranchToSHA(branch, sha string) error {
+	headRef, headErr := runGit(g.repoPath, "symbolic-ref", "--quiet", "HEAD")
+	isCheckedOut := false
+	if headErr == nil {
+		isCheckedOut = strings.TrimSpace(headRef) == "refs/heads/"+branch
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(headErr, &exitErr) || exitErr.ExitCode() != 1 {
+			return headErr
+		}
+	}
+	if !isCheckedOut {
+		return g.updateBranchRef(branch, sha)
+	}
+	dirty, err := hasWorktreeChanges(g.repoPath)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		if err := g.updateBranchRef(branch, sha); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "kitchen: branch %s advanced by merge, but the working tree has uncommitted changes; run `git reset --hard %s` when ready to sync\n", branch, branch)
+		return nil
+	}
+	_, err = runGit(g.repoPath, "reset", "--hard", sha)
 	return err
 }
 

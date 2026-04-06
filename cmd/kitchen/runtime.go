@@ -44,6 +44,7 @@ func (k *Kitchen) StartRuntime(ctx context.Context, brokerAddr, brokerToken, kit
 	scheduler.kitchenAddr = advertisedAddr
 	scheduler.notify = k.sendNotify
 	scheduler.activatePlan = k.ApprovePlan
+	scheduler.keepDeadWorkers = k.keepDeadWorkers
 
 	k.workerBkr = broker
 	k.scheduler = scheduler

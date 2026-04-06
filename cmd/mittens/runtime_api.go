@@ -207,6 +207,14 @@ func runtimeWorkerStatus(record runtimeWorkerRecord, container pool.ContainerInf
 		}
 		return pool.WorkerDead
 	}
+	// Container was previously recorded (ContainerID set) but has
+	// disappeared from the host (e.g. operator ran `docker rm -f`).
+	// Without this, the stale record.Status ("spawning" or "working")
+	// would leak through and the scheduler's runtime client would keep
+	// reporting the worker as running.
+	if !hasContainer && strings.TrimSpace(record.ContainerID) != "" {
+		return pool.WorkerDead
+	}
 	if record.CurrentAssignment != nil {
 		return pool.WorkerWorking
 	}
@@ -239,10 +247,20 @@ func (a *App) runtimeWorkerView(workerID string) (*pool.RuntimeWorker, error) {
 		return nil, err
 	}
 
+	status := runtimeWorkerStatus(record, container, hasContainer, activity)
+	// Persist dead state so subsequent reads short-circuit and so other
+	// consumers (status listings, reconcile loops) don't have to
+	// recompute the transition each time.
+	if status == pool.WorkerDead && record.Status != pool.WorkerDead {
+		if err := a.markRuntimeWorkerDead(record.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	view := &pool.RuntimeWorker{
 		ID:                record.ID,
 		ContainerID:       record.ContainerID,
-		Status:            runtimeWorkerStatus(record, container, hasContainer, activity),
+		Status:            status,
 		Provider:          record.Provider,
 		Model:             record.Model,
 		Adapter:           record.Adapter,

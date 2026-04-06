@@ -86,6 +86,13 @@ func (lm *LineageManager) ActivePlan(lineage string) (string, error) {
 	return string(bytesTrimSpace(data)), nil
 }
 
+// ClearActivePlan removes the active-plan marker for `lineage` when it
+// currently points at `planID`. If the marker is missing or claims a
+// different plan (for example because another plan took over the
+// lineage after a rename, or this plan was already cleared), it
+// returns nil — callers deleting/cancelling/merging a plan should
+// never be blocked by someone else's active marker, they simply
+// don't own it.
 func (lm *LineageManager) ClearActivePlan(lineage, planID string) error {
 	if lm == nil {
 		return fmt.Errorf("lineage manager not configured")
@@ -98,7 +105,7 @@ func (lm *LineageManager) ClearActivePlan(lineage, planID string) error {
 		return err
 	}
 	if planID != "" && currentPlan != planID {
-		return fmt.Errorf("lineage %s active plan is %s, not %s", lineage, currentPlan, planID)
+		return nil
 	}
 	return os.Remove(filepath.Join(lm.lineagesDir, lineage, activePlanLinkName))
 }

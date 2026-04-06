@@ -58,6 +58,7 @@ esac
 		WorkspaceMountSrc: workspace,
 		ImageName:         "mittens-test",
 		ImageTag:          "latest",
+		NoBuild:           true,
 		brokerPort:        43123,
 		brokerToken:       "broker-token",
 		poolSession:       "kitchen-workspace-123",
@@ -234,6 +235,7 @@ esac
 		WorkspaceMountSrc: repo,
 		ImageName:         "mittens-test",
 		ImageTag:          "latest",
+		NoBuild:           true,
 		brokerPort:        43123,
 		brokerToken:       "broker-token",
 		poolSession:       "kitchen-workspace-123",
@@ -266,6 +268,97 @@ esac
 	commonGitDir := filepath.Join(repo, ".git")
 	if !argPairExists(runArgs, "-v", commonGitDir+":"+commonGitDir) {
 		t.Fatalf("docker run args missing linked-worktree common git dir mount %q: %v", commonGitDir, runArgs)
+	}
+}
+
+func TestSpawnWorkerContainerGeminiHostname(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
+
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", filepath.Join(tmp, ".mittens"))
+
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(dockerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runArgsPath := filepath.Join(tmp, "docker-run-args.txt")
+	dockerPath := filepath.Join(dockerDir, "docker")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  ps)
+    exit 0
+    ;;
+  run)
+    printf '%%s\n' "$@" > '%s'
+    printf 'container-gemini123\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, runArgsPath)
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", dockerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	p := GeminiProvider()
+	if err := os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{
+		Provider:          p,
+		Workspace:         workspace,
+		WorkspaceMountSrc: workspace,
+		ImageName:         "mittens-test",
+		ImageTag:          "latest",
+		NoBuild:           true,
+		brokerPort:        43123,
+		brokerToken:       "broker-token",
+		poolSession:       "kitchen-workspace-gemini",
+		poolStateDir:      filepath.Join(tmp, "pool-state"),
+	}
+	if err := os.MkdirAll(app.poolStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := app.spawnWorkerContainer(pool.WorkerSpec{
+		ID:            "w-g1",
+		Role:          "implementer",
+		Provider:      "gemini",
+		WorkspacePath: workspace,
+		Environment: map[string]string{
+			"MITTENS_SESSION_ID":   "kitchen-workspace-gemini",
+			"MITTENS_KITCHEN_ADDR": "http://127.0.0.1:3900",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runArgsData, err := os.ReadFile(runArgsPath)
+	if err != nil {
+		t.Fatalf("read docker run args: %v", err)
+	}
+	runArgs := strings.Split(strings.TrimSpace(string(runArgsData)), "\n")
+
+	if !argPairExists(runArgs, "--hostname", "gemini-cli") {
+		t.Errorf("docker run args missing --hostname gemini-cli: %v", runArgs)
+	}
+	if got := poolEnvValue(runArgs, "GEMINI_API_KEY"); got != "test-gemini-key" {
+		t.Errorf("GEMINI_API_KEY = %q, want %q", got, "test-gemini-key")
+	}
+	if got := poolEnvValue(runArgs, "MITTENS_PROVIDER"); got != "gemini" {
+		t.Errorf("MITTENS_PROVIDER = %q, want %q", got, "gemini")
 	}
 }
 

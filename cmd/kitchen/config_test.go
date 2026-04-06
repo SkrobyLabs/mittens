@@ -16,8 +16,8 @@ func TestLoadKitchenConfigMissingReturnsDefaults(t *testing.T) {
 	if got := cfg.Concurrency.MaxWorkersTotal; got != 12 {
 		t.Fatalf("MaxWorkersTotal = %d, want 12", got)
 	}
-	if len(cfg.Routing[ComplexityMedium].Fallback) != 1 {
-		t.Fatalf("medium fallback = %+v, want one entry", cfg.Routing[ComplexityMedium].Fallback)
+	if len(cfg.Routing[ComplexityMedium].Fallback) != 2 {
+		t.Fatalf("medium fallback = %+v, want two entries (gemini then opus)", cfg.Routing[ComplexityMedium].Fallback)
 	}
 	if got := cfg.Snapshots.PlanHistoryLimit; got != defaultPlanProgressHistoryLimit {
 		t.Fatalf("PlanHistoryLimit = %d, want %d", got, defaultPlanProgressHistoryLimit)

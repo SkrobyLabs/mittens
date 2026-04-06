@@ -19,8 +19,9 @@ const (
 	planStatePlanningFailed  = "planning_failed"
 	planStatePendingApproval = "pending_approval"
 	planStateActive          = "active"
-	planStateCompleted       = "completed"
-	planStateMerged          = "merged"
+	planStateCompleted              = "completed"
+	planStateImplementationReview   = "implementation_review"
+	planStateMerged                 = "merged"
 	planStateClosed          = "closed"
 	planStateRejected        = "rejected"
 
@@ -28,7 +29,7 @@ const (
 	planReviewStatusFailed = "failed"
 )
 
-func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool, reviewRounds int, maxReviewRevisions int) (*StoredPlan, error) {
+func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool, reviewRounds int, maxReviewRevisions int, implReview bool) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
@@ -67,11 +68,12 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 	}
 
 	execution := ExecutionRecord{
-		State:              planStatePlanning,
-		AutoApproved:       auto,
-		ReviewRequested:    review,
-		ReviewRounds:       reviewRounds,
-		MaxReviewRevisions: maxReviewRevisions,
+		State:                 planStatePlanning,
+		AutoApproved:          auto,
+		ReviewRequested:       review,
+		ReviewRounds:          reviewRounds,
+		MaxReviewRevisions:    maxReviewRevisions,
+		ImplReviewRequested:   implReview,
 		ActiveTaskIDs:      []string{planningTaskID},
 		Branch:             lineageBranchName(lineage),
 		Anchor:             anchor,
@@ -562,6 +564,257 @@ func (k *Kitchen) RetryTask(taskID string, requireFreshWorker bool) error {
 	return nil
 }
 
+// FixConflicts creates a new conflict-resolution task for a previously
+// failed task that has recorded merge-conflict information.
+func (k *Kitchen) FixConflicts(taskID string) (string, error) {
+	if k == nil || k.pm == nil || k.planStore == nil {
+		return "", fmt.Errorf("kitchen is not fully configured")
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", fmt.Errorf("task ID must not be empty")
+	}
+	task, ok := k.pm.Task(taskID)
+	if !ok {
+		return "", fmt.Errorf("task %s not found", taskID)
+	}
+	if task.Status != pool.TaskFailed {
+		return "", fmt.Errorf("task %s is not failed (status: %s)", taskID, task.Status)
+	}
+	if task.Result == nil || task.Result.Conflict == nil {
+		return "", fmt.Errorf("no conflict info recorded for task; was it failed by a merge conflict?")
+	}
+
+	planID := strings.TrimSpace(task.PlanID)
+	if planID == "" {
+		return "", fmt.Errorf("task %s has no associated plan", taskID)
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the original PlanTask entry for the failed task.
+	var originalTask *PlanTask
+	for i := range bundle.Plan.Tasks {
+		if planTaskRuntimeID(planID, bundle.Plan.Tasks[i].ID) == taskID {
+			originalTask = &bundle.Plan.Tasks[i]
+			break
+		}
+	}
+	if originalTask == nil {
+		return "", fmt.Errorf("task %s not found in plan %s", taskID, planID)
+	}
+
+	prompt := buildConflictFixPrompt(originalTask.Prompt, task.Result.Conflict)
+
+	// Generate a unique short ID for the new conflict-fix task.
+	now := time.Now().UTC().Format("20060102T150405")
+	newPlanTaskID := "conflict-fix-" + now
+	newRuntimeTaskID := planTaskRuntimeID(planID, newPlanTaskID)
+
+	newPlanTask := PlanTask{
+		ID:              newPlanTaskID,
+		Title:           "Fix conflicts: " + originalTask.Title,
+		Prompt:          prompt,
+		Complexity:      originalTask.Complexity,
+		Outputs:         originalTask.Outputs,
+		SuccessCriteria: originalTask.SuccessCriteria,
+		ReviewComplexity: originalTask.ReviewComplexity,
+		TimeoutMinutes:  originalTask.TimeoutMinutes,
+		// No dependencies: starts immediately.
+	}
+
+	if err := k.planStore.AddTask(planID, newPlanTask); err != nil {
+		return "", fmt.Errorf("add conflict-fix task to plan: %w", err)
+	}
+
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:                 newRuntimeTaskID,
+		PlanID:             planID,
+		Prompt:             prompt,
+		Complexity:         string(newPlanTask.Complexity),
+		Priority:           1,
+		TimeoutMinutes:     newPlanTask.TimeoutMinutes,
+		Role:               "implementer",
+		RequireFreshWorker: true,
+	}); err != nil {
+		return "", fmt.Errorf("enqueue conflict-fix task: %w", err)
+	}
+
+	// Reload bundle to apply the AddTask change before appending history.
+	bundle, err = k.planStore.Get(planID)
+	if err != nil {
+		return "", err
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryConflictFixRequested,
+		TaskID:  newRuntimeTaskID,
+		Summary: "Conflict fix task created for: " + originalTask.Title,
+	})
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		return "", err
+	}
+
+	return newRuntimeTaskID, nil
+}
+
+// FixLineageConflicts enqueues a fix-lineage-merge task that runs a
+// worker inside a worktree pre-loaded with the in-progress lineage→base
+// merge. The worker resolves conflicts, runs any tests the plan calls
+// out, commits the merge, and scheduler finalisation fast-forwards the
+// base branch onto the resolved commit.
+func (k *Kitchen) FixLineageConflicts(lineage string) (string, error) {
+	if k == nil || k.pm == nil || k.planStore == nil {
+		return "", fmt.Errorf("kitchen is not fully configured")
+	}
+	lineage = strings.TrimSpace(lineage)
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return "", err
+	}
+
+	activePlanID, _ := k.lineageMgr.ActivePlan(lineage)
+	if activePlanID == "" {
+		return "", fmt.Errorf("lineage %s has no active plan", lineage)
+	}
+	bundle, err := k.planStore.Get(activePlanID)
+	if err != nil {
+		return "", err
+	}
+	baseBranch := k.baseBranchForLineage(lineage)
+
+	// Check first — if it's actually clean we have nothing to do.
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		return "", err
+	}
+	clean, conflictFiles, err := gitMgr.MergeCheck(lineage, baseBranch)
+	if err != nil {
+		return "", err
+	}
+	if clean {
+		return "", fmt.Errorf("merge from %s into %s is already clean", lineage, baseBranch)
+	}
+
+	fixTaskID := "fix-merge-" + time.Now().UTC().Format("20060102T150405")
+	runtimeTaskID := planTaskRuntimeID(activePlanID, fixTaskID)
+	prompt := buildLineageFixMergePrompt(baseBranch, lineage, conflictFiles, bundle.Plan.Title)
+
+	// Register the fix task on the plan so it shows up alongside the
+	// other tasks in the TUI's Tasks pane (buildTaskItems iterates
+	// plan.Tasks). Without this the task exists only in the pool and
+	// the operator has no way to track it.
+	planTask := PlanTask{
+		ID:               fixTaskID,
+		Title:            fmt.Sprintf("Fix %s→%s merge conflicts", lineage, baseBranch),
+		Prompt:           prompt,
+		Complexity:       ComplexityMedium,
+		ReviewComplexity: ComplexityMedium,
+		Outputs: &PlanOutputs{
+			Files: append([]string(nil), conflictFiles...),
+		},
+	}
+	if err := k.planStore.AddTask(activePlanID, planTask); err != nil {
+		return "", fmt.Errorf("add fix-merge task to plan: %w", err)
+	}
+
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:                 runtimeTaskID,
+		PlanID:             activePlanID,
+		Prompt:             prompt,
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		TimeoutMinutes:     0,
+		Role:               lineageFixMergeRole,
+		RequireFreshWorker: true,
+	}); err != nil {
+		return "", fmt.Errorf("enqueue fix-lineage-merge task: %w", err)
+	}
+
+	// Reload to pick up the AddTask change, flip the plan back to
+	// active (the fix task is a new pending work item), and append
+	// history so the TUI reflects the new state immediately rather
+	// than waiting for the scheduler's next syncPlanExecution pass.
+	bundle, err = k.planStore.Get(activePlanID)
+	if err != nil {
+		return "", err
+	}
+	active, completed, failed := summarizePlanTasks(k.pm.Tasks(), activePlanID)
+	bundle.Execution.ActiveTaskIDs = active
+	bundle.Execution.CompletedTaskIDs = completed
+	bundle.Execution.FailedTaskIDs = failed
+	bundle.Plan.State = planStateActive
+	bundle.Execution.State = planStateActive
+	bundle.Execution.CompletedAt = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageFixMergeRequested,
+		TaskID:  runtimeTaskID,
+		Summary: fmt.Sprintf("Resolve lineage→%s merge conflicts in: %s", baseBranch, strings.Join(conflictFiles, ", ")),
+	})
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return "", err
+	}
+	if err := k.planStore.UpdateExecution(activePlanID, bundle.Execution); err != nil {
+		return "", err
+	}
+	k.sendNotify(pool.Notification{Type: "lineage_fix_merge_requested", ID: runtimeTaskID, Message: lineage})
+	return runtimeTaskID, nil
+}
+
+func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, planTitle string) string {
+	var sb strings.Builder
+	sb.WriteString("You are catching the Kitchen lineage branch up to the base branch so a later merge will be a trivial fast-forward.\n\n")
+	sb.WriteString("## Context\n")
+	sb.WriteString("- Lineage: `")
+	sb.WriteString(lineage)
+	sb.WriteString("` (the accumulated work from plan: ")
+	sb.WriteString(planTitle)
+	sb.WriteString(")\n- Base: `")
+	sb.WriteString(baseBranch)
+	sb.WriteString("` (has drifted since the lineage started)\n")
+	sb.WriteString("\nYour working directory sits on a throwaway fix branch forked from the lineage, with `git merge --no-ff --no-commit ")
+	sb.WriteString(baseBranch)
+	sb.WriteString("` already in progress — `git status` shows the conflicting files with their `<<<<<<<` / `=======` / `>>>>>>>` markers. HEAD is the fix branch, NOT the lineage branch itself (Kitchen will fast-forward the lineage onto your resolution commit when you finish).\n\n")
+	sb.WriteString("## Conflicting files\n")
+	for _, f := range files {
+		sb.WriteString("- ")
+		sb.WriteString(f)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n## Your job\n")
+	sb.WriteString("1. Resolve every conflict marker. Keep both sides' intent whenever that is what each change was trying to achieve — do not drop the lineage's work and do not drop the base's work unless one strictly supersedes the other.\n")
+	sb.WriteString("2. Run the repository's standard verification (build, tests, linters — look at the project instructions if you are unsure what's standard) to make sure the resolved tree is healthy.\n")
+	sb.WriteString("3. Once it passes, `git add` the resolved files and commit with a message like `Merge ")
+	sb.WriteString(baseBranch)
+	sb.WriteString(" into ")
+	sb.WriteString(lineage)
+	sb.WriteString(" (conflict resolution)`.\n")
+	sb.WriteString("4. Do NOT touch the base branch, do not amend, do not rebase — a single resolution commit on your fix branch is enough. Kitchen fast-forwards the lineage branch onto your commit once the task completes; the base branch is left untouched and the operator still runs the normal `kitchen merge` to deliver the lineage.\n")
+	return sb.String()
+}
+
+func buildConflictFixPrompt(originalPrompt string, info *pool.ConflictInfo) string {
+	var sb strings.Builder
+	sb.WriteString("You are re-implementing a task that previously failed due to merge conflicts.\n\n")
+	sb.WriteString("## Original task goal\n")
+	sb.WriteString(strings.TrimSpace(originalPrompt))
+	sb.WriteString("\n\n## Conflict context\n")
+	sb.WriteString("The following files had merge conflicts when your previous attempt was merged into the lineage branch:\n")
+	for _, f := range info.ConflictingFiles {
+		sb.WriteString("- ")
+		sb.WriteString(f)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n## What the lineage branch changed in those files\n")
+	sb.WriteString("The diff below shows the changes that were already present in the lineage branch (made by other concurrent tasks) that conflicted with your previous implementation:\n\n")
+	sb.WriteString("```diff\n")
+	sb.WriteString(info.LineageDiff)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("## Your job\n")
+	sb.WriteString("Re-implement the original task goal above. Your implementation MUST be compatible with the lineage changes shown in the diff. Do not revert or duplicate the lineage changes — work alongside them to achieve the original goal.")
+	return sb.String()
+}
+
 func planHistoryCycleForTask(planID string, task pool.Task) int {
 	if isPlanReviewTask(task) {
 		return reviewCycleForTask(planID, task.ID)
@@ -602,9 +855,15 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 		newPlan.Summary += "Replan requested: " + reason
 	}
 	if len(newPlan.Tasks) == 0 {
-		replanned, err := k.SubmitIdea(newPlan.Summary, newPlan.Lineage, false, review, rounds, maxRevisions)
+		replanned, err := k.SubmitIdea(newPlan.Summary, newPlan.Lineage, false, review, rounds, maxRevisions, bundle.Execution.ImplReviewRequested)
 		if err != nil {
 			return "", err
+		}
+		// Replan supersedes the old plan: delete it once the
+		// successor is safely persisted so the operator doesn't have
+		// to clean up the previous record by hand.
+		if err := k.DeletePlan(planID); err != nil {
+			return "", fmt.Errorf("delete superseded plan %s: %w", planID, err)
 		}
 		k.sendNotify(pool.Notification{Type: "plan_replanned", ID: replanned.Plan.PlanID, Message: replanned.Plan.Title})
 		return replanned.Plan.PlanID, nil
@@ -627,6 +886,12 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 	})
 	if err != nil {
 		return "", err
+	}
+	// Replan supersedes the old plan: delete it once the successor is
+	// safely persisted so the operator doesn't have to clean up the
+	// previous record by hand.
+	if err := k.DeletePlan(planID); err != nil {
+		return "", fmt.Errorf("delete superseded plan %s: %w", planID, err)
 	}
 	k.sendNotify(pool.Notification{Type: "plan_replanned", ID: newPlanID, Message: newPlan.Title})
 	return newPlanID, nil
@@ -942,6 +1207,27 @@ func derivePlanTitle(idea string) string {
 	return line
 }
 
+// sanitizeLineageSlug normalises an AI-generated lineage string into a
+// value that satisfies validatePathComponent. Planners frequently return
+// git-branch-style names like "feat/kitchen-headless" because that's
+// what lineages look like in git, but kitchen uses the lineage as both
+// a directory name and a sub-component of a git ref, so slashes and
+// backslashes must be collapsed. Returns empty string when the input
+// is empty, "." / "..", or collapses to nothing after sanitisation,
+// so callers can keep the existing lineage instead of failing the
+// whole planning run.
+func sanitizeLineageSlug(raw string) string {
+	slug := nonSlug.ReplaceAllString(strings.ToLower(strings.TrimSpace(raw)), "-")
+	slug = strings.Trim(slug, "-.")
+	if len(slug) > 48 {
+		slug = strings.Trim(slug[:48], "-.")
+	}
+	if slug == "" || slug == "." || slug == ".." {
+		return ""
+	}
+	return slug
+}
+
 func defaultLineage(title string) string {
 	slug := nonSlug.ReplaceAllString(strings.ToLower(strings.TrimSpace(title)), "-")
 	slug = strings.Trim(slug, "-")
@@ -1008,6 +1294,17 @@ func planRevisionRuntimeID(planID string, revision int) string {
 	return planTaskRuntimeID(planID, fmt.Sprintf("%s-%d", planRevisionTaskID, revision))
 }
 
+func planImplReviewRuntimeID(planID string, attempt int) string {
+	if attempt <= 0 {
+		attempt = 1
+	}
+	return planTaskRuntimeID(planID, fmt.Sprintf("%s-%d", implReviewTaskID, attempt))
+}
+
+func implReviewRuntimeID(planID string) string {
+	return planImplReviewRuntimeID(planID, 1)
+}
+
 func planReviewFindings(verdict, feedback, severity string) []string {
 	var findings []string
 	if verdict == pool.ReviewFail && strings.TrimSpace(severity) != "" {
@@ -1064,7 +1361,7 @@ func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanR
 	if artifact == nil {
 		return plan
 	}
-	if lineage := strings.TrimSpace(artifact.Lineage); lineage != "" {
+	if lineage := sanitizeLineageSlug(artifact.Lineage); lineage != "" {
 		plan.Lineage = lineage
 	}
 	if title := strings.TrimSpace(artifact.Title); title != "" {
@@ -1113,10 +1410,12 @@ func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanR
 }
 
 const (
-	plannerTaskID      = "plan"
-	plannerTaskRole    = "planner"
-	planReviewTaskID   = "plan-review"
-	planRevisionTaskID = "plan-revise"
+	plannerTaskID       = "plan"
+	plannerTaskRole     = "planner"
+	planReviewTaskID    = "plan-review"
+	planRevisionTaskID  = "plan-revise"
+	lineageFixMergeRole = "lineage-fix-merge"
+	implReviewTaskID    = "impl-review"
 )
 
 func isValidComplexity(value Complexity) bool {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,12 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrPlanNotFound is returned by PlanStore.Get when the plan directory or its
+// core files have been removed on disk. Callers (typically the scheduler) can
+// use this to distinguish genuinely missing plans from transient I/O errors
+// and reap tasks that still reference the orphaned plan.
+var ErrPlanNotFound = errors.New("plan not found")
 
 const (
 	planFileName      = "plan.json"
@@ -115,7 +122,12 @@ type ExecutionRecord struct {
 	ApprovedAt         *time.Time         `json:"approvedAt,omitempty"`
 	ActivatedAt        *time.Time         `json:"activatedAt,omitempty"`
 	CompletedAt        *time.Time         `json:"completedAt,omitempty"`
-	ReviewedAt         *time.Time         `json:"reviewedAt,omitempty"`
+	ReviewedAt             *time.Time         `json:"reviewedAt,omitempty"`
+	ImplReviewRequested    bool               `json:"implReviewRequested,omitempty"`
+	ImplReviewAttempts     int                `json:"implReviewAttempts,omitempty"`
+	ImplReviewStatus       string             `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings     []string           `json:"implReviewFindings,omitempty"`
+	ImplReviewedAt         *time.Time         `json:"implReviewedAt,omitempty"`
 }
 
 type AffinityRecord struct {
@@ -230,12 +242,21 @@ func (ps *PlanStore) Get(planID string) (StoredPlan, error) {
 	planDir := filepath.Join(ps.plansDir, planID)
 	var bundle StoredPlan
 	if err := readJSONFile(filepath.Join(planDir, planFileName), &bundle.Plan); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return StoredPlan{}, fmt.Errorf("%w: %s", ErrPlanNotFound, planID)
+		}
 		return StoredPlan{}, err
 	}
 	if err := readJSONFile(filepath.Join(planDir, executionFileName), &bundle.Execution); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return StoredPlan{}, fmt.Errorf("%w: %s", ErrPlanNotFound, planID)
+		}
 		return StoredPlan{}, err
 	}
 	if err := readJSONFile(filepath.Join(planDir, affinityFileName), &bundle.Affinity); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return StoredPlan{}, fmt.Errorf("%w: %s", ErrPlanNotFound, planID)
+		}
 		return StoredPlan{}, err
 	}
 	return bundle, nil
@@ -306,6 +327,22 @@ func (ps *PlanStore) UpdateExecution(planID string, execution ExecutionRecord) e
 	execution.PlanID = planID
 	execution.UpdatedAt = time.Now().UTC()
 	return writeJSONAtomic(filepath.Join(ps.plansDir, planID, executionFileName), execution)
+}
+
+func (ps *PlanStore) AddTask(planID string, task PlanTask) error {
+	if ps == nil {
+		return fmt.Errorf("plan store not configured")
+	}
+	if err := validatePathComponent("plan ID", planID); err != nil {
+		return err
+	}
+	bundle, err := ps.Get(planID)
+	if err != nil {
+		return err
+	}
+	bundle.Plan.Tasks = append(bundle.Plan.Tasks, task)
+	bundle.Plan.UpdatedAt = time.Now().UTC()
+	return writeJSONAtomic(filepath.Join(ps.plansDir, planID, planFileName), bundle.Plan)
 }
 
 func (ps *PlanStore) UpdateAffinity(planID string, affinity AffinityRecord) error {

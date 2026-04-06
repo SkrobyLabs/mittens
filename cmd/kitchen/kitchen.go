@@ -16,8 +16,9 @@ func openKitchen(repoPath string) (*Kitchen, func() error, error) {
 }
 
 type kitchenOpenOptions struct {
-	hostAPI  pool.RuntimeAPI
-	hostPool []PoolKey
+	hostAPI         pool.RuntimeAPI
+	hostPool        []PoolKey
+	keepDeadWorkers bool
 }
 
 func openKitchenWithOptions(repoPath string, opts kitchenOpenOptions) (*Kitchen, func() error, error) {
@@ -81,17 +82,18 @@ func openKitchenWithOptions(repoPath string, opts kitchenOpenOptions) (*Kitchen,
 	}
 
 	k := &Kitchen{
-		pm:         pm,
-		wal:        wal,
-		hostAPI:    hostAPI,
-		router:     NewComplexityRouter(cfg, health, hostPool...),
-		health:     health,
-		planStore:  NewPlanStore(project.PlansDir),
-		lineageMgr: NewLineageManager(project.LineagesDir, project.PlansDir),
-		cfg:        cfg,
-		repoPath:   repoRoot,
-		paths:      paths,
-		project:    project,
+		pm:              pm,
+		wal:             wal,
+		hostAPI:         hostAPI,
+		router:          NewComplexityRouter(cfg, health, hostPool...),
+		health:          health,
+		planStore:       NewPlanStore(project.PlansDir),
+		lineageMgr:      NewLineageManager(project.LineagesDir, project.PlansDir),
+		cfg:             cfg,
+		repoPath:        repoRoot,
+		paths:           paths,
+		project:         project,
+		keepDeadWorkers: opts.keepDeadWorkers,
 	}
 	return k, wal.Close, nil
 }

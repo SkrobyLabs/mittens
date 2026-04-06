@@ -90,17 +90,20 @@ func DefaultKitchenConfig() KitchenConfig {
 				Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}},
 			},
 			ComplexityLow: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+				Prefer:   []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.0-flash"}},
 			},
 			ComplexityMedium: {
 				Prefer:   []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-				Fallback: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.0-flash"}, {Provider: "anthropic", Model: "opus"}},
 			},
 			ComplexityHigh: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				Prefer:   []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.5-pro"}},
 			},
 			ComplexityCritical: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				Prefer:   []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.5-pro"}},
 			},
 		},
 		Concurrency: ConcurrencyConfig{

@@ -27,6 +27,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/plans/{id}/evidence", k.withAPIAuth(token, k.handlePlanEvidence))
 	mux.HandleFunc("GET /v1/tasks/{id}/activity", k.withAPIAuth(token, k.handleTaskActivity))
 	mux.HandleFunc("POST /v1/tasks/{id}/retry", k.withAPIAuth(token, k.handleRetryTask))
+	mux.HandleFunc("POST /v1/tasks/{id}/fix-conflicts", k.withAPIAuth(token, k.handleFixConflicts))
 	mux.HandleFunc("DELETE /v1/tasks/{id}", k.withAPIAuth(token, k.handleCancelTask))
 	mux.HandleFunc("DELETE /v1/plans/{id}", k.withAPIAuth(token, k.handleCancelPlan))
 	mux.HandleFunc("DELETE /v1/plans/{id}/purge", k.withAPIAuth(token, k.handleDeletePlan))
@@ -44,6 +45,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/meta", k.withAPIAuth(token, k.handleMeta))
 	mux.HandleFunc("GET /v1/lineages", k.withAPIAuth(token, k.handleLineages))
 	mux.HandleFunc("POST /v1/lineages/{name}/merge", k.withAPIAuth(token, k.handleMergeLineage))
+	mux.HandleFunc("POST /v1/lineages/{name}/fix-merge", k.withAPIAuth(token, k.handleFixLineageConflicts))
 	mux.HandleFunc("GET /v1/lineages/{name}/merge-check", k.withAPIAuth(token, k.handleMergeCheck))
 	mux.HandleFunc("GET /v1/providers/health", k.withAPIAuth(token, k.handleProviderHealth))
 	mux.HandleFunc("POST /v1/providers/{provider}/models/{model}/reset", k.withAPIAuth(token, k.handleProviderReset))
@@ -130,6 +132,7 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 		Review             bool   `json:"review"`
 		ReviewRounds       int    `json:"reviewRounds"`
 		MaxReviewRevisions *int   `json:"maxReviewRevisions"`
+		ImplReview         bool   `json:"implReview"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
@@ -138,7 +141,7 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	if req.MaxReviewRevisions != nil {
 		maxReviewRevisions = *req.MaxReviewRevisions
 	}
-	bundle, err := k.SubmitIdea(req.Idea, req.Lineage, req.Auto, req.Review, req.ReviewRounds, maxReviewRevisions)
+	bundle, err := k.SubmitIdea(req.Idea, req.Lineage, req.Auto, req.Review, req.ReviewRounds, maxReviewRevisions, req.ImplReview)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
@@ -269,6 +272,26 @@ func (k *Kitchen) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		"taskId":             taskID,
 		"requireFreshWorker": requireFreshWorker,
 	})
+}
+
+func (k *Kitchen) handleFixConflicts(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	newTaskID, err := k.FixConflicts(taskID)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"newTaskId": newTaskID})
+}
+
+func (k *Kitchen) handleFixLineageConflicts(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	newTaskID, err := k.FixLineageConflicts(name)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"newTaskId": newTaskID})
 }
 
 func (k *Kitchen) handleCancelTask(w http.ResponseWriter, r *http.Request) {

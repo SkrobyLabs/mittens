@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -70,6 +71,8 @@ type App struct {
 	// Image build state
 	imageTagParts []string
 	buildArgs     map[string]string
+	imageBuildOnce sync.Once
+	imageBuildErr  error
 
 	// Cleanup tracking
 	tempDirs        []string
@@ -471,15 +474,18 @@ func (a *App) Run() error {
 		return err
 	}
 
-	// Build Docker image.
-	if !a.NoBuild {
-		if err := a.buildImage(); err != nil {
-			return err
-		}
-	}
-
+	// Daemon mode: return readiness immediately without blocking on an
+	// image build. The image is built lazily on the first worker spawn
+	// (or opportunistically in the background — see runRuntimeDaemon).
 	if a.DaemonMode {
 		return a.runRuntimeDaemon()
+	}
+
+	// Build Docker image.
+	if !a.NoBuild {
+		if err := a.ensureImage(); err != nil {
+			return err
+		}
 	}
 
 	if a.PoolMode {
@@ -1072,6 +1078,17 @@ func registerClipboardClient(sharedDir, clientDir string) (string, error) {
 		return "", err
 	}
 	return regFile.Name(), nil
+}
+
+// ensureImage runs buildImage at most once per App lifetime. Concurrent
+// callers block on the same build and share its result. Used by daemon
+// mode so that the first worker spawn (or an opportunistic background
+// build) can drive image construction without racing.
+func (a *App) ensureImage() error {
+	a.imageBuildOnce.Do(func() {
+		a.imageBuildErr = a.buildImage()
+	})
+	return a.imageBuildErr
 }
 
 // buildImage runs docker build.

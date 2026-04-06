@@ -508,16 +508,17 @@ func (pm *PoolManager) enqueueTaskLocked(spec TaskSpec) (string, error) {
 		Type:      EventTaskCreated,
 		TaskID:    tid,
 		Data: marshalData(TaskCreatedData{
-			Prompt:         spec.Prompt,
-			Complexity:     spec.Complexity,
-			Priority:       spec.Priority,
-			DependsOn:      spec.DependsOn,
-			TimeoutMinutes: spec.TimeoutMinutes,
-			Role:           spec.Role,
-			MaxReviews:     maxReviews,
-			PipelineID:     spec.PipelineID,
-			PlanID:         spec.PlanID,
-			StageIndex:     spec.StageIndex,
+			Prompt:             spec.Prompt,
+			Complexity:         spec.Complexity,
+			Priority:           spec.Priority,
+			DependsOn:          spec.DependsOn,
+			TimeoutMinutes:     spec.TimeoutMinutes,
+			Role:               spec.Role,
+			MaxReviews:         maxReviews,
+			PipelineID:         spec.PipelineID,
+			PlanID:             spec.PlanID,
+			StageIndex:         spec.StageIndex,
+			RequireFreshWorker: spec.RequireFreshWorker,
 		}),
 	}
 	if _, err := pm.wal.Append(e); err != nil {
@@ -877,6 +878,32 @@ func (pm *PoolManager) FailCompletedTask(taskID, errMsg string) error {
 	Apply(pm, e)
 
 	pm.sendNotify(Notification{Type: "task_failed", ID: taskID})
+	return nil
+}
+
+// SetTaskConflictInfo attaches structured conflict data to a failed task's result
+// and persists it to the WAL so the information survives restart.
+func (pm *PoolManager) SetTaskConflictInfo(taskID string, info *ConflictInfo) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if pm.tasks[taskID] == nil {
+		return fmt.Errorf("set conflict info: task %q not found", taskID)
+	}
+
+	e := Event{
+		Timestamp: time.Now(),
+		Type:      EventTaskConflictRecorded,
+		TaskID:    taskID,
+		Data: marshalData(TaskConflictRecordedData{
+			ConflictingFiles: info.ConflictingFiles,
+			LineageDiff:      info.LineageDiff,
+		}),
+	}
+	if _, err := pm.wal.Append(e); err != nil {
+		return fmt.Errorf("set conflict info wal: %w", err)
+	}
+	Apply(pm, e)
 	return nil
 }
 

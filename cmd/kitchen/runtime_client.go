@@ -36,7 +36,16 @@ func newRuntimeClient(socketPath, token, poolToken string) *runtimeClient {
 		token:      token,
 		poolToken:  poolToken,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			// Worker spawns can legitimately take minutes on the
+			// first call after the mittens daemon starts, since
+			// spawnWorkerContainer blocks on ensureImage (docker
+			// build with cached layers still takes 20-60s). A 30s
+			// ceiling caused Kitchen to time out and retry in a
+			// loop, leaving a trail of orphan "spawning" runtime
+			// records while the daemon continued the build. Per-
+			// request deadlines are still enforced via ctx by
+			// callers that need a shorter bound.
+			Timeout: 10 * time.Minute,
 			Transport: &http.Transport{
 				Proxy: nil,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

@@ -209,6 +209,26 @@ func kitchenCapabilities() map[string]any {
 			"overrideHistoryLimit":        true,
 			"embeddedHistoryLimitDefault": defaultPlanProgressHistoryLimit,
 		},
+		"providers": []map[string]any{
+			{
+				"provider":    "anthropic",
+				"adapter":     "claude-code",
+				"models":      []string{"haiku", "sonnet", "opus"},
+				"description": "Anthropic Claude via claude-code CLI",
+			},
+			{
+				"provider":    "codex",
+				"adapter":     "openai-codex",
+				"models":      []string{"codex-mini", "o4-mini"},
+				"description": "OpenAI Codex via codex CLI",
+			},
+			{
+				"provider":    "gemini",
+				"adapter":     "gemini-cli",
+				"models":      []string{"gemini-2.0-flash", "gemini-2.5-pro"},
+				"description": "Google Gemini via gemini-cli",
+			},
+		},
 		"runtime": map[string]any{
 			"transport":       "unix-socket",
 			"eventForwarding": true,

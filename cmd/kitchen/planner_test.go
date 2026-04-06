@@ -11,10 +11,76 @@ import (
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
+func TestSanitizeLineageSlug(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "already valid", in: "kitchen-tui-questions", want: "kitchen-tui-questions"},
+		{name: "forward slashes collapsed", in: "feat/kitchen-headless", want: "feat-kitchen-headless"},
+		{name: "multi-segment branch", in: "kitchen/kitchen-worktree-gone", want: "kitchen-kitchen-worktree-gone"},
+		{name: "backslashes collapsed", in: `feat\nested\work`, want: "feat-nested-work"},
+		{name: "uppercase lowercased", in: "Kitchen/TUI-Questions", want: "kitchen-tui-questions"},
+		{name: "whitespace trimmed and replaced", in: "  my  lineage  ", want: "my-lineage"},
+		{name: "leading/trailing dots stripped", in: "..rooted..", want: "rooted"},
+		{name: "lone dot rejected", in: ".", want: ""},
+		{name: "double dot rejected", in: "..", want: ""},
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "truncated at 48 chars", in: strings.Repeat("a", 80), want: strings.Repeat("a", 48)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeLineageSlug(tc.in)
+			if got != tc.want {
+				t.Fatalf("sanitizeLineageSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPlanFromArtifactSanitizesLineage(t *testing.T) {
+	existing := PlanRecord{
+		PlanID:  "plan_1",
+		Lineage: "original-lineage",
+		Title:   "Existing",
+	}
+	artifact := &adapter.PlanArtifact{
+		Lineage: "feat/kitchen-headless",
+		Title:   "Updated",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "Work", Prompt: "do", Complexity: "low",
+		}},
+	}
+	planned := planFromArtifact(existing, artifact)
+	if planned.Lineage != "feat-kitchen-headless" {
+		t.Fatalf("planned.Lineage = %q, want feat-kitchen-headless (slashes collapsed)", planned.Lineage)
+	}
+}
+
+func TestPlanFromArtifactKeepsExistingLineageWhenArtifactSlugUnusable(t *testing.T) {
+	existing := PlanRecord{
+		PlanID:  "plan_1",
+		Lineage: "original-lineage",
+		Title:   "Existing",
+	}
+	artifact := &adapter.PlanArtifact{
+		Lineage: "..",
+		Title:   "Updated",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "Work", Prompt: "do", Complexity: "low",
+		}},
+	}
+	planned := planFromArtifact(existing, artifact)
+	if planned.Lineage != "original-lineage" {
+		t.Fatalf("planned.Lineage = %q, want original-lineage preserved", planned.Lineage)
+	}
+}
+
 func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -102,7 +168,7 @@ func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 func TestKitchenSubmitIdeaWithReviewPersistsReviewMetadata(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 2, 3)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 2, 3, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -144,7 +210,7 @@ func TestKitchenSubmitIdeaWithReviewPersistsReviewMetadata(t *testing.T) {
 func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -189,7 +255,7 @@ func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, false, 0, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -235,7 +301,7 @@ func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.
 func TestKitchenAutoApprovedReviewedPlanActivatesAfterReviewPass(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, true, 2, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, true, 2, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -275,7 +341,7 @@ func TestKitchenAutoApprovedReviewedPlanActivatesAfterReviewPass(t *testing.T) {
 func TestKitchenFailedPlanReviewQueuesSinglePlannerRevision(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -364,7 +430,7 @@ func TestKitchenFailedPlanReviewQueuesSinglePlannerRevision(t *testing.T) {
 func TestKitchenReviewWithZeroMaxRevisionsStopsAfterFailedReview(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, 0)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, 0, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -398,7 +464,7 @@ func TestKitchenReviewWithZeroMaxRevisionsStopsAfterFailedReview(t *testing.T) {
 func TestKitchenCancelActivePlanCancelsRuntimeTasks(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}

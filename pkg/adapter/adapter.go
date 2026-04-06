@@ -69,6 +69,13 @@ func New(name string, workDir string, opts ...func(*Config)) (Adapter, error) {
 			onActivity:    cfg.OnActivity,
 			onToolUse:     cfg.OnToolUse,
 		}, nil
+	case "gemini-cli", "gemini":
+		return &geminiAdapter{
+			workDir:    cfg.WorkDir,
+			model:      cfg.Model,
+			onActivity: cfg.OnActivity,
+			onToolUse:  cfg.OnToolUse,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown adapter: %q", name)
 	}

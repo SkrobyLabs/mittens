@@ -15,11 +15,14 @@ type fakeKitchenTUIBackend struct {
 	deletedPlanID             string
 	deleteCalls               int
 	plans                     []PlanRecord
+	questions                 []pool.Question
 	submitPlanID              string
 	submittedIdea             string
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
+	answeredQuestionID        string
+	answeredQuestionAnswer    string
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -38,7 +41,9 @@ func (b *fakeKitchenTUIBackend) PlanDetail(planID string) (PlanDetail, error) {
 func (b *fakeKitchenTUIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
 	return nil, nil
 }
-func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) { return nil, nil }
+func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
+	return append([]pool.Question(nil), b.questions...), nil
+}
 func (b *fakeKitchenTUIBackend) SubmitIdea(idea string) (string, error) {
 	b.submittedIdea = idea
 	if strings.TrimSpace(b.submitPlanID) == "" {
@@ -60,9 +65,18 @@ func (b *fakeKitchenTUIBackend) RetryTask(taskID string, requireFreshWorker bool
 	b.retriedRequireFreshWorker = requireFreshWorker
 	return nil
 }
+func (b *fakeKitchenTUIBackend) FixConflicts(taskID string) (string, error) { return "", nil }
 func (b *fakeKitchenTUIBackend) ReplanPlan(planID, reason string) (string, error) { return "", nil }
+func (b *fakeKitchenTUIBackend) AnswerQuestion(id, answer string) error {
+	b.answeredQuestionID = id
+	b.answeredQuestionAnswer = answer
+	return nil
+}
 func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error)        { return "", nil }
 func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error)      { return "", nil }
+func (b *fakeKitchenTUIBackend) FixLineageConflicts(lineage string) (string, error) {
+	return "", nil
+}
 
 func textInputWithValue(value string) textinput.Model {
 	input := textinput.New()
@@ -411,6 +425,28 @@ func TestKitchenTUIFooterShowsPlanActionsOnlyWhenActionable(t *testing.T) {
 	}
 }
 
+func TestKitchenTUIViewDoesNotShowSubmitBarAfterInputClosed(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:   backend,
+		width:     120,
+		height:    40,
+		inputMode: kitchenTUIInputSubmit,
+	}
+	model.input = textInputWithValue("some idea")
+
+	updated, _ := model.Update(kitchenTUIActionMsg{status: "submitted plan_new", selectedPlanID: "plan_new"})
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q after action success, want none", got.inputMode)
+	}
+
+	view := got.View()
+	if strings.Contains(view, "Submit") {
+		t.Fatalf("View() contains 'Submit' bar after input closed:\n%s", view)
+	}
+}
+
 func TestKitchenTUIFooterShowsMergeOnlyForCompletedPlan(t *testing.T) {
 	model := kitchenTUIModel{
 		leftMode: kitchenTUILeftPlans,
@@ -425,5 +461,336 @@ func TestKitchenTUIFooterShowsMergeOnlyForCompletedPlan(t *testing.T) {
 	footer := model.renderFooter()
 	if !strings.Contains(footer, "M merge") {
 		t.Fatalf("footer = %q, want merge action for completed plan", footer)
+	}
+}
+
+// helpers for question detail pane tests
+
+func questionModel(q pool.Question) kitchenTUIModel {
+	return kitchenTUIModel{
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_q"}},
+		},
+		questions: []pool.Question{q},
+	}
+}
+
+func TestRenderQuestionDetailPaneFreeText(t *testing.T) {
+	q := pool.Question{
+		ID:       "q1",
+		WorkerID: "w1",
+		TaskID:   "plan_q-t1",
+		Question: "What is the intended behavior?",
+		Context:  "This context block explains the background.",
+	}
+	model := questionModel(q)
+	out := model.renderQuestionDetailPane(80, 30)
+
+	if !strings.Contains(out, "What is the intended behavior?") {
+		t.Fatalf("output missing question text: %q", out)
+	}
+	if !strings.Contains(out, "This context block explains the background.") {
+		t.Fatalf("output missing context: %q", out)
+	}
+	if !strings.Contains(out, "w1") {
+		t.Fatalf("output missing worker ID: %q", out)
+	}
+	if !strings.Contains(out, "Press 'a' to answer") {
+		t.Fatalf("output missing answer hint: %q", out)
+	}
+}
+
+func TestRenderQuestionDetailPaneMultipleChoice(t *testing.T) {
+	q := pool.Question{
+		ID:       "q2",
+		WorkerID: "w2",
+		TaskID:   "plan_q-t1",
+		Question: "Which approach?",
+		Options:  []string{"Option A", "Option B", "Option C"},
+	}
+	model := questionModel(q)
+	out := model.renderQuestionDetailPane(80, 30)
+
+	for _, opt := range []string{"Option A", "Option B", "Option C"} {
+		if !strings.Contains(out, opt) {
+			t.Fatalf("output missing %q: %q", opt, out)
+		}
+	}
+	if !strings.Contains(out, "Press 'a' to answer") {
+		t.Fatalf("output missing answer hint: %q", out)
+	}
+}
+
+func TestRenderQuestionDetailPaneMultipleChoiceHighlight(t *testing.T) {
+	q := pool.Question{
+		ID:      "q3",
+		TaskID:  "plan_q-t1",
+		Options: []string{"Option A", "Option B", "Option C"},
+	}
+	model := questionModel(q)
+	model.inputMode = kitchenTUIInputAnswer
+	model.selectedOption = 1
+	out := model.renderQuestionDetailPane(80, 30)
+
+	if !strings.Contains(out, "Option A") {
+		t.Fatalf("output missing Option A: %q", out)
+	}
+	if !strings.Contains(out, "Option B") {
+		t.Fatalf("output missing Option B: %q", out)
+	}
+	if !strings.Contains(out, "↑/↓") {
+		t.Fatalf("output missing navigation hint: %q", out)
+	}
+}
+
+func TestMultipleChoiceSubmitViaEnter(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	q := pool.Question{
+		ID:      "q4",
+		TaskID:  "plan_q-t1",
+		Options: []string{"Option A", "Option B"},
+	}
+	model := kitchenTUIModel{
+		backend:  backend,
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_q"}},
+		},
+		questions:      []pool.Question{q},
+		inputMode:      kitchenTUIInputAnswer,
+		selectedOption: 0,
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command after enter")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.answeredQuestionID != "q4" {
+		t.Fatalf("answeredQuestionID = %q, want q4", backend.answeredQuestionID)
+	}
+	if backend.answeredQuestionAnswer != "Option A" {
+		t.Fatalf("answeredQuestionAnswer = %q, want Option A", backend.answeredQuestionAnswer)
+	}
+}
+
+func TestFreeTextSubmitViaEnter(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	q := pool.Question{
+		ID:     "q5",
+		TaskID: "plan_q-t1",
+	}
+	model := kitchenTUIModel{
+		backend:  backend,
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_q"}},
+		},
+		questions: []pool.Question{q},
+		inputMode: kitchenTUIInputAnswer,
+	}
+	model.input = textInputWithValue("my answer")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command after enter")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.answeredQuestionID != "q5" {
+		t.Fatalf("answeredQuestionID = %q, want q5", backend.answeredQuestionID)
+	}
+	if backend.answeredQuestionAnswer != "my answer" {
+		t.Fatalf("answeredQuestionAnswer = %q, want my answer", backend.answeredQuestionAnswer)
+	}
+}
+
+func TestRenderQuestionDetailPaneAlreadyAnswered(t *testing.T) {
+	q := pool.Question{
+		ID:       "q6",
+		TaskID:   "plan_q-t1",
+		Question: "Should we proceed?",
+		Answered: true,
+		Answer:   "done",
+	}
+	model := questionModel(q)
+	out := model.renderQuestionDetailPane(80, 30)
+
+	if !strings.Contains(out, "done") {
+		t.Fatalf("output missing answer 'done': %q", out)
+	}
+	if strings.Contains(out, "Press 'a' to answer") {
+		t.Fatalf("output should not contain answer hint for already-answered question: %q", out)
+	}
+}
+
+// TestKitchenTUIRenderPlansPaneBadge verifies that plans with pending questions show a
+// [N?] badge and plans without questions do not.
+func TestKitchenTUIRenderPlansPaneBadge(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_has_q", Title: "Has Questions"}},
+			{Record: PlanRecord{PlanID: "plan_no_q", Title: "No Questions"}},
+		},
+		questions: []pool.Question{
+			{ID: "q1", TaskID: "plan_has_q-t1", Question: "What is the intended behavior?"},
+		},
+	}
+
+	pane := model.renderPlansPane(120, 20)
+
+	if !strings.Contains(pane, "[1?]") {
+		t.Fatalf("plans pane missing [1?] badge for plan with questions: %q", pane)
+	}
+
+	// Split into lines and check that no line mentioning plan_no_q contains a badge.
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(line, "plan_no_q") && strings.Contains(line, "?]") {
+			t.Fatalf("plan_no_q row should not contain a badge, got line: %q", line)
+		}
+	}
+}
+
+// TestKitchenTUIQuestionKeyEntersQuestionsMode verifies that pressing '?' in plans mode
+// switches leftMode to kitchenTUILeftQuestions with selectedQuestion reset to 0.
+func TestKitchenTUIQuestionKeyEntersQuestionsMode(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:  &fakeKitchenTUIBackend{},
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_q", Title: "Plan Q"}},
+		},
+		questions: []pool.Question{
+			{ID: "q1", TaskID: "plan_q-t1", Question: "Shall we proceed?"},
+		},
+		selectedQuestion: 5, // ensure it gets reset
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if cmd != nil {
+		t.Fatal("expected no command for ? key transition")
+	}
+	got, ok := updated.(kitchenTUIModel)
+	if !ok {
+		t.Fatalf("updated model = %T, want kitchenTUIModel", updated)
+	}
+	if got.leftMode != kitchenTUILeftQuestions {
+		t.Fatalf("leftMode = %q, want kitchenTUILeftQuestions", got.leftMode)
+	}
+	if got.selectedQuestion != 0 {
+		t.Fatalf("selectedQuestion = %d, want 0", got.selectedQuestion)
+	}
+}
+
+// TestKitchenTUIRenderQuestionsPaneScoping verifies that renderQuestionsPane only shows
+// questions belonging to the currently selected plan.
+func TestKitchenTUIRenderQuestionsPaneScoping(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_alpha", Title: "Alpha"}},
+			{Record: PlanRecord{PlanID: "plan_beta", Title: "Beta"}},
+		},
+		selectedPlan: 0, // plan_alpha is selected
+		questions: []pool.Question{
+			{ID: "qa1", TaskID: "plan_alpha-t1", Question: "Alpha question one"},
+			{ID: "qb1", TaskID: "plan_beta-t1", Question: "Beta question one"},
+		},
+	}
+
+	pane := model.renderQuestionsPane(120, 20)
+
+	if !strings.Contains(pane, "Alpha question one") {
+		t.Fatalf("questions pane missing selected plan's question: %q", pane)
+	}
+	if strings.Contains(pane, "Beta question one") {
+		t.Fatalf("questions pane should not show other plan's question, got: %q", pane)
+	}
+	if strings.Contains(pane, "qb1") {
+		t.Fatalf("questions pane should not show other plan's question ID, got: %q", pane)
+	}
+}
+
+// TestKitchenTUIEscExitsQuestionsMode verifies that pressing Esc in questions mode
+// returns to plans mode.
+func TestKitchenTUIEscExitsQuestionsMode(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:  &fakeKitchenTUIBackend{},
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_q", Title: "Plan Q"}},
+		},
+		questions: []pool.Question{
+			{ID: "q1", TaskID: "plan_q-t1", Question: "Shall we proceed?"},
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got, ok := updated.(kitchenTUIModel)
+	if !ok {
+		t.Fatalf("updated model = %T, want kitchenTUIModel", updated)
+	}
+	if got.leftMode != kitchenTUILeftPlans {
+		t.Fatalf("leftMode = %q, want kitchenTUILeftPlans after esc", got.leftMode)
+	}
+}
+
+// TestKitchenTUIFooterHints verifies that the footer contains the '?' questions hint in
+// plans mode and the answer/back hints in questions mode.
+func TestKitchenTUIFooterHints(t *testing.T) {
+	basePlans := []kitchenTUIPlanItem{
+		{
+			Record:   PlanRecord{PlanID: "plan_q", Title: "Plan Q", State: planStatePendingApproval},
+			Progress: &PlanProgress{State: planStatePendingApproval},
+		},
+	}
+
+	plansModel := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans:    basePlans,
+	}
+	plansFooter := plansModel.renderFooter()
+	if !strings.Contains(plansFooter, "? questions") {
+		t.Fatalf("plans footer missing '? questions' hint: %q", plansFooter)
+	}
+
+	questionsModel := kitchenTUIModel{
+		leftMode: kitchenTUILeftQuestions,
+		plans:    basePlans,
+		questions: []pool.Question{
+			{ID: "q1", TaskID: "plan_q-t1", Question: "Which way?"},
+		},
+	}
+	questionsFooter := questionsModel.renderFooter()
+	if !strings.Contains(questionsFooter, "a answer") {
+		t.Fatalf("questions footer missing 'a answer' hint: %q", questionsFooter)
+	}
+	if !strings.Contains(questionsFooter, "esc back") {
+		t.Fatalf("questions footer missing 'esc back' hint: %q", questionsFooter)
 	}
 }

@@ -84,13 +84,14 @@ func (c *kitchenAPIClient) request(method, path string, body any, dst any) error
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
-func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, review bool, reviewRounds, maxReviewRevisions int) (map[string]any, error) {
+func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, review bool, reviewRounds, maxReviewRevisions int, implReview bool) (map[string]any, error) {
 	req := map[string]any{
 		"idea":         idea,
 		"lineage":      lineage,
 		"auto":         auto,
 		"review":       review,
 		"reviewRounds": reviewRounds,
+		"implReview":   implReview,
 	}
 	if maxReviewRevisions >= 0 {
 		req["maxReviewRevisions"] = maxReviewRevisions
@@ -190,6 +191,16 @@ func (c *kitchenAPIClient) RetryTask(taskID string, requireFreshWorker bool) (ma
 	return resp, c.request(http.MethodPost, "/v1/tasks/"+url.PathEscape(taskID)+"/retry", map[string]any{
 		"requireFreshWorker": requireFreshWorker,
 	}, &resp)
+}
+
+func (c *kitchenAPIClient) FixConflicts(taskID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/tasks/"+url.PathEscape(taskID)+"/fix-conflicts", nil, &resp)
+}
+
+func (c *kitchenAPIClient) FixLineageConflicts(lineage string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/lineages/"+url.PathEscape(lineage)+"/fix-merge", nil, &resp)
 }
 
 func (c *kitchenAPIClient) Status(historyLimit int) (map[string]any, error) {

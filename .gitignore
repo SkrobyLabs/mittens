@@ -32,3 +32,5 @@ clipboard-sync.exe
 .gocache/*
 .gomodcache/*
 .gopath/*
+
+kitchen-linux

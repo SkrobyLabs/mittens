@@ -47,6 +47,9 @@ const (
 	EventPipelineBlocked   = "pipeline_blocked"
 	EventPipelineUnblocked = "pipeline_unblocked"
 	EventStageAdvanced     = "stage_advanced"
+
+	// Conflict info.
+	EventTaskConflictRecorded = "task_conflict_recorded"
 )
 
 // Event is a single entry in the WAL.
@@ -69,16 +72,17 @@ type WorkerSpawnedData struct {
 }
 
 type TaskCreatedData struct {
-	Prompt         string   `json:"prompt"`
-	Complexity     string   `json:"complexity,omitempty"`
-	Priority       int      `json:"priority"`
-	DependsOn      []string `json:"dependsOn,omitempty"`
-	TimeoutMinutes int      `json:"timeoutMinutes,omitempty"`
-	Role           string   `json:"role,omitempty"`
-	MaxReviews     int      `json:"maxReviews,omitempty"`
-	PipelineID     string   `json:"pipelineId,omitempty"`
-	PlanID         string   `json:"planId,omitempty"`
-	StageIndex     int      `json:"stageIndex,omitempty"`
+	Prompt             string   `json:"prompt"`
+	Complexity         string   `json:"complexity,omitempty"`
+	Priority           int      `json:"priority"`
+	DependsOn          []string `json:"dependsOn,omitempty"`
+	TimeoutMinutes     int      `json:"timeoutMinutes,omitempty"`
+	Role               string   `json:"role,omitempty"`
+	MaxReviews         int      `json:"maxReviews,omitempty"`
+	PipelineID         string   `json:"pipelineId,omitempty"`
+	PlanID             string   `json:"planId,omitempty"`
+	StageIndex         int      `json:"stageIndex,omitempty"`
+	RequireFreshWorker bool     `json:"requireFreshWorker,omitempty"`
 }
 
 type TaskRequeuedData struct {
@@ -152,6 +156,11 @@ type StageAdvancedData struct {
 	PipelineID    string `json:"pipelineId"`
 	StageIndex    int    `json:"stageIndex"`
 	TriggerTaskID string `json:"triggerTaskId,omitempty"`
+}
+
+type TaskConflictRecordedData struct {
+	ConflictingFiles []string `json:"conflictingFiles,omitempty"`
+	LineageDiff      string   `json:"lineageDiff,omitempty"`
 }
 
 // marshalData marshals a payload to json.RawMessage.
@@ -244,19 +253,20 @@ func Apply(pm *PoolManager, e Event) error {
 			json.Unmarshal(e.Data, &d)
 		}
 		pm.tasks[e.TaskID] = &Task{
-			ID:             e.TaskID,
-			PipelineID:     d.PipelineID,
-			PlanID:         d.PlanID,
-			StageIndex:     d.StageIndex,
-			Prompt:         d.Prompt,
-			Complexity:     d.Complexity,
-			Role:           d.Role,
-			Priority:       d.Priority,
-			DependsOn:      d.DependsOn,
-			TimeoutMinutes: d.TimeoutMinutes,
-			MaxReviews:     d.MaxReviews,
-			Status:         TaskQueued,
-			CreatedAt:      e.Timestamp,
+			ID:                 e.TaskID,
+			PipelineID:         d.PipelineID,
+			PlanID:             d.PlanID,
+			StageIndex:         d.StageIndex,
+			Prompt:             d.Prompt,
+			Complexity:         d.Complexity,
+			Role:               d.Role,
+			Priority:           d.Priority,
+			DependsOn:          d.DependsOn,
+			TimeoutMinutes:     d.TimeoutMinutes,
+			MaxReviews:         d.MaxReviews,
+			RequireFreshWorker: d.RequireFreshWorker,
+			Status:             TaskQueued,
+			CreatedAt:          e.Timestamp,
 		}
 
 	case EventTaskDispatched:
@@ -543,6 +553,22 @@ func Apply(pm *PoolManager, e Event) error {
 
 	case EventStageAdvanced:
 		// Audit trail only; no in-memory state change needed.
+
+	case EventTaskConflictRecorded:
+		var d TaskConflictRecordedData
+		if e.Data != nil {
+			json.Unmarshal(e.Data, &d)
+		}
+		t := pm.tasks[e.TaskID]
+		if t != nil {
+			if t.Result == nil {
+				t.Result = &TaskResult{}
+			}
+			t.Result.Conflict = &ConflictInfo{
+				ConflictingFiles: d.ConflictingFiles,
+				LineageDiff:      d.LineageDiff,
+			}
+		}
 
 	default:
 		return fmt.Errorf("apply event: unknown type %q", e.Type)

@@ -31,9 +31,12 @@ type kitchenTUIBackend interface {
 	DeletePlan(planID string) error
 	CancelTask(taskID string) error
 	RetryTask(taskID string, requireFreshWorker bool) error
+	FixConflicts(taskID string) (string, error)
 	ReplanPlan(planID, reason string) (string, error)
+	AnswerQuestion(id, answer string) error
 	MergeCheck(lineage string) (string, error)
 	MergeLineage(lineage string) (string, error)
+	FixLineageConflicts(lineage string) (string, error)
 }
 
 type tuiStatusSnapshot struct {
@@ -72,7 +75,7 @@ func (b *kitchenAPIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRe
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
 func (b *kitchenAPIBackend) SubmitIdea(idea string) (string, error) {
-	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1)
+	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1, false)
 	if err != nil {
 		return "", err
 	}
@@ -102,6 +105,14 @@ func (b *kitchenAPIBackend) RetryTask(taskID string, requireFreshWorker bool) er
 	_, err := b.client.RetryTask(taskID, requireFreshWorker)
 	return err
 }
+func (b *kitchenAPIBackend) FixConflicts(taskID string) (string, error) {
+	resp, err := b.client.FixConflicts(taskID)
+	if err != nil {
+		return "", err
+	}
+	newTaskID, _ := resp["newTaskId"].(string)
+	return newTaskID, nil
+}
 func (b *kitchenAPIBackend) ReplanPlan(planID, reason string) (string, error) {
 	resp, err := b.client.ReplanPlan(planID, reason)
 	if err != nil {
@@ -113,6 +124,10 @@ func (b *kitchenAPIBackend) ReplanPlan(planID, reason string) (string, error) {
 	}
 	return newPlanID, nil
 }
+func (b *kitchenAPIBackend) AnswerQuestion(id, answer string) error {
+	_, err := b.client.AnswerQuestion(id, answer)
+	return err
+}
 func (b *kitchenAPIBackend) MergeCheck(lineage string) (string, error) {
 	resp, err := b.client.MergeCheck(lineage)
 	if err != nil {
@@ -120,6 +135,18 @@ func (b *kitchenAPIBackend) MergeCheck(lineage string) (string, error) {
 	}
 	return summarizeMergeCheck(resp), nil
 }
+func (b *kitchenAPIBackend) FixLineageConflicts(lineage string) (string, error) {
+	resp, err := b.client.FixLineageConflicts(lineage)
+	if err != nil {
+		return "", err
+	}
+	newTaskID, _ := resp["newTaskId"].(string)
+	if strings.TrimSpace(newTaskID) == "" {
+		return "", fmt.Errorf("fix-lineage-merge response missing newTaskId")
+	}
+	return newTaskID, nil
+}
+
 func (b *kitchenAPIBackend) MergeLineage(lineage string) (string, error) {
 	resp, err := b.client.MergeLineage(lineage, "squash", false)
 	if err != nil {
@@ -198,7 +225,7 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 func (b *kitchenLocalBackend) SubmitIdea(idea string) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1)
+		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -238,6 +265,16 @@ func (b *kitchenLocalBackend) RetryTask(taskID string, requireFreshWorker bool) 
 	})
 }
 
+func (b *kitchenLocalBackend) FixConflicts(taskID string) (string, error) {
+	var newTaskID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		newTaskID, err = k.FixConflicts(taskID)
+		return err
+	})
+	return newTaskID, err
+}
+
 func (b *kitchenLocalBackend) ReplanPlan(planID, reason string) (string, error) {
 	var newPlanID string
 	err := b.withKitchen(func(k *Kitchen) error {
@@ -246,6 +283,12 @@ func (b *kitchenLocalBackend) ReplanPlan(planID, reason string) (string, error) 
 		return err
 	})
 	return newPlanID, err
+}
+
+func (b *kitchenLocalBackend) AnswerQuestion(id, answer string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.AnswerQuestion(id, answer)
+	})
 }
 
 func (b *kitchenLocalBackend) MergeCheck(lineage string) (string, error) {
@@ -267,6 +310,16 @@ func (b *kitchenLocalBackend) MergeCheck(lineage string) (string, error) {
 		return nil
 	})
 	return summary, err
+}
+
+func (b *kitchenLocalBackend) FixLineageConflicts(lineage string) (string, error) {
+	var newTaskID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		var innerErr error
+		newTaskID, innerErr = k.FixLineageConflicts(lineage)
+		return innerErr
+	})
+	return newTaskID, err
 }
 
 func (b *kitchenLocalBackend) MergeLineage(lineage string) (string, error) {
@@ -306,12 +359,13 @@ func decodeTUIStatus(src map[string]any) (tuiStatusSnapshot, error) {
 }
 
 type kitchenTUILoadedMsg struct {
-	status    tuiStatusSnapshot
-	plans     []PlanRecord
-	questions []pool.Question
-	detail    *PlanDetail
-	taskLog   []pool.WorkerActivityRecord
-	err       error
+	status     tuiStatusSnapshot
+	plans      []PlanRecord
+	questions  []pool.Question
+	detail     *PlanDetail
+	taskLog    []pool.WorkerActivityRecord
+	err        error
+	newBackend kitchenTUIBackend
 }
 
 type kitchenTUIActionMsg struct {
@@ -330,9 +384,11 @@ const (
 	kitchenTUIInputNone   kitchenTUIInputMode = ""
 	kitchenTUIInputSubmit kitchenTUIInputMode = "submit"
 	kitchenTUIInputReplan kitchenTUIInputMode = "replan"
+	kitchenTUIInputAnswer kitchenTUIInputMode = "answer"
 
-	kitchenTUILeftPlans kitchenTUILeftMode = "plans"
-	kitchenTUILeftTasks kitchenTUILeftMode = "tasks"
+	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
+	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
+	kitchenTUILeftQuestions kitchenTUILeftMode = "questions"
 
 	kitchenTUITaskPaneDetail kitchenTUITaskPaneMode = "detail"
 	kitchenTUITaskPaneLogs   kitchenTUITaskPaneMode = "logs"
@@ -345,19 +401,25 @@ type kitchenTUIPlanItem struct {
 }
 
 type kitchenTUITaskItem struct {
-	ID         string
-	RuntimeID  string
-	Kind       string
-	Title      string
-	State      string
-	WorkerID   string
-	Complexity string
-	Prompt     string
-	Summary    string
+	ID          string
+	RuntimeID   string
+	Kind        string
+	Title       string
+	State       string
+	WorkerID    string
+	Complexity  string
+	Prompt      string
+	Summary     string
+	HasConflict bool
+}
+
+func taskHasConflictInfo(t kitchenTUITaskItem) bool {
+	return t.HasConflict
 }
 
 type kitchenTUIModel struct {
 	backend           kitchenTUIBackend
+	repoPath          string
 	width             int
 	height            int
 	status            tuiStatusSnapshot
@@ -366,6 +428,8 @@ type kitchenTUIModel struct {
 	questions         []pool.Question
 	selectedPlan      int
 	selectedTask      int
+	selectedQuestion  int
+	selectedOption    int
 	leftMode          kitchenTUILeftMode
 	taskPaneMode      kitchenTUITaskPaneMode
 	detail            *PlanDetail
@@ -392,6 +456,7 @@ func runKitchenTUI(repoPath string) error {
 	input.Prompt = "> "
 	model := kitchenTUIModel{
 		backend:      backend,
+		repoPath:     repoPath,
 		input:        input,
 		loading:      true,
 		leftMode:     kitchenTUILeftPlans,
@@ -416,6 +481,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case kitchenTUILoadedMsg:
 		m.loading = false
+		if msg.newBackend != nil {
+			m.backend = msg.newBackend
+		}
 		if msg.err != nil {
 			m.errText = msg.err.Error()
 			return m, nil
@@ -453,7 +521,12 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(msg.selectedPlanID) != "" {
 			m.pendingSelectedID = msg.selectedPlanID
 		}
-		return m, m.loadCmd()
+		// Closing the input bar shrinks the view, and the upcoming
+		// loadCmd may resize the plan list out from under the
+		// previous selection. Force a full redraw so the terminal
+		// doesn't retain stale lines from the taller prior frame
+		// (header summary, removed plan rows, etc.).
+		return m, tea.Batch(tea.ClearScreen, m.loadCmd())
 	case kitchenTUITickMsg:
 		if !m.flashUntil.IsZero() && time.Now().After(m.flashUntil) {
 			m.flash = ""
@@ -461,6 +534,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.loadCmd(), kitchenTUITick())
 	case tea.KeyMsg:
+		if m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0 {
+			return m.updateMultipleChoiceInput(msg)
+		}
 		if m.inputMode != kitchenTUIInputNone {
 			return m.updateInput(msg)
 		}
@@ -481,6 +557,12 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.leftMode == kitchenTUILeftQuestions {
+				if m.selectedQuestion > 0 {
+					m.selectedQuestion--
+				}
+				return m, nil
+			}
 			if m.selectedPlan > 0 {
 				m.selectedPlan--
 				m.pendingSelectedID = m.selectedPlanID()
@@ -495,6 +577,25 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.taskPaneMode == kitchenTUITaskPaneLogs {
 					return m, m.loadCmd()
+				}
+				return m, nil
+			}
+			if m.leftMode == kitchenTUILeftQuestions {
+				planID := ""
+				if plan := m.selectedPlanItem(); plan != nil {
+					planID = strings.TrimSpace(plan.Record.PlanID)
+				}
+				count := 0
+				if planID != "" {
+					prefix := planID + "-"
+					for _, q := range m.questions {
+						if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+							count++
+						}
+					}
+				}
+				if m.selectedQuestion < count-1 {
+					m.selectedQuestion++
 				}
 				return m, nil
 			}
@@ -524,12 +625,31 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.leftMode = kitchenTUILeftPlans
 				m.taskPaneMode = kitchenTUITaskPaneDetail
+			} else if m.leftMode == kitchenTUILeftQuestions {
+				m.leftMode = kitchenTUILeftPlans
+			}
+			return m, nil
+		case "?":
+			if m.leftMode == kitchenTUILeftPlans {
+				m.leftMode = kitchenTUILeftQuestions
+				m.selectedQuestion = 0
 			}
 			return m, nil
 		case "n":
 			m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
 			return m, nil
 		case "a":
+			if m.leftMode == kitchenTUILeftQuestions {
+				if q := m.selectedQuestionItem(); q != nil {
+					if len(q.Options) > 0 {
+						m.inputMode = kitchenTUIInputAnswer
+						m.selectedOption = 0
+					} else {
+						m.openInput(kitchenTUIInputAnswer, "Answer", "Type your answer...")
+					}
+				}
+				return m, nil
+			}
 			if plan := m.selectedPlanItem(); plan != nil {
 				if planDisplayState(*plan) == planStatePendingApproval {
 					return m, m.actionCmd(func() (string, string, error) {
@@ -601,6 +721,17 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			return m, nil
+		case "F":
+			if plan := m.selectedPlanItem(); plan != nil {
+				return m, m.actionCmd(func() (string, string, error) {
+					newTaskID, err := m.backend.FixLineageConflicts(plan.Record.Lineage)
+					if err != nil {
+						return "", plan.Record.PlanID, err
+					}
+					return "fix-merge task queued: " + newTaskID, plan.Record.PlanID, nil
+				})
+			}
+			return m, nil
 		case "R":
 			if m.leftMode != kitchenTUILeftTasks {
 				return m, nil
@@ -630,6 +761,25 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.actionCmd(func() (string, string, error) {
 					err := m.backend.RetryTask(task.RuntimeID, false)
 					return m.selectedTaskRetryStatus() + " " + task.RuntimeID + " (reuse allowed)", m.selectedPlanID(), err
+				})
+			}
+			return m, nil
+		case "f":
+			if m.leftMode != kitchenTUILeftTasks {
+				return m, nil
+			}
+			if task := m.selectedTaskItem(); task != nil {
+				if !m.canFixConflictsSelectedTask() {
+					m.flash = "selected task has no conflict info"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					newTaskID, err := m.backend.FixConflicts(task.RuntimeID)
+					if err != nil {
+						return err.Error(), m.selectedPlanID(), err
+					}
+					return "Conflict fix task created: " + newTaskID, m.selectedPlanID(), nil
 				})
 			}
 			return m, nil
@@ -676,6 +826,17 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return "replanned as " + newPlanID, newPlanID, nil
 			})
+		case kitchenTUIInputAnswer:
+			q := m.selectedQuestionItem()
+			if q == nil || value == "" {
+				m.closeInput()
+				return m, nil
+			}
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.AnswerQuestion(q.ID, value)
+				return "Answered", m.selectedPlanID(), err
+			})
 		}
 	case "ctrl+c":
 		return m, tea.Quit
@@ -692,7 +853,17 @@ func (m kitchenTUIModel) View() string {
 
 	header := m.renderHeader()
 	footer := m.renderFooter()
-	bodyHeight := max(10, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-2)
+
+	var bar string
+	if m.inputMode != kitchenTUIInputNone {
+		bar = m.renderInputBar()
+	}
+	barHeight := lipgloss.Height(bar)
+	if bar == "" {
+		barHeight = 0
+	}
+
+	bodyHeight := max(10, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-barHeight-2)
 	leftWidth := max(54, (m.width*2)/5)
 	rightWidth := max(58, m.width-leftWidth-4)
 
@@ -700,8 +871,8 @@ func (m kitchenTUIModel) View() string {
 	right := m.renderDetailPane(rightWidth, bodyHeight)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 
-	if m.inputMode != kitchenTUIInputNone {
-		return lipgloss.JoinVertical(lipgloss.Left, header, body, m.renderInputBar(), footer)
+	if bar != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, bar, footer)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -741,6 +912,62 @@ func (m *kitchenTUIModel) closeInput() {
 	m.inputMode = kitchenTUIInputNone
 	m.input.Blur()
 	m.input.SetValue("")
+}
+
+func (m kitchenTUIModel) selectedQuestionItem() *pool.Question {
+	planID := ""
+	if plan := m.selectedPlanItem(); plan != nil {
+		planID = strings.TrimSpace(plan.Record.PlanID)
+	}
+	if planID == "" {
+		return nil
+	}
+	prefix := planID + "-"
+	var filtered []pool.Question
+	for _, q := range m.questions {
+		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+			filtered = append(filtered, q)
+		}
+	}
+	if m.selectedQuestion < 0 || m.selectedQuestion >= len(filtered) {
+		return nil
+	}
+	return &filtered[m.selectedQuestion]
+}
+
+func (m kitchenTUIModel) updateMultipleChoiceInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	q := m.selectedQuestionItem()
+	if q == nil {
+		m.closeInput()
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.closeInput()
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.selectedOption > 0 {
+			m.selectedOption--
+		}
+		return m, nil
+	case "down", "j":
+		if m.selectedOption < len(q.Options)-1 {
+			m.selectedOption++
+		}
+		return m, nil
+	case "enter":
+		if m.selectedOption >= 0 && m.selectedOption < len(q.Options) {
+			answer := q.Options[m.selectedOption]
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.AnswerQuestion(q.ID, answer)
+				return "Answered", m.selectedPlanID(), err
+			})
+		}
+	}
+	return m, nil
 }
 
 func (m kitchenTUIModel) selectedPlanID() string {
@@ -808,6 +1035,11 @@ func (m kitchenTUIModel) canRetrySelectedTask() bool {
 	}
 }
 
+func (m kitchenTUIModel) canFixConflictsSelectedTask() bool {
+	task := m.selectedTaskItem()
+	return task != nil && strings.TrimSpace(task.State) == pool.TaskFailed && taskHasConflictInfo(*task)
+}
+
 func (m kitchenTUIModel) selectedTaskRetryLabel() string {
 	task := m.selectedTaskItem()
 	if task != nil && strings.TrimSpace(task.State) == pool.TaskCompleted {
@@ -830,7 +1062,7 @@ func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
 		return false
 	}
 	switch planDisplayState(*plan) {
-	case "", "cancelled", planStatePlanning, planStateReviewing, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged:
+	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged:
 		return false
 	default:
 		return true
@@ -862,6 +1094,11 @@ func (m kitchenTUIModel) footerActions() []string {
 			return []string{"enter submit", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputAnswer:
+			if q := m.selectedQuestionItem(); q != nil && len(q.Options) > 0 {
+				return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
+			}
+			return []string{"enter answer", "esc cancel", "ctrl+c quit"}
 		default:
 			return []string{"esc cancel", "ctrl+c quit"}
 		}
@@ -876,6 +1113,11 @@ func (m kitchenTUIModel) footerActions() []string {
 			actions = append(actions, "R "+m.selectedTaskRetryLabel())
 			actions = append(actions, "U reuse")
 		}
+		if m.canFixConflictsSelectedTask() {
+			actions = append(actions, "f fix-conflicts")
+		}
+	} else if m.leftMode == kitchenTUILeftQuestions {
+		actions = append(actions, "a answer", "esc back")
 	} else {
 		if m.canApproveSelectedPlan() {
 			actions = append(actions, "a approve")
@@ -892,6 +1134,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			if m.canMergeSelectedPlan() {
 				actions = append(actions, "M merge")
 			}
+			actions = append(actions, "F fix-merge")
+			actions = append(actions, "? questions")
 		}
 	}
 	actions = append(actions, "r refresh", "q quit")
@@ -909,18 +1153,36 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 	if strings.TrimSpace(m.pendingSelectedID) != "" {
 		selectedPlanID = m.pendingSelectedID
 	}
+	currentLabel := ""
+	if m.backend != nil {
+		currentLabel = m.backend.Label()
+	}
+	repoPath := m.repoPath
 	return func() tea.Msg {
-		status, err := m.backend.Status()
-		if err != nil {
-			return kitchenTUILoadedMsg{err: err}
+		// If we're on local backend, see if `kitchen serve` has
+		// come up since the last load so we can switch over and
+		// stop dispatching via transient Kitchen instances.
+		var upgraded kitchenTUIBackend
+		if currentLabel == "local" && strings.TrimSpace(repoPath) != "" {
+			if probe, err := openKitchenTUIBackend(repoPath); err == nil && probe.Label() != "local" {
+				upgraded = probe
+			}
 		}
-		plans, err := m.backend.ListPlans()
-		if err != nil {
-			return kitchenTUILoadedMsg{err: err}
+		backend := m.backend
+		if upgraded != nil {
+			backend = upgraded
 		}
-		questions, err := m.backend.ListQuestions()
+		status, err := backend.Status()
 		if err != nil {
-			return kitchenTUILoadedMsg{err: err}
+			return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
+		}
+		plans, err := backend.ListPlans()
+		if err != nil {
+			return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
+		}
+		questions, err := backend.ListQuestions()
+		if err != nil {
+			return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
 		}
 		planID := strings.TrimSpace(selectedPlanID)
 		if planID != "" {
@@ -941,25 +1203,26 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 		}
 		var detail *PlanDetail
 		if planID != "" {
-			got, err := m.backend.PlanDetail(planID)
+			got, err := backend.PlanDetail(planID)
 			if err != nil {
-				return kitchenTUILoadedMsg{err: err}
+				return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
 			}
 			detail = &got
 		}
 		var taskLog []pool.WorkerActivityRecord
 		if selectedTaskID != "" {
-			taskLog, err = m.backend.TaskActivity(selectedTaskID)
+			taskLog, err = backend.TaskActivity(selectedTaskID)
 			if err != nil {
-				return kitchenTUILoadedMsg{err: err}
+				return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
 			}
 		}
 		return kitchenTUILoadedMsg{
-			status:    status,
-			plans:     plans,
-			questions: questions,
-			detail:    detail,
-			taskLog:   taskLog,
+			status:     status,
+			plans:      plans,
+			questions:  questions,
+			detail:     detail,
+			taskLog:    taskLog,
+			newBackend: upgraded,
 		}
 	}
 }
@@ -988,12 +1251,32 @@ func (m kitchenTUIModel) renderHeader() string {
 	}
 	headline := fmt.Sprintf("Kitchen  %s  %s@%s", repo, branch, shortenSHA(m.status.Anchor.Commit))
 	summary := fmt.Sprintf("backend=%s  workers=%d/%d  pendingQuestions=%d  plans=%d", m.backend.Label(), m.status.Queue.AliveWorkers, m.status.Queue.MaxWorkers, len(m.questions), len(m.plans))
-	return lipgloss.JoinVertical(lipgloss.Left, titleStyle.Render(headline), metaStyle.Render(summary))
+	rows := []string{titleStyle.Render(headline), metaStyle.Render(summary)}
+	// In local backend mode the TUI talks to a transient Kitchen that
+	// does not run the scheduler, so any queued task will sit there
+	// forever. Surface that clearly so the operator knows to start
+	// `kitchen serve` in another terminal.
+	if m.backend.Label() == "local" {
+		queued := 0
+		for _, t := range m.status.Queue.Tasks {
+			if t.Status == pool.TaskQueued {
+				queued++
+			}
+		}
+		if queued > 0 {
+			warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("202")).Padding(0, 1)
+			rows = append(rows, warnStyle.Render(fmt.Sprintf("⚠  %d queued task(s) will not dispatch — run `kitchen serve` to start the scheduler", queued)))
+		}
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 func (m kitchenTUIModel) renderLeftPane(width, height int) string {
 	if m.leftMode == kitchenTUILeftTasks {
 		return m.renderTasksPane(width, height)
+	}
+	if m.leftMode == kitchenTUILeftQuestions {
+		return m.renderQuestionsPane(width, height)
 	}
 	return m.renderPlansPane(width, height)
 }
@@ -1008,7 +1291,14 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 	for i, plan := range m.plans {
 		state := padRight(compactState(planDisplayState(plan)), 6)
 		marker := rowMarker(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans)
-		primary := truncate(fmt.Sprintf("%s %s %s", marker, state, plan.Record.Title), innerWidth)
+		badge := ""
+		badgeWidth := 0
+		if nq := pendingQuestionCountForPlan(plan.Record.PlanID, m.questions); nq > 0 {
+			badgeText := fmt.Sprintf(" [%d?]", nq)
+			badgeWidth = len(badgeText)
+			badge = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(badgeText)
+		}
+		primary := truncate(fmt.Sprintf("%s %s %s", marker, state, plan.Record.Title), innerWidth-badgeWidth) + badge
 		secondary := truncate(fmt.Sprintf("    lineage: %s  plan: %s", firstNonEmpty(plan.Record.Lineage, "-"), plan.Record.PlanID), innerWidth)
 		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, primary, secondary)...)
 	}
@@ -1035,7 +1325,53 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
 }
 
+func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
+	titleText := "Questions"
+	if plan := m.selectedPlanItem(); plan != nil {
+		titleText = "Questions · " + truncate(plan.Record.Title, max(10, width-20))
+	}
+	title := paneTitle(titleText, true)
+
+	planID := ""
+	if plan := m.selectedPlanItem(); plan != nil {
+		planID = strings.TrimSpace(plan.Record.PlanID)
+	}
+	var filtered []pool.Question
+	if planID != "" {
+		prefix := planID + "-"
+		for _, q := range m.questions {
+			if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+				filtered = append(filtered, q)
+			}
+		}
+	}
+
+	if len(filtered) == 0 {
+		return paneBox(width, height, title+"\n\nNo pending questions.")
+	}
+
+	innerWidth := max(20, width-6)
+	lines := make([]string, 0, len(filtered)*2)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	for i, q := range filtered {
+		selected := i == m.selectedQuestion
+		marker := rowMarker(selected)
+		text := truncate(q.Question, 60)
+		suffix := ""
+		if len(q.Options) > 0 {
+			suffix = dimStyle.Render(fmt.Sprintf(" (options: %d)", len(q.Options)))
+		}
+		primary := truncate(fmt.Sprintf("%s %d. %s", marker, i+1, text), innerWidth) + suffix
+		secondary := truncate(fmt.Sprintf("    id: %s  task: %s", q.ID, q.TaskID), innerWidth)
+		lines = append(lines, renderSelectableRow(selected, primary, secondary)...)
+	}
+	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+}
+
 func (m kitchenTUIModel) renderDetailPane(width, height int) string {
+	if m.leftMode == kitchenTUILeftQuestions {
+		return m.renderQuestionDetailPane(width, height)
+	}
 	if m.detail == nil {
 		return paneBox(width, height, "Detail\n\nNo selected plan.")
 	}
@@ -1050,6 +1386,72 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 	} else {
 		lines = m.renderPlanDetailLines(innerWidth)
 	}
+	return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+}
+
+func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
+	q := m.selectedQuestionItem()
+	if q == nil {
+		return paneBox(width, height, "Question Detail\n\nNo selected question.")
+	}
+	innerWidth := max(24, width-6)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	boldStyle := lipgloss.NewStyle().Bold(true)
+	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+
+	var lines []string
+
+	// Header
+	lines = append(lines, dimStyle.Render(fmt.Sprintf("Question %s · %s", q.ID, firstNonEmpty(q.Category, "general"))))
+	lines = append(lines, "")
+
+	// Full question text
+	lines = append(lines, boldStyle.Render("Question:"))
+	lines = append(lines, wrapText(q.Question, innerWidth)...)
+	lines = append(lines, "")
+
+	// Context block
+	if strings.TrimSpace(q.Context) != "" {
+		lines = append(lines, dimStyle.Render("Context:"))
+		lines = append(lines, wrapText(q.Context, innerWidth)...)
+		lines = append(lines, "")
+	}
+
+	// Provenance
+	lines = append(lines, dimStyle.Render(fmt.Sprintf("Worker: %s  Task: %s", firstNonEmpty(q.WorkerID, "-"), firstNonEmpty(q.TaskID, "-"))))
+	if !q.AskedAt.IsZero() {
+		lines = append(lines, dimStyle.Render("Asked: "+q.AskedAt.UTC().Format("2006-01-02 15:04:05")))
+	}
+	lines = append(lines, "")
+
+	// Already answered guard
+	if q.Answered {
+		lines = append(lines, boldStyle.Render("Answer: ")+q.Answer)
+		return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+	}
+
+	// Options or free-text hint
+	if len(q.Options) > 0 {
+		lines = append(lines, boldStyle.Render("Options:"))
+		for i, opt := range q.Options {
+			prefix := fmt.Sprintf("  %d. ", i+1)
+			if m.inputMode == kitchenTUIInputAnswer && i == m.selectedOption {
+				lines = append(lines, highlightStyle.Render(prefix+opt))
+			} else {
+				lines = append(lines, prefix+opt)
+			}
+		}
+		if m.inputMode == kitchenTUIInputAnswer {
+			lines = append(lines, "", dimStyle.Render("↑/↓ navigate · enter select · esc cancel"))
+		} else {
+			lines = append(lines, "", dimStyle.Render("Press 'a' to answer"))
+		}
+	} else {
+		if m.inputMode != kitchenTUIInputAnswer {
+			lines = append(lines, dimStyle.Render("Press 'a' to answer"))
+		}
+	}
+
 	return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
 }
 
@@ -1156,12 +1558,18 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 }
 
 func (m kitchenTUIModel) renderInputBar() string {
+	// Multiple-choice answer mode doesn't use the input bar
+	if m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0 {
+		return ""
+	}
 	label := "Input"
 	switch m.inputMode {
 	case kitchenTUIInputSubmit:
 		label = "Submit"
 	case kitchenTUIInputReplan:
 		label = "Replan"
+	case kitchenTUIInputAnswer:
+		label = "Answer"
 	}
 	return paneBox(m.width, 3, label+"\n"+m.input.View())
 }
@@ -1248,15 +1656,16 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 			state = summary.Status
 		}
 		items = append(items, kitchenTUITaskItem{
-			ID:         task.ID,
-			RuntimeID:  runtimeID,
-			Kind:       "implementation",
-			Title:      firstNonEmpty(task.Title, task.ID),
-			State:      state,
-			WorkerID:   summary.WorkerID,
-			Complexity: string(task.Complexity),
-			Prompt:     task.Prompt,
-			Summary:    summarizeTaskHistory(detail.History, runtimeID),
+			ID:          task.ID,
+			RuntimeID:   runtimeID,
+			Kind:        "implementation",
+			Title:       firstNonEmpty(task.Title, task.ID),
+			State:       state,
+			WorkerID:    summary.WorkerID,
+			Complexity:  string(task.Complexity),
+			Prompt:      task.Prompt,
+			Summary:     summarizeTaskHistory(detail.History, runtimeID),
+			HasConflict: summary.HasConflict,
 		})
 	}
 	return items
@@ -1304,6 +1713,20 @@ func summarizeTaskHistory(history []PlanHistoryEntry, runtimeID string) string {
 		}
 	}
 	return ""
+}
+
+func pendingQuestionCountForPlan(planID string, questions []pool.Question) int {
+	if strings.TrimSpace(planID) == "" {
+		return 0
+	}
+	prefix := strings.TrimSpace(planID) + "-"
+	count := 0
+	for _, q := range questions {
+		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+			count++
+		}
+	}
+	return count
 }
 
 func pendingQuestionSummaryForPlan(planID string, questions []pool.Question) string {
@@ -1522,6 +1945,8 @@ func compactState(state string) string {
 		return "plan"
 	case planStateReviewing:
 		return "review"
+	case planStateImplementationReview:
+		return "impl-rev"
 	case planStateActive:
 		return "active"
 	case planStateCompleted:

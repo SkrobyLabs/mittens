@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -15,24 +17,26 @@ import (
 )
 
 type Scheduler struct {
-	pm                *pool.PoolManager
-	hostAPI           pool.RuntimeAPI
-	router            *ComplexityRouter
-	git               *GitManager
-	plans             *PlanStore
-	lineages          *LineageManager
-	cfg               ConcurrencyConfig
-	failurePolicy     map[string]FailurePolicyRule
-	sessionID         string
-	kitchenAddr       string
-	notify            func(pool.Notification)
-	activatePlan      func(string) error
-	pendingSpawn      map[string]string
-	reconcileInterval time.Duration
-	reapInterval      time.Duration
-	reapTimeout       time.Duration
-	nowFunc           func() time.Time
-	stderr            io.Writer
+	pm                  *pool.PoolManager
+	hostAPI             pool.RuntimeAPI
+	router              *ComplexityRouter
+	git                 *GitManager
+	plans               *PlanStore
+	lineages            *LineageManager
+	cfg                 ConcurrencyConfig
+	failurePolicy       map[string]FailurePolicyRule
+	sessionID           string
+	kitchenAddr         string
+	notify              func(pool.Notification)
+	activatePlan        func(string) error
+	pendingSpawn        map[string]string
+	reconcileInterval   time.Duration
+	reapInterval        time.Duration
+	reapTimeout         time.Duration
+	nowFunc             func() time.Time
+	stderr              io.Writer
+	keepDeadWorkers     bool
+	retainedDeadWorkers []string
 }
 
 func NewScheduler(pm *pool.PoolManager, hostAPI pool.RuntimeAPI, router *ComplexityRouter, git *GitManager, plans *PlanStore, lineages *LineageManager, cfg ConcurrencyConfig, sessionID string) *Scheduler {
@@ -63,6 +67,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 	stopReaper := pool.StartReaper(s.pm, s.reapInterval, s.reapTimeout)
 	defer stopReaper()
 
+	// One-shot reconciliation of plan execution state against the
+	// pool's task map. Catches plans left with stale activeTaskIDs
+	// because a completion handler errored out before syncPlanExecution
+	// ran (e.g. worktree cleanup blew up with EACCES after the ref
+	// advance had already succeeded).
+	if err := s.reconcilePlanExecutionOnStartup(); err != nil {
+		s.logf("scheduler startup sync: %v", err)
+	}
 	if err := s.reconcile(); err != nil {
 		s.logf("scheduler reconcile: %v", err)
 	}
@@ -134,6 +146,7 @@ func (s *Scheduler) schedule() error {
 		return nil
 	}
 
+	s.reapOrphanPlanTasks()
 	s.refreshPendingSpawns()
 
 	for taskID, workerID := range s.pendingSpawn {
@@ -204,6 +217,12 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	if isPlanReviewTask(*task) {
 		return s.onPlanReviewCompleted(*task)
 	}
+	if task.Role == lineageFixMergeRole {
+		return s.onLineageFixMergeCompleted(*task)
+	}
+	if isImplReviewTask(*task) {
+		return s.onImplementationReviewCompleted(*task)
+	}
 	bundle, err := s.plans.Get(task.PlanID)
 	if err != nil {
 		return err
@@ -211,12 +230,76 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	if bundle.Plan.Lineage == "" {
 		return s.syncPlanExecution(task.PlanID)
 	}
+	// Workers run inside a child git worktree but aren't instructed to
+	// commit their own work. Auto-commit anything left dirty before
+	// merging back into the lineage branch, otherwise DiscardChild would
+	// erase the edits.
+	commitMsg := "Kitchen task " + taskID
+	if summary := strings.TrimSpace(strings.SplitN(task.Prompt, "\n", 2)[0]); summary != "" {
+		if len(summary) > 72 {
+			summary = summary[:72]
+		}
+		commitMsg = fmt.Sprintf("Kitchen task %s: %s", taskID, summary)
+	}
+	if _, err := s.git.CommitChildIfDirty(bundle.Plan.Lineage, taskID, commitMsg); err != nil {
+		return s.onTaskMergeFailed(*task, bundle.Plan.Lineage, err)
+	}
 	if err := s.git.MergeChild(bundle.Plan.Lineage, taskID); err != nil {
 		return s.onTaskMergeFailed(*task, bundle.Plan.Lineage, err)
 	}
 	if err := s.git.DiscardChild(bundle.Plan.Lineage, taskID); err != nil {
 		return err
 	}
+	// Kitchen workers are single-use: the container's bind mount is
+	// pinned to this task's child worktree with this task's child
+	// branch checked out, and DiscardChild has now wiped the path.
+	// Kill the worker so the next task spawns a fresh container with
+	// a fresh worktree forked from the updated lineage head instead
+	// of inheriting a stale cwd and the previous child branch.
+	s.killWorkerForDiscardedWorktree(task.WorkerID, taskID)
+	return s.syncPlanExecution(task.PlanID)
+}
+
+func (s *Scheduler) onLineageFixMergeCompleted(task pool.Task) error {
+	if s.plans == nil || s.git == nil {
+		return nil
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	baseBranch := strings.TrimSpace(bundle.Plan.Anchor.Branch)
+	if lineage == "" || baseBranch == "" {
+		s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+		return s.syncPlanExecution(task.PlanID)
+	}
+	fixBranch := "kitchen/" + lineage + "/fix-merge/" + task.ID
+	worktreePath := filepath.Join(s.git.worktreeBase, lineage, "fix-merge-"+task.ID)
+	// The worker was expected to commit its resolution. If it left the
+	// worktree dirty (unfinished resolution), auto-commit so the fast-
+	// forward step below still captures their work rather than losing
+	// it to the cleanup.
+	commitMsg := fmt.Sprintf("Resolve %s→%s merge conflicts (auto-commit)", baseBranch, lineage)
+	if _, err := s.git.commitWorktreeIfDirty(worktreePath, commitMsg); err != nil {
+		s.logf("fix-lineage-merge %s auto-commit: %v", task.ID, err)
+	}
+	cleanupErr, err := s.git.FinalizeFixLineageMerge(lineage, fixBranch, worktreePath)
+	if err != nil {
+		return err
+	}
+	if cleanupErr != nil {
+		s.logf("fix-lineage-merge %s cleanup (non-fatal): %v", task.ID, cleanupErr)
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageFixMergeCompleted,
+		TaskID:  task.ID,
+		Summary: fmt.Sprintf("Resolved %s→%s conflicts on lineage; base untouched, ready for fast-forward merge", baseBranch, lineage),
+	})
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
 	return s.syncPlanExecution(task.PlanID)
 }
 
@@ -228,9 +311,13 @@ func (s *Scheduler) onTaskMergeFailed(task pool.Task, lineage string, mergeErr e
 	if err := s.pm.FailCompletedTask(task.ID, mergeErr.Error()); err != nil {
 		return err
 	}
+	if class == FailureConflict {
+		s.recordConflictInfo(task, lineage, mergeErr)
+	}
 	if err := s.git.DiscardChild(lineage, task.ID); err != nil {
 		s.logf("task %s merge failure cleanup: %v", task.ID, err)
 	}
+	s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
 	if err := s.syncPlanExecution(task.PlanID); err != nil {
 		return err
 	}
@@ -238,6 +325,57 @@ func (s *Scheduler) onTaskMergeFailed(task pool.Task, lineage string, mergeErr e
 		return err
 	}
 	return nil
+}
+
+// recordConflictInfo extracts conflict file names from the merge error, computes
+// the lineage diff for those files, and persists the data on the task result so
+// that fix-conflicts tooling can use it later. Errors are logged and swallowed;
+// the conflict info is best-effort enrichment only.
+func (s *Scheduler) recordConflictInfo(task pool.Task, lineage string, mergeErr error) {
+	// Extract the comma-separated file list from the error string produced by
+	// mergeIntoTemp: "merge conflicts: file1, file2, ...".
+	const prefix = "merge conflicts: "
+	errMsg := mergeErr.Error()
+	idx := strings.Index(errMsg, prefix)
+	if idx < 0 {
+		return
+	}
+	fileStr := errMsg[idx+len(prefix):]
+	var conflictFiles []string
+	for _, f := range strings.Split(fileStr, ", ") {
+		if f = strings.TrimSpace(f); f != "" {
+			conflictFiles = append(conflictFiles, f)
+		}
+	}
+	if len(conflictFiles) == 0 {
+		return
+	}
+
+	if task.PlanID == "" || s.plans == nil {
+		return
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		s.logf("task %s conflict info: get plan: %v", task.ID, err)
+		return
+	}
+	anchorSHA := strings.TrimSpace(bundle.Plan.Anchor.Commit)
+	if anchorSHA == "" {
+		return
+	}
+
+	diff, err := s.git.ConflictDiff(anchorSHA, lineageBranchName(lineage), conflictFiles)
+	if err != nil {
+		s.logf("task %s conflict diff: %v", task.ID, err)
+		// Continue with empty diff — the file list alone is still useful.
+	}
+
+	if err := s.pm.SetTaskConflictInfo(task.ID, &pool.ConflictInfo{
+		ConflictingFiles: conflictFiles,
+		LineageDiff:      diff,
+	}); err != nil {
+		s.logf("task %s set conflict info: %v", task.ID, err)
+	}
 }
 
 func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
@@ -256,6 +394,9 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 	}
 	if isPlanReviewTask(*task) {
 		return s.onPlanReviewFailed(*task)
+	}
+	if isImplReviewTask(*task) {
+		return s.onImplementationReviewFailed(*task)
 	}
 	bundle, err := s.plans.Get(task.PlanID)
 	if err != nil {
@@ -297,8 +438,74 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 		if err := s.git.DiscardChild(bundle.Plan.Lineage, taskID); err != nil {
 			return err
 		}
+		s.killWorkerForDiscardedWorktree(task.WorkerID, taskID)
 	}
 	return s.syncPlanExecution(task.PlanID)
+}
+
+// killWorkerForDiscardedWorktree kills the worker container whose bind
+// mount pointed at a now-removed child worktree. Kitchen workers are
+// spawned with a single static workspace bind mount, so once that path
+// is discarded the container's cwd becomes a dangling inode and any
+// subsequent task dispatched to the idle worker would fail with
+// "current working directory was deleted". The container must be
+// recycled instead.
+//
+// When keepDeadWorkers is set the container is left running (only the
+// pool state transitions to Dead) so an operator can docker exec into
+// it for post-mortem. The scheduler tracks retained IDs and evicts the
+// oldest before spawning a new worker if the total would exceed
+// MaxWorkersTotal.
+func (s *Scheduler) killWorkerForDiscardedWorktree(workerID, taskID string) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return
+	}
+	if s.keepDeadWorkers {
+		if err := s.pm.MarkDead(workerID); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "not found") {
+				return
+			}
+			s.logf("mark worker %s dead after discarding worktree for task %s: %v", workerID, taskID, err)
+			return
+		}
+		s.retainedDeadWorkers = append(s.retainedDeadWorkers, workerID)
+		return
+	}
+	if err := s.pm.KillWorker(workerID); err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "not found") {
+			return
+		}
+		s.logf("kill worker %s after discarding worktree for task %s: %v", workerID, taskID, err)
+	}
+}
+
+// evictRetainedDeadWorkersUntilUnderCap evicts retained dead worker
+// containers (oldest first) until the total number of containers
+// (alive + retained-dead) is strictly below MaxWorkersTotal, so a
+// fresh spawn can fit under the cap. Called from spawnWorkerForTask
+// when keepDeadWorkers is enabled.
+func (s *Scheduler) evictRetainedDeadWorkersUntilUnderCap() {
+	if !s.keepDeadWorkers || s.hostAPI == nil {
+		return
+	}
+	cap := s.cfg.MaxWorkersTotal
+	if cap <= 0 {
+		return
+	}
+	for len(s.retainedDeadWorkers) > 0 && s.pm.AliveWorkers()+len(s.retainedDeadWorkers) >= cap {
+		victim := s.retainedDeadWorkers[0]
+		s.retainedDeadWorkers = s.retainedDeadWorkers[1:]
+		if err := s.hostAPI.KillWorker(context.Background(), victim); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "not found") {
+				continue
+			}
+			s.logf("evict retained dead worker %s: %v", victim, err)
+		}
+	}
 }
 
 func (s *Scheduler) onWorkerIdle(_ string) error {
@@ -365,6 +572,7 @@ func (s *Scheduler) spawnWorkerForTask(task pool.Task) error {
 	if err != nil {
 		return err
 	}
+	s.evictRetainedDeadWorkersUntilUnderCap()
 	worker, err := s.pm.SpawnWorker(spec)
 	if err != nil {
 		return err
@@ -430,6 +638,22 @@ func (s *Scheduler) workerSpecForTask(task pool.Task) (pool.WorkerSpec, error) {
 			return spec, err
 		}
 	}
+	if task.Role == lineageFixMergeRole {
+		baseBranch := bundle.Plan.Anchor.Branch
+		if strings.TrimSpace(baseBranch) == "" {
+			return spec, fmt.Errorf("lineage fix-merge task needs a base branch on the plan anchor")
+		}
+		worktreePath, _, err := s.git.CreateFixLineageMergeWorktree(bundle.Plan.Lineage, baseBranch, task.ID)
+		if err != nil {
+			return spec, err
+		}
+		if worktreePath == "" {
+			// Merge turned out to be clean — nothing for the worker to do.
+			return spec, fmt.Errorf("lineage fix-merge: %s→%s is already clean", bundle.Plan.Lineage, baseBranch)
+		}
+		spec.WorkspacePath = worktreePath
+		return spec, nil
+	}
 	worktreePath, err := s.git.CreateChildWorktree(bundle.Plan.Lineage, task.ID)
 	if err != nil {
 		return spec, err
@@ -478,6 +702,74 @@ func (s *Scheduler) dispatchReadyTaskToWorker(workerID string) error {
 		return s.pm.DispatchTask(task.ID, workerID)
 	}
 	return nil
+}
+
+// reconcilePlanExecutionOnStartup walks each plan referenced by tasks
+// currently in the pool and re-syncs its execution record. Covers
+// the recovery case where a completion handler partially applied
+// state (e.g. advanced the lineage ref) but crashed before
+// syncPlanExecution ran, leaving the plan's activeTaskIDs pointing
+// at an already-completed task.
+func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, t := range s.pm.Tasks() {
+		planID := strings.TrimSpace(t.PlanID)
+		if planID == "" || seen[planID] {
+			continue
+		}
+		seen[planID] = true
+		if _, err := s.plans.Get(planID); err != nil {
+			continue
+		}
+		if err := s.syncPlanExecution(planID); err != nil {
+			s.logf("startup sync %s: %v", planID, err)
+		}
+	}
+	return nil
+}
+
+// reapOrphanPlanTasks cancels any non-terminal task whose referenced plan
+// has been removed from disk. Without this, the scheduler would repeatedly
+// try to load the missing plan on every reconcile tick and spam errors.
+func (s *Scheduler) reapOrphanPlanTasks() {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return
+	}
+	missing := make(map[string]bool)
+	for _, t := range s.pm.Tasks() {
+		if strings.TrimSpace(t.PlanID) == "" {
+			continue
+		}
+		switch t.Status {
+		case pool.TaskCompleted, pool.TaskAccepted, pool.TaskFailed, pool.TaskCanceled:
+			continue
+		}
+		gone, known := missing[t.PlanID]
+		if !known {
+			_, err := s.plans.Get(t.PlanID)
+			if err == nil {
+				missing[t.PlanID] = false
+				continue
+			}
+			if !errors.Is(err, ErrPlanNotFound) {
+				// Transient error — leave task alone; downstream callers
+				// will surface the real error.
+				missing[t.PlanID] = false
+				continue
+			}
+			missing[t.PlanID] = true
+			gone = true
+			s.logf("scheduler: plan %s missing on disk, canceling orphan tasks", t.PlanID)
+		}
+		if gone {
+			if err := s.pm.CancelTask(t.ID); err != nil {
+				s.logf("scheduler: cancel orphan task %s: %v", t.ID, err)
+			}
+		}
+	}
 }
 
 func (s *Scheduler) lineageHasCapacity(task pool.Task) (bool, error) {
@@ -625,6 +917,9 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	bundle.Execution.FailedTaskIDs = failed
 
 	if len(active) == 0 && len(failed) == 0 {
+		if bundle.Execution.ImplReviewRequested && bundle.Execution.State == planStateActive {
+			return s.enqueueImplementationReview(bundle)
+		}
 		now := time.Now().UTC()
 		bundle.Plan.State = planStateCompleted
 		bundle.Execution.State = planStateCompleted
@@ -672,6 +967,12 @@ func (s *Scheduler) onPlannerTaskCompleted(task pool.Task) error {
 	if err != nil {
 		return err
 	}
+	// Remember the lineage under which the planner task was activated
+	// so that if the planner artifact renames the lineage we can
+	// migrate the active-plan marker. Without this the original lineage
+	// stays "locked" by this plan even though the plan record now says
+	// it belongs to a different lineage.
+	previousLineage := strings.TrimSpace(bundle.Plan.Lineage)
 	planned := planFromArtifact(bundle.Plan, &artifact)
 	if err := validatePlanRecord(planned, s.lineages); err != nil {
 		return s.markPlanningFailed(task, fmt.Sprintf("validate planner artifact: %v", err))
@@ -699,6 +1000,14 @@ func (s *Scheduler) onPlannerTaskCompleted(task pool.Task) error {
 	}
 	if err := s.plans.UpdateAffinity(task.PlanID, bundle.Affinity); err != nil {
 		return err
+	}
+	// Migrate the active-plan marker if the planner renamed the lineage.
+	newLineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if s.lineages != nil && previousLineage != "" && newLineage != "" && previousLineage != newLineage {
+		_ = s.lineages.ClearActivePlan(previousLineage, task.PlanID)
+		if err := s.lineages.ActivatePlan(newLineage, task.PlanID); err != nil {
+			return err
+		}
 	}
 	if err := s.seedPlannerQuestions(task, artifact.Questions); err != nil {
 		return err
@@ -941,8 +1250,214 @@ func isPlanReviewTask(task pool.Task) bool {
 	return task.PlanID != "" && strings.HasPrefix(task.ID, planTaskRuntimeID(task.PlanID, planReviewTaskID+"-"))
 }
 
+func isImplReviewTask(task pool.Task) bool {
+	return task.PlanID != "" && strings.HasPrefix(task.ID, planTaskRuntimeID(task.PlanID, implReviewTaskID+"-"))
+}
+
+func (s *Scheduler) enqueueImplementationReview(bundle StoredPlan) error {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return nil
+	}
+	reviewTaskID := planImplReviewRuntimeID(bundle.Plan.PlanID, bundle.Execution.ImplReviewAttempts+1)
+	if _, exists := s.pm.Task(reviewTaskID); !exists {
+		prompt, err := buildImplementationReviewPrompt(bundle.Plan, bundle.Execution)
+		if err != nil {
+			return err
+		}
+		if _, err := s.pm.EnqueueTask(pool.TaskSpec{
+			ID:         reviewTaskID,
+			PlanID:     bundle.Plan.PlanID,
+			Prompt:     prompt,
+			Complexity: string(reviewComplexityForPlan(bundle.Plan)),
+			Priority:   len(bundle.Plan.Tasks) + 1,
+			Role:       "reviewer",
+		}); err != nil {
+			return err
+		}
+	}
+	bundle.Plan.State = planStateImplementationReview
+	bundle.Execution.State = planStateImplementationReview
+	bundle.Execution.ActiveTaskIDs = []string{reviewTaskID}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryImplReviewRequested,
+		Cycle:   implReviewCycleForTask(bundle.Plan.PlanID, reviewTaskID),
+		TaskID:  reviewTaskID,
+		Summary: "Implementation queued for post-implementation review.",
+	})
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(bundle.Plan.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "plan_impl_review_requested", ID: bundle.Plan.PlanID, Message: bundle.Plan.Title})
+	}
+	return nil
+}
+
+func buildImplementationReviewPrompt(plan PlanRecord, execution ExecutionRecord) (string, error) {
+	var b strings.Builder
+	b.WriteString("## Post-Implementation Review\n\n")
+	b.WriteString("Review the implementation of the plan below. Your job is to verify that every task's success criteria has been met by inspecting the actual code changes.\n\n")
+
+	b.WriteString("### Plan Title\n\n")
+	b.WriteString(strings.TrimSpace(plan.Title))
+	b.WriteString("\n\n")
+
+	if plan.Summary != "" {
+		b.WriteString("### Plan Summary\n\n")
+		b.WriteString(strings.TrimSpace(plan.Summary))
+		b.WriteString("\n\n")
+	}
+
+	data, err := json.MarshalIndent(plan.Tasks, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal tasks for impl review: %w", err)
+	}
+	b.WriteString("### Task List\n\n```json\n")
+	b.Write(data)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("### How to Review\n\n")
+	b.WriteString("1. Run `git diff ")
+	if execution.Anchor.Commit != "" {
+		b.WriteString(execution.Anchor.Commit)
+	} else if plan.Anchor.Commit != "" {
+		b.WriteString(plan.Anchor.Commit)
+	} else {
+		b.WriteString("HEAD~1")
+	}
+	b.WriteString("` on the lineage branch to see what was implemented.\n")
+	b.WriteString("2. For each task, verify that the success criteria have been met.\n")
+	b.WriteString("3. Check for regressions, missing edge cases, and incomplete work.\n")
+	b.WriteString("4. Conclude with your review verdict.\n\n")
+
+	b.WriteString("At the end of your review, output a review block:\n")
+	b.WriteString("<review>\n<verdict>pass|fail</verdict>\n<feedback>...</feedback>\n<severity>minor|major|critical</severity>\n</review>\n\n")
+	b.WriteString("Use verdict=pass if every task's success criteria has been met, fail otherwise.\n")
+	b.WriteString("Severity is only meaningful when verdict is fail: minor=small issues, major=significant gaps, critical=broken/unsafe.")
+	return b.String(), nil
+}
+
+func (s *Scheduler) onImplementationReviewCompleted(task pool.Task) error {
+	if s.plans == nil || s.pm == nil || task.PlanID == "" || task.WorkerID == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(pool.WorkerStatePath(s.pm.StateDir(), task.WorkerID, pool.WorkerResultFile))
+	if err != nil {
+		return s.onImplementationReviewFailed(pool.Task{
+			ID:       task.ID,
+			PlanID:   task.PlanID,
+			Result:   &pool.TaskResult{Error: fmt.Sprintf("read impl review output: %v", err)},
+			WorkerID: task.WorkerID,
+		})
+	}
+	verdict, feedback, severity := adapter.ExtractReviewVerdict(string(raw))
+	if verdict == "" {
+		verdict = pool.ReviewFail
+		feedback = "implementation review verdict not found in output"
+		if severity == "" {
+			severity = pool.SeverityMajor
+		}
+	}
+
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	bundle.Execution.ImplReviewAttempts++
+	bundle.Execution.ImplReviewedAt = &now
+	if verdict == pool.ReviewPass {
+		bundle.Execution.ImplReviewStatus = planReviewStatusPassed
+	} else {
+		bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+	}
+
+	if verdict == pool.ReviewPass {
+		bundle.Execution.ImplReviewFindings = nil
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryImplReviewPassed,
+			Cycle:   implReviewCycleForTask(task.PlanID, task.ID),
+			TaskID:  task.ID,
+			Verdict: verdict,
+		})
+		if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+			return err
+		}
+		if s.notify != nil {
+			s.notify(pool.Notification{Type: "plan_impl_review_passed", ID: task.PlanID, Message: bundle.Plan.Title})
+		}
+		return s.syncPlanExecution(task.PlanID)
+	}
+
+	// verdict == fail
+	bundle.Execution.ImplReviewFindings = planReviewFindings(verdict, feedback, severity)
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:     planHistoryImplReviewFailed,
+		Cycle:    implReviewCycleForTask(task.PlanID, task.ID),
+		TaskID:   task.ID,
+		Verdict:  verdict,
+		Findings: bundle.Execution.ImplReviewFindings,
+	})
+	completedAt := time.Now().UTC()
+	bundle.Plan.State = planStateCompleted
+	bundle.Execution.State = planStateCompleted
+	bundle.Execution.CompletedAt = &completedAt
+	bundle.Execution.ActiveTaskIDs = nil
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
+	}
+	return nil
+}
+
+func (s *Scheduler) onImplementationReviewFailed(task pool.Task) error {
+	if s.plans == nil || task.PlanID == "" {
+		return nil
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+	msg := "implementation review task failed"
+	if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {
+		msg = strings.TrimSpace(task.Result.Error)
+	}
+	bundle.Execution.ImplReviewFindings = []string{msg}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:     planHistoryImplReviewFailed,
+		Cycle:    implReviewCycleForTask(task.PlanID, task.ID),
+		TaskID:   task.ID,
+		Verdict:  pool.ReviewFail,
+		Findings: bundle.Execution.ImplReviewFindings,
+	})
+	bundle.Plan.State = planStateCompleted
+	bundle.Execution.State = planStateCompleted
+	bundle.Execution.CompletedAt = &now
+	bundle.Execution.ActiveTaskIDs = nil
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
+	}
+	return nil
+}
+
 func isPlanControlTask(task pool.Task) bool {
-	return task.Role == plannerTaskRole || isPlanReviewTask(task)
+	return task.Role == plannerTaskRole || isPlanReviewTask(task) || isImplReviewTask(task)
 }
 
 func reviewComplexityForPlan(plan PlanRecord) Complexity {

@@ -16,7 +16,7 @@ import (
 
 func TestKitchenStatusSnapshotIncludesWorkersProvidersAndLineages(t *testing.T) {
 	k := newTestKitchen(t)
-	if _, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, true, 2, 3); err != nil {
+	if _, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, true, 2, 3, false); err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
@@ -244,7 +244,7 @@ func TestKitchenCapabilitiesCommandOutputsCapabilityMap(t *testing.T) {
 func TestKitchenMergeLineageMarksPlanMergedAndClearsActivePlan(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestKitchenStatusIncludesRuntimeActivity(t *testing.T) {
 
 func TestKitchenEvidenceCommandOutputsPlanEvidence(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestKitchenEvidenceCommandOutputsPlanEvidence(t *testing.T) {
 
 func TestKitchenEvidenceCommandOutputsCompactTier(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestKitchenEvidenceCommandOutputsCompactTier(t *testing.T) {
 
 func TestKitchenEvidenceIncludesRuntimeActivity(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestKitchenEvidenceIncludesRuntimeActivity(t *testing.T) {
 
 func TestKitchenPlanCommandOutputsProgress(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, true, 2, 3)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, true, 2, 3, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestKitchenPlanCommandOutputsProgress(t *testing.T) {
 func TestKitchenHistoryCommandShowsTimelineAndCycleFilter(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestKitchenHistoryCommandShowsTimelineAndCycleFilter(t *testing.T) {
 func TestKitchenHistoryCommandOutputsJSON(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -727,7 +727,7 @@ func TestKitchenSubmitCommandReadsIdeaFromEditor(t *testing.T) {
 func TestKitchenCancelCommandCancelsActivePlan(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestKitchenCancelCommandCancelsActivePlan(t *testing.T) {
 
 func TestKitchenReplanCommandCreatesPendingApprovalClone(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -785,12 +785,17 @@ func TestKitchenReplanCommandCreatesPendingApprovalClone(t *testing.T) {
 	if !bytes.Contains([]byte(replanned.Plan.Summary), []byte("Need a narrower rollout")) {
 		t.Fatalf("replanned summary = %q, want appended reason", replanned.Plan.Summary)
 	}
+	// Replan supersedes the source plan; the old record must be gone
+	// so the operator doesn't have to prune it manually.
+	if _, err := k.GetPlan(bundle.Plan.PlanID); err == nil {
+		t.Fatalf("superseded plan %s still exists after replan", bundle.Plan.PlanID)
+	}
 }
 
 func TestKitchenDeleteCommandRemovesPlanTasksAndQuestions(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -933,7 +938,7 @@ func TestKitchenRetryCommandSameWorkerClearsFreshWorkerRequirement(t *testing.T)
 
 func TestKitchenReplanCommandRequeuesPlanningWhenSourcePlanHasNoTasks(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Review this branch and draft squash message", "review-branch", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Review this branch and draft squash message", "review-branch", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -966,6 +971,11 @@ func TestKitchenReplanCommandRequeuesPlanningWhenSourcePlanHasNoTasks(t *testing
 	}
 	if len(replanned.Execution.ActiveTaskIDs) != 1 {
 		t.Fatalf("active task ids = %+v, want one planner task", replanned.Execution.ActiveTaskIDs)
+	}
+	// Even on the no-tasks path, the original plan should be deleted
+	// once the new planning run is queued.
+	if _, err := k.GetPlan(bundle.Plan.PlanID); err == nil {
+		t.Fatalf("superseded plan %s still exists after replan", bundle.Plan.PlanID)
 	}
 }
 
@@ -1060,7 +1070,7 @@ func TestKitchenLineagesCommandListsActiveLineages(t *testing.T) {
 
 func TestKitchenMergeCheckCommandReportsCleanMerge(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -1093,7 +1103,7 @@ func TestKitchenMergeCheckCommandReportsCleanMerge(t *testing.T) {
 func TestKitchenMergeCommandNoCommitPreviewsWithoutUpdatingBase(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -1174,7 +1184,7 @@ func runKitchenCommand(t *testing.T, k *Kitchen, args ...string) string {
 func seedFailedImplementationTask(t *testing.T, k *Kitchen) (string, string) {
 	t.Helper()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}

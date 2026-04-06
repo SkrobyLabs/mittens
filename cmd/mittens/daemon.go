@@ -123,6 +123,17 @@ func (a *App) runRuntimeDaemon() error {
 	fmt.Fprintf(os.Stderr, "MITTENS_POOL_TOKEN=%s\n", a.poolToken)
 	fmt.Fprintf(os.Stderr, "MITTENS_SESSION_ID=%s\n", a.poolSession)
 
+	// Opportunistically build the worker image in the background so the
+	// first spawn doesn't pay the full build cost. spawnWorkerContainer
+	// blocks on ensureImage() if it races ahead of this.
+	if !a.NoBuild {
+		go func() {
+			if err := a.ensureImage(); err != nil {
+				logWarn("Background image build failed: %v", err)
+			}
+		}()
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)

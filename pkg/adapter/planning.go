@@ -54,7 +54,7 @@ At the end of your response, output a plan block with valid JSON:
 {
   "title": "Short plan title",
   "summary": "Optional operator-facing summary",
-  "lineage": "optional-lineage-slug",
+  "lineage": "optional-lineage-slug (kebab-case, no slashes — used as a directory and git sub-ref name)",
   "ownership": {
     "packages": ["optional/package"],
     "exclusive": false

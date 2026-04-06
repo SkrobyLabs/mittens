@@ -30,7 +30,7 @@ func TestKitchenEndToEndWithRuntimeClient(t *testing.T) {
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Add end-to-end Kitchen coverage", "kitchen-e2e", false, false, 0, -1)
+	bundle, err := k.SubmitIdea("Add end-to-end Kitchen coverage", "kitchen-e2e", false, false, 0, -1, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}

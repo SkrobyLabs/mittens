@@ -150,6 +150,7 @@ type TaskSummary struct {
 	DependsOn    []string   `json:"dependsOn,omitempty"`
 	ReviewCycles int        `json:"reviewCycles"`
 	HasHandover  bool       `json:"hasHandover,omitempty"`
+	HasConflict  bool       `json:"hasConflict,omitempty"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	DispatchedAt *time.Time `json:"dispatchedAt,omitempty"`
 	CompletedAt  *time.Time `json:"completedAt,omitempty"`
@@ -167,6 +168,7 @@ func (t *Task) Summary() TaskSummary {
 		DependsOn:    t.DependsOn,
 		ReviewCycles: t.ReviewCycles,
 		HasHandover:  t.Handover != nil,
+		HasConflict:  t.Result != nil && t.Result.Conflict != nil,
 		CreatedAt:    t.CreatedAt,
 		DispatchedAt: t.DispatchedAt,
 		CompletedAt:  t.CompletedAt,
@@ -175,17 +177,18 @@ func (t *Task) Summary() TaskSummary {
 
 // TaskSpec is the input for creating a new task.
 type TaskSpec struct {
-	ID             string   `json:"id,omitempty"`
-	PipelineID     string   `json:"pipelineId,omitempty"`
-	PlanID         string   `json:"planId,omitempty"`
-	StageIndex     int      `json:"stageIndex,omitempty"`
-	Prompt         string   `json:"prompt"`
-	Complexity     string   `json:"complexity,omitempty"`
-	Role           string   `json:"role,omitempty"`
-	Priority       int      `json:"priority"`
-	DependsOn      []string `json:"dependsOn,omitempty"`
-	TimeoutMinutes int      `json:"timeoutMinutes,omitempty"`
-	MaxReviews     int      `json:"maxReviews,omitempty"`
+	ID                 string   `json:"id,omitempty"`
+	PipelineID         string   `json:"pipelineId,omitempty"`
+	PlanID             string   `json:"planId,omitempty"`
+	StageIndex         int      `json:"stageIndex,omitempty"`
+	Prompt             string   `json:"prompt"`
+	Complexity         string   `json:"complexity,omitempty"`
+	Role               string   `json:"role,omitempty"`
+	Priority           int      `json:"priority"`
+	DependsOn          []string `json:"dependsOn,omitempty"`
+	TimeoutMinutes     int      `json:"timeoutMinutes,omitempty"`
+	MaxReviews         int      `json:"maxReviews,omitempty"`
+	RequireFreshWorker bool     `json:"requireFreshWorker,omitempty"`
 }
 
 // WorkerSpec is the input for spawning a new worker.
@@ -201,15 +204,24 @@ type WorkerSpec struct {
 	Environment   map[string]string `json:"environment,omitempty"`
 }
 
+// ConflictInfo carries the details of a merge conflict recorded when a task
+// failed during lineage merge-back. It is attached to TaskResult.Conflict so
+// that operators can create a targeted conflict-resolution task.
+type ConflictInfo struct {
+	ConflictingFiles []string `json:"conflictingFiles,omitempty"`
+	LineageDiff      string   `json:"lineageDiff,omitempty"`
+}
+
 // TaskResult contains the outcome of a completed or failed task.
 type TaskResult struct {
-	TaskID       string   `json:"taskId"`
-	WorkerID     string   `json:"workerId"`
-	State        string   `json:"state"`
-	Summary      string   `json:"summary,omitempty"`
-	FilesChanged []string `json:"filesChanged,omitempty"`
-	GitDiff      string   `json:"gitDiff,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	TaskID       string        `json:"taskId"`
+	WorkerID     string        `json:"workerId"`
+	State        string        `json:"state"`
+	Summary      string        `json:"summary,omitempty"`
+	FilesChanged []string      `json:"filesChanged,omitempty"`
+	GitDiff      string        `json:"gitDiff,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	Conflict     *ConflictInfo `json:"conflict,omitempty"`
 }
 
 // TaskHandover carries structured context from one task to the next.

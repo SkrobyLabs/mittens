@@ -48,6 +48,15 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 		return "", "", fmt.Errorf("spawn worker: provider %q does not match host provider %q", spec.Provider, a.Provider.Name)
 	}
 
+	// In daemon mode the image build is deferred to first spawn. Block
+	// here until it completes (ensureImage is once-safe and shared with
+	// the background build kicked off in runRuntimeDaemon).
+	if !a.NoBuild {
+		if err := a.ensureImage(); err != nil {
+			return "", "", fmt.Errorf("spawn worker: build image: %w", err)
+		}
+	}
+
 	sessionID := strings.TrimSpace(spec.Environment["MITTENS_SESSION_ID"])
 	if sessionID == "" {
 		sessionID = a.poolSession
@@ -105,6 +114,9 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 		"-e", "MITTENS_KITCHEN_ADDR=" + kitchenAddr,
 		"-e", "MITTENS_TEAM_DIR=/team",
 		"-e", "MITTENS_PROVIDER=" + a.Provider.Name,
+	}
+	if a.Provider.ContainerHostname != "" {
+		args = append(args, "--hostname", a.Provider.ContainerHostname)
 	}
 	if _, ok := spec.Environment["MITTENS_SKIP_PERMS_FLAG"]; !ok && a.Provider.SkipPermsFlag != "" {
 		args = append(args, "-e", "MITTENS_SKIP_PERMS_FLAG="+a.Provider.SkipPermsFlag)

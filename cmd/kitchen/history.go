@@ -9,14 +9,20 @@ import (
 )
 
 const (
-	planHistoryPlanningStarted   = "planning_started"
-	planHistoryPlanningCompleted = "planning_completed"
-	planHistoryPlanningFailed    = "planning_failed"
-	planHistoryReviewRequested   = "review_requested"
-	planHistoryReviewPassed      = "review_passed"
-	planHistoryReviewFailed      = "review_failed"
-	planHistoryConflictRetried   = "conflict_retried"
-	planHistoryManualRetried     = "manual_retried"
+	planHistoryPlanningStarted          = "planning_started"
+	planHistoryPlanningCompleted        = "planning_completed"
+	planHistoryPlanningFailed           = "planning_failed"
+	planHistoryReviewRequested          = "review_requested"
+	planHistoryReviewPassed             = "review_passed"
+	planHistoryReviewFailed             = "review_failed"
+	planHistoryConflictRetried          = "conflict_retried"
+	planHistoryManualRetried            = "manual_retried"
+	planHistoryConflictFixRequested     = "conflict_fix_requested"
+	planHistoryLineageFixMergeRequested = "lineage_fix_merge_requested"
+	planHistoryLineageFixMergeCompleted = "lineage_fix_merge_completed"
+	planHistoryImplReviewRequested      = "impl_review_requested"
+	planHistoryImplReviewPassed         = "impl_review_passed"
+	planHistoryImplReviewFailed         = "impl_review_failed"
 )
 
 type PlanHistoryEntry struct {
@@ -69,6 +75,16 @@ func reviewCycleForTask(planID, taskID string) int {
 	return 1
 }
 
+func implReviewCycleForTask(planID, taskID string) int {
+	prefix := planTaskRuntimeID(planID, implReviewTaskID+"-")
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(taskID), prefix); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
 func (k *Kitchen) PlanHistory(planID string, cycle int) ([]PlanHistoryEntry, error) {
 	detail, err := k.PlanDetail(planID)
 	if err != nil {
@@ -109,6 +125,35 @@ func summarizePlanHistoryEntry(entry PlanHistoryEntry) string {
 	return "-"
 }
 
+func planHistoryEntryLabel(entryType string) string {
+	switch strings.TrimSpace(entryType) {
+	case planHistoryPlanningStarted:
+		return "Planning started"
+	case planHistoryPlanningCompleted:
+		return "Planning completed"
+	case planHistoryPlanningFailed:
+		return "Planning failed"
+	case planHistoryReviewRequested:
+		return "Review requested"
+	case planHistoryReviewPassed:
+		return "Review passed"
+	case planHistoryReviewFailed:
+		return "Review failed"
+	case planHistoryConflictRetried:
+		return "Conflict retried"
+	case planHistoryManualRetried:
+		return "Manual retry"
+	case planHistoryImplReviewRequested:
+		return "Implementation review requested"
+	case planHistoryImplReviewPassed:
+		return "Implementation review passed"
+	case planHistoryImplReviewFailed:
+		return "Implementation review failed"
+	default:
+		return strings.TrimSpace(entryType)
+	}
+}
+
 func historyTypeForNotification(eventType string) string {
 	switch strings.TrimSpace(eventType) {
 	case "plan_submitted", "plan_revising":
@@ -123,6 +168,12 @@ func historyTypeForNotification(eventType string) string {
 		return planHistoryReviewPassed
 	case "plan_review_failed":
 		return planHistoryReviewFailed
+	case "plan_impl_review_requested":
+		return planHistoryImplReviewRequested
+	case "plan_impl_review_passed":
+		return planHistoryImplReviewPassed
+	case "plan_impl_review_failed":
+		return planHistoryImplReviewFailed
 	default:
 		return ""
 	}
