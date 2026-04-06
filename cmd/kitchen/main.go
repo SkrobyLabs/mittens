@@ -971,6 +971,14 @@ func newRootCommand() *cobra.Command {
 	serveCmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "worker broker address advertised to spawned workers")
 	serveCmd.Flags().BoolVar(&keepDeadWorkers, "keep-dead-workers", false, "retain finished worker containers for debugging; oldest is evicted when the container count reaches maxWorkersTotal")
 
+	configureCmd := &cobra.Command{
+		Use:   "configure",
+		Short: "Configure provider and model routing",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigure()
+		},
+	}
+
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
@@ -1031,6 +1039,7 @@ func newRootCommand() *cobra.Command {
 		fixMergeCmd,
 		providerCmd,
 		cleanCmd,
+		configureCmd,
 		tuiCmd,
 		serveCmd,
 		mittensCmd,

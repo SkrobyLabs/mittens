@@ -9,6 +9,36 @@ import (
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
+// logRoutingOverrides prints a line to stderr for each complexity whose routing
+// differs from the defaults, e.g. "kitchen: routing override: low → claude/haiku".
+func logRoutingOverrides(defaultCfg, cfg KitchenConfig) {
+	for _, c := range allComplexities {
+		def := defaultCfg.Routing[c]
+		got := cfg.Routing[c]
+		if routingRuleChanged(def, got) && len(got.Prefer) > 0 {
+			key := got.Prefer[0]
+			fmt.Fprintf(os.Stderr, "kitchen: routing override: %s → %s/%s\n", c, key.Provider, key.Model)
+		}
+	}
+}
+
+func routingRuleChanged(a, b RoutingRule) bool {
+	if len(a.Prefer) != len(b.Prefer) || len(a.Fallback) != len(b.Fallback) {
+		return true
+	}
+	for i := range a.Prefer {
+		if a.Prefer[i] != b.Prefer[i] {
+			return true
+		}
+	}
+	for i := range a.Fallback {
+		if a.Fallback[i] != b.Fallback[i] {
+			return true
+		}
+	}
+	return false
+}
+
 const defaultPoolStateName = "default"
 
 func openKitchen(repoPath string) (*Kitchen, func() error, error) {
@@ -30,8 +60,21 @@ func openKitchenWithOptions(repoPath string, opts kitchenOpenOptions) (*Kitchen,
 		return nil, nil, err
 	}
 
-	cfg, err := LoadKitchenConfig(paths.ConfigPath)
+	defaultCfg := DefaultKitchenConfig()
+	configPath, err := KitchenConfigPath()
 	if err != nil {
+		return nil, nil, err
+	}
+	userCfg, err := LoadKitchenConfigFile(configPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := defaultCfg
+	if userCfg != nil {
+		cfg = MergeKitchenConfig(defaultCfg, *userCfg)
+		logRoutingOverrides(defaultCfg, cfg)
+	}
+	if err := cfg.Validate(); err != nil {
 		return nil, nil, err
 	}
 

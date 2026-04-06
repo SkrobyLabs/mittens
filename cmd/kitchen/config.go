@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -187,6 +187,89 @@ func (p ProjectPaths) Ensure() error {
 	return nil
 }
 
+// KitchenConfigPath returns the path to the user's Kitchen config file.
+func KitchenConfigPath() (string, error) {
+	home, err := DefaultKitchenHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "config.yaml"), nil
+}
+
+// LoadKitchenConfigFile reads the user config at path without merging defaults.
+// Returns nil (not an error) when the file does not exist.
+func LoadKitchenConfigFile(path string) (*KitchenConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var cfg KitchenConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return &cfg, nil
+}
+
+// MergeKitchenConfig applies user overrides on top of base.
+// Routing rules are merged per complexity key; keys absent in user retain base values.
+// Concurrency limits are overridden only when the user value is positive.
+// Failure policy rules are merged per class; snapshot limit overridden when positive.
+func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
+	merged := base
+
+	// Deep-copy routing map before mutating.
+	merged.Routing = make(map[Complexity]RoutingRule, len(base.Routing))
+	for k, v := range base.Routing {
+		merged.Routing[k] = v
+	}
+	for c, rule := range user.Routing {
+		if len(rule.Prefer) > 0 {
+			merged.Routing[c] = rule
+		}
+	}
+
+	// Concurrency: apply positive user values.
+	if user.Concurrency.MaxActiveLineages > 0 {
+		merged.Concurrency.MaxActiveLineages = user.Concurrency.MaxActiveLineages
+	}
+	if user.Concurrency.MaxPlanningWorkers > 0 {
+		merged.Concurrency.MaxPlanningWorkers = user.Concurrency.MaxPlanningWorkers
+	}
+	if user.Concurrency.MaxWorkersTotal > 0 {
+		merged.Concurrency.MaxWorkersTotal = user.Concurrency.MaxWorkersTotal
+	}
+	if user.Concurrency.MaxWorkersPerPool > 0 {
+		merged.Concurrency.MaxWorkersPerPool = user.Concurrency.MaxWorkersPerPool
+	}
+	if user.Concurrency.MaxWorkersPerLineage > 0 {
+		merged.Concurrency.MaxWorkersPerLineage = user.Concurrency.MaxWorkersPerLineage
+	}
+	if user.Concurrency.MaxIdlePerPool > 0 {
+		merged.Concurrency.MaxIdlePerPool = user.Concurrency.MaxIdlePerPool
+	}
+
+	// Failure policy: deep-copy then merge per class.
+	merged.FailurePolicy = make(map[string]FailurePolicyRule, len(base.FailurePolicy))
+	for k, v := range base.FailurePolicy {
+		merged.FailurePolicy[k] = v
+	}
+	for class, rule := range user.FailurePolicy {
+		if strings.TrimSpace(rule.Action) != "" {
+			merged.FailurePolicy[class] = rule
+		}
+	}
+
+	// Snapshots: override positive values only.
+	if user.Snapshots.PlanHistoryLimit > 0 {
+		merged.Snapshots.PlanHistoryLimit = user.Snapshots.PlanHistoryLimit
+	}
+
+	return merged
+}
+
 func LoadKitchenConfig(path string) (KitchenConfig, error) {
 	cfg := DefaultKitchenConfig()
 	if strings.TrimSpace(path) == "" {
@@ -247,6 +330,21 @@ func (c KitchenConfig) Validate() error {
 		if strings.TrimSpace(class) == "" || strings.TrimSpace(policy.Action) == "" {
 			return fmt.Errorf("failure_policy entries must include class and action")
 		}
+	}
+	return nil
+}
+
+// SaveKitchenConfigFile marshals cfg as YAML and writes it atomically.
+func SaveKitchenConfigFile(path string, cfg *KitchenConfig) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("ensure config dir: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
 }
