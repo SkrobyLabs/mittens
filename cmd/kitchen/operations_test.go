@@ -323,6 +323,55 @@ func TestKitchenMergeLineageMarksPlanMergedAndClearsActivePlan(t *testing.T) {
 	}
 }
 
+func TestKitchenMergeLineageBlocksFailedImplementationReview(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_impl_review_failed",
+			Lineage: "parser-errors",
+			Title:   "Impl review gate",
+			State:   planStateCompleted,
+			Anchor:  anchor,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateCompleted,
+			Branch:              lineageBranchName("parser-errors"),
+			Anchor:              anchor,
+			CompletedAt:         &completedAt,
+			ImplReviewRequested: true,
+			ImplReviewStatus:    planReviewStatusFailed,
+			ImplReviewFindings:  []string{"missing parser error handling"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	_, err = k.MergeLineage("parser-errors")
+	if err == nil {
+		t.Fatal("MergeLineage error = nil, want failed implementation review gate")
+	}
+	if !strings.Contains(err.Error(), "failed post-implementation review") {
+		t.Fatalf("MergeLineage error = %q, want impl review failure", err)
+	}
+}
+
 func TestKitchenCleanWorktreesRemovesOnlyOrphans(t *testing.T) {
 	k := newTestKitchen(t)
 

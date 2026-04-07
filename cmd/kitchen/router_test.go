@@ -41,6 +41,40 @@ func TestComplexityRouterResolveFiltersUnavailablePools(t *testing.T) {
 	}
 }
 
+func TestComplexityRouterResolveForRolePrefersRoleOverrideAndFallsBackToDefault(t *testing.T) {
+	router := NewComplexityRouter(KitchenConfig{
+		Routing: map[Complexity]RoutingRule{
+			ComplexityLow: {
+				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+			},
+			ComplexityHigh: {
+				Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+			},
+		},
+		RoleDefaults: map[string]RoutingRule{
+			"reviewer": {
+				Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+			},
+		},
+		RoleRouting: map[string]map[Complexity]RoutingRule{
+			"reviewer": {
+				ComplexityHigh: {
+					Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+				},
+			},
+		},
+	}, nil)
+
+	low := router.ResolveForRole("reviewer", ComplexityLow)
+	if len(low) != 1 || low[0].Provider != "openai" {
+		t.Fatalf("reviewer low routing = %+v, want role default openai route", low)
+	}
+	high := router.ResolveForRole("reviewer", ComplexityHigh)
+	if len(high) != 1 || high[0].Provider != "anthropic" {
+		t.Fatalf("reviewer high routing = %+v, want anthropic complexity override", high)
+	}
+}
+
 func TestComplexityRouterEscalate(t *testing.T) {
 	router := &ComplexityRouter{}
 	next, ok := router.Escalate(ComplexityLow)

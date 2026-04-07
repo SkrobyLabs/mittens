@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-"fmt"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,6 +41,8 @@ type RoutingRule struct {
 	Fallback []PoolKey `json:"fallback,omitempty" yaml:"fallback,omitempty"`
 }
 
+const defaultRoutingRole = "default"
+
 type ConcurrencyConfig struct {
 	MaxActiveLineages    int `json:"maxActiveLineages" yaml:"maxActiveLineages"`
 	MaxPlanningWorkers   int `json:"maxPlanningWorkers" yaml:"maxPlanningWorkers"`
@@ -61,10 +63,12 @@ type SnapshotConfig struct {
 }
 
 type KitchenConfig struct {
-	Routing       map[Complexity]RoutingRule   `json:"routing" yaml:"routing"`
-	Concurrency   ConcurrencyConfig            `json:"concurrency" yaml:"concurrency"`
-	FailurePolicy map[string]FailurePolicyRule `json:"failure_policy" yaml:"failure_policy"`
-	Snapshots     SnapshotConfig               `json:"snapshots" yaml:"snapshots"`
+	Routing       map[Complexity]RoutingRule            `json:"routing" yaml:"routing"`
+	RoleDefaults  map[string]RoutingRule                `json:"roleDefaults,omitempty" yaml:"roleDefaults,omitempty"`
+	RoleRouting   map[string]map[Complexity]RoutingRule `json:"roleRouting,omitempty" yaml:"roleRouting,omitempty"`
+	Concurrency   ConcurrencyConfig                     `json:"concurrency" yaml:"concurrency"`
+	FailurePolicy map[string]FailurePolicyRule          `json:"failure_policy" yaml:"failure_policy"`
+	Snapshots     SnapshotConfig                        `json:"snapshots" yaml:"snapshots"`
 }
 
 type KitchenPaths struct {
@@ -106,6 +110,8 @@ func DefaultKitchenConfig() KitchenConfig {
 				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.5-pro"}},
 			},
 		},
+		RoleDefaults: map[string]RoutingRule{},
+		RoleRouting:  map[string]map[Complexity]RoutingRule{},
 		Concurrency: ConcurrencyConfig{
 			MaxActiveLineages:    5,
 			MaxPlanningWorkers:   2,
@@ -126,6 +132,181 @@ func DefaultKitchenConfig() KitchenConfig {
 			PlanHistoryLimit: defaultPlanProgressHistoryLimit,
 		},
 	}
+}
+
+func configurableKitchenRoles() []string {
+	return []string{
+		defaultRoutingRole,
+		plannerTaskRole,
+		"implementer",
+		"reviewer",
+		lineageFixMergeRole,
+	}
+}
+
+func effectiveRoutingForRole(cfg KitchenConfig, role string) map[Complexity]RoutingRule {
+	role = normalizeRoutingRole(role)
+	routing := cloneRoutingMap(cfg.Routing)
+	if role == defaultRoutingRole {
+		return routing
+	}
+	if rule, ok := roleDefaultRule(cfg, role); ok {
+		for _, complexity := range allComplexities {
+			routing[complexity] = cloneRoutingRule(rule)
+		}
+	}
+	roleRules := cfg.RoleRouting[role]
+	for complexity, rule := range roleRules {
+		if len(rule.Prefer) > 0 {
+			routing[complexity] = cloneRoutingRule(rule)
+		}
+	}
+	return routing
+}
+
+func normalizeRoutingRole(role string) string {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return defaultRoutingRole
+	}
+	return role
+}
+
+func cloneRoutingMap(src map[Complexity]RoutingRule) map[Complexity]RoutingRule {
+	out := make(map[Complexity]RoutingRule, len(src))
+	for complexity, rule := range src {
+		out[complexity] = cloneRoutingRule(rule)
+	}
+	return out
+}
+
+func cloneRoutingRule(rule RoutingRule) RoutingRule {
+	return RoutingRule{
+		Prefer:   append([]PoolKey(nil), rule.Prefer...),
+		Fallback: append([]PoolKey(nil), rule.Fallback...),
+	}
+}
+
+func roleDefaultRule(cfg KitchenConfig, role string) (RoutingRule, bool) {
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return RoutingRule{}, false
+	}
+	rule, ok := cfg.RoleDefaults[role]
+	if !ok || len(rule.Prefer) == 0 {
+		return RoutingRule{}, false
+	}
+	return cloneRoutingRule(rule), true
+}
+
+func setRoutingForRole(cfg *KitchenConfig, role string, routing map[Complexity]RoutingRule) {
+	if cfg == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		cfg.Routing = cloneRoutingMap(routing)
+		return
+	}
+	if cfg.RoleRouting == nil {
+		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
+	}
+	if cfg.RoleDefaults == nil {
+		cfg.RoleDefaults = make(map[string]RoutingRule)
+	}
+	overrides := make(map[Complexity]RoutingRule)
+	for _, complexity := range allComplexities {
+		rule, ok := routing[complexity]
+		if !ok || len(rule.Prefer) == 0 {
+			continue
+		}
+		if routingRuleEqual(rule, cfg.Routing[complexity]) {
+			continue
+		}
+		overrides[complexity] = cloneRoutingRule(rule)
+	}
+	if len(overrides) == 0 {
+		delete(cfg.RoleRouting, role)
+		return
+	}
+	cfg.RoleRouting[role] = overrides
+}
+
+func setRoleDefault(cfg *KitchenConfig, role string, rule RoutingRule) {
+	if cfg == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	if cfg.RoleDefaults == nil {
+		cfg.RoleDefaults = make(map[string]RoutingRule)
+	}
+	if len(rule.Prefer) == 0 {
+		delete(cfg.RoleDefaults, role)
+		return
+	}
+	cfg.RoleDefaults[role] = cloneRoutingRule(rule)
+}
+
+func setRoleComplexityOverrides(cfg *KitchenConfig, role string, overrides map[Complexity]RoutingRule) {
+	if cfg == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	if cfg.RoleRouting == nil {
+		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
+	}
+	if len(overrides) == 0 {
+		delete(cfg.RoleRouting, role)
+		return
+	}
+	cfg.RoleRouting[role] = cloneRoutingMap(overrides)
+}
+
+func clearRoutingForRole(cfg *KitchenConfig, role string) {
+	if cfg == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	if cfg.RoleRouting != nil {
+		delete(cfg.RoleRouting, role)
+	}
+	if cfg.RoleDefaults != nil {
+		delete(cfg.RoleDefaults, role)
+	}
+}
+
+func roleHasRoutingOverride(cfg KitchenConfig, role string) bool {
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return true
+	}
+	return len(cfg.RoleRouting[role]) > 0 || len(cfg.RoleDefaults[role].Prefer) > 0
+}
+
+func routingRuleEqual(a, b RoutingRule) bool {
+	if len(a.Prefer) != len(b.Prefer) || len(a.Fallback) != len(b.Fallback) {
+		return false
+	}
+	for i := range a.Prefer {
+		if a.Prefer[i] != b.Prefer[i] {
+			return false
+		}
+	}
+	for i := range a.Fallback {
+		if a.Fallback[i] != b.Fallback[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func DefaultKitchenHome() (string, error) {
@@ -221,13 +402,43 @@ func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
 	merged := base
 
 	// Deep-copy routing map before mutating.
-	merged.Routing = make(map[Complexity]RoutingRule, len(base.Routing))
-	for k, v := range base.Routing {
-		merged.Routing[k] = v
-	}
+	merged.Routing = cloneRoutingMap(base.Routing)
 	for c, rule := range user.Routing {
 		if len(rule.Prefer) > 0 {
-			merged.Routing[c] = rule
+			merged.Routing[c] = cloneRoutingRule(rule)
+		}
+	}
+
+	merged.RoleDefaults = make(map[string]RoutingRule, len(base.RoleDefaults))
+	for role, rule := range base.RoleDefaults {
+		merged.RoleDefaults[role] = cloneRoutingRule(rule)
+	}
+	for role, rule := range user.RoleDefaults {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			continue
+		}
+		if len(rule.Prefer) > 0 {
+			merged.RoleDefaults[role] = cloneRoutingRule(rule)
+		}
+	}
+
+	merged.RoleRouting = make(map[string]map[Complexity]RoutingRule, len(base.RoleRouting))
+	for role, routes := range base.RoleRouting {
+		merged.RoleRouting[role] = cloneRoutingMap(routes)
+	}
+	for role, routes := range user.RoleRouting {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			continue
+		}
+		if merged.RoleRouting[role] == nil {
+			merged.RoleRouting[role] = make(map[Complexity]RoutingRule)
+		}
+		for complexity, rule := range routes {
+			if len(rule.Prefer) > 0 {
+				merged.RoleRouting[role][complexity] = cloneRoutingRule(rule)
+			}
 		}
 	}
 
@@ -308,6 +519,43 @@ func (c KitchenConfig) Validate() error {
 		for i, key := range entries {
 			if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
 				return fmt.Errorf("routing.%s entry %d must include provider and model", complexity, i)
+			}
+		}
+	}
+	for role, routes := range c.RoleRouting {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			return fmt.Errorf("roleRouting.%s is reserved; use routing for default settings", defaultRoutingRole)
+		}
+		for complexity, rule := range routes {
+			if !isValidComplexity(complexity) {
+				return fmt.Errorf("roleRouting.%s.%s is not a valid complexity", role, complexity)
+			}
+			if len(rule.Prefer) == 0 {
+				return fmt.Errorf("roleRouting.%s.%s.prefer must not be empty", role, complexity)
+			}
+			entries := append([]PoolKey{}, rule.Prefer...)
+			entries = append(entries, rule.Fallback...)
+			for i, key := range entries {
+				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
+					return fmt.Errorf("roleRouting.%s.%s entry %d must include provider and model", role, complexity, i)
+				}
+			}
+		}
+	}
+	for role, rule := range c.RoleDefaults {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			return fmt.Errorf("roleDefaults.%s is reserved; use routing for default settings", defaultRoutingRole)
+		}
+		entries := append([]PoolKey{}, rule.Prefer...)
+		entries = append(entries, rule.Fallback...)
+		if len(rule.Prefer) == 0 {
+			return fmt.Errorf("roleDefaults.%s.prefer must not be empty", role)
+		}
+		for i, key := range entries {
+			if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
+				return fmt.Errorf("roleDefaults.%s entry %d must include provider and model", role, i)
 			}
 		}
 	}

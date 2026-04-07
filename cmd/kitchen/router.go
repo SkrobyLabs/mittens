@@ -6,16 +6,16 @@ import (
 )
 
 type ComplexityRouter struct {
-	table    map[Complexity][]PoolKey
-	fallback map[Complexity][]PoolKey
-	health   *ProviderHealth
+	table     map[string]map[Complexity][]PoolKey
+	fallback  map[string]map[Complexity][]PoolKey
+	health    *ProviderHealth
 	hostPools []PoolKey
 }
 
 func NewComplexityRouter(cfg KitchenConfig, health *ProviderHealth, hostPool ...PoolKey) *ComplexityRouter {
 	r := &ComplexityRouter{
-		table:    make(map[Complexity][]PoolKey, len(cfg.Routing)),
-		fallback: make(map[Complexity][]PoolKey, len(cfg.Routing)),
+		table:    make(map[string]map[Complexity][]PoolKey),
+		fallback: make(map[string]map[Complexity][]PoolKey),
 		health:   health,
 	}
 	for _, pool := range hostPool {
@@ -24,20 +24,36 @@ func NewComplexityRouter(cfg KitchenConfig, health *ProviderHealth, hostPool ...
 		}
 		r.hostPools = append(r.hostPools, pool)
 	}
-	for complexity, rule := range cfg.Routing {
-		r.table[complexity] = append([]PoolKey(nil), rule.Prefer...)
-		r.fallback[complexity] = append([]PoolKey(nil), rule.Fallback...)
+	r.setRoleRouting(defaultRoutingRole, cfg.Routing)
+	for role := range cfg.RoleRouting {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			continue
+		}
+		r.setRoleRouting(role, effectiveRoutingForRole(cfg, role))
 	}
 	return r
 }
 
 func (r *ComplexityRouter) Resolve(c Complexity) []PoolKey {
+	return r.ResolveForRole(defaultRoutingRole, c)
+}
+
+func (r *ComplexityRouter) ResolveForRole(role string, c Complexity) []PoolKey {
 	if r == nil {
 		return nil
 	}
+	role = normalizeRoutingRole(role)
 
-	ordered := append([]PoolKey(nil), r.table[c]...)
-	ordered = append(ordered, r.fallback[c]...)
+	table := r.table[role]
+	fallback := r.fallback[role]
+	if len(table) == 0 && len(fallback) == 0 && role != defaultRoutingRole {
+		table = r.table[defaultRoutingRole]
+		fallback = r.fallback[defaultRoutingRole]
+	}
+
+	ordered := append([]PoolKey(nil), table[c]...)
+	ordered = append(ordered, fallback[c]...)
 	healthy := ordered
 	if r.health != nil {
 		now := time.Now().UTC()
@@ -69,6 +85,20 @@ func (r *ComplexityRouter) Resolve(c Complexity) []PoolKey {
 		return supported
 	}
 	return nil
+}
+
+func (r *ComplexityRouter) setRoleRouting(role string, routing map[Complexity]RoutingRule) {
+	role = normalizeRoutingRole(role)
+	if r.table[role] == nil {
+		r.table[role] = make(map[Complexity][]PoolKey, len(routing))
+	}
+	if r.fallback[role] == nil {
+		r.fallback[role] = make(map[Complexity][]PoolKey, len(routing))
+	}
+	for complexity, rule := range routing {
+		r.table[role][complexity] = append([]PoolKey(nil), rule.Prefer...)
+		r.fallback[role][complexity] = append([]PoolKey(nil), rule.Fallback...)
+	}
 }
 
 func (r *ComplexityRouter) supportsProvider(provider string) bool {

@@ -65,6 +65,8 @@ type roleFormValues struct {
 	FallbackModel    string
 }
 
+const configureSaveAndExit = "__save_and_exit__"
+
 func runConfigure() error {
 	paths, err := DefaultKitchenPaths()
 	if err != nil {
@@ -75,24 +77,81 @@ func runConfigure() error {
 		return err
 	}
 
-	// Pre-fill form values from current config.
-	values := make([]roleFormValues, len(allComplexities))
-	for i, c := range allComplexities {
-		rule := cfg.Routing[c]
-		if len(rule.Prefer) > 0 {
-			values[i].PrimaryProvider = configToDisplay(rule.Prefer[0].Provider)
-			values[i].PrimaryModel = rule.Prefer[0].Model
+	fmt.Fprintln(os.Stderr, "Select a role to configure. `default` defines the shared per-complexity routing; other roles only store the differences from that default.")
+	fmt.Fprintln(os.Stderr)
+
+	for {
+		selection := defaultRoutingRole
+		if err := huh.NewSelect[string]().
+			Title("Choose role").
+			Options(routingRoleOptions(cfg)...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
 		}
-		if len(rule.Fallback) > 0 {
-			values[i].FallbackProvider = configToDisplay(rule.Fallback[0].Provider)
-			values[i].FallbackModel = rule.Fallback[0].Model
+		if selection == configureSaveAndExit {
+			break
+		}
+		if err := runConfigureRole(&cfg, selection); err != nil {
+			return err
 		}
 	}
 
-	// Build one huh.Group per complexity level.
+	if err := SaveKitchenConfigFile(paths.ConfigPath, &cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Configuration saved to %s\n", paths.ConfigPath)
+	return nil
+}
+
+func runConfigureRole(cfg *KitchenConfig, role string) error {
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		routing, err := editRoleRouting(role, effectiveRoutingForRole(*cfg, role))
+		if err != nil {
+			return err
+		}
+		setRoutingForRole(cfg, role, routing)
+		return nil
+	}
+
+	action := "edit"
+	options := []huh.Option[string]{
+		huh.NewOption[string]("Edit role default and overrides", "edit"),
+		huh.NewOption[string]("Use default routing", "inherit"),
+		huh.NewOption[string]("Back", "back"),
+	}
+	if err := huh.NewSelect[string]().
+		Title(routingRoleDisplayName(role)).
+		Description(routingRoleStatus(cfg, role)).
+		Options(options...).
+		Value(&action).
+		Run(); err != nil {
+		return err
+	}
+	switch action {
+	case "back":
+		return nil
+	case "inherit":
+		clearRoutingForRole(cfg, role)
+		return nil
+	}
+
+	defaultRule, overrides, err := editRoleDefaultsAndOverrides(*cfg, role)
+	if err != nil {
+		return err
+	}
+	setRoleDefault(cfg, role, defaultRule)
+	setRoleComplexityOverrides(cfg, role, overrides)
+	return nil
+}
+
+func editRoleRouting(role string, routing map[Complexity]RoutingRule) (map[Complexity]RoutingRule, error) {
+	values := roleFormValuesFromRouting(routing)
+
 	groups := make([]*huh.Group, len(allComplexities))
 	for i, c := range allComplexities {
-		idx := i // capture for closures
+		idx := i
 		name := complexityDisplayName(c)
 
 		groups[i] = huh.NewGroup(
@@ -110,45 +169,201 @@ func runConfigure() error {
 			huh.NewInput().
 				Title(name+" — Fallback model").
 				Value(&values[idx].FallbackModel),
-		).Description(fmt.Sprintf("Configure %s complexity role", name))
+		).Description(fmt.Sprintf("%s routing for %s complexity", routingRoleDisplayName(role), name))
 	}
 
-	form := huh.NewForm(groups...).
-		WithShowHelp(true)
-
-	fmt.Fprintln(os.Stderr, "Configure provider and model for each task complexity role.")
-	fmt.Fprintln(os.Stderr)
-
-	if err := form.Run(); err != nil {
-		return err
+	if err := huh.NewForm(groups...).WithShowHelp(true).Run(); err != nil {
+		return nil, err
 	}
+	return routingFromRoleFormValues(values), nil
+}
 
-	// Build routing map from form values.
+func roleFormValuesFromRouting(routing map[Complexity]RoutingRule) []roleFormValues {
+	values := make([]roleFormValues, len(allComplexities))
+	for i, c := range allComplexities {
+		rule := routing[c]
+		if len(rule.Prefer) > 0 {
+			values[i].PrimaryProvider = configToDisplay(rule.Prefer[0].Provider)
+			values[i].PrimaryModel = rule.Prefer[0].Model
+		}
+		if len(rule.Fallback) > 0 {
+			values[i].FallbackProvider = configToDisplay(rule.Fallback[0].Provider)
+			values[i].FallbackModel = rule.Fallback[0].Model
+		}
+	}
+	return values
+}
+
+func routingFromRoleFormValues(values []roleFormValues) map[Complexity]RoutingRule {
 	routing := make(map[Complexity]RoutingRule, len(allComplexities))
 	for i, c := range allComplexities {
-		v := values[i]
-		rule := RoutingRule{
-			Prefer: []PoolKey{{
-				Provider: displayToConfig(v.PrimaryProvider),
-				Model:    strings.TrimSpace(v.PrimaryModel),
-			}},
-		}
-		fbProvider := strings.TrimSpace(v.FallbackProvider)
-		fbModel := strings.TrimSpace(v.FallbackModel)
-		if fbProvider != "" && fbModel != "" {
-			rule.Fallback = []PoolKey{{
-				Provider: displayToConfig(fbProvider),
-				Model:    fbModel,
-			}}
-		}
-		routing[c] = rule
+		routing[c] = routingRuleFromFormValues(values[i])
+	}
+	return routing
+}
+
+func editRoleDefaultsAndOverrides(cfg KitchenConfig, role string) (RoutingRule, map[Complexity]RoutingRule, error) {
+	effective := effectiveRoutingForRole(cfg, role)
+	defaultRule, hasDefault := roleDefaultRule(cfg, role)
+	defaultValues := roleFormValues{}
+	if hasDefault {
+		defaultValues = roleFormValuesFromRule(defaultRule)
+	} else {
+		defaultValues = roleFormValuesFromRule(effective[ComplexityMedium])
 	}
 
-	cfg.Routing = routing
-
-	if err := SaveKitchenConfigFile(paths.ConfigPath, &cfg); err != nil {
-		return err
+	useRoleDefault := hasDefault
+	if err := huh.NewConfirm().
+		Title("Set a role-level default route?").
+		Description("Applies one provider/model to this whole role, with optional per-complexity overrides afterward.").
+		Value(&useRoleDefault).
+		Run(); err != nil {
+		return RoutingRule{}, nil, err
 	}
-	fmt.Fprintf(os.Stdout, "Configuration saved to %s\n", paths.ConfigPath)
-	return nil
+	if useRoleDefault {
+		rule, err := editSingleRoutingRule("Role default routing", defaultValues, false)
+		if err != nil {
+			return RoutingRule{}, nil, err
+		}
+		defaultRule = rule
+	} else {
+		defaultRule = RoutingRule{}
+	}
+
+	overrides := make(map[Complexity]RoutingRule)
+	for _, complexity := range allComplexities {
+		existingRule, hasExisting := cfg.RoleRouting[role][complexity]
+		enabled := hasExisting
+		if !enabled && !useRoleDefault && !routingRuleEqual(effective[complexity], cfg.Routing[complexity]) {
+			enabled = true
+		}
+		overrideLabel := complexityDisplayName(complexity) + " override"
+		if err := huh.NewConfirm().
+			Title("Override " + complexityDisplayName(complexity) + " complexity?").
+			Description("Leave off to use the role default or inherited shared default for this complexity.").
+			Value(&enabled).
+			Run(); err != nil {
+			return RoutingRule{}, nil, err
+		}
+		if !enabled {
+			continue
+		}
+		initial := effective[complexity]
+		if hasExisting {
+			initial = existingRule
+		} else if useRoleDefault {
+			initial = defaultRule
+		}
+		rule, err := editSingleRoutingRule(overrideLabel, roleFormValuesFromRule(initial), true)
+		if err != nil {
+			return RoutingRule{}, nil, err
+		}
+		overrides[complexity] = rule
+	}
+
+	return defaultRule, overrides, nil
+}
+
+func editSingleRoutingRule(title string, values roleFormValues, includeNone bool) (RoutingRule, error) {
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(title+" — Primary provider").
+				Options(providerOptions(false)...).
+				Value(&values.PrimaryProvider),
+			huh.NewInput().
+				Title(title+" — Primary model").
+				Value(&values.PrimaryModel),
+			huh.NewSelect[string]().
+				Title(title+" — Fallback provider").
+				Options(providerOptions(includeNone)...).
+				Value(&values.FallbackProvider),
+			huh.NewInput().
+				Title(title+" — Fallback model").
+				Value(&values.FallbackModel),
+		),
+	).WithShowHelp(true).Run(); err != nil {
+		return RoutingRule{}, err
+	}
+	return routingRuleFromFormValues(values), nil
+}
+
+func roleFormValuesFromRule(rule RoutingRule) roleFormValues {
+	var values roleFormValues
+	if len(rule.Prefer) > 0 {
+		values.PrimaryProvider = configToDisplay(rule.Prefer[0].Provider)
+		values.PrimaryModel = rule.Prefer[0].Model
+	}
+	if len(rule.Fallback) > 0 {
+		values.FallbackProvider = configToDisplay(rule.Fallback[0].Provider)
+		values.FallbackModel = rule.Fallback[0].Model
+	}
+	return values
+}
+
+func routingRuleFromFormValues(v roleFormValues) RoutingRule {
+	rule := RoutingRule{
+		Prefer: []PoolKey{{
+			Provider: displayToConfig(v.PrimaryProvider),
+			Model:    strings.TrimSpace(v.PrimaryModel),
+		}},
+	}
+	fbProvider := strings.TrimSpace(v.FallbackProvider)
+	fbModel := strings.TrimSpace(v.FallbackModel)
+	if fbProvider != "" && fbModel != "" {
+		rule.Fallback = []PoolKey{{
+			Provider: displayToConfig(fbProvider),
+			Model:    fbModel,
+		}}
+	}
+	return rule
+}
+
+func routingRoleOptions(cfg KitchenConfig) []huh.Option[string] {
+	roles := configurableKitchenRoles()
+	options := make([]huh.Option[string], 0, len(roles)+1)
+	for _, role := range roles {
+		options = append(options, huh.NewOption[string](routingRoleMenuLabel(cfg, role), role))
+	}
+	options = append(options, huh.NewOption[string]("Save and exit", configureSaveAndExit))
+	return options
+}
+
+func routingRoleMenuLabel(cfg KitchenConfig, role string) string {
+	label := routingRoleDisplayName(role)
+	switch {
+	case role == defaultRoutingRole:
+		return label + " (shared baseline)"
+	case roleHasRoutingOverride(cfg, role):
+		return label + " (custom)"
+	default:
+		return label + " (inherits default)"
+	}
+}
+
+func routingRoleDisplayName(role string) string {
+	switch normalizeRoutingRole(role) {
+	case defaultRoutingRole:
+		return "default"
+	case plannerTaskRole:
+		return "planner"
+	case "implementer":
+		return "implementer"
+	case "reviewer":
+		return "reviewer"
+	case lineageFixMergeRole:
+		return "lineage-fix-merge"
+	default:
+		return normalizeRoutingRole(role)
+	}
+}
+
+func routingRoleStatus(cfg *KitchenConfig, role string) string {
+	if cfg == nil {
+		return ""
+	}
+	if roleHasRoutingOverride(*cfg, role) {
+		return "This role currently has custom per-complexity routing."
+	}
+	return "This role currently inherits the shared default routing."
 }

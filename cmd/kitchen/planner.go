@@ -14,16 +14,17 @@ import (
 )
 
 const (
-	planStatePlanning        = "planning"
-	planStateReviewing       = "reviewing"
-	planStatePlanningFailed  = "planning_failed"
-	planStatePendingApproval = "pending_approval"
-	planStateActive          = "active"
-	planStateCompleted              = "completed"
-	planStateImplementationReview   = "implementation_review"
-	planStateMerged                 = "merged"
-	planStateClosed          = "closed"
-	planStateRejected        = "rejected"
+	planStatePlanning                   = "planning"
+	planStateReviewing                  = "reviewing"
+	planStatePlanningFailed             = "planning_failed"
+	planStatePendingApproval            = "pending_approval"
+	planStateActive                     = "active"
+	planStateCompleted                  = "completed"
+	planStateImplementationReview       = "implementation_review"
+	planStateImplementationReviewFailed = "implementation_review_failed"
+	planStateMerged                     = "merged"
+	planStateClosed                     = "closed"
+	planStateRejected                   = "rejected"
 
 	planReviewStatusPassed = "passed"
 	planReviewStatusFailed = "failed"
@@ -68,15 +69,15 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 	}
 
 	execution := ExecutionRecord{
-		State:                 planStatePlanning,
-		AutoApproved:          auto,
-		ReviewRequested:       review,
-		ReviewRounds:          reviewRounds,
-		MaxReviewRevisions:    maxReviewRevisions,
-		ImplReviewRequested:   implReview,
-		ActiveTaskIDs:      []string{planningTaskID},
-		Branch:             lineageBranchName(lineage),
-		Anchor:             anchor,
+		State:               planStatePlanning,
+		AutoApproved:        auto,
+		ReviewRequested:     review,
+		ReviewRounds:        reviewRounds,
+		MaxReviewRevisions:  maxReviewRevisions,
+		ImplReviewRequested: implReview,
+		ActiveTaskIDs:       []string{planningTaskID},
+		Branch:              lineageBranchName(lineage),
+		Anchor:              anchor,
 	}
 	execution = appendPlanHistory(execution, PlanHistoryEntry{
 		Type:    planHistoryPlanningStarted,
@@ -614,14 +615,14 @@ func (k *Kitchen) FixConflicts(taskID string) (string, error) {
 	newRuntimeTaskID := planTaskRuntimeID(planID, newPlanTaskID)
 
 	newPlanTask := PlanTask{
-		ID:              newPlanTaskID,
-		Title:           "Fix conflicts: " + originalTask.Title,
-		Prompt:          prompt,
-		Complexity:      originalTask.Complexity,
-		Outputs:         originalTask.Outputs,
-		SuccessCriteria: originalTask.SuccessCriteria,
+		ID:               newPlanTaskID,
+		Title:            "Fix conflicts: " + originalTask.Title,
+		Prompt:           prompt,
+		Complexity:       originalTask.Complexity,
+		Outputs:          originalTask.Outputs,
+		SuccessCriteria:  originalTask.SuccessCriteria,
 		ReviewComplexity: originalTask.ReviewComplexity,
-		TimeoutMinutes:  originalTask.TimeoutMinutes,
+		TimeoutMinutes:   originalTask.TimeoutMinutes,
 		// No dependencies: starts immediately.
 	}
 

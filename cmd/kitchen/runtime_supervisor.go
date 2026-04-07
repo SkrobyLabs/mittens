@@ -40,22 +40,60 @@ func supervisedPoolStateDir(project ProjectPaths) string {
 func configuredServeProviders(cfg KitchenConfig) ([]string, error) {
 	seen := make(map[string]bool)
 	var providers []string
+	if err := collectServeProviders(seen, &providers, "routing", cfg.Routing); err != nil {
+		return nil, err
+	}
+	for role, rule := range cfg.RoleDefaults {
+		role = normalizeRoutingRole(role)
+		if err := collectServeProvidersForRule(seen, &providers, "roleDefaults."+role, rule); err != nil {
+			return nil, err
+		}
+	}
+	for role, routing := range cfg.RoleRouting {
+		role = normalizeRoutingRole(role)
+		if err := collectServeProviders(seen, &providers, "roleRouting."+role, routing); err != nil {
+			return nil, err
+		}
+	}
+	return providers, nil
+}
+
+func collectServeProviders(seen map[string]bool, providers *[]string, scope string, routing map[Complexity]RoutingRule) error {
 	for _, complexity := range allComplexities {
-		rule := cfg.Routing[complexity]
+		rule, ok := routing[complexity]
+		if !ok {
+			continue
+		}
 		keys := append([]PoolKey(nil), rule.Prefer...)
 		keys = append(keys, rule.Fallback...)
 		for _, key := range keys {
 			provider, err := normalizeServeProvider(key.Provider)
 			if err != nil {
-				return nil, fmt.Errorf("routing.%s provider %q: %w", complexity, key.Provider, err)
+				return fmt.Errorf("%s.%s provider %q: %w", scope, complexity, key.Provider, err)
 			}
 			if !seen[provider] {
 				seen[provider] = true
-				providers = append(providers, provider)
+				*providers = append(*providers, provider)
 			}
 		}
 	}
-	return providers, nil
+	return nil
+}
+
+func collectServeProvidersForRule(seen map[string]bool, providers *[]string, scope string, rule RoutingRule) error {
+	keys := append([]PoolKey(nil), rule.Prefer...)
+	keys = append(keys, rule.Fallback...)
+	for _, key := range keys {
+		provider, err := normalizeServeProvider(key.Provider)
+		if err != nil {
+			return fmt.Errorf("%s provider %q: %w", scope, key.Provider, err)
+		}
+		if !seen[provider] {
+			seen[provider] = true
+			*providers = append(*providers, provider)
+		}
+	}
+	return nil
 }
 
 func normalizeServeProvider(name string) (string, error) {

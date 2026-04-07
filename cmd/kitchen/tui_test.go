@@ -18,6 +18,7 @@ type fakeKitchenTUIBackend struct {
 	questions                 []pool.Question
 	submitPlanID              string
 	submittedIdea             string
+	submittedImplReview       bool
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
@@ -44,8 +45,9 @@ func (b *fakeKitchenTUIBackend) TaskActivity(taskID string) ([]pool.WorkerActivi
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
 }
-func (b *fakeKitchenTUIBackend) SubmitIdea(idea string) (string, error) {
+func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
 	b.submittedIdea = idea
+	b.submittedImplReview = implReview
 	if strings.TrimSpace(b.submitPlanID) == "" {
 		return "plan_submitted", nil
 	}
@@ -65,15 +67,15 @@ func (b *fakeKitchenTUIBackend) RetryTask(taskID string, requireFreshWorker bool
 	b.retriedRequireFreshWorker = requireFreshWorker
 	return nil
 }
-func (b *fakeKitchenTUIBackend) FixConflicts(taskID string) (string, error) { return "", nil }
+func (b *fakeKitchenTUIBackend) FixConflicts(taskID string) (string, error)       { return "", nil }
 func (b *fakeKitchenTUIBackend) ReplanPlan(planID, reason string) (string, error) { return "", nil }
 func (b *fakeKitchenTUIBackend) AnswerQuestion(id, answer string) error {
 	b.answeredQuestionID = id
 	b.answeredQuestionAnswer = answer
 	return nil
 }
-func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error)        { return "", nil }
-func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error)      { return "", nil }
+func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error)   { return "", nil }
+func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error) { return "", nil }
 func (b *fakeKitchenTUIBackend) FixLineageConflicts(lineage string) (string, error) {
 	return "", nil
 }
@@ -245,8 +247,9 @@ func TestKitchenTUIDeleteKeyDeletesSelectedPlan(t *testing.T) {
 func TestKitchenTUISubmitEnterClosesInputAndQueuesLoad(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{submitPlanID: "plan_new"}
 	model := kitchenTUIModel{
-		backend:   backend,
-		inputMode: kitchenTUIInputSubmit,
+		backend:          backend,
+		inputMode:        kitchenTUIInputSubmit,
+		submitImplReview: true,
 	}
 	model.input = textInputWithValue("Add typed parser errors")
 
@@ -270,11 +273,30 @@ func TestKitchenTUISubmitEnterClosesInputAndQueuesLoad(t *testing.T) {
 	if action.err != nil {
 		t.Fatalf("action err = %v", action.err)
 	}
-	if action.status != "submitted plan_new" || action.selectedPlanID != "plan_new" {
+	if action.status != "submitted plan_new with impl review" || action.selectedPlanID != "plan_new" {
 		t.Fatalf("action = %+v", action)
 	}
 	if backend.submittedIdea != "Add typed parser errors" {
 		t.Fatalf("submittedIdea = %q, want entered value", backend.submittedIdea)
+	}
+	if !backend.submittedImplReview {
+		t.Fatal("submittedImplReview = false, want true")
+	}
+}
+
+func TestKitchenTUISubmitTabTogglesImplReview(t *testing.T) {
+	model := kitchenTUIModel{inputMode: kitchenTUIInputSubmit}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got := updated.(kitchenTUIModel)
+	if !got.submitImplReview {
+		t.Fatal("submitImplReview = false, want true after tab")
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got = updated.(kitchenTUIModel)
+	if got.submitImplReview {
+		t.Fatal("submitImplReview = true, want false after second tab")
 	}
 }
 
@@ -464,6 +486,27 @@ func TestKitchenTUIFooterShowsMergeOnlyForCompletedPlan(t *testing.T) {
 	}
 }
 
+func TestKitchenTUIFooterHidesMergeForFailedImplementationReview(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record: PlanRecord{PlanID: "plan_impl_fail", Title: "Impl Fail", Lineage: "feat/merge", State: planStateCompleted},
+				Progress: &PlanProgress{
+					State:               planStateCompleted,
+					ImplReviewRequested: true,
+					ImplReviewStatus:    planReviewStatusFailed,
+				},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if strings.Contains(footer, "M merge") {
+		t.Fatalf("footer = %q, did not expect merge action after failed impl review", footer)
+	}
+}
+
 // helpers for question detail pane tests
 
 func questionModel(q pool.Question) kitchenTUIModel {
@@ -645,6 +688,43 @@ func TestRenderQuestionDetailPaneAlreadyAnswered(t *testing.T) {
 	}
 	if strings.Contains(out, "Press 'a' to answer") {
 		t.Fatalf("output should not contain answer hint for already-answered question: %q", out)
+	}
+}
+
+func TestBuildTaskItemsIncludesImplementationReviewCycle(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{PlanID: "plan_impl_review"},
+		Progress: PlanProgress{
+			Cycles: []PlanCycleProgress{{
+				Index:               1,
+				ImplReviewTaskID:    "plan_impl_review-impl-review-1",
+				ImplReviewTaskState: pool.TaskQueued,
+			}},
+		},
+	}
+	snapshot := tuiStatusSnapshot{
+		Queue: struct {
+			AliveWorkers     int                `json:"aliveWorkers"`
+			MaxWorkers       int                `json:"maxWorkers"`
+			PendingQuestions int                `json:"pendingQuestions"`
+			Tasks            []pool.TaskSummary `json:"tasks"`
+		}{
+			Tasks: []pool.TaskSummary{{
+				ID:     "plan_impl_review-impl-review-1",
+				Status: pool.TaskQueued,
+			}},
+		},
+	}
+
+	items := buildTaskItems(detail, snapshot)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one impl-review item", items)
+	}
+	if items[0].Kind != "implementation-review" {
+		t.Fatalf("kind = %q, want implementation-review", items[0].Kind)
+	}
+	if items[0].RuntimeID != "plan_impl_review-impl-review-1" {
+		t.Fatalf("runtimeID = %q, want impl review runtime id", items[0].RuntimeID)
 	}
 }
 

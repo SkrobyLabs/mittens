@@ -62,6 +62,17 @@ failure_policy:
     cooldown: 30s
 snapshots:
   planHistoryLimit: 5
+roleRouting:
+  reviewer:
+    high:
+      prefer:
+        - provider: openai
+          model: gpt-5.4
+roleDefaults:
+  implementer:
+    prefer:
+      - provider: anthropic
+        model: opus
 `)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
@@ -83,6 +94,12 @@ snapshots:
 	if got := cfg.Snapshots.PlanHistoryLimit; got != 5 {
 		t.Fatalf("PlanHistoryLimit = %d, want 5", got)
 	}
+	if got := cfg.RoleRouting["reviewer"][ComplexityHigh].Prefer[0].Provider; got != "openai" {
+		t.Fatalf("reviewer high provider = %q, want openai", got)
+	}
+	if got := cfg.RoleDefaults["implementer"].Prefer[0].Model; got != "opus" {
+		t.Fatalf("implementer default model = %q, want opus", got)
+	}
 }
 
 func TestKitchenConfigValidateRejectsNegativeSnapshotHistoryLimit(t *testing.T) {
@@ -90,6 +107,77 @@ func TestKitchenConfigValidateRejectsNegativeSnapshotHistoryLimit(t *testing.T) 
 	cfg.Snapshots.PlanHistoryLimit = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "snapshots.planHistoryLimit") {
 		t.Fatalf("Validate err = %v, want snapshot history limit failure", err)
+	}
+}
+
+func TestEffectiveRoutingForRoleFallsBackToDefault(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.RoleDefaults["reviewer"] = RoutingRule{
+		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	}
+	cfg.RoleRouting["reviewer"] = map[Complexity]RoutingRule{
+		ComplexityHigh: {
+			Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+		},
+	}
+
+	routing := effectiveRoutingForRole(cfg, "reviewer")
+	if got := routing[ComplexityLow].Prefer[0].Provider; got != "openai" {
+		t.Fatalf("reviewer low provider = %q, want role default openai", got)
+	}
+	if got := routing[ComplexityHigh].Prefer[0].Provider; got != "anthropic" {
+		t.Fatalf("reviewer high provider = %q, want anthropic override", got)
+	}
+}
+
+func TestSetRoleDefaultAndOverrides(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	setRoleDefault(&cfg, "reviewer", RoutingRule{
+		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	})
+	setRoleComplexityOverrides(&cfg, "reviewer", map[Complexity]RoutingRule{
+		ComplexityHigh: {
+			Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
+		},
+	})
+	if got := cfg.RoleDefaults["reviewer"].Prefer[0].Provider; got != "openai" {
+		t.Fatalf("reviewer default provider = %q, want openai", got)
+	}
+	if len(cfg.RoleRouting["reviewer"]) != 1 {
+		t.Fatalf("reviewer overrides = %+v, want exactly one override", cfg.RoleRouting["reviewer"])
+	}
+	if got := cfg.RoleRouting["reviewer"][ComplexityHigh].Prefer[0].Provider; got != "anthropic" {
+		t.Fatalf("reviewer high provider = %q, want anthropic", got)
+	}
+
+	clearRoutingForRole(&cfg, "reviewer")
+	if _, ok := cfg.RoleDefaults["reviewer"]; ok {
+		t.Fatalf("reviewer default = %+v, want cleared default", cfg.RoleDefaults["reviewer"])
+	}
+	if _, ok := cfg.RoleRouting["reviewer"]; ok {
+		t.Fatalf("reviewer overrides = %+v, want cleared overrides", cfg.RoleRouting["reviewer"])
+	}
+}
+
+func TestKitchenConfigValidateRejectsDefaultRoleRouting(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.RoleRouting[defaultRoutingRole] = map[Complexity]RoutingRule{
+		ComplexityLow: {
+			Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+		},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "roleRouting.default") {
+		t.Fatalf("Validate err = %v, want reserved default role routing failure", err)
+	}
+}
+
+func TestKitchenConfigValidateRejectsDefaultRoleDefault(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.RoleDefaults[defaultRoutingRole] = RoutingRule{
+		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "roleDefaults.default") {
+		t.Fatalf("Validate err = %v, want reserved default role default failure", err)
 	}
 }
 

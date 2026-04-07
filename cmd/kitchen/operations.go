@@ -91,6 +91,13 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 		if blocked := k.blockingTasksForPlan(activePlanID); len(blocked) > 0 {
 			return nil, fmt.Errorf("lineage %s has unfinished tasks: %s", lineage, strings.Join(blocked, ", "))
 		}
+		bundle, err := k.planStore.Get(activePlanID)
+		if err != nil {
+			return nil, err
+		}
+		if executionHasBlockingImplementationReviewFailure(bundle.Execution) {
+			return nil, fmt.Errorf("lineage %s failed post-implementation review: %s", lineage, strings.Join(bundle.Execution.ImplReviewFindings, "; "))
+		}
 	}
 
 	gitMgr, err := k.gitManager()
@@ -119,6 +126,10 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 		resp["planId"] = activePlanID
 	}
 	return resp, nil
+}
+
+func executionHasBlockingImplementationReviewFailure(execution ExecutionRecord) bool {
+	return execution.ImplReviewRequested && strings.TrimSpace(execution.ImplReviewStatus) == planReviewStatusFailed
 }
 
 func (k *Kitchen) PreviewMergeLineage(lineage string) (map[string]any, error) {

@@ -598,10 +598,7 @@ func (s *Scheduler) workerSpecForTask(task pool.Task) (pool.WorkerSpec, error) {
 		spec.Environment["MITTENS_KITCHEN_ADDR"] = kitchenAddr
 	}
 
-	keys := []PoolKey(nil)
-	if s.router != nil {
-		keys = s.router.Resolve(Complexity(task.Complexity))
-	}
+	keys := s.routeKeysForTask(task)
 	if len(keys) > 0 {
 		spec.Provider = keys[0].Provider
 		spec.Model = keys[0].Model
@@ -839,10 +836,7 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	} else if workerRole != taskRole {
 		return false
 	}
-	keys := []PoolKey(nil)
-	if s != nil && s.router != nil {
-		keys = s.router.Resolve(Complexity(task.Complexity))
-	}
+	keys := s.routeKeysForTask(task)
 	if len(keys) == 0 || strings.TrimSpace(worker.Provider) == "" {
 		return true
 	}
@@ -852,6 +846,13 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 		}
 	}
 	return false
+}
+
+func (s *Scheduler) routeKeysForTask(task pool.Task) []PoolKey {
+	if s == nil || s.router == nil {
+		return nil
+	}
+	return s.router.ResolveForRole(task.Role, Complexity(task.Complexity))
 }
 
 func taskReadyForDispatch(pm *pool.PoolManager, task pool.Task) bool {
@@ -1320,7 +1321,7 @@ func buildImplementationReviewPrompt(plan PlanRecord, execution ExecutionRecord)
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("### How to Review\n\n")
-	b.WriteString("1. Run `git diff ")
+	b.WriteString("1. From this review worktree, run `git diff ")
 	if execution.Anchor.Commit != "" {
 		b.WriteString(execution.Anchor.Commit)
 	} else if plan.Anchor.Commit != "" {
@@ -1389,6 +1390,9 @@ func (s *Scheduler) onImplementationReviewCompleted(task pool.Task) error {
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_impl_review_passed", ID: task.PlanID, Message: bundle.Plan.Title})
 		}
+		if err := s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage); err != nil {
+			return err
+		}
 		return s.syncPlanExecution(task.PlanID)
 	}
 
@@ -1415,7 +1419,7 @@ func (s *Scheduler) onImplementationReviewCompleted(task pool.Task) error {
 	if s.notify != nil {
 		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
 	}
-	return nil
+	return s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage)
 }
 
 func (s *Scheduler) onImplementationReviewFailed(task pool.Task) error {
@@ -1453,11 +1457,21 @@ func (s *Scheduler) onImplementationReviewFailed(task pool.Task) error {
 	if s.notify != nil {
 		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
 	}
-	return nil
+	return s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage)
 }
 
 func isPlanControlTask(task pool.Task) bool {
-	return task.Role == plannerTaskRole || isPlanReviewTask(task) || isImplReviewTask(task)
+	return task.Role == plannerTaskRole || isPlanReviewTask(task)
+}
+
+func (s *Scheduler) cleanupImplementationReviewTask(task pool.Task, lineage string) error {
+	if s.git != nil && strings.TrimSpace(lineage) != "" {
+		if err := s.git.DiscardChild(lineage, task.ID); err != nil {
+			return err
+		}
+	}
+	s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+	return nil
 }
 
 func reviewComplexityForPlan(plan PlanRecord) Complexity {

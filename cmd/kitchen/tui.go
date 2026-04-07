@@ -25,7 +25,7 @@ type kitchenTUIBackend interface {
 	PlanDetail(planID string) (PlanDetail, error)
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	ListQuestions() ([]pool.Question, error)
-	SubmitIdea(idea string) (string, error)
+	SubmitIdea(idea string, implReview bool) (string, error)
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
 	DeletePlan(planID string) error
@@ -74,8 +74,8 @@ func (b *kitchenAPIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRe
 	return b.client.TaskActivity(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
-func (b *kitchenAPIBackend) SubmitIdea(idea string) (string, error) {
-	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1, false)
+func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
+	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1, implReview)
 	if err != nil {
 		return "", err
 	}
@@ -222,10 +222,10 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 	return questions, err
 }
 
-func (b *kitchenLocalBackend) SubmitIdea(idea string) (string, error) {
+func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1, false)
+		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1, implReview)
 		if err != nil {
 			return err
 		}
@@ -436,6 +436,7 @@ type kitchenTUIModel struct {
 	taskLog           []pool.WorkerActivityRecord
 	input             textinput.Model
 	inputMode         kitchenTUIInputMode
+	submitImplReview  bool
 	flash             string
 	flashUntil        time.Time
 	errText           string
@@ -636,7 +637,10 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "n":
-			m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+			m.openSubmitInput(false)
+			return m, nil
+		case "N":
+			m.openSubmitInput(true)
 			return m, nil
 		case "a":
 			if m.leftMode == kitchenTUILeftQuestions {
@@ -793,6 +797,11 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.closeInput()
 		return m, nil
+	case "tab":
+		if m.inputMode == kitchenTUIInputSubmit {
+			m.submitImplReview = !m.submitImplReview
+			return m, nil
+		}
 	case "enter":
 		value := strings.TrimSpace(m.input.Value())
 		switch m.inputMode {
@@ -801,13 +810,18 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.errText = "idea must not be empty"
 				return m, nil
 			}
+			implReview := m.submitImplReview
 			m.closeInput()
 			return m, m.actionCmd(func() (string, string, error) {
-				planID, err := m.backend.SubmitIdea(value)
+				planID, err := m.backend.SubmitIdea(value, implReview)
 				if err != nil {
 					return "", "", err
 				}
-				return "submitted " + planID, planID, nil
+				status := "submitted " + planID
+				if implReview {
+					status += " with impl review"
+				}
+				return status, planID, nil
 			})
 		case kitchenTUIInputReplan:
 			plan := m.selectedPlanItem()
@@ -908,8 +922,14 @@ func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholde
 	m.input.Focus()
 }
 
+func (m *kitchenTUIModel) openSubmitInput(implReview bool) {
+	m.submitImplReview = implReview
+	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+}
+
 func (m *kitchenTUIModel) closeInput() {
 	m.inputMode = kitchenTUIInputNone
+	m.submitImplReview = false
 	m.input.Blur()
 	m.input.SetValue("")
 }
@@ -1071,7 +1091,13 @@ func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
 
 func (m kitchenTUIModel) canMergeSelectedPlan() bool {
 	plan := m.selectedPlanItem()
-	return plan != nil && strings.TrimSpace(plan.Record.Lineage) != "" && planDisplayState(*plan) == planStateCompleted
+	if plan == nil || strings.TrimSpace(plan.Record.Lineage) == "" {
+		return false
+	}
+	if implementationReviewFailed(plan.Progress) {
+		return false
+	}
+	return planDisplayState(*plan) == planStateCompleted
 }
 
 func (m kitchenTUIModel) nextPlanSelectionAfterDeletion() string {
@@ -1091,7 +1117,11 @@ func (m kitchenTUIModel) footerActions() []string {
 	if m.inputMode != kitchenTUIInputNone {
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
-			return []string{"enter submit", "esc cancel", "ctrl+c quit"}
+			mode := "off"
+			if m.submitImplReview {
+				mode = "on"
+			}
+			return []string{"enter submit", "tab impl-review:" + mode, "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputAnswer:
@@ -1104,7 +1134,7 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 	}
 
-	actions := []string{"n submit"}
+	actions := []string{"n submit", "N submit+review"}
 	if m.leftMode == kitchenTUILeftTasks {
 		if m.canCancelSelectedTask() {
 			actions = append(actions, "c cancel")
@@ -1457,7 +1487,7 @@ func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
 
 func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 	detail := *m.detail
-	state := firstNonEmpty(detail.Execution.State, detail.Plan.State)
+	state := firstNonEmpty(planDisplayState(kitchenTUIPlanItem{Record: detail.Plan, Progress: &detail.Progress}), detail.Execution.State, detail.Plan.State)
 	lines := []string{
 		lipgloss.NewStyle().Bold(true).Render(detail.Plan.Title),
 		fmt.Sprintf("Plan ID: %s", detail.Plan.PlanID),
@@ -1476,9 +1506,17 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		fmt.Sprintf("Active tasks: %s", joinOrDash(detail.Progress.ActiveTaskIDs)),
 		fmt.Sprintf("Completed tasks: %s", joinOrDash(detail.Progress.CompletedTaskIDs)),
 		fmt.Sprintf("Failed tasks: %s", joinOrDash(detail.Progress.FailedTaskIDs)),
-		"",
-		"Recent history:",
 	)
+	if detail.Progress.ImplReviewRequested {
+		lines = append(lines, fmt.Sprintf("Implementation review: %s", firstNonEmpty(detail.Progress.ImplReviewStatus, "pending")))
+		if len(detail.Progress.ImplReviewFindings) > 0 {
+			lines = append(lines, "Implementation review findings:")
+			for _, finding := range detail.Progress.ImplReviewFindings {
+				lines = append(lines, wrapText("- "+finding, innerWidth)...)
+			}
+		}
+	}
+	lines = append(lines, "", "Recent history:")
 	history := detail.History
 	if len(history) > 6 {
 		history = history[len(history)-6:]
@@ -1566,6 +1604,9 @@ func (m kitchenTUIModel) renderInputBar() string {
 	switch m.inputMode {
 	case kitchenTUIInputSubmit:
 		label = "Submit"
+		if m.submitImplReview {
+			label += " · impl review on"
+		}
 	case kitchenTUIInputReplan:
 		label = "Replan"
 	case kitchenTUIInputAnswer:
@@ -1647,6 +1688,9 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 		if cycle.ReviewTaskID != "" {
 			items = append(items, buildCycleTaskItem("reviewer", cycle.ReviewTaskID, "Review cycle "+fmt.Sprint(cycle.Index), cycle.ReviewTaskState, taskSummaryByID[cycle.ReviewTaskID]))
 		}
+		if cycle.ImplReviewTaskID != "" {
+			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, "Implementation review "+fmt.Sprint(max(1, cycle.Index)), cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
+		}
 	}
 	for _, task := range detail.Plan.Tasks {
 		runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
@@ -1686,10 +1730,19 @@ func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskS
 }
 
 func planDisplayState(plan kitchenTUIPlanItem) string {
+	if implementationReviewFailed(plan.Progress) {
+		return planStateImplementationReviewFailed
+	}
 	if plan.Progress != nil && strings.TrimSpace(plan.Progress.State) != "" {
 		return plan.Progress.State
 	}
 	return firstNonEmpty(plan.Record.State, "-")
+}
+
+func implementationReviewFailed(progress *PlanProgress) bool {
+	return progress != nil &&
+		progress.ImplReviewRequested &&
+		strings.TrimSpace(progress.ImplReviewStatus) == planReviewStatusFailed
 }
 
 func planTaskRuntimeState(detail PlanDetail, logicalTaskID string) string {
@@ -1945,6 +1998,8 @@ func compactState(state string) string {
 		return "plan"
 	case planStateReviewing:
 		return "review"
+	case planStateImplementationReviewFailed:
+		return "impl-fail"
 	case planStateImplementationReview:
 		return "impl-rev"
 	case planStateActive:

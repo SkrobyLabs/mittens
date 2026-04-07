@@ -133,6 +133,25 @@ func TestConfiguredServeProvidersDeduplicatesAndNormalizesRoutingProviders(t *te
 				},
 			},
 		},
+		RoleRouting: map[string]map[Complexity]RoutingRule{
+			"reviewer": {
+				ComplexityCritical: {
+					Prefer: []PoolKey{
+						{Provider: "codex", Model: "gpt-5.4"},
+					},
+					Fallback: []PoolKey{
+						{Provider: "gemini", Model: "gemini-2.5-pro"},
+					},
+				},
+			},
+		},
+		RoleDefaults: map[string]RoutingRule{
+			"implementer": {
+				Prefer: []PoolKey{
+					{Provider: "anthropic", Model: "opus"},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("configuredServeProviders: %v", err)

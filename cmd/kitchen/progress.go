@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -23,30 +23,30 @@ type PlanCycleProgress struct {
 }
 
 type PlanProgress struct {
-	PlanID               string              `json:"planId"`
-	Lineage              string              `json:"lineage,omitempty"`
-	Title                string              `json:"title,omitempty"`
-	State                string              `json:"state,omitempty"`
-	Phase                string              `json:"phase,omitempty"`
-	ReviewRequested      bool                `json:"reviewRequested,omitempty"`
-	ReviewStatus         string              `json:"reviewStatus,omitempty"`
-	ReviewRounds         int                 `json:"reviewRounds,omitempty"`
-	ReviewAttempts       int                 `json:"reviewAttempts,omitempty"`
-	ReviewRevisions      int                 `json:"reviewRevisions,omitempty"`
-	MaxReviewRevisions   int                 `json:"maxReviewRevisions,omitempty"`
-	ImplReviewRequested  bool                `json:"implReviewRequested,omitempty"`
-	ImplReviewStatus     string              `json:"implReviewStatus,omitempty"`
-	ImplReviewFindings   []string            `json:"implReviewFindings,omitempty"`
-	PendingQuestions     int                 `json:"pendingQuestions"`
-	PendingQuestionIDs   []string            `json:"pendingQuestionIds,omitempty"`
-	ActiveTaskIDs        []string            `json:"activeTaskIds,omitempty"`
-	CompletedTaskIDs     []string            `json:"completedTaskIds,omitempty"`
-	FailedTaskIDs        []string            `json:"failedTaskIds,omitempty"`
-	Cycles               []PlanCycleProgress `json:"cycles,omitempty"`
-	History              []PlanHistoryEntry  `json:"history,omitempty"`
-	HistoryTotal         int                 `json:"historyTotal,omitempty"`
-	HistoryIncluded      int                 `json:"historyIncluded,omitempty"`
-	HistoryTruncated     bool                `json:"historyTruncated,omitempty"`
+	PlanID              string              `json:"planId"`
+	Lineage             string              `json:"lineage,omitempty"`
+	Title               string              `json:"title,omitempty"`
+	State               string              `json:"state,omitempty"`
+	Phase               string              `json:"phase,omitempty"`
+	ReviewRequested     bool                `json:"reviewRequested,omitempty"`
+	ReviewStatus        string              `json:"reviewStatus,omitempty"`
+	ReviewRounds        int                 `json:"reviewRounds,omitempty"`
+	ReviewAttempts      int                 `json:"reviewAttempts,omitempty"`
+	ReviewRevisions     int                 `json:"reviewRevisions,omitempty"`
+	MaxReviewRevisions  int                 `json:"maxReviewRevisions,omitempty"`
+	ImplReviewRequested bool                `json:"implReviewRequested,omitempty"`
+	ImplReviewStatus    string              `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings  []string            `json:"implReviewFindings,omitempty"`
+	PendingQuestions    int                 `json:"pendingQuestions"`
+	PendingQuestionIDs  []string            `json:"pendingQuestionIds,omitempty"`
+	ActiveTaskIDs       []string            `json:"activeTaskIds,omitempty"`
+	CompletedTaskIDs    []string            `json:"completedTaskIds,omitempty"`
+	FailedTaskIDs       []string            `json:"failedTaskIds,omitempty"`
+	Cycles              []PlanCycleProgress `json:"cycles,omitempty"`
+	History             []PlanHistoryEntry  `json:"history,omitempty"`
+	HistoryTotal        int                 `json:"historyTotal,omitempty"`
+	HistoryIncluded     int                 `json:"historyIncluded,omitempty"`
+	HistoryTruncated    bool                `json:"historyTruncated,omitempty"`
 }
 
 type PlanDetail struct {
@@ -286,6 +286,7 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 	for i := 1; i <= implAttempts; i++ {
 		irTaskID := planImplReviewRuntimeID(planID, i)
 		cycles = append(cycles, PlanCycleProgress{
+			Index:               i,
 			ImplReviewTaskID:    irTaskID,
 			ImplReviewTaskState: string(tasks[irTaskID]),
 		})
