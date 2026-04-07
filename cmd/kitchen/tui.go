@@ -637,10 +637,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "n":
-			m.openSubmitInput(false)
-			return m, nil
-		case "N":
-			m.openSubmitInput(true)
+			m.openSubmitInput()
 			return m, nil
 		case "a":
 			if m.leftMode == kitchenTUILeftQuestions {
@@ -922,8 +919,8 @@ func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholde
 	m.input.Focus()
 }
 
-func (m *kitchenTUIModel) openSubmitInput(implReview bool) {
-	m.submitImplReview = implReview
+func (m *kitchenTUIModel) openSubmitInput() {
+	m.submitImplReview = true
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
 }
 
@@ -1134,7 +1131,7 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 	}
 
-	actions := []string{"n submit", "N submit+review"}
+	actions := []string{"n submit"}
 	if m.leftMode == kitchenTUILeftTasks {
 		if m.canCancelSelectedTask() {
 			actions = append(actions, "c cancel")

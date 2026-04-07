@@ -300,6 +300,19 @@ func TestKitchenTUISubmitTabTogglesImplReview(t *testing.T) {
 	}
 }
 
+func TestKitchenTUISubmitKeyOpensWithImplReviewEnabled(t *testing.T) {
+	model := kitchenTUIModel{input: textInputWithValue("")}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputSubmit {
+		t.Fatalf("inputMode = %q, want submit", got.inputMode)
+	}
+	if !got.submitImplReview {
+		t.Fatal("submitImplReview = false, want true when opening submit")
+	}
+}
+
 func TestKitchenTUIActionSuccessKeepsInputClosed(t *testing.T) {
 	model := kitchenTUIModel{
 		inputMode: kitchenTUIInputSubmit,
