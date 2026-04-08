@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -30,17 +29,13 @@ const (
 	planReviewStatusFailed = "failed"
 )
 
-func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool, reviewRounds int, maxReviewRevisions int, implReview bool) (*StoredPlan, error) {
+func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
 	idea = strings.TrimSpace(idea)
 	if idea == "" {
 		return nil, fmt.Errorf("idea must not be empty")
-	}
-	review, reviewRounds, maxReviewRevisions, err := normalizePlanReviewRequest(review, reviewRounds, maxReviewRevisions)
-	if err != nil {
-		return nil, err
 	}
 
 	title := derivePlanTitle(idea)
@@ -56,7 +51,7 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 		return nil, err
 	}
 	planID := generatePlanID(title)
-	planningTaskID := planTaskRuntimeID(planID, plannerTaskID)
+	planningTaskID := councilTaskID(planID, 1)
 
 	plan := PlanRecord{
 		PlanID:  planID,
@@ -71,19 +66,18 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 	execution := ExecutionRecord{
 		State:               planStatePlanning,
 		AutoApproved:        auto,
-		ReviewRequested:     review,
-		ReviewRounds:        reviewRounds,
-		MaxReviewRevisions:  maxReviewRevisions,
 		ImplReviewRequested: implReview,
 		ActiveTaskIDs:       []string{planningTaskID},
 		Branch:              lineageBranchName(lineage),
 		Anchor:              anchor,
+		CouncilMaxTurns:     4,
+		CouncilSeats:        newCouncilSeats(),
 	}
 	execution = appendPlanHistory(execution, PlanHistoryEntry{
-		Type:    planHistoryPlanningStarted,
+		Type:    planHistoryCouncilStarted,
 		Cycle:   1,
 		TaskID:  planningTaskID,
-		Summary: "Initial planner task queued.",
+		Summary: "Council planning started.",
 	})
 
 	if _, err = k.planStore.Create(StoredPlan{
@@ -92,10 +86,18 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 	}); err != nil {
 		return nil, err
 	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+	prompt, err := buildCouncilTurnPrompt(bundle, 1)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
 		ID:         planningTaskID,
 		PlanID:     planID,
-		Prompt:     buildIdeaPrompt(idea),
+		Prompt:     prompt,
 		Complexity: string(ComplexityMedium),
 		Priority:   1,
 		Role:       plannerTaskRole,
@@ -103,64 +105,7 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, review bool
 		return nil, err
 	}
 	k.sendNotify(pool.Notification{Type: "plan_submitted", ID: planID, Message: plan.Title})
-	bundle, err := k.planStore.Get(planID)
-	if err != nil {
-		return nil, err
-	}
 	return &bundle, nil
-}
-
-func normalizePlanReviewRequest(review bool, reviewRounds int, maxReviewRevisions int) (bool, int, int, error) {
-	if reviewRounds < 0 {
-		return false, 0, 0, fmt.Errorf("review rounds must be >= 0")
-	}
-	if maxReviewRevisions < -1 {
-		return false, 0, 0, fmt.Errorf("max review revisions must be >= -1")
-	}
-	if reviewRounds > 0 {
-		review = true
-	}
-	if !review {
-		if maxReviewRevisions > 0 {
-			return false, 0, 0, fmt.Errorf("max review revisions requires review")
-		}
-		return false, 0, 0, nil
-	}
-	if reviewRounds == 0 {
-		reviewRounds = 1
-	}
-	if maxReviewRevisions < 0 {
-		maxReviewRevisions = 1
-	}
-	return true, reviewRounds, maxReviewRevisions, nil
-}
-
-func reviewDraftPlan(plan PlanRecord, reviewRounds int) (string, []string) {
-	findings := make([]string, 0, 4)
-	if len(plan.Tasks) == 1 {
-		findings = append(findings, "Draft plan has a single implementation task; split it later if the change spans multiple subsystems.")
-	}
-
-	hasOutputs := false
-	hasSuccessCriteria := false
-	for _, task := range plan.Tasks {
-		if task.Outputs != nil && (len(task.Outputs.Files) > 0 || len(task.Outputs.Artifacts) > 0) {
-			hasOutputs = true
-		}
-		if task.SuccessCriteria != nil && (strings.TrimSpace(task.SuccessCriteria.Advisory) != "" || len(task.SuccessCriteria.Verifiable) > 0) {
-			hasSuccessCriteria = true
-		}
-	}
-	if !hasOutputs {
-		findings = append(findings, "Draft plan does not name concrete outputs yet.")
-	}
-	if !hasSuccessCriteria {
-		findings = append(findings, "Draft plan does not define explicit success criteria yet.")
-	}
-	if reviewRounds > 1 {
-		findings = append(findings, fmt.Sprintf("Review completed across %d deterministic rounds.", reviewRounds))
-	}
-	return planReviewStatusPassed, findings
 }
 
 func (k *Kitchen) ValidatePlan(plan PlanRecord) error {
@@ -342,6 +287,9 @@ func (k *Kitchen) RejectPlan(planID string) error {
 	}
 	bundle.Plan.State = planStateRejected
 	bundle.Execution.State = planStateRejected
+	if bundle.Execution.RejectedBy == "" {
+		bundle.Execution.RejectedBy = "operator"
+	}
 	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
 		return err
 	}
@@ -350,6 +298,48 @@ func (k *Kitchen) RejectPlan(planID string) error {
 	}
 	k.sendNotify(pool.Notification{Type: "plan_rejected", ID: planID, Message: bundle.Plan.Title})
 	return nil
+}
+
+func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
+	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
+		return fmt.Errorf("kitchen is not fully configured")
+	}
+	if turns == 0 {
+		turns = 2
+	}
+	if turns < 1 || turns > 4 {
+		return fmt.Errorf("extension must be 1-4 turns, got %d", turns)
+	}
+
+	k.councilExtendMu.Lock()
+	defer k.councilExtendMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if !canExtendCouncil(bundle.Plan.State, bundle.Execution) {
+		return fmt.Errorf("plan %s is not eligible for council extension", planID)
+	}
+	if bundle.Execution.CouncilTurnsCompleted+turns > CouncilHardCap {
+		return fmt.Errorf("extension would exceed hard cap of %d turns", CouncilHardCap)
+	}
+
+	bundle.Execution.CouncilMaxTurns += turns
+	bundle.Execution.CouncilFinalDecision = ""
+	bundle.Execution.CouncilWarnings = nil
+	bundle.Execution.CouncilUnresolvedDisagreements = nil
+	bundle.Execution.RejectedBy = ""
+	bundle.Plan.State = planStateReviewing
+	bundle.Execution.State = planStateReviewing
+	bundle.Execution.CouncilAwaitingAnswers = false
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryCouncilExtended,
+		TaskID:  councilTaskID(planID, bundle.Execution.CouncilTurnsCompleted+1),
+		Summary: fmt.Sprintf("Council extended by %d turns.", turns),
+	})
+	return k.scheduler.enqueueCouncilTurn(bundle)
 }
 
 func (k *Kitchen) CancelPlan(planID string) error {
@@ -817,11 +807,10 @@ func buildConflictFixPrompt(originalPrompt string, info *pool.ConflictInfo) stri
 }
 
 func planHistoryCycleForTask(planID string, task pool.Task) int {
-	if isPlanReviewTask(task) {
-		return reviewCycleForTask(planID, task.ID)
-	}
-	if strings.HasPrefix(task.ID, planTaskRuntimeID(planID, plannerTaskID)) || strings.HasPrefix(task.ID, planTaskRuntimeID(planID, planRevisionTaskID+"-")) {
-		return plannerCycleForTask(planID, task.ID)
+	if task.Role == plannerTaskRole {
+		if turn := councilTurnNumberFromTaskID(planID, task.ID); turn > 0 {
+			return turn
+		}
 	}
 	return 1
 }
@@ -834,15 +823,6 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	review, rounds, maxRevisions, err := normalizePlanReviewRequest(
-		bundle.Execution.ReviewRequested,
-		bundle.Execution.ReviewRounds,
-		bundle.Execution.MaxReviewRevisions,
-	)
-	if err != nil {
-		return "", err
-	}
-
 	newPlan := bundle.Plan
 	newPlan.PlanID = ""
 	newPlan.State = planStatePendingApproval
@@ -856,7 +836,7 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 		newPlan.Summary += "Replan requested: " + reason
 	}
 	if len(newPlan.Tasks) == 0 {
-		replanned, err := k.SubmitIdea(newPlan.Summary, newPlan.Lineage, false, review, rounds, maxRevisions, bundle.Execution.ImplReviewRequested)
+		replanned, err := k.SubmitIdea(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested)
 		if err != nil {
 			return "", err
 		}
@@ -1244,10 +1224,6 @@ func defaultLineage(title string) string {
 	return slug
 }
 
-func buildIdeaPrompt(idea string) string {
-	return "Create an execution plan for the following idea in this repository. Break the work into concrete worker-ready tasks, define outputs and success criteria, and include operator questions only when an answer is genuinely needed to plan safely.\n\nIdea:\n" + strings.TrimSpace(idea)
-}
-
 func planTaskRuntimeID(planID, taskID string) string {
 	return planID + "-" + taskID
 }
@@ -1273,28 +1249,6 @@ func pendingQuestionsForPlan(pm *pool.PoolManager, planID string) []pool.Questio
 	return questions
 }
 
-func buildPlanReviewPrompt(plan PlanRecord, reviewRounds int) (string, error) {
-	data, err := json.MarshalIndent(plan, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal plan for review: %w", err)
-	}
-	return adapter.BuildPlanReviewPrompt(string(data), plan.Summary, reviewRounds), nil
-}
-
-func planReviewRuntimeID(planID string, attempt int) string {
-	if attempt <= 0 {
-		attempt = 1
-	}
-	return planTaskRuntimeID(planID, fmt.Sprintf("%s-%d", planReviewTaskID, attempt))
-}
-
-func planRevisionRuntimeID(planID string, revision int) string {
-	if revision <= 0 {
-		revision = 1
-	}
-	return planTaskRuntimeID(planID, fmt.Sprintf("%s-%d", planRevisionTaskID, revision))
-}
-
 func planImplReviewRuntimeID(planID string, attempt int) string {
 	if attempt <= 0 {
 		attempt = 1
@@ -1306,7 +1260,7 @@ func implReviewRuntimeID(planID string) string {
 	return planImplReviewRuntimeID(planID, 1)
 }
 
-func planReviewFindings(verdict, feedback, severity string) []string {
+func implementationReviewFindings(verdict, feedback, severity string) []string {
 	var findings []string
 	if verdict == pool.ReviewFail && strings.TrimSpace(severity) != "" {
 		findings = append(findings, "Severity: "+strings.TrimSpace(severity))
@@ -1325,14 +1279,6 @@ func planReviewFindings(verdict, feedback, severity string) []string {
 		}
 	}
 	return findings
-}
-
-func buildPlanRevisionPrompt(plan PlanRecord, findings []string) (string, error) {
-	data, err := json.MarshalIndent(plan, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal plan for revision: %w", err)
-	}
-	return adapter.BuildPlanRevisionPrompt(string(data), strings.Join(findings, "\n"), plan.Summary), nil
 }
 
 func appendUniqueIDs(existing []string, ids ...string) []string {
@@ -1411,10 +1357,7 @@ func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanR
 }
 
 const (
-	plannerTaskID       = "plan"
 	plannerTaskRole     = "planner"
-	planReviewTaskID    = "plan-review"
-	planRevisionTaskID  = "plan-revise"
 	lineageFixMergeRole = "lineage-fix-merge"
 	implReviewTaskID    = "impl-review"
 )

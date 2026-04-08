@@ -30,7 +30,7 @@ func TestKitchenEndToEndWithRuntimeClient(t *testing.T) {
 		t.Fatalf("StartRuntime: %v", err)
 	}
 
-	bundle, err := k.SubmitIdea("Add end-to-end Kitchen coverage", "kitchen-e2e", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add end-to-end Kitchen coverage", "kitchen-e2e", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -41,11 +41,7 @@ func TestKitchenEndToEndWithRuntimeClient(t *testing.T) {
 		t.Fatalf("planning spawn role = %q, want %q", planningSpawn.Role, plannerTaskRole)
 	}
 
-	planningTask := registerAndPollWorkerTask(t, k, planningSpawn.ID, planningSpawn.containerID)
-	if planningTask.Role != plannerTaskRole {
-		t.Fatalf("planning task role = %q, want %q", planningTask.Role, plannerTaskRole)
-	}
-	writePlannerArtifactForWorker(t, k, planningSpawn.ID, adapter.PlanArtifact{
+	completePlannerSpawn(t, k, runtime, planningSpawn, adapter.PlanArtifact{
 		Title:   "Kitchen end-to-end coverage",
 		Summary: "Implement one end-to-end test task.",
 		Tasks: []adapter.PlanArtifactTask{{
@@ -56,7 +52,6 @@ func TestKitchenEndToEndWithRuntimeClient(t *testing.T) {
 			ReviewComplexity: string(ComplexityMedium),
 		}},
 	})
-	completeWorkerTask(t, k, planningSpawn.ID, planningTask.ID)
 
 	waitFor(t, 2*time.Second, func() bool {
 		planned, err := k.GetPlan(bundle.Plan.PlanID)
@@ -67,8 +62,7 @@ func TestKitchenEndToEndWithRuntimeClient(t *testing.T) {
 		t.Fatalf("ApprovePlan: %v", err)
 	}
 
-	waitFor(t, 2*time.Second, func() bool { return runtime.SpawnCount() >= 2 })
-	implSpawn := runtime.Spawn(1)
+	implSpawn := waitForSpawnByRole(t, runtime, "implementer", 1)[0]
 	if implSpawn.WorkspacePath == "" {
 		t.Fatal("implementation spawn missing workspacePath")
 	}
@@ -412,10 +406,27 @@ func registerAndPollWorkerTask(t *testing.T, k *Kitchen, workerID, containerID s
 
 	token := workerAuthTokenFromKitchen(t, k, workerID)
 	brokerURL := kitchenBrokerBaseURL(t, k)
-	postBrokerJSON(t, brokerURL+"/register", token, registerReq{
+	body, err := json.Marshal(registerReq{
 		WorkerID:    workerID,
 		ContainerID: containerID,
 	})
+	if err != nil {
+		t.Fatalf("Marshal register payload: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, brokerURL+"/register", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest register: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Mittens-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST %s status = %d, want 200 or 409", brokerURL+"/register", resp.StatusCode)
+	}
 
 	var task pool.Task
 	waitFor(t, 2*time.Second, func() bool {
@@ -460,9 +471,21 @@ func completeWorkerTask(t *testing.T, k *Kitchen, workerID, taskID string) {
 
 func writePlannerArtifactForWorker(t *testing.T, k *Kitchen, workerID string, artifact adapter.PlanArtifact) {
 	t.Helper()
-	raw, err := json.Marshal(artifact)
+	var task pool.Task
+	found := false
+	for _, item := range k.pm.Tasks() {
+		if item.WorkerID == workerID && item.Role == plannerTaskRole && item.Status == pool.TaskDispatched {
+			task = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no dispatched planner task found for worker %s", workerID)
+	}
+	raw, err := json.Marshal(testCouncilArtifactForTask(task, artifact))
 	if err != nil {
-		t.Fatalf("Marshal planner artifact: %v", err)
+		t.Fatalf("Marshal council artifact: %v", err)
 	}
 	workerStateDir := pool.WorkerStateDir(k.pm.StateDir(), workerID)
 	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
@@ -567,12 +590,55 @@ func waitForSpawnByRole(t *testing.T, runtime *fakeRuntimeDaemon, role string, c
 	return matches
 }
 
-func completePlannerSpawn(t *testing.T, k *Kitchen, spawn fakeRuntimeSpawn, artifact adapter.PlanArtifact) {
+func completePlannerSpawn(t *testing.T, k *Kitchen, runtime *fakeRuntimeDaemon, spawn fakeRuntimeSpawn, artifact adapter.PlanArtifact) {
 	t.Helper()
-	task := registerAndPollWorkerTask(t, k, spawn.ID, spawn.containerID)
-	if task.Role != plannerTaskRole {
-		t.Fatalf("planning task role = %q, want %q", task.Role, plannerTaskRole)
+	current := spawn
+	handled := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		task := registerAndPollWorkerTask(t, k, current.ID, current.containerID)
+		if task.Role != plannerTaskRole {
+			t.Fatalf("planning task role = %q, want %q", task.Role, plannerTaskRole)
+		}
+		writePlannerArtifactForWorker(t, k, current.ID, artifact)
+		completeWorkerTask(t, k, current.ID, task.ID)
+		handled[current.ID] = true
+
+		var bundle StoredPlan
+		waitFor(t, 3*time.Second, func() bool {
+			got, err := k.GetPlan(task.PlanID)
+			if err != nil {
+				return false
+			}
+			bundle = got
+			return bundle.Execution.CouncilAwaitingAnswers ||
+				bundle.Execution.State == planStatePendingApproval ||
+				bundle.Execution.State == planStateActive ||
+				bundle.Execution.State == planStateRejected ||
+				!contains(bundle.Execution.ActiveTaskIDs, task.ID)
+		})
+		if bundle.Execution.CouncilAwaitingAnswers ||
+			bundle.Execution.State == planStatePendingApproval ||
+			bundle.Execution.State == planStateActive ||
+			bundle.Execution.State == planStateRejected {
+			return
+		}
+
+		var next fakeRuntimeSpawn
+		waitFor(t, 3*time.Second, func() bool {
+			for _, candidate := range runtime.Spawns() {
+				if candidate.Role == plannerTaskRole && !handled[candidate.ID] {
+					next = candidate
+					return true
+				}
+			}
+			statusCode, poll := pollBrokerTaskOnce(t, k, current.ID)
+			if statusCode == http.StatusOK && !poll.Recycle && poll.Task != nil && poll.Task.Role == plannerTaskRole {
+				next = current
+				return true
+			}
+			return false
+		})
+		current = next
 	}
-	writePlannerArtifactForWorker(t, k, spawn.ID, artifact)
-	completeWorkerTask(t, k, spawn.ID, task.ID)
+	t.Fatalf("planner council did not converge for spawn %s", spawn.ID)
 }

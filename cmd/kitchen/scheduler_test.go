@@ -330,7 +330,7 @@ func TestSchedulerOnPlannerTaskCompletedMigratesLineageMarker(t *testing.T) {
 		t.Fatalf("seed active plan: %v", err)
 	}
 
-	plannerTaskRuntimeID := planTaskRuntimeID(planID, plannerTaskID)
+	plannerTaskRuntimeID := councilTaskID(planID, 1)
 	if _, err := pm.EnqueueTask(pool.TaskSpec{
 		ID:         plannerTaskRuntimeID,
 		PlanID:     planID,
@@ -371,7 +371,7 @@ func TestSchedulerOnPlannerTaskCompletedMigratesLineageMarker(t *testing.T) {
 			Complexity: string(ComplexityLow),
 		}},
 	}
-	raw, err := json.Marshal(artifact)
+	raw, err := json.Marshal(testCouncilArtifactForTask(*dispatched, artifact))
 	if err != nil {
 		t.Fatalf("marshal artifact: %v", err)
 	}
@@ -1396,7 +1396,7 @@ func TestSchedulerEnforceTaskTimeoutsSkipsPlannerTask(t *testing.T) {
 		},
 		Execution: ExecutionRecord{
 			State:         planStatePlanning,
-			ActiveTaskIDs: []string{planTaskRuntimeID("plan_planner_timeout", plannerTaskID)},
+			ActiveTaskIDs: []string{councilTaskID("plan_planner_timeout", 1)},
 		},
 	})
 	if err != nil {
@@ -1413,7 +1413,7 @@ func TestSchedulerEnforceTaskTimeoutsSkipsPlannerTask(t *testing.T) {
 	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
 
 	taskID, err := pm.EnqueueTask(pool.TaskSpec{
-		ID:         planTaskRuntimeID(planID, plannerTaskID),
+		ID:         councilTaskID(planID, 1),
 		PlanID:     planID,
 		Prompt:     "plan the implementation",
 		Complexity: string(ComplexityMedium),

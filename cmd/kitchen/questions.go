@@ -49,6 +49,9 @@ func (k *Kitchen) AnswerQuestion(questionID, answer string) error {
 	if err := k.recordQuestionAffinity(questionID); err != nil {
 		return err
 	}
+	if err := k.queueCouncilResumeIfReady(planID); err != nil {
+		return err
+	}
 	return k.autoApproveReadyPlan(planID)
 }
 
@@ -123,5 +126,59 @@ func (k *Kitchen) autoApproveReadyPlan(planID string) error {
 	if !bundle.Execution.AutoApproved || bundle.Execution.State != planStatePendingApproval {
 		return nil
 	}
+	if bundle.Execution.CouncilFinalDecision != "" && !canAutoApproveCouncil(bundle.Execution) {
+		return nil
+	}
 	return k.ApprovePlan(planID)
+}
+
+func (k *Kitchen) queueCouncilResumeIfReady(planID string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || strings.TrimSpace(planID) == "" {
+		return nil
+	}
+
+	k.councilResumeMu.Lock()
+	defer k.councilResumeMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if bundle.Execution.State != planStateReviewing || !bundle.Execution.CouncilAwaitingAnswers {
+		return nil
+	}
+	if len(pendingCouncilQuestionsForPlan(k.pm, planID)) > 0 {
+		return nil
+	}
+
+	nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
+	nextTaskID := councilTaskID(planID, nextTurn)
+	if _, exists := k.pm.Task(nextTaskID); exists {
+		return nil
+	}
+
+	prompt, err := buildCouncilTurnPrompt(bundle, nextTurn)
+	if err != nil {
+		return err
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         nextTaskID,
+		PlanID:     planID,
+		Prompt:     prompt,
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		return err
+	}
+
+	bundle.Execution.CouncilAwaitingAnswers = false
+	bundle.Execution.ActiveTaskIDs = []string{nextTaskID}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryCouncilResumed,
+		Cycle:   nextTurn,
+		TaskID:  nextTaskID,
+		Summary: "Council resumed after operator answers.",
+	})
+	return k.planStore.UpdateExecution(planID, bundle.Execution)
 }

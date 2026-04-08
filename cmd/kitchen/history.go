@@ -12,9 +12,14 @@ const (
 	planHistoryPlanningStarted          = "planning_started"
 	planHistoryPlanningCompleted        = "planning_completed"
 	planHistoryPlanningFailed           = "planning_failed"
-	planHistoryReviewRequested          = "review_requested"
-	planHistoryReviewPassed             = "review_passed"
-	planHistoryReviewFailed             = "review_failed"
+	planHistoryCouncilStarted           = "council_started"
+	planHistoryCouncilTurnCompleted     = "council_turn_completed"
+	planHistoryCouncilWaitingAnswers    = "council_waiting_answers"
+	planHistoryCouncilResumed           = "council_resumed"
+	planHistoryCouncilConverged         = "council_converged"
+	planHistoryCouncilRejected          = "council_rejected"
+	planHistoryCouncilSeatRehydrated    = "council_seat_rehydrated"
+	planHistoryCouncilExtended          = "council_extended"
 	planHistoryConflictRetried          = "conflict_retried"
 	planHistoryManualRetried            = "manual_retried"
 	planHistoryConflictFixRequested     = "conflict_fix_requested"
@@ -52,25 +57,8 @@ func appendPlanHistory(ex ExecutionRecord, entry PlanHistoryEntry) ExecutionReco
 }
 
 func plannerCycleForTask(planID, taskID string) int {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == initialPlannerRuntimeID(planID) {
-		return 1
-	}
-	prefix := planTaskRuntimeID(planID, planRevisionTaskID+"-")
-	if rest, ok := strings.CutPrefix(taskID, prefix); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
-			return n + 1
-		}
-	}
-	return 1
-}
-
-func reviewCycleForTask(planID, taskID string) int {
-	prefix := planTaskRuntimeID(planID, planReviewTaskID+"-")
-	if rest, ok := strings.CutPrefix(strings.TrimSpace(taskID), prefix); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
-			return n
-		}
+	if turn := councilTurnNumberFromTaskID(planID, taskID); turn > 0 {
+		return turn
 	}
 	return 1
 }
@@ -133,12 +121,22 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Planning completed"
 	case planHistoryPlanningFailed:
 		return "Planning failed"
-	case planHistoryReviewRequested:
-		return "Review requested"
-	case planHistoryReviewPassed:
-		return "Review passed"
-	case planHistoryReviewFailed:
-		return "Review failed"
+	case planHistoryCouncilStarted:
+		return "Council started"
+	case planHistoryCouncilTurnCompleted:
+		return "Council turn completed"
+	case planHistoryCouncilWaitingAnswers:
+		return "Council waiting for answers"
+	case planHistoryCouncilResumed:
+		return "Council resumed"
+	case planHistoryCouncilConverged:
+		return "Council converged"
+	case planHistoryCouncilRejected:
+		return "Council rejected"
+	case planHistoryCouncilSeatRehydrated:
+		return "Council seat rehydrated"
+	case planHistoryCouncilExtended:
+		return "Council extended"
 	case planHistoryConflictRetried:
 		return "Conflict retried"
 	case planHistoryManualRetried:
@@ -162,12 +160,6 @@ func historyTypeForNotification(eventType string) string {
 		return planHistoryPlanningCompleted
 	case "plan_failed":
 		return planHistoryPlanningFailed
-	case "plan_review_requested":
-		return planHistoryReviewRequested
-	case "plan_review_passed":
-		return planHistoryReviewPassed
-	case "plan_review_failed":
-		return planHistoryReviewFailed
 	case "plan_impl_review_requested":
 		return planHistoryImplReviewRequested
 	case "plan_impl_review_passed":

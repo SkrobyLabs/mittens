@@ -53,6 +53,7 @@ func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool) (string
 	}
 	return b.submitPlanID, nil
 }
+func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { return nil }
 func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error { return nil }
 func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error  { return nil }
 func (b *fakeKitchenTUIBackend) DeletePlan(planID string) error {

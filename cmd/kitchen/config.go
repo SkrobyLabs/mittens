@@ -50,6 +50,7 @@ type ConcurrencyConfig struct {
 	MaxWorkersPerPool    int `json:"maxWorkersPerPool" yaml:"maxWorkersPerPool"`
 	MaxWorkersPerLineage int `json:"maxWorkersPerLineage" yaml:"maxWorkersPerLineage"`
 	MaxIdlePerPool       int `json:"maxIdlePerPool" yaml:"maxIdlePerPool"`
+	CouncilSeatIdleTTLSeconds int `json:"councilSeatIdleTTLSeconds" yaml:"councilSeatIdleTTLSeconds"`
 }
 
 type FailurePolicyRule struct {
@@ -119,6 +120,7 @@ func DefaultKitchenConfig() KitchenConfig {
 			MaxWorkersPerPool:    6,
 			MaxWorkersPerLineage: 4,
 			MaxIdlePerPool:       2,
+			CouncilSeatIdleTTLSeconds: 270,
 		},
 		FailurePolicy: map[string]FailurePolicyRule{
 			"capability":     {Action: "escalate_complexity", Max: 2},
@@ -461,6 +463,9 @@ func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
 	if user.Concurrency.MaxIdlePerPool > 0 {
 		merged.Concurrency.MaxIdlePerPool = user.Concurrency.MaxIdlePerPool
 	}
+	if user.Concurrency.CouncilSeatIdleTTLSeconds > 0 {
+		merged.Concurrency.CouncilSeatIdleTTLSeconds = user.Concurrency.CouncilSeatIdleTTLSeconds
+	}
 
 	// Failure policy: deep-copy then merge per class.
 	merged.FailurePolicy = make(map[string]FailurePolicyRule, len(base.FailurePolicy))
@@ -569,6 +574,9 @@ func (c KitchenConfig) Validate() error {
 	}
 	if c.Concurrency.MaxIdlePerPool < 0 {
 		return fmt.Errorf("concurrency.maxIdlePerPool must be zero or greater")
+	}
+	if c.Concurrency.CouncilSeatIdleTTLSeconds <= 0 {
+		return fmt.Errorf("concurrency.councilSeatIdleTTLSeconds must be positive")
 	}
 	if c.Snapshots.PlanHistoryLimit < 0 {
 		return fmt.Errorf("snapshots.planHistoryLimit must be zero or greater")

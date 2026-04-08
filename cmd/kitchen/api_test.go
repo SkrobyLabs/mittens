@@ -23,17 +23,18 @@ func TestKitchenAPIPlanLifecycleAndQueue(t *testing.T) {
 		"idea": "Add typed parser errors",
 		"auto": false,
 	})
-	var created map[string]string
+	var created map[string]any
 	decodeResponse(t, resp, &created)
-	if created["planId"] == "" {
+	planID, _ := created["planId"].(string)
+	if planID == "" {
 		t.Fatal("expected planId")
 	}
 	if created["lineage"] == "" {
 		t.Fatalf("expected lineage in %+v", created)
 	}
-	completePlanningTask(t, k, created["planId"], basicPlannedArtifact("Add typed parser errors"))
+	completePlanningTask(t, k, planID, basicPlannedArtifact("Add typed parser errors"))
 
-	resp = apiRequest(t, server, http.MethodPost, "/v1/plans/"+created["planId"]+"/approve", map[string]any{})
+	resp = apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/approve", map[string]any{})
 	var approved map[string]string
 	decodeResponse(t, resp, &approved)
 	if approved["status"] != planStateActive {
@@ -47,24 +48,24 @@ func TestKitchenAPIPlanLifecycleAndQueue(t *testing.T) {
 		t.Fatalf("queue payload = %+v", queue)
 	}
 
-	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+created["planId"]+"/evidence", nil)
+	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+planID+"/evidence", nil)
 	var evidence map[string]any
 	decodeResponse(t, resp, &evidence)
 	if evidence["plan"] == nil || evidence["queue"] == nil || evidence["progress"] == nil || evidence["history"] == nil {
 		t.Fatalf("evidence payload = %+v", evidence)
 	}
 
-	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+created["planId"], nil)
+	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+planID, nil)
 	var detail map[string]any
 	decodeResponse(t, resp, &detail)
 	if detail["plan"] == nil || detail["execution"] == nil || detail["progress"] == nil || detail["history"] == nil {
 		t.Fatalf("plan detail payload = %+v", detail)
 	}
 
-	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+created["planId"]+"/history", nil)
+	resp = apiRequest(t, server, http.MethodGet, "/v1/plans/"+planID+"/history", nil)
 	var history map[string]any
 	decodeResponse(t, resp, &history)
-	if history["planId"] != created["planId"] || history["history"] == nil {
+	if history["planId"] != planID || history["history"] == nil {
 		t.Fatalf("history payload = %+v", history)
 	}
 }
@@ -74,7 +75,7 @@ func TestKitchenAPIStatusEndpoint(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	if _, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false); err != nil {
+	if _, err := k.SubmitIdea("Add typed parser errors", "", false, false); err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 
@@ -95,12 +96,11 @@ func TestKitchenAPIPlanHistoryCycleFilter(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Typed parser errors"))
-	completePlanReviewTask(t, k, bundle.Plan.PlanID, pool.ReviewFail, "Split the work into smaller tasks.", pool.SeverityMajor)
 
 	resp := apiRequest(t, server, http.MethodGet, "/v1/plans/"+bundle.Plan.PlanID+"/history?cycle=2", nil)
 	var payload map[string]any
@@ -123,16 +123,14 @@ func TestKitchenAPIPlanHistoryCycleFilter(t *testing.T) {
 	}
 }
 
-func TestKitchenAPIPlanReviewRequest(t *testing.T) {
+func TestKitchenAPIImplReviewRequest(t *testing.T) {
 	k := newTestKitchen(t)
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
 	resp := apiRequest(t, server, http.MethodPost, "/v1/ideas", map[string]any{
-		"idea":               "Add typed parser errors",
-		"review":             true,
-		"reviewRounds":       2,
-		"maxReviewRevisions": 3,
+		"idea":       "Add typed parser errors",
+		"implReview": true,
 	})
 	var created map[string]any
 	decodeResponse(t, resp, &created)
@@ -140,23 +138,12 @@ func TestKitchenAPIPlanReviewRequest(t *testing.T) {
 		t.Fatalf("expected planId in %+v", created)
 	}
 	planID, _ := created["planId"].(string)
-	completePlanningTask(t, k, planID, basicPlannedArtifact("Add typed parser errors"))
-	completePlanReviewTask(t, k, planID, pool.ReviewPass, "Plan decomposition looks good.", pool.SeverityMinor)
 	bundle, err := k.GetPlan(planID)
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	if bundle.Execution.ReviewStatus != planReviewStatusPassed {
-		t.Fatalf("reviewStatus = %v, want %q", bundle.Execution.ReviewStatus, planReviewStatusPassed)
-	}
-	if bundle.Execution.ReviewRounds != 2 {
-		t.Fatalf("reviewRounds = %v, want 2", bundle.Execution.ReviewRounds)
-	}
-	if bundle.Execution.MaxReviewRevisions != 3 {
-		t.Fatalf("maxReviewRevisions = %v, want 3", bundle.Execution.MaxReviewRevisions)
-	}
-	if len(bundle.Execution.ReviewFindings) == 0 {
-		t.Fatalf("reviewFindings = %#v, want non-empty list", bundle.Execution.ReviewFindings)
+	if !bundle.Execution.ImplReviewRequested {
+		t.Fatalf("execution = %+v, want impl review requested", bundle.Execution)
 	}
 }
 
@@ -165,7 +152,7 @@ func TestKitchenAPIActivePlanCancel(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -195,7 +182,7 @@ func TestKitchenAPIDeletePlanEndpointRemovesPlanTasksAndQuestions(t *testing.T) 
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -292,7 +279,7 @@ func TestKitchenAPIRetryTaskEndpointSupportsSameWorker(t *testing.T) {
 
 func TestKitchenAPIRetryTaskEndpointRejectsNonFailedTask(t *testing.T) {
 	k := newTestKitchen(t)
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -475,7 +462,7 @@ func TestKitchenAPIPlanEvidenceCompactTier(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -496,7 +483,7 @@ func TestKitchenAPIPlanEvidenceRejectsUnknownTier(t *testing.T) {
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -597,7 +584,7 @@ func TestKitchenAPIEventsStreamsPlanLifecycleNotifications(t *testing.T) {
 		t.Fatalf("first event = %q, want snapshot", event)
 	}
 
-	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -629,15 +616,8 @@ func TestKitchenAPIEventsStreamsPlanLifecycleNotifications(t *testing.T) {
 	if progress["phase"] != "planning" {
 		t.Fatalf("payload progress phase = %v, want planning", progress["phase"])
 	}
-	historyEntry, ok := payload["historyEntry"].(map[string]any)
-	if !ok {
-		t.Fatalf("payload historyEntry = %#v, want object", payload["historyEntry"])
-	}
-	if historyEntry["type"] != planHistoryPlanningStarted {
-		t.Fatalf("historyEntry type = %v, want %q", historyEntry["type"], planHistoryPlanningStarted)
-	}
-	if historyEntry["cycle"] != float64(1) {
-		t.Fatalf("historyEntry cycle = %v, want 1", historyEntry["cycle"])
+	if payload["historyEntry"] != nil {
+		t.Fatalf("payload historyEntry = %#v, want no history delta for submission event", payload["historyEntry"])
 	}
 }
 

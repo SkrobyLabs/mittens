@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
+	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
@@ -26,6 +27,7 @@ type kitchenTUIBackend interface {
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	ListQuestions() ([]pool.Question, error)
 	SubmitIdea(idea string, implReview bool) (string, error)
+	ExtendCouncil(planID string, turns int) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
 	DeletePlan(planID string) error
@@ -75,7 +77,7 @@ func (b *kitchenAPIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRe
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
 func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
-	resp, err := b.client.SubmitIdea(idea, "", false, false, 0, -1, implReview)
+	resp, err := b.client.SubmitIdea(idea, "", false, implReview)
 	if err != nil {
 		return "", err
 	}
@@ -84,6 +86,10 @@ func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool) (string, er
 		return "", fmt.Errorf("submit response missing planId")
 	}
 	return planID, nil
+}
+func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
+	_, err := b.client.ExtendCouncil(planID, turns)
+	return err
 }
 func (b *kitchenAPIBackend) ApprovePlan(planID string) error {
 	_, err := b.client.ApprovePlan(planID)
@@ -225,7 +231,7 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdea(idea, "", false, false, 0, -1, implReview)
+		bundle, err := k.SubmitIdea(idea, "", false, implReview)
 		if err != nil {
 			return err
 		}
@@ -233,6 +239,12 @@ func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool) (string, 
 		return nil
 	})
 	return planID, err
+}
+
+func (b *kitchenLocalBackend) ExtendCouncil(planID string, turns int) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.ExtendCouncil(planID, turns)
+	})
 }
 
 func (b *kitchenLocalBackend) ApprovePlan(planID string) error {
@@ -639,6 +651,22 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.openSubmitInput()
 			return m, nil
+		case "e":
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				if !m.canExtendSelectedPlan() {
+					m.flash = "selected plan cannot be extended"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.ExtendCouncil(plan.Record.PlanID, 2)
+					return "extended council " + plan.Record.PlanID, plan.Record.PlanID, err
+				})
+			}
+			return m, nil
 		case "a":
 			if m.leftMode == kitchenTUILeftQuestions {
 				if q := m.selectedQuestionItem(); q != nil {
@@ -1013,6 +1041,13 @@ func (m kitchenTUIModel) canApproveSelectedPlan() bool {
 	return plan != nil && planDisplayState(*plan) == planStatePendingApproval
 }
 
+func (m kitchenTUIModel) canExtendSelectedPlan() bool {
+	if m.detail == nil {
+		return false
+	}
+	return canExtendCouncil(m.detail.Plan.State, m.detail.Execution)
+}
+
 func (m kitchenTUIModel) canCancelSelectedPlan() bool {
 	plan := m.selectedPlanItem()
 	if plan == nil {
@@ -1148,6 +1183,9 @@ func (m kitchenTUIModel) footerActions() []string {
 	} else {
 		if m.canApproveSelectedPlan() {
 			actions = append(actions, "a approve")
+		}
+		if m.canExtendSelectedPlan() {
+			actions = append(actions, "e extend")
 		}
 		if m.canCancelSelectedPlan() {
 			actions = append(actions, "c cancel")
@@ -1513,6 +1551,52 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			}
 		}
 	}
+	if hasCouncilState(detail.Execution) {
+		now := time.Now().UTC()
+		lines = append(lines, "", "Council:")
+		for i, seat := range detail.Execution.CouncilSeats {
+			seatName := strings.TrimSpace(seat.Seat)
+			if seatName == "" {
+				if i == 1 {
+					seatName = "B"
+				} else {
+					seatName = "A"
+				}
+			}
+			seatParts := []string{"worker " + firstNonEmpty(strings.TrimSpace(seat.WorkerID), "-")}
+			if seat.IdleSince != nil {
+				seatParts = append(seatParts, "idle "+formatShortDuration(now.Sub(seat.IdleSince.UTC())))
+			}
+			if seat.Rehydrated {
+				seatParts = append(seatParts, "rehydrated")
+			}
+			lines = append(lines, fmt.Sprintf("Seat %s: %s", seatName, strings.Join(seatParts, ", ")))
+		}
+		lines = append(lines,
+			fmt.Sprintf("Turns: %d/%d (hard cap %d)", detail.Execution.CouncilTurnsCompleted, detail.Execution.CouncilMaxTurns, CouncilHardCap),
+			fmt.Sprintf("Decision: %s", firstNonEmpty(detail.Execution.CouncilFinalDecision, "(pending)")),
+		)
+		if len(detail.Execution.CouncilTurns) == 0 {
+			lines = append(lines, "No council turns recorded.")
+		} else {
+			lines = append(lines, "Turn summaries:")
+			for _, turn := range detail.Execution.CouncilTurns {
+				if turn.Artifact == nil {
+					lines = append(lines, fmt.Sprintf("Turn %d [%s]", turn.Turn, firstNonEmpty(turn.Seat, "-")))
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("Turn %d [%s] %s", turn.Turn, firstNonEmpty(turn.Artifact.Seat, turn.Seat, "-"), firstNonEmpty(turn.Artifact.Stance, "-")))
+				lines = appendWrappedPrefixed(lines, "  ", firstNonEmpty(turn.Artifact.Summary, turn.Artifact.SeatMemo), max(1, innerWidth))
+				lines = append(lines, fmt.Sprintf("  disagreements: %d  blocking questions: %d", len(turn.Artifact.Disagreements), countBlockingCouncilQuestions(turn.Artifact.QuestionsForUser)))
+			}
+		}
+		switch detail.Plan.State {
+		case planStateRejected:
+			lines = appendCouncilDisagreements(lines, "Unresolved disagreements:", detail.Execution.CouncilUnresolvedDisagreements, innerWidth)
+		case planStatePendingApproval:
+			lines = appendCouncilDisagreements(lines, "Council warnings:", detail.Execution.CouncilWarnings, innerWidth)
+		}
+	}
 	lines = append(lines, "", "Recent history:")
 	history := detail.History
 	if len(history) > 6 {
@@ -1740,6 +1824,73 @@ func implementationReviewFailed(progress *PlanProgress) bool {
 	return progress != nil &&
 		progress.ImplReviewRequested &&
 		strings.TrimSpace(progress.ImplReviewStatus) == planReviewStatusFailed
+}
+
+func hasCouncilState(exec ExecutionRecord) bool {
+	if exec.CouncilMaxTurns > 0 || exec.CouncilTurnsCompleted > 0 || strings.TrimSpace(exec.CouncilFinalDecision) != "" || len(exec.CouncilTurns) > 0 || len(exec.CouncilWarnings) > 0 || len(exec.CouncilUnresolvedDisagreements) > 0 {
+		return true
+	}
+	for _, seat := range exec.CouncilSeats {
+		if strings.TrimSpace(seat.Seat) != "" || strings.TrimSpace(seat.WorkerID) != "" || seat.IdleSince != nil || seat.Rehydrated {
+			return true
+		}
+	}
+	return false
+}
+
+func appendCouncilDisagreements(lines []string, heading string, items []adapter.CouncilDisagreement, width int) []string {
+	if len(items) == 0 {
+		return lines
+	}
+	lines = append(lines, heading)
+	for _, item := range items {
+		lines = appendWrappedPrefixed(lines, "- ", fmt.Sprintf("[%s] %s", firstNonEmpty(item.Severity, "unknown"), firstNonEmpty(item.Title, item.ID)), width)
+		lines = appendWrappedPrefixed(lines, "  Impact: ", item.Impact, width)
+		if strings.TrimSpace(item.SuggestedChange) != "" {
+			lines = appendWrappedPrefixed(lines, "  Suggested: ", item.SuggestedChange, width)
+		}
+	}
+	return lines
+}
+
+func appendWrappedPrefixed(lines []string, prefix, text string, width int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return lines
+	}
+	if width <= len(prefix)+1 {
+		return append(lines, prefix+text)
+	}
+	for _, line := range wrapText(text, width-len(prefix)) {
+		lines = append(lines, prefix+line)
+	}
+	return lines
+}
+
+func countBlockingCouncilQuestions(items []adapter.CouncilUserQuestion) int {
+	count := 0
+	for _, item := range items {
+		if item.Blocking {
+			count++
+		}
+	}
+	return count
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 func planTaskRuntimeState(detail PlanDetail, logicalTaskID string) string {

@@ -28,12 +28,6 @@ type PlanProgress struct {
 	Title               string              `json:"title,omitempty"`
 	State               string              `json:"state,omitempty"`
 	Phase               string              `json:"phase,omitempty"`
-	ReviewRequested     bool                `json:"reviewRequested,omitempty"`
-	ReviewStatus        string              `json:"reviewStatus,omitempty"`
-	ReviewRounds        int                 `json:"reviewRounds,omitempty"`
-	ReviewAttempts      int                 `json:"reviewAttempts,omitempty"`
-	ReviewRevisions     int                 `json:"reviewRevisions,omitempty"`
-	MaxReviewRevisions  int                 `json:"maxReviewRevisions,omitempty"`
 	ImplReviewRequested bool                `json:"implReviewRequested,omitempty"`
 	ImplReviewStatus    string              `json:"implReviewStatus,omitempty"`
 	ImplReviewFindings  []string            `json:"implReviewFindings,omitempty"`
@@ -166,12 +160,6 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 		Lineage:             bundle.Plan.Lineage,
 		Title:               bundle.Plan.Title,
 		State:               bundle.Execution.State,
-		ReviewRequested:     bundle.Execution.ReviewRequested,
-		ReviewStatus:        bundle.Execution.ReviewStatus,
-		ReviewRounds:        bundle.Execution.ReviewRounds,
-		ReviewAttempts:      bundle.Execution.ReviewAttempts,
-		ReviewRevisions:     bundle.Execution.ReviewRevisions,
-		MaxReviewRevisions:  bundle.Execution.MaxReviewRevisions,
 		ImplReviewRequested: bundle.Execution.ImplReviewRequested,
 		ImplReviewStatus:    bundle.Execution.ImplReviewStatus,
 		ImplReviewFindings:  append([]string(nil), bundle.Execution.ImplReviewFindings...),
@@ -248,33 +236,21 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 		}
 	}
 
-	cycleCount := 1
-	if bundle.Execution.ReviewRevisions+1 > cycleCount {
-		cycleCount = bundle.Execution.ReviewRevisions + 1
-	}
-	if bundle.Execution.ReviewAttempts > cycleCount {
-		cycleCount = bundle.Execution.ReviewAttempts
-	}
-	if bundle.Execution.State == planStateReviewing && bundle.Execution.ReviewAttempts+1 > cycleCount {
-		cycleCount = bundle.Execution.ReviewAttempts + 1
+	cycleCount := max(1, bundle.Execution.CouncilTurnsCompleted)
+	if bundle.Execution.State == planStatePlanning || bundle.Execution.State == planStateReviewing {
+		nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
+		if nextTurn > cycleCount && nextTurn <= bundle.Execution.CouncilMaxTurns {
+			cycleCount = nextTurn
+		}
 	}
 
 	cycles := make([]PlanCycleProgress, 0, cycleCount)
 	for i := 1; i <= cycleCount; i++ {
-		plannerTaskID := initialPlannerRuntimeID(planID)
-		if i > 1 {
-			plannerTaskID = planRevisionRuntimeID(planID, i-1)
-		}
+		plannerTaskID := councilTaskID(planID, i)
 		cycle := PlanCycleProgress{
 			Index:            i,
 			PlannerTaskID:    plannerTaskID,
 			PlannerTaskState: string(tasks[plannerTaskID]),
-		}
-
-		if bundle.Execution.ReviewRequested && (i <= bundle.Execution.ReviewAttempts || (bundle.Execution.State == planStateReviewing && i == bundle.Execution.ReviewAttempts+1)) {
-			reviewTaskID := planReviewRuntimeID(planID, i)
-			cycle.ReviewTaskID = reviewTaskID
-			cycle.ReviewTaskState = string(tasks[reviewTaskID])
 		}
 		cycles = append(cycles, cycle)
 	}
@@ -298,15 +274,12 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 type poolTaskState string
 
 func initialPlannerRuntimeID(planID string) string {
-	return planTaskRuntimeID(planID, plannerTaskID)
+	return councilTaskID(planID, 1)
 }
 
 func planPhase(bundle StoredPlan, pendingQuestions int) string {
 	switch bundle.Execution.State {
 	case planStatePlanning:
-		if hasActivePlanRevision(bundle) || bundle.Execution.ReviewRevisions > 0 {
-			return "revising"
-		}
 		return "planning"
 	case planStateReviewing:
 		return "reviewing"
@@ -324,14 +297,4 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 	default:
 		return bundle.Execution.State
 	}
-}
-
-func hasActivePlanRevision(bundle StoredPlan) bool {
-	prefix := planTaskRuntimeID(bundle.Plan.PlanID, planRevisionTaskID+"-")
-	for _, taskID := range bundle.Execution.ActiveTaskIDs {
-		if strings.HasPrefix(taskID, prefix) {
-			return true
-		}
-	}
-	return false
 }

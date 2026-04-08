@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +81,7 @@ func TestPlanFromArtifactKeepsExistingLineageWhenArtifactSlugUnusable(t *testing
 func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	if len(bundle.Plan.Tasks) != 0 {
 		t.Fatalf("tasks = %+v, want planner-generated tasks later", bundle.Plan.Tasks)
 	}
-	task, ok := k.pm.Task(planTaskRuntimeID(bundle.Plan.PlanID, plannerTaskID))
+	task, ok := k.pm.Task(councilTaskID(bundle.Plan.PlanID, 1))
 	if !ok || task.Role != plannerTaskRole {
 		t.Fatalf("planner task = %+v, want queued planner task", task)
 	}
@@ -144,9 +145,6 @@ func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	}
 
 	tasks := k.pm.Tasks()
-	if len(tasks) != 2 {
-		t.Fatalf("tasks = %d, want 2 (planner + implementation)", len(tasks))
-	}
 	var implementationTask *pool.Task
 	for i := range tasks {
 		if tasks[i].ID == planTaskRuntimeID(approved.Plan.PlanID, "t1") {
@@ -165,52 +163,32 @@ func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	}
 }
 
-func TestKitchenSubmitIdeaWithReviewPersistsReviewMetadata(t *testing.T) {
+func TestKitchenSubmitIdeaWithImplReviewPersistsFlag(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 2, 3, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
-	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
-		Title: "Typed parser errors",
-		Tasks: []adapter.PlanArtifactTask{{
-			ID:               "t1",
-			Title:            "Implement typed parser errors",
-			Prompt:           "Introduce typed parser errors for lexer failures.",
-			Complexity:       string(ComplexityMedium),
-			ReviewComplexity: string(ComplexityMedium),
-		}},
-	})
-	completePlanReviewTask(t, k, bundle.Plan.PlanID, pool.ReviewPass, "Plan decomposition looks good.", pool.SeverityMinor)
 	got, err := k.GetPlan(bundle.Plan.PlanID)
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	if !got.Execution.ReviewRequested {
-		t.Fatal("expected reviewRequested")
+	if !got.Execution.ImplReviewRequested {
+		t.Fatal("expected impl review to be requested")
 	}
-	if got.Execution.ReviewRounds != 2 {
-		t.Fatalf("review rounds = %d, want 2", got.Execution.ReviewRounds)
+	if got.Execution.CouncilMaxTurns != 4 {
+		t.Fatalf("council max turns = %d, want 4", got.Execution.CouncilMaxTurns)
 	}
-	if got.Execution.MaxReviewRevisions != 3 {
-		t.Fatalf("max review revisions = %d, want 3", got.Execution.MaxReviewRevisions)
-	}
-	if got.Execution.ReviewStatus != planReviewStatusPassed {
-		t.Fatalf("review status = %q, want %q", got.Execution.ReviewStatus, planReviewStatusPassed)
-	}
-	if got.Execution.ReviewedAt == nil {
-		t.Fatal("expected reviewedAt to be set")
-	}
-	if len(got.Execution.ReviewFindings) == 0 {
-		t.Fatal("expected review findings")
+	if len(got.Execution.ActiveTaskIDs) != 1 || got.Execution.ActiveTaskIDs[0] != councilTaskID(bundle.Plan.PlanID, 1) {
+		t.Fatalf("active task ids = %+v, want initial council task", got.Execution.ActiveTaskIDs)
 	}
 }
 
 func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -233,20 +211,30 @@ func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 	if len(questions) != 1 {
 		t.Fatalf("questions = %+v, want 1", questions)
 	}
-	if questions[0].Category != "planning" {
-		t.Fatalf("category = %q, want planning", questions[0].Category)
+	if questions[0].Category != "council" {
+		t.Fatalf("category = %q, want council", questions[0].Category)
 	}
 	if questions[0].Context != "This changes the public API shape and rollout scope." {
 		t.Fatalf("context = %q", questions[0].Context)
 	}
 
-	if err := k.ApprovePlan(bundle.Plan.PlanID); err == nil || !strings.Contains(err.Error(), "pending questions") {
-		t.Fatalf("ApprovePlan err = %v, want pending questions failure", err)
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err == nil || !strings.Contains(err.Error(), "still under review") {
+		t.Fatalf("ApprovePlan err = %v, want under review failure", err)
 	}
 
 	if err := k.AnswerQuestion(questions[0].ID, "Keep one exported type for now."); err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Typed parser errors",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID:               "t1",
+			Title:            "Implement typed parser errors",
+			Prompt:           "Introduce typed parser errors for lexer failures.",
+			Complexity:       string(ComplexityMedium),
+			ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
 	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
 		t.Fatalf("ApprovePlan after answer: %v", err)
 	}
@@ -255,7 +243,7 @@ func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -277,8 +265,8 @@ func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	if got.Execution.State != planStatePendingApproval {
-		t.Fatalf("state = %q, want %q before answer", got.Execution.State, planStatePendingApproval)
+	if got.Execution.State != planStateReviewing {
+		t.Fatalf("state = %q, want %q before answer", got.Execution.State, planStateReviewing)
 	}
 
 	questions := k.ListQuestions()
@@ -287,23 +275,6 @@ func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.
 	}
 	if err := k.AnswerQuestion(questions[0].ID, "Keep one exported type for now."); err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
-	}
-
-	got, err = k.GetPlan(bundle.Plan.PlanID)
-	if err != nil {
-		t.Fatalf("GetPlan(after answer): %v", err)
-	}
-	if got.Execution.State != planStateActive {
-		t.Fatalf("state = %q, want %q after auto-approve", got.Execution.State, planStateActive)
-	}
-}
-
-func TestKitchenAutoApprovedReviewedPlanActivatesAfterReviewPass(t *testing.T) {
-	k := newTestKitchen(t)
-
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", true, true, 2, -1, false)
-	if err != nil {
-		t.Fatalf("SubmitIdea: %v", err)
 	}
 	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
 		Title: "Typed parser errors",
@@ -316,155 +287,19 @@ func TestKitchenAutoApprovedReviewedPlanActivatesAfterReviewPass(t *testing.T) {
 		}},
 	})
 
-	got, err := k.GetPlan(bundle.Plan.PlanID)
-	if err != nil {
-		t.Fatalf("GetPlan: %v", err)
-	}
-	if got.Execution.State != planStateReviewing {
-		t.Fatalf("state = %q, want %q before review completion", got.Execution.State, planStateReviewing)
-	}
-
-	completePlanReviewTask(t, k, bundle.Plan.PlanID, pool.ReviewPass, "Plan decomposition looks good.", pool.SeverityMinor)
-
 	got, err = k.GetPlan(bundle.Plan.PlanID)
 	if err != nil {
-		t.Fatalf("GetPlan(after review): %v", err)
+		t.Fatalf("GetPlan(after answer): %v", err)
 	}
 	if got.Execution.State != planStateActive {
-		t.Fatalf("state = %q, want %q after auto approval", got.Execution.State, planStateActive)
-	}
-	if got.Execution.ReviewStatus != planReviewStatusPassed {
-		t.Fatalf("review status = %q, want %q", got.Execution.ReviewStatus, planReviewStatusPassed)
-	}
-}
-
-func TestKitchenFailedPlanReviewQueuesSinglePlannerRevision(t *testing.T) {
-	k := newTestKitchen(t)
-
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, -1, false)
-	if err != nil {
-		t.Fatalf("SubmitIdea: %v", err)
-	}
-	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Typed parser errors"))
-
-	firstReviewTaskID := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, isPlanReviewTask)
-	completePlanReviewTask(t, k, bundle.Plan.PlanID, pool.ReviewFail, "Split the work into smaller tasks.", pool.SeverityMajor)
-
-	got, err := k.GetPlan(bundle.Plan.PlanID)
-	if err != nil {
-		t.Fatalf("GetPlan(after failed review): %v", err)
-	}
-	if got.Execution.State != planStatePlanning {
-		t.Fatalf("state = %q, want %q", got.Execution.State, planStatePlanning)
-	}
-	if got.Execution.ReviewStatus != planReviewStatusFailed {
-		t.Fatalf("review status = %q, want %q", got.Execution.ReviewStatus, planReviewStatusFailed)
-	}
-	if got.Execution.ReviewRevisions != 1 {
-		t.Fatalf("review revisions = %d, want 1", got.Execution.ReviewRevisions)
-	}
-	if len(got.Execution.History) < 4 {
-		t.Fatalf("history = %+v, want planning/review timeline", got.Execution.History)
-	}
-	last := got.Execution.History[len(got.Execution.History)-1]
-	if last.Type != planHistoryPlanningStarted || last.Cycle != 2 {
-		t.Fatalf("last history entry = %+v, want cycle 2 planning start", last)
-	}
-	revisionTaskID := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, func(task pool.Task) bool {
-		return task.Role == plannerTaskRole && !isPlanReviewTask(task)
-	})
-	if !strings.Contains(revisionTaskID, planRevisionTaskID+"-1") {
-		t.Fatalf("revision task ID = %q, want %q suffix", revisionTaskID, planRevisionTaskID+"-1")
-	}
-
-	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
-		Title: "Typed parser errors v2",
-		Tasks: []adapter.PlanArtifactTask{{
-			ID:               "t1",
-			Title:            "Add typed parser errors",
-			Prompt:           "Introduce typed parser errors and update callers.",
-			Complexity:       string(ComplexityLow),
-			ReviewComplexity: string(ComplexityLow),
-		}, {
-			ID:               "t2",
-			Title:            "Update callers",
-			Prompt:           "Update callers to use typed parser errors.",
-			Complexity:       string(ComplexityMedium),
-			Dependencies:     []string{"t1"},
-			ReviewComplexity: string(ComplexityMedium),
-		}},
-	})
-
-	got, err = k.GetPlan(bundle.Plan.PlanID)
-	if err != nil {
-		t.Fatalf("GetPlan(after revision planning): %v", err)
-	}
-	if got.Execution.State != planStateReviewing {
-		t.Fatalf("state = %q, want %q after revision plan", got.Execution.State, planStateReviewing)
-	}
-	secondReviewTaskID := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, isPlanReviewTask)
-	if secondReviewTaskID == firstReviewTaskID {
-		t.Fatalf("review task ID reused: %q", secondReviewTaskID)
-	}
-	if !strings.Contains(secondReviewTaskID, planReviewTaskID+"-2") {
-		t.Fatalf("second review task ID = %q, want %q suffix", secondReviewTaskID, planReviewTaskID+"-2")
-	}
-	history := got.Execution.History
-	if history[0].Type != planHistoryPlanningStarted || history[0].Cycle != 1 {
-		t.Fatalf("first history entry = %+v, want initial planning start", history[0])
-	}
-	if history[1].Type != planHistoryPlanningCompleted || history[1].Cycle != 1 {
-		t.Fatalf("second history entry = %+v, want initial planning completion", history[1])
-	}
-	if history[2].Type != planHistoryReviewRequested || history[2].Cycle != 1 {
-		t.Fatalf("third history entry = %+v, want initial review request", history[2])
-	}
-	if history[3].Type != planHistoryReviewFailed || history[3].Cycle != 1 {
-		t.Fatalf("fourth history entry = %+v, want failed first review", history[3])
-	}
-	if len(history[3].Findings) == 0 || !strings.Contains(history[3].Findings[0], "Severity:") {
-		t.Fatalf("failed review history findings = %+v, want persisted findings", history[3].Findings)
-	}
-}
-
-func TestKitchenReviewWithZeroMaxRevisionsStopsAfterFailedReview(t *testing.T) {
-	k := newTestKitchen(t)
-
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, true, 1, 0, false)
-	if err != nil {
-		t.Fatalf("SubmitIdea: %v", err)
-	}
-	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Typed parser errors"))
-	reviewTaskID := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, isPlanReviewTask)
-	completePlanReviewTask(t, k, bundle.Plan.PlanID, pool.ReviewFail, "Split the work into smaller tasks.", pool.SeverityMajor)
-
-	got, err := k.GetPlan(bundle.Plan.PlanID)
-	if err != nil {
-		t.Fatalf("GetPlan(after failed review): %v", err)
-	}
-	if got.Execution.State != planStatePendingApproval {
-		t.Fatalf("state = %q, want %q", got.Execution.State, planStatePendingApproval)
-	}
-	if got.Execution.ReviewRevisions != 0 {
-		t.Fatalf("review revisions = %d, want 0", got.Execution.ReviewRevisions)
-	}
-	if len(got.Execution.FailedTaskIDs) != 0 {
-		t.Fatalf("failed task IDs = %+v, want none", got.Execution.FailedTaskIDs)
-	}
-	for _, task := range k.pm.Tasks() {
-		if task.PlanID != bundle.Plan.PlanID || task.ID == reviewTaskID {
-			continue
-		}
-		if task.Role == plannerTaskRole && !isPlanReviewTask(task) && (task.Status == pool.TaskQueued || task.Status == pool.TaskDispatched) {
-			t.Fatalf("unexpected revision task queued: %+v", task)
-		}
+		t.Fatalf("state = %q, want %q after auto-approve", got.Execution.State, planStateActive)
 	}
 }
 
 func TestKitchenCancelActivePlanCancelsRuntimeTasks(t *testing.T) {
 	k := newTestKitchen(t)
 
-	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false, 0, -1, false)
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
@@ -698,9 +533,9 @@ func completePlanningTask(t *testing.T, k *Kitchen, planID string, artifact adap
 	s.activatePlan = k.ApprovePlan
 
 	taskID := currentPlanControlTaskID(t, k, planID, func(task pool.Task) bool {
-		return task.Role == plannerTaskRole && !isPlanReviewTask(task)
+		return task.Role == plannerTaskRole
 	})
-	workerID := "planner-" + planID
+	workerID := "planner-" + planID + "-" + taskID
 	if _, ok := k.pm.Worker(workerID); !ok {
 		if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: plannerTaskRole}); err != nil {
 			t.Fatalf("SpawnWorker: %v", err)
@@ -720,9 +555,13 @@ func completePlanningTask(t *testing.T, k *Kitchen, planID string, artifact adap
 	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("planned\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile result: %v", err)
 	}
-	raw, err := json.Marshal(artifact)
+	currentTask, ok := k.pm.Task(taskID)
+	if !ok {
+		t.Fatalf("planner task %q not found", taskID)
+	}
+	raw, err := json.Marshal(testCouncilArtifactForTask(*currentTask, artifact))
 	if err != nil {
-		t.Fatalf("Marshal planner artifact: %v", err)
+		t.Fatalf("Marshal council artifact: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
 		t.Fatalf("WriteFile plan: %v", err)
@@ -733,47 +572,58 @@ func completePlanningTask(t *testing.T, k *Kitchen, planID string, artifact adap
 	if err := s.onTaskCompleted(taskID); err != nil {
 		t.Fatalf("onTaskCompleted: %v", err)
 	}
-}
-
-func completePlanReviewTask(t *testing.T, k *Kitchen, planID, verdict, feedback, severity string) {
-	t.Helper()
-
-	gitMgr, err := k.gitManager()
-	if err != nil {
-		t.Fatalf("gitManager: %v", err)
-	}
-	s := NewScheduler(k.pm, &schedulerHostAPI{}, k.router, gitMgr, k.planStore, k.lineageMgr, k.cfg.Concurrency, "kitchen-test")
-	s.notify = k.sendNotify
-	s.activatePlan = k.ApprovePlan
-
-	taskID := currentPlanControlTaskID(t, k, planID, isPlanReviewTask)
-	workerID := "reviewer-" + planID
-	if _, ok := k.pm.Worker(workerID); !ok {
-		if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: "reviewer"}); err != nil {
-			t.Fatalf("SpawnWorker: %v", err)
+	for i := 0; i < 4; i++ {
+		bundle, err := k.GetPlan(planID)
+		if err != nil {
+			t.Fatalf("GetPlan(after council turn): %v", err)
 		}
-		if err := k.pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
-			t.Fatalf("RegisterWorker: %v", err)
+		if bundle.Execution.CouncilAwaitingAnswers ||
+			bundle.Execution.State == planStatePendingApproval ||
+			bundle.Execution.State == planStateActive ||
+			bundle.Execution.State == planStateRejected {
+			return
+		}
+		taskID = currentPlanControlTaskID(t, k, planID, func(task pool.Task) bool {
+			return task.Role == plannerTaskRole
+		})
+		currentTask, ok = k.pm.Task(taskID)
+		if !ok {
+			t.Fatalf("planner task %q not found", taskID)
+		}
+		workerID = "planner-" + planID + "-" + currentTask.ID
+		if _, ok := k.pm.Worker(workerID); !ok {
+			if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: plannerTaskRole}); err != nil {
+				t.Fatalf("SpawnWorker: %v", err)
+			}
+			if err := k.pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+				t.Fatalf("RegisterWorker: %v", err)
+			}
+		}
+		if err := k.pm.DispatchTask(taskID, workerID); err != nil {
+			t.Fatalf("DispatchTask: %v", err)
+		}
+		workerStateDir = pool.WorkerStateDir(k.pm.StateDir(), workerID)
+		if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll worker state: %v", err)
+		}
+		raw, err = json.Marshal(testCouncilArtifactForTask(*currentTask, artifact))
+		if err != nil {
+			t.Fatalf("Marshal council artifact: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
+			t.Fatalf("WriteFile plan: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("planned\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile result: %v", err)
+		}
+		if err := k.pm.CompleteTask(workerID, taskID); err != nil {
+			t.Fatalf("CompleteTask: %v", err)
+		}
+		if err := s.onTaskCompleted(taskID); err != nil {
+			t.Fatalf("onTaskCompleted: %v", err)
 		}
 	}
-	if err := k.pm.DispatchTask(taskID, workerID); err != nil {
-		t.Fatalf("DispatchTask(review): %v", err)
-	}
-
-	workerStateDir := pool.WorkerStateDir(k.pm.StateDir(), workerID)
-	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll worker state: %v", err)
-	}
-	output := "<review><verdict>" + verdict + "</verdict><feedback>" + feedback + "</feedback><severity>" + severity + "</severity></review>"
-	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
-		t.Fatalf("WriteFile review result: %v", err)
-	}
-	if err := k.pm.CompleteTask(workerID, taskID); err != nil {
-		t.Fatalf("CompleteTask(review): %v", err)
-	}
-	if err := s.onTaskCompleted(taskID); err != nil {
-		t.Fatalf("onTaskCompleted(review): %v", err)
-	}
+	t.Fatalf("council planning did not reach a terminal planning state for plan %s", planID)
 }
 
 func basicPlannedArtifact(title string) adapter.PlanArtifact {
@@ -787,6 +637,36 @@ func basicPlannedArtifact(title string) adapter.PlanArtifact {
 			Complexity:       string(ComplexityMedium),
 			ReviewComplexity: string(ComplexityMedium),
 		}},
+	}
+}
+
+func testCouncilArtifactForTask(task pool.Task, artifact adapter.PlanArtifact) adapter.CouncilTurnArtifact {
+	turn := councilTurnNumberFromTaskID(task.PlanID, task.ID)
+	questions := make([]adapter.CouncilUserQuestion, 0, len(artifact.Questions))
+	for i, item := range artifact.Questions {
+		questions = append(questions, adapter.CouncilUserQuestion{
+			ID:           fmt.Sprintf("q%d", i+1),
+			Question:     item.Question,
+			WhyItMatters: item.Context,
+			Blocking:     true,
+		})
+	}
+	stance := "propose"
+	adopted := false
+	if turn >= 2 && len(questions) == 0 {
+		stance = "converged"
+		adopted = true
+	}
+	planCopy := artifact
+	return adapter.CouncilTurnArtifact{
+		Seat:             councilSeatForTurn(turn),
+		Turn:             turn,
+		Stance:           stance,
+		CandidatePlan:    &planCopy,
+		AdoptedPriorPlan: adopted,
+		QuestionsForUser: questions,
+		SeatMemo:         firstNonEmpty(artifact.Summary, artifact.Title),
+		Summary:          firstNonEmpty(artifact.Summary, artifact.Title),
 	}
 }
 

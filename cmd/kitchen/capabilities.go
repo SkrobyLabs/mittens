@@ -47,7 +47,6 @@ func kitchenCapabilities() map[string]any {
 		"meta": kitchenCapabilityMetadata(),
 		"cli": map[string]any{
 			"submit": map[string]any{
-				"review": true,
 				"inputs": []string{"inline", "file", "stdin", "editor"},
 				"options": map[string]any{
 					"lineage": map[string]any{
@@ -57,21 +56,9 @@ func kitchenCapabilities() map[string]any {
 						"type":    "bool",
 						"default": false,
 					},
-					"review": map[string]any{
+					"implReview": map[string]any{
 						"type":    "bool",
 						"default": false,
-					},
-					"reviewRounds": map[string]any{
-						"type":    "int",
-						"minimum": 0,
-						"default": 0,
-					},
-					"maxReviewRevisions": map[string]any{
-						"type":           "int",
-						"minimum":        -1,
-						"default":        -1,
-						"special":        map[string]any{"-1": "use default", "0": "disable automatic refinement"},
-						"requiresReview": true,
 					},
 				},
 			},

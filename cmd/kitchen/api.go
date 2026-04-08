@@ -25,6 +25,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/plans/{id}", k.withAPIAuth(token, k.handleGetPlan))
 	mux.HandleFunc("GET /v1/plans/{id}/history", k.withAPIAuth(token, k.handlePlanHistory))
 	mux.HandleFunc("GET /v1/plans/{id}/evidence", k.withAPIAuth(token, k.handlePlanEvidence))
+	mux.HandleFunc("POST /v1/plans/{id}/extend", k.withAPIAuth(token, k.handleExtendCouncil))
 	mux.HandleFunc("GET /v1/tasks/{id}/activity", k.withAPIAuth(token, k.handleTaskActivity))
 	mux.HandleFunc("POST /v1/tasks/{id}/retry", k.withAPIAuth(token, k.handleRetryTask))
 	mux.HandleFunc("POST /v1/tasks/{id}/fix-conflicts", k.withAPIAuth(token, k.handleFixConflicts))
@@ -126,22 +127,15 @@ func apiErrorStatus(err error) int {
 
 func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Idea               string `json:"idea"`
-		Lineage            string `json:"lineage"`
-		Auto               bool   `json:"auto"`
-		Review             bool   `json:"review"`
-		ReviewRounds       int    `json:"reviewRounds"`
-		MaxReviewRevisions *int   `json:"maxReviewRevisions"`
-		ImplReview         bool   `json:"implReview"`
+		Idea       string `json:"idea"`
+		Lineage    string `json:"lineage"`
+		Auto       bool   `json:"auto"`
+		ImplReview bool   `json:"implReview"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
 	}
-	maxReviewRevisions := -1
-	if req.MaxReviewRevisions != nil {
-		maxReviewRevisions = *req.MaxReviewRevisions
-	}
-	bundle, err := k.SubmitIdea(req.Idea, req.Lineage, req.Auto, req.Review, req.ReviewRounds, maxReviewRevisions, req.ImplReview)
+	bundle, err := k.SubmitIdea(req.Idea, req.Lineage, req.Auto, req.ImplReview)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
@@ -151,13 +145,26 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 		"state":   bundle.Execution.State,
 		"lineage": bundle.Plan.Lineage,
 	}
-	if bundle.Execution.ReviewRequested {
-		resp["reviewStatus"] = bundle.Execution.ReviewStatus
-		resp["reviewRounds"] = bundle.Execution.ReviewRounds
-		resp["maxReviewRevisions"] = bundle.Execution.MaxReviewRevisions
-		resp["reviewFindings"] = bundle.Execution.ReviewFindings
-	}
+	resp["councilMaxTurns"] = bundle.Execution.CouncilMaxTurns
 	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+func (k *Kitchen) handleExtendCouncil(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Turns int `json:"turns"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	if err := k.ExtendCouncil(r.PathValue("id"), req.Turns); err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"status": "extended",
+		"planId": r.PathValue("id"),
+		"turns":  req.Turns,
+	})
 }
 
 func (k *Kitchen) handleListPlans(w http.ResponseWriter, r *http.Request) {

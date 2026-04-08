@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SkrobyLabs/mittens/pkg/adapter"
 )
 
 // ErrPlanNotFound is returned by PlanStore.Get when the plan directory or its
@@ -104,13 +106,6 @@ type ExecutionRecord struct {
 	State              string             `json:"state"`
 	AutoApproved       bool               `json:"autoApproved,omitempty"`
 	Approved           bool               `json:"approved,omitempty"`
-	ReviewRequested    bool               `json:"reviewRequested,omitempty"`
-	ReviewRounds       int                `json:"reviewRounds,omitempty"`
-	ReviewAttempts     int                `json:"reviewAttempts,omitempty"`
-	ReviewRevisions    int                `json:"reviewRevisions,omitempty"`
-	MaxReviewRevisions int                `json:"maxReviewRevisions,omitempty"`
-	ReviewStatus       string             `json:"reviewStatus,omitempty"`
-	ReviewFindings     []string           `json:"reviewFindings,omitempty"`
 	History            []PlanHistoryEntry `json:"history,omitempty"`
 	Branch             string             `json:"branch,omitempty"`
 	Anchor             PlanAnchor         `json:"anchor,omitempty"`
@@ -122,12 +117,36 @@ type ExecutionRecord struct {
 	ApprovedAt         *time.Time         `json:"approvedAt,omitempty"`
 	ActivatedAt        *time.Time         `json:"activatedAt,omitempty"`
 	CompletedAt        *time.Time         `json:"completedAt,omitempty"`
-	ReviewedAt             *time.Time         `json:"reviewedAt,omitempty"`
-	ImplReviewRequested    bool               `json:"implReviewRequested,omitempty"`
-	ImplReviewAttempts     int                `json:"implReviewAttempts,omitempty"`
-	ImplReviewStatus       string             `json:"implReviewStatus,omitempty"`
-	ImplReviewFindings     []string           `json:"implReviewFindings,omitempty"`
-	ImplReviewedAt         *time.Time         `json:"implReviewedAt,omitempty"`
+	ImplReviewRequested bool              `json:"implReviewRequested,omitempty"`
+	ImplReviewAttempts  int               `json:"implReviewAttempts,omitempty"`
+	ImplReviewStatus    string            `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings  []string          `json:"implReviewFindings,omitempty"`
+	ImplReviewedAt      *time.Time        `json:"implReviewedAt,omitempty"`
+	CouncilMaxTurns                int                        `json:"councilMaxTurns,omitempty"`
+	CouncilTurnsCompleted          int                        `json:"councilTurnsCompleted,omitempty"`
+	CouncilAwaitingAnswers         bool                       `json:"councilAwaitingAnswers,omitempty"`
+	CouncilFinalDecision           string                     `json:"councilFinalDecision,omitempty"`
+	CouncilSeats                   [2]CouncilSeatRecord       `json:"councilSeats,omitempty"`
+	CouncilTurns                   []CouncilTurnRecord        `json:"councilTurns,omitempty"`
+	CouncilWarnings                []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
+	CouncilUnresolvedDisagreements []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
+	RejectedBy                     string                     `json:"rejectedBy,omitempty"`
+}
+
+type CouncilSeatRecord struct {
+	Seat         string     `json:"seat"`
+	WorkerID     string     `json:"workerId,omitempty"`
+	PoolKey      PoolKey    `json:"poolKey,omitempty"`
+	IdleSince    *time.Time `json:"idleSince,omitempty"`
+	Rehydrated   bool       `json:"rehydrated,omitempty"`
+	RehydratedAt *time.Time `json:"rehydratedAt,omitempty"`
+}
+
+type CouncilTurnRecord struct {
+	Seat       string                       `json:"seat"`
+	Turn       int                          `json:"turn"`
+	Artifact   *adapter.CouncilTurnArtifact `json:"artifact"`
+	OccurredAt time.Time                    `json:"occurredAt"`
 }
 
 type AffinityRecord struct {

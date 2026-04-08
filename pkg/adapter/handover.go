@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/pkg/pool"
@@ -149,6 +151,29 @@ func ExtractReviewVerdict(output string) (verdict, feedback, severity string) {
 		return "", "", ""
 	}
 	return verdict, feedback, severity
+}
+
+func ExtractCouncilTurnArtifact(output string) (*CouncilTurnArtifact, error) {
+	end := strings.LastIndex(output, "</council_turn>")
+	if end < 0 {
+		return nil, fmt.Errorf("council turn block not found")
+	}
+	start := strings.LastIndex(output[:end], "<council_turn>")
+	if start < 0 {
+		return nil, fmt.Errorf("council turn block not found")
+	}
+	body := strings.TrimSpace(output[start+len("<council_turn>") : end])
+	if body == "" {
+		return nil, fmt.Errorf("council turn block is empty")
+	}
+	var artifact CouncilTurnArtifact
+	if err := json.Unmarshal([]byte(body), &artifact); err != nil {
+		return nil, fmt.Errorf("decode council turn JSON: %w", err)
+	}
+	if err := validateCouncilTurnArtifact(&artifact); err != nil {
+		return nil, err
+	}
+	return &artifact, nil
 }
 
 // extractTag finds <tag>content</tag> in a block and returns the trimmed content.

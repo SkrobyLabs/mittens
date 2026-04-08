@@ -88,6 +88,72 @@ At the end of your response, output a plan block with valid JSON:
 
 Return only valid JSON inside <plan>. Use stable task IDs like t1, t2, t3.`
 
+const councilTurnSuffix = `
+
+At the end of your response, output a council turn block with valid JSON:
+<council_turn>
+{
+  "seat": "A|B",
+  "turn": 1,
+  "stance": "propose|revise|converged|blocked",
+  "candidatePlan": {
+    "title": "Short plan title",
+    "summary": "Optional operator-facing summary",
+    "lineage": "optional-lineage-slug",
+    "ownership": {
+      "packages": ["optional/package"],
+      "exclusive": false
+    },
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Task title",
+        "prompt": "Worker-ready task prompt",
+        "complexity": "low|medium|high",
+        "dependencies": [],
+        "outputs": {
+          "files": ["optional/file.go"],
+          "artifacts": ["optional-artifact"]
+        },
+        "successCriteria": {
+          "advisory": "Optional plain-language success note",
+          "verifiable": ["Optional concrete checks"]
+        },
+        "reviewComplexity": "low|medium|high"
+      }
+    ],
+    "questions": []
+  },
+  "adoptedPriorPlan": false,
+  "disagreements": [
+    {
+      "id": "d1",
+      "severity": "major|critical",
+      "category": "architecture|dependency|scope|assumption|overengineering",
+      "title": "Short title",
+      "impact": "Why this matters",
+      "blocking": true,
+      "taskIds": ["t1"],
+      "suggestedChange": "Optional fix direction"
+    }
+  ],
+  "questionsForUser": [
+    {
+      "id": "q1",
+      "question": "Question text",
+      "whyItMatters": "How the answer changes the plan",
+      "blocking": true
+    }
+  ],
+  "strengths": ["Short strengths"],
+  "seatMemo": "Compact reasoning summary for fallback rehydration",
+  "rejectedAlternatives": ["Discarded option and why"],
+  "summary": "Overall seat summary"
+}
+</council_turn>
+
+Return only valid JSON inside <council_turn>.`
+
 // BuildPlannerPrompt creates a prompt that instructs the planner AI to output a
 // structured plan artifact. The caller's Execute() wraps this with BuildPrompt,
 // which adds the handover instructions, so prior context is embedded here.
@@ -104,44 +170,41 @@ func BuildPlannerPrompt(taskPrompt, priorContext string) string {
 	return b.String()
 }
 
-// BuildPlanReviewPrompt creates a prompt that asks a reviewer to assess a
-// structured execution plan and emit the standard <review> verdict block.
-func BuildPlanReviewPrompt(planJSON, priorContext string, reviewRounds int) string {
+func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string) string {
 	var b strings.Builder
-	if priorContext != "" {
-		b.WriteString("## Prior Context\n\n")
-		b.WriteString(priorContext)
-		b.WriteString("\n\n---\n\n")
+	b.WriteString("## Planner Council Turn\n\n")
+	b.WriteString("You are one seat in a two-seat planner council. Produce a full replacement candidate plan every turn.\n\n")
+	b.WriteString("### Council Rules\n\n")
+	b.WriteString("- Seats alternate A then B.\n")
+	b.WriteString("- Explicit adoption only. Set `adoptedPriorPlan=true` only when you intentionally adopt the previous seat's plan.\n")
+	b.WriteString("- Use `stance=converged` only when you adopt the prior plan and believe the council has converged.\n")
+	b.WriteString("- Use `questionsForUser` only for genuinely blocking operator input.\n")
+	b.WriteString("- `seatMemo` and `rejectedAlternatives` should help rehydration if your seat is replaced.\n\n")
+	b.WriteString("### Current Turn\n\n")
+	b.WriteString(fmt.Sprintf("Seat: %s\nTurn: %d\n\n", strings.TrimSpace(seat), turn))
+	if strings.TrimSpace(summary) != "" {
+		b.WriteString("### Operator Intent\n\n")
+		b.WriteString(strings.TrimSpace(summary))
+		b.WriteString("\n\n")
 	}
-	b.WriteString("## Plan Review Request\n\n")
-	b.WriteString("Review the execution plan below for decomposition quality, dependency correctness, outputs, success criteria, and whether any operator questions are justified.\n\n")
-	if reviewRounds > 1 {
-		b.WriteString(fmt.Sprintf("Conduct %d internal review passes before producing your final verdict.\n\n", reviewRounds))
+	if strings.TrimSpace(idea) != "" {
+		b.WriteString("### Idea\n\n")
+		b.WriteString(strings.TrimSpace(idea))
+		b.WriteString("\n\n")
 	}
-	b.WriteString("### Plan JSON\n\n```json\n")
-	b.WriteString(strings.TrimSpace(planJSON))
-	b.WriteString("\n```\n")
-	b.WriteString(reviewSuffix)
-	return b.String()
-}
-
-// BuildPlanRevisionPrompt creates a prompt that asks a planner to revise a plan
-// using reviewer feedback while emitting a fresh <plan> JSON artifact.
-func BuildPlanRevisionPrompt(planJSON, reviewFeedback, priorContext string) string {
-	var b strings.Builder
-	if priorContext != "" {
-		b.WriteString("## Prior Context\n\n")
-		b.WriteString(priorContext)
-		b.WriteString("\n\n---\n\n")
+	if len(prior) > 0 {
+		b.WriteString("### Prior Artifact Chain\n\n")
+		for _, item := range prior {
+			data, err := json.MarshalIndent(item, "", "  ")
+			if err != nil {
+				continue
+			}
+			b.WriteString("```json\n")
+			b.Write(data)
+			b.WriteString("\n```\n\n")
+		}
 	}
-	b.WriteString("## Plan Revision Request\n\n")
-	b.WriteString("Revise the execution plan below using the reviewer feedback. Keep sound parts, fix the issues raised, and return a complete replacement plan.\n\n")
-	b.WriteString("### Reviewer Feedback\n\n")
-	b.WriteString(strings.TrimSpace(reviewFeedback))
-	b.WriteString("\n\n### Current Plan JSON\n\n```json\n")
-	b.WriteString(strings.TrimSpace(planJSON))
-	b.WriteString("\n```\n")
-	b.WriteString(plannerSuffix)
+	b.WriteString(councilTurnSuffix)
 	return b.String()
 }
 

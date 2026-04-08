@@ -46,6 +46,8 @@ type Kitchen struct {
 	notifySubs map[int]chan pool.Notification
 	notifySeq  int
 	repoMutex  sync.Mutex
+	councilResumeMu sync.Mutex
+	councilExtendMu sync.Mutex
 	cfg        KitchenConfig
 	repoPath   string
 	paths      KitchenPaths
@@ -67,9 +69,6 @@ func main() {
 func newRootCommand() *cobra.Command {
 	var submitLineage string
 	var submitAuto bool
-	var submitReview bool
-	var submitReviewRounds int
-	var submitMaxReviewRevisions int
 	var submitImplReview bool
 	var submitFile string
 	var plansCompleted bool
@@ -109,7 +108,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	submitCmd := &cobra.Command{
-		Use:   "submit [--lineage LINEAGE] [--auto] [--review] [--review-rounds N] [--file PATH|-] [IDEA]",
+		Use:   "submit [--lineage LINEAGE] [--auto] [--file PATH|-] [IDEA]",
 		Short: "Submit an idea for planning",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -120,7 +119,7 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions, submitImplReview)
+				resp, err := client.SubmitIdea(idea, submitLineage, submitAuto, submitImplReview)
 				if err != nil {
 					return err
 				}
@@ -133,7 +132,7 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.SubmitIdea(idea, submitLineage, submitAuto, submitReview, submitReviewRounds, submitMaxReviewRevisions, submitImplReview)
+			bundle, err := k.SubmitIdea(idea, submitLineage, submitAuto, submitImplReview)
 			if err != nil {
 				return err
 			}
@@ -141,21 +140,13 @@ func newRootCommand() *cobra.Command {
 				"planId":  bundle.Plan.PlanID,
 				"state":   bundle.Execution.State,
 				"lineage": bundle.Plan.Lineage,
-			}
-			if bundle.Execution.ReviewRequested {
-				resp["reviewStatus"] = bundle.Execution.ReviewStatus
-				resp["reviewRounds"] = bundle.Execution.ReviewRounds
-				resp["maxReviewRevisions"] = bundle.Execution.MaxReviewRevisions
-				resp["reviewFindings"] = bundle.Execution.ReviewFindings
+				"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
 			}
 			return writeJSON(cmd.OutOrStdout(), resp)
 		},
 	}
 	submitCmd.Flags().StringVar(&submitLineage, "lineage", "", "lineage to submit the idea into")
 	submitCmd.Flags().BoolVar(&submitAuto, "auto", false, "auto-approve the generated plan")
-	submitCmd.Flags().BoolVar(&submitReview, "review", false, "request adversarial planning review")
-	submitCmd.Flags().IntVar(&submitReviewRounds, "review-rounds", 0, "number of review passes to request from the plan reviewer")
-	submitCmd.Flags().IntVar(&submitMaxReviewRevisions, "max-review-revisions", -1, "automatic planner revisions after failed review; -1 keeps the default and 0 disables retries")
 	submitCmd.Flags().StringVar(&submitFile, "file", "", "read the idea body from a file path or '-' for stdin")
 	submitCmd.Flags().BoolVar(&submitImplReview, "impl-review", false, "request a post-implementation adversarial review")
 

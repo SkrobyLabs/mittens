@@ -383,7 +383,6 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		prompt = adapter.BuildReviewPrompt(task.Prompt, implementerSummary, priorContext)
 		priorContext = ""
 	} else if task.Role == "planner" {
-		prompt = adapter.BuildPlannerPrompt(task.Prompt, priorContext)
 		priorContext = ""
 	}
 
@@ -412,7 +411,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		}
 
 		if task.Role == "planner" {
-			planArtifact, err := adapter.ExtractPlanArtifact(result.Output)
+			councilArtifact, err := adapter.ExtractCouncilTurnArtifact(result.Output)
 			if err != nil {
 				reportMsg := fmt.Sprintf("planner artifact invalid: %v", err)
 				writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
@@ -422,7 +421,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 				}
 				return false
 			}
-			if data, err := json.MarshalIndent(planArtifact, "", "  "); err == nil {
+			if data, err := json.MarshalIndent(councilArtifact, "", "  "); err == nil {
 				writeTeamFileAtomic(state.teamDir, teamPlanFile, data)
 			}
 		}

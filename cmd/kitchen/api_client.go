@@ -84,20 +84,24 @@ func (c *kitchenAPIClient) request(method, path string, body any, dst any) error
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
-func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, review bool, reviewRounds, maxReviewRevisions int, implReview bool) (map[string]any, error) {
+func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, implReview bool) (map[string]any, error) {
 	req := map[string]any{
-		"idea":         idea,
-		"lineage":      lineage,
-		"auto":         auto,
-		"review":       review,
-		"reviewRounds": reviewRounds,
-		"implReview":   implReview,
-	}
-	if maxReviewRevisions >= 0 {
-		req["maxReviewRevisions"] = maxReviewRevisions
+		"idea":       idea,
+		"lineage":    lineage,
+		"auto":       auto,
+		"implReview": implReview,
 	}
 	var resp map[string]any
 	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)
+}
+
+func (c *kitchenAPIClient) ExtendCouncil(planID string, turns int) (map[string]any, error) {
+	req := map[string]any{}
+	if turns != 0 {
+		req["turns"] = turns
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/extend", req, &resp)
 }
 
 func (c *kitchenAPIClient) ListPlans(includeCompleted bool) ([]PlanRecord, error) {

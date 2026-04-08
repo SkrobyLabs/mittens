@@ -58,20 +58,17 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 	}
 
 	exec := ExecutionRecord{
-		State:           "active",
-		Approved:        true,
-		ReviewRequested: true,
-		ReviewRounds:    2,
-		ReviewStatus:    "passed",
-		ReviewFindings:  []string{"single-task draft"},
+		State:               "active",
+		Approved:            true,
+		ImplReviewRequested: true,
+		ImplReviewStatus:    "passed",
+		ImplReviewFindings:  []string{"single-task draft"},
+		CouncilMaxTurns:     4,
 		History: []PlanHistoryEntry{{
-			Type:    planHistoryReviewPassed,
+			Type:    planHistoryCouncilConverged,
 			Cycle:   1,
-			TaskID:  "plan_custom-plan-review-1",
-			Verdict: "pass",
-			Findings: []string{
-				"single-task draft",
-			},
+			TaskID:  councilTaskID(planID, 2),
+			Summary: "Council converged.",
 		}},
 		ActiveTaskIDs: []string{"t1"},
 	}
@@ -94,11 +91,11 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 	if got.Execution.State != "active" || len(got.Execution.ActiveTaskIDs) != 1 {
 		t.Fatalf("execution = %+v, want active task state", got.Execution)
 	}
-	if !got.Execution.ReviewRequested || got.Execution.ReviewRounds != 2 || got.Execution.ReviewStatus != "passed" {
-		t.Fatalf("execution review metadata = %+v, want persisted review fields", got.Execution)
+	if !got.Execution.ImplReviewRequested || got.Execution.ImplReviewStatus != "passed" || got.Execution.CouncilMaxTurns != 4 {
+		t.Fatalf("execution metadata = %+v, want persisted impl review + council fields", got.Execution)
 	}
-	if len(got.Execution.History) != 1 || got.Execution.History[0].Type != planHistoryReviewPassed {
-		t.Fatalf("execution history = %+v, want persisted review history", got.Execution.History)
+	if len(got.Execution.History) != 1 || got.Execution.History[0].Type != planHistoryCouncilConverged {
+		t.Fatalf("execution history = %+v, want persisted council history", got.Execution.History)
 	}
 	if got.Affinity.LastWorkerID != "w-impl-1" {
 		t.Fatalf("affinity = %+v, want last worker set", got.Affinity)
