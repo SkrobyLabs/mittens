@@ -131,7 +131,7 @@ model = "gemma4-26b-64k"
 model_provider = "ollama-remote"
 ```
 
-Replace `<server-ip>` with the Ollama server's LAN IP (e.g. `10.0.26.137`).
+Replace `<server-ip>` with the Ollama server's LAN IP (e.g. `10.0.1.50`).
 
 Key settings:
 - `supports_websockets = false` -- Ollama does not support WebSocket transport; without this, Codex tries WebSocket first and times out
