@@ -368,7 +368,7 @@ func (a *App) Run() error {
 	// Skip OAuth credential staging when using a custom base URL (local/third-party
 	// provider) — the stored tokens belong to the original provider and will cause
 	// refresh failures that block the CLI.
-	if a.Provider.UsingCustomBaseURL() {
+	if a.Provider.UsingCustomBaseURL() || os.Getenv("OLLAMA_HOST") != "" {
 		logInfo("Custom base URL detected (%s), skipping OAuth credential staging", a.Provider.BaseURLEnv)
 		a.Credentials = &CredentialManager{}
 	} else {
@@ -1118,6 +1118,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 	if a.Provider.BaseURLEnv != "" && os.Getenv(a.Provider.BaseURLEnv) != "" {
 		args = append(args, "-e", a.Provider.BaseURLEnv+"="+os.Getenv(a.Provider.BaseURLEnv))
+	}
+	// Forward OLLAMA_HOST for --oss mode with remote Ollama servers.
+	if os.Getenv("OLLAMA_HOST") != "" {
+		args = append(args, "-e", "OLLAMA_HOST="+os.Getenv("OLLAMA_HOST"))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
 	for k, v := range a.Provider.ContainerEnv {
