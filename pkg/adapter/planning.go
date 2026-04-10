@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -173,10 +174,10 @@ func BuildPlannerPrompt(taskPrompt, priorContext string) string {
 func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string) string {
 	var b strings.Builder
 	b.WriteString("## Planner Council Turn\n\n")
-	b.WriteString("You are one seat in a two-seat planner council. Produce a full replacement candidate plan every turn.\n\n")
+	b.WriteString("You are one seat in a two-seat planner council. Produce a full candidate plan each turn, integrating any improvements over the prior seat's plan.\n\n")
 	b.WriteString("### Council Rules\n\n")
 	b.WriteString("- Seats alternate A then B.\n")
-	b.WriteString("- Explicit adoption only. Set `adoptedPriorPlan=true` only when you intentionally adopt the previous seat's plan.\n")
+	b.WriteString("- If after reviewing the prior plan you have no substantive improvements to add, set `adoptedPriorPlan=true` and `stance=converged`. Do not re-emit the prior plan verbatim with `adoptedPriorPlan=false`.\n")
 	b.WriteString("- Use `stance=converged` only when you adopt the prior plan and believe the council has converged.\n")
 	b.WriteString("- Use `questionsForUser` only for genuinely blocking operator input.\n")
 	b.WriteString("- `seatMemo` and `rejectedAlternatives` should help rehydration if your seat is replaced.\n\n")
@@ -290,4 +291,118 @@ func validatePlanArtifact(plan *PlanArtifact) error {
 		}
 	}
 	return nil
+}
+
+// PlanArtifactsEqual reports whether two plan artifacts are structurally equal
+// for council convergence purposes.
+func PlanArtifactsEqual(a, b *PlanArtifact) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if strings.TrimSpace(a.Title) != strings.TrimSpace(b.Title) ||
+		strings.TrimSpace(a.Summary) != strings.TrimSpace(b.Summary) ||
+		strings.TrimSpace(a.Lineage) != strings.TrimSpace(b.Lineage) {
+		return false
+	}
+	if !planArtifactOwnershipEqual(a.Ownership, b.Ownership) {
+		return false
+	}
+	if len(a.Tasks) != len(b.Tasks) {
+		return false
+	}
+	for i := range a.Tasks {
+		if !planArtifactTaskEqual(a.Tasks[i], b.Tasks[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func planArtifactOwnershipEqual(a, b *PlanArtifactOwnership) bool {
+	if planArtifactOwnershipEmpty(a) && planArtifactOwnershipEmpty(b) {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Exclusive == b.Exclusive &&
+		stringSetEqual(a.Packages, b.Packages)
+}
+
+func planArtifactOwnershipEmpty(item *PlanArtifactOwnership) bool {
+	return item == nil || (!item.Exclusive && len(nonEmptySortedCopy(item.Packages)) == 0)
+}
+
+func planArtifactTaskEqual(a, b PlanArtifactTask) bool {
+	if strings.TrimSpace(a.ID) != strings.TrimSpace(b.ID) ||
+		strings.TrimSpace(a.Title) != strings.TrimSpace(b.Title) ||
+		strings.TrimSpace(a.Prompt) != strings.TrimSpace(b.Prompt) ||
+		strings.TrimSpace(a.Complexity) != strings.TrimSpace(b.Complexity) ||
+		strings.TrimSpace(a.ReviewComplexity) != strings.TrimSpace(b.ReviewComplexity) {
+		return false
+	}
+	if !stringSetEqual(a.Dependencies, b.Dependencies) {
+		return false
+	}
+	if !planArtifactOutputsEqual(a.Outputs, b.Outputs) {
+		return false
+	}
+	return planArtifactSuccessCriteriaEqual(a.SuccessCriteria, b.SuccessCriteria)
+}
+
+func planArtifactOutputsEqual(a, b *PlanArtifactOutputs) bool {
+	if planArtifactOutputsEmpty(a) && planArtifactOutputsEmpty(b) {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return stringSetEqual(a.Files, b.Files) &&
+		stringSetEqual(a.Artifacts, b.Artifacts)
+}
+
+func planArtifactOutputsEmpty(item *PlanArtifactOutputs) bool {
+	return item == nil || (len(nonEmptySortedCopy(item.Files)) == 0 && len(nonEmptySortedCopy(item.Artifacts)) == 0)
+}
+
+func planArtifactSuccessCriteriaEqual(a, b *PlanArtifactSuccessCriteria) bool {
+	if planArtifactSuccessCriteriaEmpty(a) && planArtifactSuccessCriteriaEmpty(b) {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.TrimSpace(a.Advisory) == strings.TrimSpace(b.Advisory) &&
+		stringSetEqual(a.Verifiable, b.Verifiable)
+}
+
+func planArtifactSuccessCriteriaEmpty(item *PlanArtifactSuccessCriteria) bool {
+	return item == nil || (strings.TrimSpace(item.Advisory) == "" && len(nonEmptySortedCopy(item.Verifiable)) == 0)
+}
+
+func stringSetEqual(a, b []string) bool {
+	left := nonEmptySortedCopy(a)
+	right := nonEmptySortedCopy(b)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func nonEmptySortedCopy(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
 }

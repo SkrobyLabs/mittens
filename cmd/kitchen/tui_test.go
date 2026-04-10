@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
@@ -54,8 +55,8 @@ func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool) (string
 	return b.submitPlanID, nil
 }
 func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { return nil }
-func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error { return nil }
-func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error  { return nil }
+func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error              { return nil }
+func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error               { return nil }
 func (b *fakeKitchenTUIBackend) DeletePlan(planID string) error {
 	b.deleteCalls++
 	b.deletedPlanID = planID
@@ -282,6 +283,159 @@ func TestKitchenTUISubmitEnterClosesInputAndQueuesLoad(t *testing.T) {
 	}
 	if !backend.submittedImplReview {
 		t.Fatal("submittedImplReview = false, want true")
+	}
+}
+
+func TestRenderCouncilTurnDiffLines(t *testing.T) {
+	prev := &adapter.PlanArtifact{
+		Title: "Parser cleanup",
+		Tasks: []adapter.PlanArtifactTask{
+			{ID: "t1", Title: "Normalize parser errors", Prompt: "Do work", Complexity: "medium", Dependencies: []string{"t0"}, Outputs: &adapter.PlanArtifactOutputs{Files: []string{"parser/errors.go"}}},
+			{ID: "t2", Title: "Wire callers", Prompt: "Do work", Complexity: "medium"},
+		},
+	}
+	curr := &adapter.PlanArtifact{
+		Title: "Parser cleanup v2",
+		Tasks: []adapter.PlanArtifactTask{
+			{ID: "t1", Title: "Normalize typed parser errors", Prompt: "Do work", Complexity: "medium", Dependencies: []string{"t0", "t2"}, Outputs: &adapter.PlanArtifactOutputs{Files: []string{"parser/errors.go", "cmd/kitchen/capabilities.go"}}},
+			{ID: "t2", Title: "Wire callers", Prompt: "Do work", Complexity: "medium"},
+			{ID: "t3", Title: "Add scroll support", Prompt: "Do work", Complexity: "low"},
+		},
+	}
+
+	t.Run("turn one has no diff lines", func(t *testing.T) {
+		lines := renderCouncilTurnDiffLines(nil, curr, 80, 12)
+		if len(lines) != 0 {
+			t.Fatalf("lines = %+v, want no diff for initial turn", lines)
+		}
+	})
+
+	t.Run("changed turn shows key diff lines", func(t *testing.T) {
+		lines := renderCouncilTurnDiffLines(prev, curr, 80, 12)
+		joined := strings.Join(lines, "\n")
+		for _, want := range []string{
+			"title: Parser cleanup -> Parser cleanup v2",
+			"task count delta: +1",
+			"added task: Add scroll support",
+			"renamed task t1: Normalize parser errors -> Normalize typed parser errors",
+			"Normalize typed parser errors deps: t0 -> t0, t2",
+			"Normalize typed parser errors files: +cmd/kitchen/capabilities.go",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("diff output missing %q:\n%s", want, joined)
+			}
+		}
+	})
+
+	t.Run("non equal prompt only change still surfaces diff", func(t *testing.T) {
+		promptOnly := &adapter.PlanArtifact{
+			Title: "Parser cleanup",
+			Tasks: []adapter.PlanArtifactTask{
+				{ID: "t1", Title: "Normalize parser errors", Prompt: "Do different work", Complexity: "medium", Dependencies: []string{"t0"}, Outputs: &adapter.PlanArtifactOutputs{Files: []string{"parser/errors.go"}}},
+				{ID: "t2", Title: "Wire callers", Prompt: "Do work", Complexity: "medium"},
+			},
+		}
+		lines := renderCouncilTurnDiffLines(prev, promptOnly, 80, 12)
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "Normalize parser errors prompt updated") {
+			t.Fatalf("diff output missing prompt update:\n%s", joined)
+		}
+	})
+
+	t.Run("budget trimming keeps overflow marker", func(t *testing.T) {
+		lines := renderCouncilTurnDiffLines(prev, curr, 80, 3)
+		if len(lines) != 3 {
+			t.Fatalf("line count = %d, want 3", len(lines))
+		}
+		if !strings.Contains(lines[2], "more changes") {
+			t.Fatalf("last line = %q, want overflow marker", lines[2])
+		}
+	})
+
+	t.Run("structurally equal turn shows no change", func(t *testing.T) {
+		equal := &adapter.PlanArtifact{
+			Title: "Parser cleanup",
+			Tasks: []adapter.PlanArtifactTask{
+				{ID: "t1", Title: "Normalize parser errors", Prompt: "Do work", Complexity: "medium", Dependencies: []string{"t0"}, Outputs: &adapter.PlanArtifactOutputs{Files: []string{"parser/errors.go"}}},
+				{ID: "t2", Title: "Wire callers", Prompt: "Do work", Complexity: "medium"},
+			},
+		}
+		lines := renderCouncilTurnDiffLines(prev, equal, 80, 12)
+		if len(lines) != 1 || !strings.Contains(lines[0], "no change") {
+			t.Fatalf("lines = %+v, want no-change marker", lines)
+		}
+	})
+}
+
+func TestRenderPlanDetailLinesIncludesCouncilTurnDiffs(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID:  "plan_council",
+			Title:   "Parser cleanup",
+			Summary: "Keep council changes visible.",
+			Lineage: "parser-cleanup",
+			State:   planStateReviewing,
+			Anchor:  PlanAnchor{Branch: "main", Commit: "abcdef1234567890"},
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 2,
+			CouncilSeats:          newCouncilSeats(),
+			CouncilTurns: []CouncilTurnRecord{
+				{
+					Seat: "A",
+					Turn: 1,
+					Artifact: &adapter.CouncilTurnArtifact{
+						Seat:    "A",
+						Turn:    1,
+						Stance:  "propose",
+						Summary: "Initial proposal.",
+						CandidatePlan: &adapter.PlanArtifact{
+							Title: "Parser cleanup",
+							Tasks: []adapter.PlanArtifactTask{
+								{ID: "t1", Title: "Normalize parser errors", Prompt: "Do work", Complexity: "medium"},
+							},
+						},
+					},
+				},
+				{
+					Seat: "B",
+					Turn: 2,
+					Artifact: &adapter.CouncilTurnArtifact{
+						Seat:    "B",
+						Turn:    2,
+						Stance:  "revise",
+						Summary: "Adds one missing dependency.",
+						CandidatePlan: &adapter.PlanArtifact{
+							Title: "Parser cleanup v2",
+							Tasks: []adapter.PlanArtifactTask{
+								{ID: "t1", Title: "Normalize typed parser errors", Prompt: "Do work", Complexity: "medium", Dependencies: []string{"t0"}},
+								{ID: "t2", Title: "Wire callers", Prompt: "Do work", Complexity: "low"},
+							},
+						},
+					},
+				},
+			},
+		},
+		Progress: PlanProgress{
+			PlanID: "plan_council",
+			Phase:  "planning",
+		},
+	}
+	model := kitchenTUIModel{detail: detail}
+
+	lines := model.renderPlanDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Turn 2 [B] revise",
+		"title: Parser cleanup -> Parser cleanup v2",
+		"added task: Wire callers",
+		"Normalize typed parser errors deps: - -> t0",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("detail output missing %q:\n%s", want, joined)
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ const (
 	planHistoryCouncilWaitingAnswers    = "council_waiting_answers"
 	planHistoryCouncilResumed           = "council_resumed"
 	planHistoryCouncilConverged         = "council_converged"
+	planHistoryCouncilAutoConverged     = "council_auto_converged"
 	planHistoryCouncilRejected          = "council_rejected"
 	planHistoryCouncilSeatRehydrated    = "council_seat_rehydrated"
 	planHistoryCouncilExtended          = "council_extended"
@@ -131,6 +132,8 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Council resumed"
 	case planHistoryCouncilConverged:
 		return "Council converged"
+	case planHistoryCouncilAutoConverged:
+		return "Council auto-converged (structural match)"
 	case planHistoryCouncilRejected:
 		return "Council rejected"
 	case planHistoryCouncilSeatRehydrated:

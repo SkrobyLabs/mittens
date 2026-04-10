@@ -64,12 +64,20 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 		ImplReviewStatus:    "passed",
 		ImplReviewFindings:  []string{"single-task draft"},
 		CouncilMaxTurns:     4,
-		History: []PlanHistoryEntry{{
-			Type:    planHistoryCouncilConverged,
-			Cycle:   1,
-			TaskID:  councilTaskID(planID, 2),
-			Summary: "Council converged.",
-		}},
+		History: []PlanHistoryEntry{
+			{
+				Type:    planHistoryCouncilConverged,
+				Cycle:   1,
+				TaskID:  councilTaskID(planID, 2),
+				Summary: "Council converged.",
+			},
+			{
+				Type:    planHistoryCouncilAutoConverged,
+				Cycle:   2,
+				TaskID:  councilTaskID(planID, 3),
+				Summary: "Council auto-converged.",
+			},
+		},
 		ActiveTaskIDs: []string{"t1"},
 	}
 	if err := store.UpdateExecution(planID, exec); err != nil {
@@ -94,7 +102,7 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 	if !got.Execution.ImplReviewRequested || got.Execution.ImplReviewStatus != "passed" || got.Execution.CouncilMaxTurns != 4 {
 		t.Fatalf("execution metadata = %+v, want persisted impl review + council fields", got.Execution)
 	}
-	if len(got.Execution.History) != 1 || got.Execution.History[0].Type != planHistoryCouncilConverged {
+	if len(got.Execution.History) != 2 || got.Execution.History[0].Type != planHistoryCouncilConverged || got.Execution.History[1].Type != planHistoryCouncilAutoConverged {
 		t.Fatalf("execution history = %+v, want persisted council history", got.Execution.History)
 	}
 	if got.Affinity.LastWorkerID != "w-impl-1" {

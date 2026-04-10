@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	councilContinue  = "continue"
-	councilConverged = "converged"
-	councilAskUser   = "ask_user"
-	councilReject    = "reject"
+	councilContinue      = "continue"
+	councilConverged     = "converged"
+	councilAutoConverged = "auto_converged"
+	councilAskUser       = "ask_user"
+	councilReject        = "reject"
 
 	CouncilHardCap = 8
 )
@@ -99,6 +100,20 @@ func decideCouncilNext(bundle StoredPlan, artifact *adapter.CouncilTurnArtifact)
 	if artifact.Turn >= 2 && artifact.AdoptedPriorPlan && artifact.Stance == "converged" {
 		return councilConverged, nil
 	}
+	if artifact.Turn >= 2 {
+		if prev := previousCouncilCandidatePlan(bundle); prev != nil && adapter.PlanArtifactsEqual(prev, artifact.CandidatePlan) {
+			var autoWarnings []adapter.CouncilDisagreement
+			for _, item := range artifact.Disagreements {
+				if strings.TrimSpace(item.Severity) == pool.SeverityCritical {
+					autoWarnings = nil
+					goto continueNormalFlow
+				}
+				autoWarnings = append(autoWarnings, item)
+			}
+			return councilAutoConverged, autoWarnings
+		}
+	}
+continueNormalFlow:
 	if bundle.Execution.CouncilTurnsCompleted < bundle.Execution.CouncilMaxTurns {
 		return councilContinue, nil
 	}
@@ -113,16 +128,28 @@ func decideCouncilNext(bundle StoredPlan, artifact *adapter.CouncilTurnArtifact)
 	return councilConverged, nil
 }
 
+func previousCouncilCandidatePlan(bundle StoredPlan) *adapter.PlanArtifact {
+	turns := bundle.Execution.CouncilTurns
+	if len(turns) < 2 {
+		return nil
+	}
+	prev := turns[len(turns)-2].Artifact
+	if prev == nil {
+		return nil
+	}
+	return prev.CandidatePlan
+}
+
 func synthesizeBlockedCouncilArtifact(plan PlanRecord, seat string, turn int, reason string) *adapter.CouncilTurnArtifact {
 	candidate := planToArtifact(plan)
 	return &adapter.CouncilTurnArtifact{
-		Seat:              strings.TrimSpace(seat),
-		Turn:              turn,
-		Stance:            "blocked",
-		CandidatePlan:     candidate,
-		AdoptedPriorPlan:  false,
-		SeatMemo:          strings.TrimSpace(reason),
-		Summary:           strings.TrimSpace(reason),
+		Seat:             strings.TrimSpace(seat),
+		Turn:             turn,
+		Stance:           "blocked",
+		CandidatePlan:    candidate,
+		AdoptedPriorPlan: false,
+		SeatMemo:         strings.TrimSpace(reason),
+		Summary:          strings.TrimSpace(reason),
 		Disagreements: []adapter.CouncilDisagreement{{
 			ID:       fmt.Sprintf("blocked-t%d", turn),
 			Severity: pool.SeverityMajor,

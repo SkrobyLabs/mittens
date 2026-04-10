@@ -78,9 +78,9 @@ func TestGeminiAdapter_ModelNormalization(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"flash", "gemini-flash"},
+		{"flash", "flash"},
 		{"gemini-2.0-flash", "gemini-2.0-flash"},
-		{"", "gemini-2.0-flash"},
+		{"", "gemini-2.5-pro"},
 		{"2.0-flash", "gemini-2.0-flash"},
 		{"gemini-pro", "gemini-pro"},
 	}
@@ -126,7 +126,7 @@ func TestGeminiAdapter_Execute_Success(t *testing.T) {
 		t.Fatalf("activity = %+v, want status/completed", activities[0])
 	}
 
-	// Command args must include -p, --model, --sandbox=off.
+	// Command args must include -p, --model, and approval mode.
 	if len(h.records) != 1 {
 		t.Fatalf("command records = %d, want 1", len(h.records))
 	}
@@ -137,8 +137,8 @@ func TestGeminiAdapter_Execute_Success(t *testing.T) {
 	if !hasFlag(rec, "--model") {
 		t.Errorf("expected --model flag in args: %v", rec.args)
 	}
-	if !hasFlag(rec, "--sandbox=off") {
-		t.Errorf("expected --sandbox=off flag in args: %v", rec.args)
+	if !hasFlag(rec, "--approval-mode=yolo") {
+		t.Errorf("expected --approval-mode=yolo flag in args: %v", rec.args)
 	}
 	if got := getFlagValue(rec, "--model"); got != "gemini-2.0-flash" {
 		t.Errorf("--model = %q, want %q", got, "gemini-2.0-flash")
@@ -146,7 +146,7 @@ func TestGeminiAdapter_Execute_Success(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestGeminiAdapter_Execute_ModelPropagated — short name gets prefixed
+// TestGeminiAdapter_Execute_ModelPropagated — short alias passes through unchanged
 // ---------------------------------------------------------------------------
 
 func TestGeminiAdapter_Execute_ModelPropagated(t *testing.T) {
@@ -161,8 +161,8 @@ func TestGeminiAdapter_Execute_ModelPropagated(t *testing.T) {
 		t.Fatalf("command records = %d, want 1", len(h.records))
 	}
 	got := getFlagValue(h.records[0], "--model")
-	if !strings.HasPrefix(got, "gemini-") {
-		t.Errorf("--model = %q, want gemini- prefix", got)
+	if got != "flash" {
+		t.Errorf("--model = %q, want flash alias passthrough", got)
 	}
 }
 

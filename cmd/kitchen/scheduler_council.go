@@ -250,6 +250,19 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 			TaskID:  task.ID,
 			Summary: "Council converged.",
 		})
+	case councilAutoConverged:
+		bundle.Plan.State = planStatePendingApproval
+		bundle.Execution.State = planStatePendingApproval
+		bundle.Execution.CouncilFinalDecision = councilConverged
+		bundle.Execution.CouncilWarnings = append([]adapter.CouncilDisagreement(nil), warnings...)
+		bundle.Execution.CouncilUnresolvedDisagreements = nil
+		bundle.Execution.CouncilSeats = newCouncilSeats()
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryCouncilAutoConverged,
+			Cycle:   artifact.Turn,
+			TaskID:  task.ID,
+			Summary: "Council auto-converged on structurally equal candidate.",
+		})
 	case councilReject:
 		bundle.Plan.State = planStateRejected
 		bundle.Execution.State = planStateRejected
@@ -284,6 +297,14 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 	case councilContinue:
 		return s.enqueueCouncilTurn(bundle)
 	case councilConverged:
+		if s.notify != nil {
+			s.notify(pool.Notification{Type: "plan_ready", ID: task.PlanID, Message: bundle.Plan.Title})
+		}
+		if canAutoApproveCouncil(bundle.Execution) && s.activatePlan != nil && len(pendingQuestionsForPlan(s.pm, task.PlanID)) == 0 {
+			return s.activatePlan(task.PlanID)
+		}
+		return nil
+	case councilAutoConverged:
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_ready", ID: task.PlanID, Message: bundle.Plan.Title})
 		}

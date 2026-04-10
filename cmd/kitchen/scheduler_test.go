@@ -516,6 +516,213 @@ func TestSchedulerOnPlannerTaskCompletedMigratesLineageMarker(t *testing.T) {
 	}
 }
 
+func TestSchedulerAutoConvergesStructurallyEqualCouncilCandidate(t *testing.T) {
+	k := newTestKitchen(t)
+	bundle, err := k.SubmitIdea("Surface council auto convergence", "", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	artifact := adapter.PlanArtifact{
+		Title:   "Auto converge plan",
+		Summary: "Keep the same council candidate",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID:               "t1",
+			Title:            "Keep candidate stable",
+			Prompt:           "Implement the stable plan.",
+			Complexity:       string(ComplexityMedium),
+			ReviewComplexity: string(ComplexityMedium),
+		}},
+	}
+
+	turn1 := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, func(task pool.Task) bool {
+		return task.Role == plannerTaskRole
+	})
+	completeCouncilTurnWithArtifact(t, k, bundle.Plan.PlanID, turn1, testCouncilArtifactForTask(mustTask(t, k.pm, turn1), artifact))
+
+	turn2 := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, func(task pool.Task) bool {
+		return task.Role == plannerTaskRole
+	})
+	second := testCouncilArtifactForTask(mustTask(t, k.pm, turn2), artifact)
+	second.Stance = "revise"
+	second.AdoptedPriorPlan = false
+	second.Summary = "No substantive changes."
+	second.SeatMemo = second.Summary
+	completeCouncilTurnWithArtifact(t, k, bundle.Plan.PlanID, turn2, second)
+
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStatePendingApproval {
+		t.Fatalf("execution state = %q, want %q", got.Execution.State, planStatePendingApproval)
+	}
+	if got.Execution.CouncilFinalDecision != councilConverged {
+		t.Fatalf("final decision = %q, want converged", got.Execution.CouncilFinalDecision)
+	}
+	if len(got.Execution.CouncilTurns) != 2 {
+		t.Fatalf("council turns = %d, want 2", len(got.Execution.CouncilTurns))
+	}
+	last := got.Execution.History[len(got.Execution.History)-1]
+	if last.Type != planHistoryCouncilAutoConverged {
+		t.Fatalf("last history = %+v, want council_auto_converged", last)
+	}
+}
+
+func TestSchedulerAutoConvergedCouncilTriggersAutoApproval(t *testing.T) {
+	k := newTestKitchen(t)
+	bundle, err := k.SubmitIdea("Auto approve identical council candidate", "", true, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	artifact := adapter.PlanArtifact{
+		Title: "Auto approve plan",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID:               "t1",
+			Title:            "Keep candidate stable",
+			Prompt:           "Implement the stable plan.",
+			Complexity:       string(ComplexityMedium),
+			ReviewComplexity: string(ComplexityMedium),
+		}},
+	}
+
+	turn1 := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, func(task pool.Task) bool {
+		return task.Role == plannerTaskRole
+	})
+	completeCouncilTurnWithArtifact(t, k, bundle.Plan.PlanID, turn1, testCouncilArtifactForTask(mustTask(t, k.pm, turn1), artifact))
+
+	turn2 := currentPlanControlTaskID(t, k, bundle.Plan.PlanID, func(task pool.Task) bool {
+		return task.Role == plannerTaskRole
+	})
+	second := testCouncilArtifactForTask(mustTask(t, k.pm, turn2), artifact)
+	second.Stance = "revise"
+	second.AdoptedPriorPlan = false
+	second.Summary = "No substantive changes."
+	second.SeatMemo = second.Summary
+
+	var activated []string
+	completeCouncilTurnWithArtifactUsingActivator(t, k, bundle.Plan.PlanID, turn2, second, func(planID string) error {
+		activated = append(activated, planID)
+		return nil
+	})
+
+	if len(activated) != 1 || activated[0] != bundle.Plan.PlanID {
+		t.Fatalf("activated = %+v, want [%s]", activated, bundle.Plan.PlanID)
+	}
+}
+
+func TestSchedulerRecoverCouncilPlansSkipsAutoConvergedPlan(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_auto_recover",
+			Lineage: "auto-recover",
+			Title:   "Recovered auto converge",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			PlanID:                "plan_auto_recover",
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 2,
+			CouncilFinalDecision:  councilConverged,
+			CouncilWarnings:       []adapter.CouncilDisagreement{{ID: "d1", Severity: "major", Title: "Warning", Category: "scope", Impact: "still okay"}},
+			CouncilTurns:          []CouncilTurnRecord{{Turn: 1, Artifact: &adapter.CouncilTurnArtifact{Seat: "A", Turn: 1, CandidatePlan: &adapter.PlanArtifact{Title: "Recovered", Tasks: []adapter.PlanArtifactTask{{ID: "t1", Title: "Task", Prompt: "Do work", Complexity: "medium"}}}}}, {Turn: 2, Artifact: &adapter.CouncilTurnArtifact{Seat: "B", Turn: 2, CandidatePlan: &adapter.PlanArtifact{Title: "Recovered", Tasks: []adapter.PlanArtifactTask{{ID: "t1", Title: "Task", Prompt: "Do work", Complexity: "medium"}}}}}},
+			History:               []PlanHistoryEntry{{Type: planHistoryCouncilAutoConverged, Cycle: 2, TaskID: councilTaskID("plan_auto_recover", 2), Summary: "Council auto-converged."}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-auto-recover"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	if err := s.recoverCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverCouncilPlansOnStartup: %v", err)
+	}
+	if _, exists := pm.Task(councilTaskID(planID, 3)); exists {
+		t.Fatal("unexpected new council turn enqueued for auto-converged plan")
+	}
+}
+
+func mustTask(t *testing.T, pm *pool.PoolManager, taskID string) pool.Task {
+	t.Helper()
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	return *task
+}
+
+func completeCouncilTurnWithArtifact(t *testing.T, k *Kitchen, planID, taskID string, artifact adapter.CouncilTurnArtifact) {
+	t.Helper()
+	completeCouncilTurnWithArtifactUsingActivator(t, k, planID, taskID, artifact, k.ApprovePlan)
+}
+
+func completeCouncilTurnWithArtifactUsingActivator(t *testing.T, k *Kitchen, planID, taskID string, artifact adapter.CouncilTurnArtifact, activatePlan func(string) error) {
+	t.Helper()
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	s := NewScheduler(k.pm, &schedulerHostAPI{}, k.router, gitMgr, k.planStore, k.lineageMgr, k.cfg.Concurrency, "kitchen-test")
+	s.notify = k.sendNotify
+	s.activatePlan = activatePlan
+	k.scheduler = s
+
+	workerID := "planner-" + planID + "-" + taskID
+	if _, ok := k.pm.Worker(workerID); !ok {
+		if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: plannerTaskRole}); err != nil {
+			t.Fatalf("SpawnWorker: %v", err)
+		}
+		if err := k.pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+			t.Fatalf("RegisterWorker: %v", err)
+		}
+	}
+	if err := k.pm.DispatchTask(taskID, workerID); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(k.pm.StateDir(), workerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("Marshal council artifact: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
+		t.Fatalf("WriteFile plan: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("planned\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask(workerID, taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if err := s.onTaskCompleted(taskID); err != nil {
+		t.Fatalf("onTaskCompleted: %v", err)
+	}
+}
+
 func TestSchedulerKeepDeadWorkersRetainsThenEvictsUnderCap(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

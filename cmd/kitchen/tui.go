@@ -1580,7 +1580,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			lines = append(lines, "No council turns recorded.")
 		} else {
 			lines = append(lines, "Turn summaries:")
-			for _, turn := range detail.Execution.CouncilTurns {
+			for i, turn := range detail.Execution.CouncilTurns {
 				if turn.Artifact == nil {
 					lines = append(lines, fmt.Sprintf("Turn %d [%s]", turn.Turn, firstNonEmpty(turn.Seat, "-")))
 					continue
@@ -1588,6 +1588,11 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 				lines = append(lines, fmt.Sprintf("Turn %d [%s] %s", turn.Turn, firstNonEmpty(turn.Artifact.Seat, turn.Seat, "-"), firstNonEmpty(turn.Artifact.Stance, "-")))
 				lines = appendWrappedPrefixed(lines, "  ", firstNonEmpty(turn.Artifact.Summary, turn.Artifact.SeatMemo), max(1, innerWidth))
 				lines = append(lines, fmt.Sprintf("  disagreements: %d  blocking questions: %d", len(turn.Artifact.Disagreements), countBlockingCouncilQuestions(turn.Artifact.QuestionsForUser)))
+				var prev *adapter.PlanArtifact
+				if i > 0 && detail.Execution.CouncilTurns[i-1].Artifact != nil {
+					prev = detail.Execution.CouncilTurns[i-1].Artifact.CandidatePlan
+				}
+				lines = append(lines, renderCouncilTurnDiffLines(prev, turn.Artifact.CandidatePlan, innerWidth, 12)...)
 			}
 		}
 		switch detail.Plan.State {
@@ -1875,6 +1880,71 @@ func countBlockingCouncilQuestions(items []adapter.CouncilUserQuestion) int {
 		}
 	}
 	return count
+}
+
+func renderCouncilTurnDiffLines(prev, curr *adapter.PlanArtifact, width, budget int) []string {
+	diff := councilTurnDiff(prev, curr)
+	if diff.IsInitial {
+		return nil
+	}
+	if !diff.HasChanges {
+		return []string{"  no change (auto-converge eligible)"}
+	}
+	lines := make([]string, 0, 12)
+	if diff.TitleChanged {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("title: %s -> %s", firstNonEmpty(diff.PrevTitle, "-"), firstNonEmpty(diff.CurrTitle, "-")), max(1, width))
+	}
+	if diff.SummaryChanged {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("summary: %s -> %s", firstNonEmpty(diff.PrevSummary, "-"), firstNonEmpty(diff.CurrSummary, "-")), max(1, width))
+	}
+	if diff.LineageChanged {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("lineage: %s -> %s", firstNonEmpty(diff.PrevLineage, "-"), firstNonEmpty(diff.CurrLineage, "-")), max(1, width))
+	}
+	if diff.OwnershipChanged {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("ownership: %s -> %s", firstNonEmpty(diff.PrevOwnership, "-"), firstNonEmpty(diff.CurrOwnership, "-")), max(1, width))
+	}
+	if diff.TaskCountDelta != 0 {
+		lines = append(lines, fmt.Sprintf("  task count delta: %+d", diff.TaskCountDelta))
+	}
+	if diff.TaskOrderChanged {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("task order: %s -> %s", firstNonEmpty(diff.PrevTaskOrder, "-"), firstNonEmpty(diff.CurrTaskOrder, "-")), max(1, width))
+	}
+	for _, item := range diff.AddedTasks {
+		lines = appendWrappedPrefixed(lines, "  ", "added task: "+item, max(1, width))
+	}
+	for _, item := range diff.RemovedTasks {
+		lines = appendWrappedPrefixed(lines, "  ", "removed task: "+item, max(1, width))
+	}
+	for _, item := range diff.RenamedTasks {
+		lines = appendWrappedPrefixed(lines, "  ", fmt.Sprintf("renamed task %s: %s -> %s", item.ID, firstNonEmpty(item.PrevTitle, "-"), firstNonEmpty(item.CurrTitle, "-")), max(1, width))
+	}
+	for _, item := range diff.PromptChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	for _, item := range diff.ComplexityChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	for _, item := range diff.DependencyChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	for _, item := range diff.FileListChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	for _, item := range diff.ArtifactListChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	for _, item := range diff.SuccessCriteriaChanges {
+		lines = appendWrappedPrefixed(lines, "  ", item, max(1, width))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "  candidate changed")
+	}
+	if budget <= 0 || len(lines) <= budget {
+		return lines
+	}
+	trimmed := append([]string(nil), lines[:budget-1]...)
+	trimmed = append(trimmed, fmt.Sprintf("  … (%d more changes)", len(lines)-(budget-1)))
+	return trimmed
 }
 
 func formatShortDuration(d time.Duration) string {
