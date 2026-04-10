@@ -1397,6 +1397,32 @@ func TestSpawnWorkerPersistsProviderOnWorker(t *testing.T) {
 	}
 }
 
+func TestSpawnWorkerPersistsModelAndAdapterOnWorker(t *testing.T) {
+	dir := t.TempDir()
+	wal, err := OpenWAL(filepath.Join(dir, "test.wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { wal.Close() })
+
+	hostAPI := &capturingHostAPI{}
+	pm := NewPoolManager(PoolConfig{MaxWorkers: 5, StateDir: dir}, wal, hostAPI)
+
+	worker, err := pm.SpawnWorker(WorkerSpec{
+		ID:       "w-1",
+		Role:     "implementer",
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Adapter:  "openai-codex",
+	})
+	if err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if worker.Model != "gpt-5.4" || worker.Adapter != "openai-codex" {
+		t.Fatalf("worker route = %+v, want model and adapter persisted", worker)
+	}
+}
+
 func TestSpawnWorkerPropagatesSessionID(t *testing.T) {
 	dir := t.TempDir()
 	wal, err := OpenWAL(filepath.Join(dir, "test.wal"))

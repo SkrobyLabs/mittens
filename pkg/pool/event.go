@@ -67,6 +67,8 @@ type Event struct {
 type WorkerSpawnedData struct {
 	ContainerID string `json:"containerId,omitempty"`
 	Provider    string `json:"provider,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Adapter     string `json:"adapter,omitempty"`
 	Role        string `json:"role,omitempty"`
 	Token       string `json:"token,omitempty"`
 }
@@ -200,6 +202,8 @@ func Apply(pm *PoolManager, e Event) error {
 			ID:          e.WorkerID,
 			ContainerID: d.ContainerID,
 			Provider:    d.Provider,
+			Model:       d.Model,
+			Adapter:     d.Adapter,
 			Role:        d.Role,
 			Token:       d.Token,
 			Status:      WorkerSpawning,

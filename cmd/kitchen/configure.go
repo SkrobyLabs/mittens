@@ -101,11 +101,15 @@ func runConfigure() error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Configuration saved to %s\n", paths.ConfigPath)
+	fmt.Fprintln(os.Stdout, "Routing changes take effect the next time `kitchen serve` starts.")
 	return nil
 }
 
 func runConfigureRole(cfg *KitchenConfig, role string) error {
 	role = normalizeRoutingRole(role)
+	if role == plannerTaskRole {
+		return runConfigurePlanner(cfg)
+	}
 	if role == defaultRoutingRole {
 		routing, err := editRoleRouting(role, effectiveRoutingForRole(*cfg, role))
 		if err != nil {
@@ -143,6 +147,98 @@ func runConfigureRole(cfg *KitchenConfig, role string) error {
 	}
 	setRoleDefault(cfg, role, defaultRule)
 	setRoleComplexityOverrides(cfg, role, overrides)
+	return nil
+}
+
+func runConfigurePlanner(cfg *KitchenConfig) error {
+	for {
+		selection := "planner"
+		options := []huh.Option[string]{
+			huh.NewOption[string]("Edit planner routing", "planner"),
+			huh.NewOption[string](councilSeatMenuLabel(*cfg, "A"), "seat:A"),
+			huh.NewOption[string](councilSeatMenuLabel(*cfg, "B"), "seat:B"),
+			huh.NewOption[string]("Back", "back"),
+		}
+		if err := huh.NewSelect[string]().
+			Title("planner").
+			Description("Planner routing is the shared baseline for both council seats. Seat routing stores only the differences from planner.").
+			Options(options...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
+		}
+		switch selection {
+		case "back":
+			return nil
+		case "planner":
+			action := "edit"
+			if err := huh.NewSelect[string]().
+				Title("planner").
+				Description(routingRoleStatus(cfg, plannerTaskRole)).
+				Options(
+					huh.NewOption[string]("Edit role default and overrides", "edit"),
+					huh.NewOption[string]("Use default routing", "inherit"),
+					huh.NewOption[string]("Back", "back"),
+				).
+				Value(&action).
+				Run(); err != nil {
+				return err
+			}
+			switch action {
+			case "back":
+				continue
+			case "inherit":
+				clearRoutingForRole(cfg, plannerTaskRole)
+				continue
+			}
+			defaultRule, overrides, err := editRoleDefaultsAndOverrides(*cfg, plannerTaskRole)
+			if err != nil {
+				return err
+			}
+			setRoleDefault(cfg, plannerTaskRole, defaultRule)
+			setRoleComplexityOverrides(cfg, plannerTaskRole, overrides)
+		case "seat:A":
+			if err := runConfigureCouncilSeat(cfg, "A"); err != nil {
+				return err
+			}
+		case "seat:B":
+			if err := runConfigureCouncilSeat(cfg, "B"); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func runConfigureCouncilSeat(cfg *KitchenConfig, seat string) error {
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return nil
+	}
+	action := "edit"
+	if err := huh.NewSelect[string]().
+		Title("Council seat "+seat).
+		Description(councilSeatStatus(*cfg, seat)).
+		Options(
+			huh.NewOption[string]("Edit seat default and overrides", "edit"),
+			huh.NewOption[string]("Use planner routing", "inherit"),
+			huh.NewOption[string]("Back", "back"),
+		).
+		Value(&action).
+		Run(); err != nil {
+		return err
+	}
+	switch action {
+	case "back":
+		return nil
+	case "inherit":
+		clearCouncilSeatRoutingConfig(cfg, seat)
+		return nil
+	}
+	seatCfg, err := editCouncilSeatDefaultsAndOverrides(*cfg, seat)
+	if err != nil {
+		return err
+	}
+	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
 	return nil
 }
 
@@ -264,6 +360,65 @@ func editRoleDefaultsAndOverrides(cfg KitchenConfig, role string) (RoutingRule, 
 	return defaultRule, overrides, nil
 }
 
+func editCouncilSeatDefaultsAndOverrides(cfg KitchenConfig, seat string) (CouncilSeatRoutingConfig, error) {
+	effective := effectiveRoutingForCouncilSeat(cfg, seat)
+	seatCfg, _ := councilSeatRoutingConfig(cfg, seat)
+	defaultValues := roleFormValuesFromRule(seatCfg.Default)
+	if len(seatCfg.Default.Prefer) == 0 {
+		defaultValues = roleFormValuesFromRule(effective[ComplexityMedium])
+	}
+
+	useSeatDefault := len(seatCfg.Default.Prefer) > 0
+	if err := huh.NewConfirm().
+		Title("Set a seat-level default route?").
+		Description("Applies one provider/model to this council seat, with optional per-complexity overrides afterward.").
+		Value(&useSeatDefault).
+		Run(); err != nil {
+		return CouncilSeatRoutingConfig{}, err
+	}
+	defaultRule := RoutingRule{}
+	if useSeatDefault {
+		rule, err := editSingleRoutingRule("Seat default routing", defaultValues, false)
+		if err != nil {
+			return CouncilSeatRoutingConfig{}, err
+		}
+		defaultRule = rule
+	}
+
+	overrides := make(map[Complexity]RoutingRule)
+	for _, complexity := range allComplexities {
+		existingRule, hasExisting := seatCfg.Routing[complexity]
+		enabled := hasExisting
+		plannerRouting := effectiveRoutingForRole(cfg, plannerTaskRole)
+		if !enabled && !useSeatDefault && !routingRuleEqual(effective[complexity], plannerRouting[complexity]) {
+			enabled = true
+		}
+		if err := huh.NewConfirm().
+			Title("Override " + complexityDisplayName(complexity) + " complexity?").
+			Description("Leave off to use the planner baseline or the seat default for this complexity.").
+			Value(&enabled).
+			Run(); err != nil {
+			return CouncilSeatRoutingConfig{}, err
+		}
+		if !enabled {
+			continue
+		}
+		initial := effective[complexity]
+		if hasExisting {
+			initial = existingRule
+		} else if useSeatDefault {
+			initial = defaultRule
+		}
+		rule, err := editSingleRoutingRule(complexityDisplayName(complexity)+" override", roleFormValuesFromRule(initial), true)
+		if err != nil {
+			return CouncilSeatRoutingConfig{}, err
+		}
+		overrides[complexity] = rule
+	}
+
+	return CouncilSeatRoutingConfig{Default: defaultRule, Routing: overrides}, nil
+}
+
 func editSingleRoutingRule(title string, values roleFormValues, includeNone bool) (RoutingRule, error) {
 	if err := huh.NewForm(
 		huh.NewGroup(
@@ -366,4 +521,20 @@ func routingRoleStatus(cfg *KitchenConfig, role string) string {
 		return "This role currently has custom per-complexity routing."
 	}
 	return "This role currently inherits the shared default routing."
+}
+
+func councilSeatMenuLabel(cfg KitchenConfig, seat string) string {
+	seat = normalizeCouncilSeat(seat)
+	if councilSeatHasRoutingOverride(cfg, seat) {
+		return "Seat " + seat + " (custom)"
+	}
+	return "Seat " + seat + " (inherits planner)"
+}
+
+func councilSeatStatus(cfg KitchenConfig, seat string) string {
+	seat = normalizeCouncilSeat(seat)
+	if councilSeatHasRoutingOverride(cfg, seat) {
+		return "This seat currently has custom routing on top of the planner baseline."
+	}
+	return "This seat currently inherits the planner routing."
 }

@@ -246,6 +246,8 @@ func (pm *PoolManager) SpawnWorker(spec WorkerSpec) (*Worker, error) {
 		Data: marshalData(WorkerSpawnedData{
 			ContainerID: containerID,
 			Provider:    spec.Provider,
+			Model:       spec.Model,
+			Adapter:     spec.Adapter,
 			Role:        spec.Role,
 			Token:       workerToken,
 		}),

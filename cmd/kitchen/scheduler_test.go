@@ -167,6 +167,109 @@ func TestSchedulerWorkerSpecForTaskUsesRoleAwareRouting(t *testing.T) {
 	}
 }
 
+func TestSchedulerWorkerSpecForTaskUsesCouncilSeatRouting(t *testing.T) {
+	router := NewComplexityRouter(KitchenConfig{
+		Routing: map[Complexity]RoutingRule{
+			ComplexityMedium: {
+				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+			},
+		},
+		CouncilSeats: map[string]CouncilSeatRoutingConfig{
+			"B": {
+				Default: RoutingRule{
+					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+				},
+			},
+		},
+	}, nil)
+
+	s := &Scheduler{router: router}
+	specA, err := s.workerSpecForTask(pool.Task{
+		ID:         councilTaskID("plan-seat", 1),
+		PlanID:     "plan-seat",
+		Role:       plannerTaskRole,
+		Complexity: string(ComplexityMedium),
+	})
+	if err != nil {
+		t.Fatalf("workerSpecForTask A: %v", err)
+	}
+	specB, err := s.workerSpecForTask(pool.Task{
+		ID:         councilTaskID("plan-seat", 2),
+		PlanID:     "plan-seat",
+		Role:       plannerTaskRole,
+		Complexity: string(ComplexityMedium),
+	})
+	if err != nil {
+		t.Fatalf("workerSpecForTask B: %v", err)
+	}
+	if specA.Provider != "anthropic" || specB.Provider != "openai" {
+		t.Fatalf("seat routes = A:%+v B:%+v, want anthropic then openai", specA, specB)
+	}
+}
+
+func TestWorkerCanRunCouncilTaskRejectsNonResidentIdleWorkerWhenRouteMismatches(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewPlanStore(project.PlansDir)
+	if _, err := store.Create(StoredPlan{
+		Plan: PlanRecord{PlanID: "plan-seat-dispatch", Title: "Seat dispatch", Lineage: "seat-dispatch"},
+		Execution: ExecutionRecord{
+			PlanID:          "plan-seat-dispatch",
+			State:           planStateReviewing,
+			CouncilMaxTurns: 4,
+			CouncilSeats:    newCouncilSeats(),
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-seat-dispatch"), "kitchen-test")
+	worker, err := pm.SpawnWorker(pool.WorkerSpec{ID: "planner-openai", Role: plannerTaskRole, Provider: "openai", Model: "gpt-5.4"})
+	if err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker(worker.ID, "container-"+worker.ID); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	s := &Scheduler{
+		pm:    pm,
+		plans: store,
+		router: NewComplexityRouter(KitchenConfig{
+			Routing: map[Complexity]RoutingRule{
+				ComplexityMedium: {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
+			},
+		}, nil),
+	}
+	allowed, handled := s.workerCanRunCouncilTask(*worker, pool.Task{
+		ID:         councilTaskID("plan-seat-dispatch", 1),
+		PlanID:     "plan-seat-dispatch",
+		Role:       plannerTaskRole,
+		Complexity: string(ComplexityMedium),
+	})
+	if !handled {
+		t.Fatal("expected council task handling")
+	}
+	if allowed {
+		t.Fatal("expected mismatched idle worker to be rejected")
+	}
+}
+
+func TestWorkerCanRunCouncilTaskAllowsLegacyWorkerWithUnknownModelByProvider(t *testing.T) {
+	worker := pool.Worker{ID: "legacy", Provider: "anthropic", Role: plannerTaskRole}
+	keys := []PoolKey{{Provider: "anthropic", Model: "sonnet"}}
+	if !workerMatchesAnyRouteKey(worker, keys) {
+		t.Fatal("expected worker with unknown model to match by provider")
+	}
+}
+
 func TestSchedulerOnTaskCompletedMergesAndKillsWorker(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

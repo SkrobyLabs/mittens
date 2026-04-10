@@ -41,15 +41,20 @@ type RoutingRule struct {
 	Fallback []PoolKey `json:"fallback,omitempty" yaml:"fallback,omitempty"`
 }
 
+type CouncilSeatRoutingConfig struct {
+	Default RoutingRule                `json:"default,omitempty" yaml:"default,omitempty"`
+	Routing map[Complexity]RoutingRule `json:"routing,omitempty" yaml:"routing,omitempty"`
+}
+
 const defaultRoutingRole = "default"
 
 type ConcurrencyConfig struct {
-	MaxActiveLineages    int `json:"maxActiveLineages" yaml:"maxActiveLineages"`
-	MaxPlanningWorkers   int `json:"maxPlanningWorkers" yaml:"maxPlanningWorkers"`
-	MaxWorkersTotal      int `json:"maxWorkersTotal" yaml:"maxWorkersTotal"`
-	MaxWorkersPerPool    int `json:"maxWorkersPerPool" yaml:"maxWorkersPerPool"`
-	MaxWorkersPerLineage int `json:"maxWorkersPerLineage" yaml:"maxWorkersPerLineage"`
-	MaxIdlePerPool       int `json:"maxIdlePerPool" yaml:"maxIdlePerPool"`
+	MaxActiveLineages         int `json:"maxActiveLineages" yaml:"maxActiveLineages"`
+	MaxPlanningWorkers        int `json:"maxPlanningWorkers" yaml:"maxPlanningWorkers"`
+	MaxWorkersTotal           int `json:"maxWorkersTotal" yaml:"maxWorkersTotal"`
+	MaxWorkersPerPool         int `json:"maxWorkersPerPool" yaml:"maxWorkersPerPool"`
+	MaxWorkersPerLineage      int `json:"maxWorkersPerLineage" yaml:"maxWorkersPerLineage"`
+	MaxIdlePerPool            int `json:"maxIdlePerPool" yaml:"maxIdlePerPool"`
 	CouncilSeatIdleTTLSeconds int `json:"councilSeatIdleTTLSeconds" yaml:"councilSeatIdleTTLSeconds"`
 }
 
@@ -67,6 +72,7 @@ type KitchenConfig struct {
 	Routing       map[Complexity]RoutingRule            `json:"routing" yaml:"routing"`
 	RoleDefaults  map[string]RoutingRule                `json:"roleDefaults,omitempty" yaml:"roleDefaults,omitempty"`
 	RoleRouting   map[string]map[Complexity]RoutingRule `json:"roleRouting,omitempty" yaml:"roleRouting,omitempty"`
+	CouncilSeats  map[string]CouncilSeatRoutingConfig   `json:"councilSeats,omitempty" yaml:"councilSeats,omitempty"`
 	Concurrency   ConcurrencyConfig                     `json:"concurrency" yaml:"concurrency"`
 	FailurePolicy map[string]FailurePolicyRule          `json:"failure_policy" yaml:"failure_policy"`
 	Snapshots     SnapshotConfig                        `json:"snapshots" yaml:"snapshots"`
@@ -113,13 +119,14 @@ func DefaultKitchenConfig() KitchenConfig {
 		},
 		RoleDefaults: map[string]RoutingRule{},
 		RoleRouting:  map[string]map[Complexity]RoutingRule{},
+		CouncilSeats: map[string]CouncilSeatRoutingConfig{},
 		Concurrency: ConcurrencyConfig{
-			MaxActiveLineages:    5,
-			MaxPlanningWorkers:   2,
-			MaxWorkersTotal:      12,
-			MaxWorkersPerPool:    6,
-			MaxWorkersPerLineage: 4,
-			MaxIdlePerPool:       2,
+			MaxActiveLineages:         5,
+			MaxPlanningWorkers:        2,
+			MaxWorkersTotal:           12,
+			MaxWorkersPerPool:         6,
+			MaxWorkersPerLineage:      4,
+			MaxIdlePerPool:            2,
 			CouncilSeatIdleTTLSeconds: 270,
 		},
 		FailurePolicy: map[string]FailurePolicyRule{
@@ -166,6 +173,29 @@ func effectiveRoutingForRole(cfg KitchenConfig, role string) map[Complexity]Rout
 	return routing
 }
 
+func effectiveRoutingForCouncilSeat(cfg KitchenConfig, seat string) map[Complexity]RoutingRule {
+	seat = normalizeCouncilSeat(seat)
+	routing := effectiveRoutingForRole(cfg, plannerTaskRole)
+	if seat == "" {
+		return routing
+	}
+	seatCfg, ok := cfg.CouncilSeats[seat]
+	if !ok {
+		return routing
+	}
+	if len(seatCfg.Default.Prefer) > 0 {
+		for _, complexity := range allComplexities {
+			routing[complexity] = cloneRoutingRule(seatCfg.Default)
+		}
+	}
+	for complexity, rule := range seatCfg.Routing {
+		if len(rule.Prefer) > 0 {
+			routing[complexity] = cloneRoutingRule(rule)
+		}
+	}
+	return routing
+}
+
 func normalizeRoutingRole(role string) string {
 	role = strings.TrimSpace(role)
 	if role == "" {
@@ -189,6 +219,13 @@ func cloneRoutingRule(rule RoutingRule) RoutingRule {
 	}
 }
 
+func cloneCouncilSeatRoutingConfig(cfg CouncilSeatRoutingConfig) CouncilSeatRoutingConfig {
+	return CouncilSeatRoutingConfig{
+		Default: cloneRoutingRule(cfg.Default),
+		Routing: cloneRoutingMap(cfg.Routing),
+	}
+}
+
 func roleDefaultRule(cfg KitchenConfig, role string) (RoutingRule, bool) {
 	role = normalizeRoutingRole(role)
 	if role == defaultRoutingRole {
@@ -199,6 +236,65 @@ func roleDefaultRule(cfg KitchenConfig, role string) (RoutingRule, bool) {
 		return RoutingRule{}, false
 	}
 	return cloneRoutingRule(rule), true
+}
+
+func normalizeCouncilSeat(seat string) string {
+	seat = strings.ToUpper(strings.TrimSpace(seat))
+	switch seat {
+	case "A", "B":
+		return seat
+	default:
+		return ""
+	}
+}
+
+func councilSeatRoutingConfig(cfg KitchenConfig, seat string) (CouncilSeatRoutingConfig, bool) {
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return CouncilSeatRoutingConfig{}, false
+	}
+	seatCfg, ok := cfg.CouncilSeats[seat]
+	if !ok {
+		return CouncilSeatRoutingConfig{}, false
+	}
+	return cloneCouncilSeatRoutingConfig(seatCfg), true
+}
+
+func setCouncilSeatRoutingConfig(cfg *KitchenConfig, seat string, seatCfg CouncilSeatRoutingConfig) {
+	if cfg == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	if cfg.CouncilSeats == nil {
+		cfg.CouncilSeats = make(map[string]CouncilSeatRoutingConfig)
+	}
+	if len(seatCfg.Default.Prefer) == 0 && len(seatCfg.Routing) == 0 {
+		delete(cfg.CouncilSeats, seat)
+		return
+	}
+	cfg.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
+}
+
+func clearCouncilSeatRoutingConfig(cfg *KitchenConfig, seat string) {
+	if cfg == nil || cfg.CouncilSeats == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	delete(cfg.CouncilSeats, seat)
+}
+
+func councilSeatHasRoutingOverride(cfg KitchenConfig, seat string) bool {
+	seatCfg, ok := councilSeatRoutingConfig(cfg, seat)
+	if !ok {
+		return false
+	}
+	return len(seatCfg.Default.Prefer) > 0 || len(seatCfg.Routing) > 0
 }
 
 func setRoutingForRole(cfg *KitchenConfig, role string, routing map[Complexity]RoutingRule) {
@@ -444,6 +540,22 @@ func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
 		}
 	}
 
+	merged.CouncilSeats = make(map[string]CouncilSeatRoutingConfig, len(base.CouncilSeats))
+	for seat, seatCfg := range base.CouncilSeats {
+		seat = normalizeCouncilSeat(seat)
+		if seat == "" {
+			continue
+		}
+		merged.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
+	}
+	for seat, seatCfg := range user.CouncilSeats {
+		seat = normalizeCouncilSeat(seat)
+		if seat == "" {
+			continue
+		}
+		merged.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
+	}
+
 	// Concurrency: apply positive user values.
 	if user.Concurrency.MaxActiveLineages > 0 {
 		merged.Concurrency.MaxActiveLineages = user.Concurrency.MaxActiveLineages
@@ -561,6 +673,36 @@ func (c KitchenConfig) Validate() error {
 		for i, key := range entries {
 			if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
 				return fmt.Errorf("roleDefaults.%s entry %d must include provider and model", role, i)
+			}
+		}
+	}
+	for seat, seatCfg := range c.CouncilSeats {
+		normalized := normalizeCouncilSeat(seat)
+		if normalized == "" {
+			return fmt.Errorf("councilSeats.%s is not a valid seat; expected A or B", seat)
+		}
+		if len(seatCfg.Default.Prefer) > 0 {
+			entries := append([]PoolKey{}, seatCfg.Default.Prefer...)
+			entries = append(entries, seatCfg.Default.Fallback...)
+			for i, key := range entries {
+				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
+					return fmt.Errorf("councilSeats.%s.default entry %d must include provider and model", normalized, i)
+				}
+			}
+		}
+		for complexity, rule := range seatCfg.Routing {
+			if !isValidComplexity(complexity) {
+				return fmt.Errorf("councilSeats.%s.routing.%s is not a valid complexity", normalized, complexity)
+			}
+			if len(rule.Prefer) == 0 {
+				return fmt.Errorf("councilSeats.%s.routing.%s.prefer must not be empty", normalized, complexity)
+			}
+			entries := append([]PoolKey{}, rule.Prefer...)
+			entries = append(entries, rule.Fallback...)
+			for i, key := range entries {
+				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
+					return fmt.Errorf("councilSeats.%s.routing.%s entry %d must include provider and model", normalized, complexity, i)
+				}
 			}
 		}
 	}

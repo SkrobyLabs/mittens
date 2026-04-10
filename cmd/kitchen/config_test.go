@@ -159,6 +159,47 @@ func TestSetRoleDefaultAndOverrides(t *testing.T) {
 	}
 }
 
+func TestEffectiveRoutingForCouncilSeatFallsBackToPlannerAndOverrides(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.RoleDefaults[plannerTaskRole] = RoutingRule{
+		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	}
+	cfg.CouncilSeats["B"] = CouncilSeatRoutingConfig{
+		Default: RoutingRule{
+			Prefer: []PoolKey{{Provider: "google", Model: "gemini-2.5-pro"}},
+		},
+		Routing: map[Complexity]RoutingRule{
+			ComplexityTrivial: {
+				Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}},
+			},
+		},
+	}
+
+	seatA := effectiveRoutingForCouncilSeat(cfg, "A")
+	if got := seatA[ComplexityMedium].Prefer[0].Provider; got != "openai" {
+		t.Fatalf("seat A provider = %q, want planner fallback openai", got)
+	}
+	seatB := effectiveRoutingForCouncilSeat(cfg, "B")
+	if got := seatB[ComplexityMedium].Prefer[0].Provider; got != "google" {
+		t.Fatalf("seat B medium provider = %q, want seat default google", got)
+	}
+	if got := seatB[ComplexityTrivial].Prefer[0].Provider; got != "anthropic" {
+		t.Fatalf("seat B trivial provider = %q, want anthropic override", got)
+	}
+}
+
+func TestKitchenConfigValidateRejectsInvalidCouncilSeatKey(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.CouncilSeats["C"] = CouncilSeatRoutingConfig{
+		Default: RoutingRule{
+			Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+		},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "councilSeats.C") {
+		t.Fatalf("Validate err = %v, want invalid council seat failure", err)
+	}
+}
+
 func TestKitchenConfigValidateRejectsDefaultRoleRouting(t *testing.T) {
 	cfg := DefaultKitchenConfig()
 	cfg.RoleRouting[defaultRoutingRole] = map[Complexity]RoutingRule{

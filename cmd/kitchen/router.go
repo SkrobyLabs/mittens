@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -31,6 +32,9 @@ func NewComplexityRouter(cfg KitchenConfig, health *ProviderHealth, hostPool ...
 			continue
 		}
 		r.setRoleRouting(role, effectiveRoutingForRole(cfg, role))
+	}
+	for _, seat := range []string{"A", "B"} {
+		r.setRoleRouting(councilSeatRoutingRole(seat), effectiveRoutingForCouncilSeat(cfg, seat))
 	}
 	return r
 }
@@ -87,6 +91,10 @@ func (r *ComplexityRouter) ResolveForRole(role string, c Complexity) []PoolKey {
 	return nil
 }
 
+func (r *ComplexityRouter) ResolveCouncilSeat(seat string, c Complexity) []PoolKey {
+	return r.ResolveForRole(councilSeatRoutingRole(seat), c)
+}
+
 func (r *ComplexityRouter) setRoleRouting(role string, routing map[Complexity]RoutingRule) {
 	role = normalizeRoutingRole(role)
 	if r.table[role] == nil {
@@ -99,6 +107,13 @@ func (r *ComplexityRouter) setRoleRouting(role string, routing map[Complexity]Ro
 		r.table[role][complexity] = append([]PoolKey(nil), rule.Prefer...)
 		r.fallback[role][complexity] = append([]PoolKey(nil), rule.Fallback...)
 	}
+}
+
+func councilSeatRoutingRole(seat string) string {
+	if normalized := normalizeCouncilSeat(seat); normalized != "" {
+		return fmt.Sprintf("council-seat:%s", normalized)
+	}
+	return defaultRoutingRole
 }
 
 func (r *ComplexityRouter) supportsProvider(provider string) bool {

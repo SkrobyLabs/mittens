@@ -75,6 +75,32 @@ func TestComplexityRouterResolveForRolePrefersRoleOverrideAndFallsBackToDefault(
 	}
 }
 
+func TestComplexityRouterResolveCouncilSeatUsesSeatRoutingWithPlannerFallback(t *testing.T) {
+	router := NewComplexityRouter(KitchenConfig{
+		Routing: map[Complexity]RoutingRule{
+			ComplexityMedium: {
+				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+			},
+		},
+		CouncilSeats: map[string]CouncilSeatRoutingConfig{
+			"B": {
+				Default: RoutingRule{
+					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+				},
+			},
+		},
+	}, nil)
+
+	seatA := router.ResolveCouncilSeat("A", ComplexityMedium)
+	if len(seatA) != 1 || seatA[0].Provider != "anthropic" {
+		t.Fatalf("seat A routing = %+v, want planner fallback anthropic", seatA)
+	}
+	seatB := router.ResolveCouncilSeat("B", ComplexityMedium)
+	if len(seatB) != 1 || seatB[0].Provider != "openai" {
+		t.Fatalf("seat B routing = %+v, want seat-specific openai", seatB)
+	}
+}
+
 func TestComplexityRouterEscalate(t *testing.T) {
 	router := &ComplexityRouter{}
 	next, ok := router.Escalate(ComplexityLow)

@@ -841,7 +841,7 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 		return true
 	}
 	for _, key := range keys {
-		if sameProvider(worker.Provider, key.Provider) {
+		if poolKeyMatchesWorker(key, worker) {
 			return true
 		}
 	}
@@ -852,7 +852,51 @@ func (s *Scheduler) routeKeysForTask(task pool.Task) []PoolKey {
 	if s == nil || s.router == nil {
 		return nil
 	}
+	if task.Role == plannerTaskRole && task.PlanID != "" {
+		if seat := councilSeatForTask(task); seat != "" {
+			keys := s.router.ResolveCouncilSeat(seat, Complexity(task.Complexity))
+			if len(keys) > 0 {
+				return keys
+			}
+		}
+	}
 	return s.router.ResolveForRole(task.Role, Complexity(task.Complexity))
+}
+
+func councilSeatForTask(task pool.Task) string {
+	if strings.TrimSpace(task.PlanID) == "" {
+		return ""
+	}
+	return councilSeatForTurn(councilTurnNumberFromTaskID(task.PlanID, task.ID))
+}
+
+func poolKeyMatchesWorker(key PoolKey, worker pool.Worker) bool {
+	if !sameProvider(key.Provider, worker.Provider) {
+		return false
+	}
+	keyModel := strings.TrimSpace(key.Model)
+	workerModel := strings.TrimSpace(worker.Model)
+	if keyModel != "" && workerModel != "" && keyModel != workerModel {
+		return false
+	}
+	keyAdapter := strings.TrimSpace(key.Adapter)
+	workerAdapter := strings.TrimSpace(worker.Adapter)
+	return keyAdapter == "" || workerAdapter == "" || keyAdapter == workerAdapter
+}
+
+func workerMatchesAnyRouteKey(worker pool.Worker, keys []PoolKey) bool {
+	if len(keys) == 0 {
+		return true
+	}
+	if strings.TrimSpace(worker.Provider) == "" {
+		return false
+	}
+	for _, key := range keys {
+		if poolKeyMatchesWorker(key, worker) {
+			return true
+		}
+	}
+	return false
 }
 
 func taskReadyForDispatch(pm *pool.PoolManager, task pool.Task) bool {

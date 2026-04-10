@@ -152,6 +152,15 @@ func TestConfiguredServeProvidersDeduplicatesAndNormalizesRoutingProviders(t *te
 				},
 			},
 		},
+		CouncilSeats: map[string]CouncilSeatRoutingConfig{
+			"B": {
+				Default: RoutingRule{
+					Prefer: []PoolKey{
+						{Provider: "google", Model: "gemini-2.5-pro"},
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("configuredServeProviders: %v", err)
@@ -164,6 +173,31 @@ func TestConfiguredServeProvidersDeduplicatesAndNormalizesRoutingProviders(t *te
 		if providers[i] != want[i] {
 			t.Fatalf("providers = %v, want %v", providers, want)
 		}
+	}
+}
+
+func TestConfiguredServeProvidersIncludesCouncilSeatOnlyProviders(t *testing.T) {
+	providers, err := configuredServeProviders(KitchenConfig{
+		Routing: map[Complexity]RoutingRule{
+			ComplexityTrivial:  {Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}}},
+			ComplexityLow:      {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
+			ComplexityMedium:   {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
+			ComplexityHigh:     {Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}}},
+			ComplexityCritical: {Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}}},
+		},
+		CouncilSeats: map[string]CouncilSeatRoutingConfig{
+			"B": {
+				Default: RoutingRule{
+					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("configuredServeProviders: %v", err)
+	}
+	if len(providers) != 2 || providers[0] != "claude" || providers[1] != "codex" {
+		t.Fatalf("providers = %v, want [claude codex]", providers)
 	}
 }
 

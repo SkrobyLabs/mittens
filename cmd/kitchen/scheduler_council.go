@@ -48,15 +48,22 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 	if err != nil {
 		return false, true
 	}
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 {
+		return s.workerCanRunTaskWithoutCouncilAffinity(worker, task), true
+	}
 	seat := bundle.Execution.CouncilSeats[councilSeatIndex(councilSeatForTurn(turn))]
 	targetWorkerID := strings.TrimSpace(seat.WorkerID)
-	if targetWorkerID != "" {
-		return worker.ID == targetWorkerID, true
-	}
-	if _, reserved := s.reservedCouncilWorkerIDs()[worker.ID]; reserved {
+	if reserved, ok := s.reservedCouncilWorkerIDs()[worker.ID]; ok && reserved != bundle.Plan.PlanID+":"+seat.Seat {
 		return false, true
 	}
-	return true, true
+	if targetWorkerID != "" {
+		if worker.ID != targetWorkerID {
+			return false, true
+		}
+		return workerMatchesAnyRouteKey(worker, keys), true
+	}
+	return workerMatchesAnyRouteKey(worker, keys), true
 }
 
 func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
@@ -98,24 +105,20 @@ func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
 		seat.Seat = councilSeatForTurn(turn)
 	}
 	if workerID := strings.TrimSpace(seat.WorkerID); workerID != "" {
-		if worker, ok := s.pm.Worker(workerID); ok && worker.Status != pool.WorkerDead {
+		if worker, ok := s.pm.Worker(workerID); ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
+			ID:         taskID,
+			PlanID:     bundle.Plan.PlanID,
+			Complexity: string(ComplexityMedium),
+			Role:       plannerTaskRole,
+		}) {
 			if worker.Status == pool.WorkerIdle {
 				if err := s.pm.DispatchTask(taskID, workerID); err != nil {
 					return err
 				}
 			}
 		} else {
-			now := time.Now().UTC()
-			seat.WorkerID = ""
-			seat.IdleSince = nil
-			seat.Rehydrated = true
-			seat.RehydratedAt = &now
-			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-				Type:    planHistoryCouncilSeatRehydrated,
-				Cycle:   turn,
-				TaskID:  taskID,
-				Summary: fmt.Sprintf("Council seat %s rehydrated.", seat.Seat),
-			})
+			s.invalidateCouncilSeat(&bundle, idx, turn, taskID)
+			seat = bundle.Execution.CouncilSeats[idx]
 		}
 	}
 	bundle.Execution.CouncilSeats[idx] = seat
@@ -206,7 +209,7 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 	seat.WorkerID = task.WorkerID
 	seat.IdleSince = &now
 	if worker, ok := s.pm.Worker(task.WorkerID); ok {
-		seat.PoolKey = PoolKey{Provider: worker.Provider}
+		seat.PoolKey = PoolKey{Provider: worker.Provider, Model: worker.Model, Adapter: worker.Adapter}
 	}
 	bundle.Execution.CouncilSeats[idx] = seat
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
@@ -371,10 +374,15 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 				continue
 			}
 			worker, ok := s.pm.Worker(workerID)
-			if ok && worker.Status != pool.WorkerDead {
+			if ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
+				ID:         councilTaskID(bundle.Plan.PlanID, bundle.Execution.CouncilTurnsCompleted+1),
+				PlanID:     bundle.Plan.PlanID,
+				Complexity: string(ComplexityMedium),
+				Role:       plannerTaskRole,
+			}) {
 				continue
 			}
-			bundle.Execution.CouncilSeats[i].WorkerID = ""
+			s.invalidateCouncilSeat(&bundle, i, bundle.Execution.CouncilTurnsCompleted+1, "")
 			changedSeats = true
 		}
 		if changedSeats {
@@ -384,6 +392,42 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) workerCanRunTaskWithoutCouncilAffinity(worker pool.Worker, task pool.Task) bool {
+	workerRole := strings.TrimSpace(worker.Role)
+	taskRole := strings.TrimSpace(task.Role)
+	if workerRole != "" && workerRole != "general" && taskRole != "" && workerRole != taskRole {
+		return false
+	}
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 || strings.TrimSpace(worker.Provider) == "" {
+		return true
+	}
+	return workerMatchesAnyRouteKey(worker, keys)
+}
+
+func (s *Scheduler) seatWorkerMatchesRoute(worker pool.Worker, task pool.Task) bool {
+	return workerMatchesAnyRouteKey(worker, s.routeKeysForTask(task))
+}
+
+func (s *Scheduler) invalidateCouncilSeat(bundle *StoredPlan, idx, turn int, taskID string) {
+	if bundle == nil || idx < 0 || idx >= len(bundle.Execution.CouncilSeats) {
+		return
+	}
+	now := time.Now().UTC()
+	seat := bundle.Execution.CouncilSeats[idx]
+	seat.WorkerID = ""
+	seat.IdleSince = nil
+	seat.Rehydrated = true
+	seat.RehydratedAt = &now
+	bundle.Execution.CouncilSeats[idx] = seat
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryCouncilSeatRehydrated,
+		Cycle:   turn,
+		TaskID:  taskID,
+		Summary: fmt.Sprintf("Council seat %s rehydrated.", seat.Seat),
+	})
 }
 
 func (s *Scheduler) enqueueCouncilResumeIfReady(bundle StoredPlan) error {

@@ -20,7 +20,7 @@ func TestApplyWorkerSpawned(t *testing.T) {
 	pm := newTestPM()
 	e := Event{
 		Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1",
-		Data: marshalData(WorkerSpawnedData{ContainerID: "abc", Role: "impl"}),
+		Data: marshalData(WorkerSpawnedData{ContainerID: "abc", Provider: "openai", Model: "gpt-5.4", Adapter: "openai-codex", Role: "impl"}),
 	}
 	if err := Apply(pm, e); err != nil {
 		t.Fatal(err)
@@ -37,6 +37,9 @@ func TestApplyWorkerSpawned(t *testing.T) {
 	}
 	if w.Role != "impl" {
 		t.Errorf("role = %q, want impl", w.Role)
+	}
+	if w.Provider != "openai" || w.Model != "gpt-5.4" || w.Adapter != "openai-codex" {
+		t.Errorf("worker route = %q/%q/%q, want openai/gpt-5.4/openai-codex", w.Provider, w.Model, w.Adapter)
 	}
 }
 

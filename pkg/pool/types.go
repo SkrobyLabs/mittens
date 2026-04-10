@@ -79,6 +79,8 @@ type Worker struct {
 	ContainerID     string          `json:"containerId,omitempty"`
 	ContainerName   string          `json:"containerName,omitempty"`
 	Provider        string          `json:"provider,omitempty"`
+	Model           string          `json:"model,omitempty"`
+	Adapter         string          `json:"adapter,omitempty"`
 	Role            string          `json:"role,omitempty"`
 	Token           string          `json:"-"` // per-worker auth token (never serialised to clients)
 	Status          string          `json:"status"`

@@ -55,6 +55,20 @@ func configuredServeProviders(cfg KitchenConfig) ([]string, error) {
 			return nil, err
 		}
 	}
+	for seat, seatCfg := range cfg.CouncilSeats {
+		seat = normalizeCouncilSeat(seat)
+		if seat == "" {
+			continue
+		}
+		if len(seatCfg.Default.Prefer) > 0 {
+			if err := collectServeProvidersForRule(seen, &providers, "councilSeats."+seat+".default", seatCfg.Default); err != nil {
+				return nil, err
+			}
+		}
+		if err := collectServeProviders(seen, &providers, "councilSeats."+seat+".routing", seatCfg.Routing); err != nil {
+			return nil, err
+		}
+	}
 	return providers, nil
 }
 
