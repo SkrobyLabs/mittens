@@ -95,27 +95,20 @@ type ProjectPaths struct {
 }
 
 func DefaultKitchenConfig() KitchenConfig {
+	defaultRule := RoutingRule{
+		Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
+		Fallback: []PoolKey{
+			{Provider: "openai", Model: "gpt-5.4"},
+			{Provider: "gemini", Model: "gemini-3-flash-preview"},
+		},
+	}
 	return KitchenConfig{
 		Routing: map[Complexity]RoutingRule{
-			ComplexityTrivial: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}},
-			},
-			ComplexityLow: {
-				Prefer:   []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.0-flash"}},
-			},
-			ComplexityMedium: {
-				Prefer:   []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.0-flash"}, {Provider: "anthropic", Model: "opus"}},
-			},
-			ComplexityHigh: {
-				Prefer:   []PoolKey{{Provider: "anthropic", Model: "opus"}},
-				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.5-pro"}},
-			},
-			ComplexityCritical: {
-				Prefer:   []PoolKey{{Provider: "anthropic", Model: "opus"}},
-				Fallback: []PoolKey{{Provider: "gemini", Model: "gemini-2.5-pro"}},
-			},
+			ComplexityTrivial:  cloneRoutingRule(defaultRule),
+			ComplexityLow:      cloneRoutingRule(defaultRule),
+			ComplexityMedium:   cloneRoutingRule(defaultRule),
+			ComplexityHigh:     cloneRoutingRule(defaultRule),
+			ComplexityCritical: cloneRoutingRule(defaultRule),
 		},
 		RoleDefaults: map[string]RoutingRule{},
 		RoleRouting:  map[string]map[Complexity]RoutingRule{},
@@ -330,6 +323,16 @@ func setRoutingForRole(cfg *KitchenConfig, role string, routing map[Complexity]R
 	cfg.RoleRouting[role] = overrides
 }
 
+func setRoutingComplexity(cfg *KitchenConfig, complexity Complexity, rule RoutingRule) {
+	if cfg == nil || !isValidComplexity(complexity) || len(rule.Prefer) == 0 {
+		return
+	}
+	if cfg.Routing == nil {
+		cfg.Routing = make(map[Complexity]RoutingRule)
+	}
+	cfg.Routing[complexity] = cloneRoutingRule(rule)
+}
+
 func setRoleDefault(cfg *KitchenConfig, role string, rule RoutingRule) {
 	if cfg == nil {
 		return
@@ -366,6 +369,39 @@ func setRoleComplexityOverrides(cfg *KitchenConfig, role string, overrides map[C
 	cfg.RoleRouting[role] = cloneRoutingMap(overrides)
 }
 
+func setRoleComplexityOverride(cfg *KitchenConfig, role string, complexity Complexity, rule RoutingRule) {
+	if cfg == nil || len(rule.Prefer) == 0 || !isValidComplexity(complexity) {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	if cfg.RoleRouting == nil {
+		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
+	}
+	if cfg.RoleRouting[role] == nil {
+		cfg.RoleRouting[role] = make(map[Complexity]RoutingRule)
+	}
+	cfg.RoleRouting[role][complexity] = cloneRoutingRule(rule)
+}
+
+func clearRoleComplexityOverride(cfg *KitchenConfig, role string, complexity Complexity) {
+	if cfg == nil || cfg.RoleRouting == nil || !isValidComplexity(complexity) {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	if cfg.RoleRouting[role] != nil {
+		delete(cfg.RoleRouting[role], complexity)
+		if len(cfg.RoleRouting[role]) == 0 {
+			delete(cfg.RoleRouting, role)
+		}
+	}
+}
+
 func clearRoutingForRole(cfg *KitchenConfig, role string) {
 	if cfg == nil {
 		return
@@ -388,6 +424,67 @@ func roleHasRoutingOverride(cfg KitchenConfig, role string) bool {
 		return true
 	}
 	return len(cfg.RoleRouting[role]) > 0 || len(cfg.RoleDefaults[role].Prefer) > 0
+}
+
+func setCouncilSeatDefault(cfg *KitchenConfig, seat string, rule RoutingRule) {
+	if cfg == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	seatCfg, _ := councilSeatRoutingConfig(*cfg, seat)
+	seatCfg.Default = cloneRoutingRule(rule)
+	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
+}
+
+func clearCouncilSeatDefault(cfg *KitchenConfig, seat string) {
+	if cfg == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	seatCfg, ok := councilSeatRoutingConfig(*cfg, seat)
+	if !ok {
+		return
+	}
+	seatCfg.Default = RoutingRule{}
+	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
+}
+
+func setCouncilSeatComplexityOverride(cfg *KitchenConfig, seat string, complexity Complexity, rule RoutingRule) {
+	if cfg == nil || len(rule.Prefer) == 0 || !isValidComplexity(complexity) {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	seatCfg, _ := councilSeatRoutingConfig(*cfg, seat)
+	if seatCfg.Routing == nil {
+		seatCfg.Routing = make(map[Complexity]RoutingRule)
+	}
+	seatCfg.Routing[complexity] = cloneRoutingRule(rule)
+	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
+}
+
+func clearCouncilSeatComplexityOverride(cfg *KitchenConfig, seat string, complexity Complexity) {
+	if cfg == nil || !isValidComplexity(complexity) {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	seatCfg, ok := councilSeatRoutingConfig(*cfg, seat)
+	if !ok || seatCfg.Routing == nil {
+		return
+	}
+	delete(seatCfg.Routing, complexity)
+	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
 }
 
 func routingRuleEqual(a, b RoutingRule) bool {

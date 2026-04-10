@@ -40,32 +40,386 @@ func providerOptions(includeNone bool) []huh.Option[string] {
 	return opts
 }
 
-// configToDisplay maps config provider names (e.g. "anthropic") to TUI
-// display names.
+// configToDisplay maps config provider names to TUI display names.
 func configToDisplay(provider string) string {
-	if provider == "anthropic" {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "anthropic", "claude":
 		return "claude"
+	case "openai", "codex":
+		return "codex"
+	case "google", "gemini":
+		return "gemini"
+	default:
+		return provider
 	}
-	return provider
 }
 
-// displayToConfig maps TUI display names back to config provider names.
-func displayToConfig(provider string) string {
-	if provider == "claude" {
+func displayToCanonicalConfig(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
 		return "anthropic"
+	case "codex":
+		return "openai"
+	case "gemini":
+		return "gemini"
+	default:
+		return provider
 	}
-	return provider
 }
 
-// roleFormValues holds the TUI state for one complexity level.
-type roleFormValues struct {
-	PrimaryProvider  string
-	PrimaryModel     string
-	FallbackProvider string
-	FallbackModel    string
+func displayToConfig(provider, current string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ""
+	}
+	current = strings.TrimSpace(current)
+	if current != "" && configToDisplay(current) == provider {
+		return current
+	}
+	return displayToCanonicalConfig(provider)
 }
 
-const configureSaveAndExit = "__save_and_exit__"
+type configureMenuItem struct {
+	Label string
+	Value string
+}
+
+type routeSlotValues struct {
+	DisplayProvider string
+	Model           string
+	ConfigProvider  string
+}
+
+type routeEditorValues struct {
+	Primary      routeSlotValues
+	FallbackOne  routeSlotValues
+	FallbackTwo  routeSlotValues
+	preferTail   []PoolKey
+	fallbackTail []PoolKey
+}
+
+type routingTargetAction string
+
+const (
+	configureSaveAndExit                         = "__save_and_exit__"
+	configureActionBack                          = "back"
+	configureActionInherit                       = "inherit"
+	configureActionDefault                       = "default"
+	configureActionEdit                          = "edit"
+	configureActionSeatA                         = "seat:A"
+	configureActionSeatB                         = "seat:B"
+	routingTargetActionSave  routingTargetAction = "save"
+	routingTargetActionClear routingTargetAction = "clear"
+	routingTargetActionBack  routingTargetAction = "back"
+)
+
+func complexityMenuValue(c Complexity) string {
+	return "complexity:" + string(c)
+}
+
+func parseComplexityMenuValue(v string) (Complexity, bool) {
+	if !strings.HasPrefix(v, "complexity:") {
+		return "", false
+	}
+	c := Complexity(strings.TrimPrefix(v, "complexity:"))
+	if !isValidComplexity(c) {
+		return "", false
+	}
+	return c, true
+}
+
+func complexityMenuLabel(c Complexity) string {
+	return "complexity: " + string(c)
+}
+
+func configureMenuOptions(items []configureMenuItem) []huh.Option[string] {
+	options := make([]huh.Option[string], 0, len(items))
+	for _, item := range items {
+		options = append(options, huh.NewOption[string](item.Label, item.Value))
+	}
+	return options
+}
+
+func defaultMenuItems() []configureMenuItem {
+	items := make([]configureMenuItem, 0, len(allComplexities)+1)
+	for _, complexity := range allComplexities {
+		items = append(items, configureMenuItem{
+			Label: complexityMenuLabel(complexity),
+			Value: complexityMenuValue(complexity),
+		})
+	}
+	items = append(items, configureMenuItem{Label: "back", Value: configureActionBack})
+	return items
+}
+
+func roleMenuItems() []configureMenuItem {
+	items := []configureMenuItem{
+		{Label: "use default routing", Value: configureActionInherit},
+		{Label: "role default", Value: configureActionDefault},
+	}
+	for _, complexity := range allComplexities {
+		items = append(items, configureMenuItem{
+			Label: complexityMenuLabel(complexity),
+			Value: complexityMenuValue(complexity),
+		})
+	}
+	items = append(items, configureMenuItem{Label: "back", Value: configureActionBack})
+	return items
+}
+
+func plannerMenuItems(cfg KitchenConfig) []configureMenuItem {
+	items := []configureMenuItem{
+		{Label: "use default routing", Value: configureActionInherit},
+		{Label: "role default", Value: configureActionDefault},
+		{Label: councilSeatMenuLabel(cfg, "A"), Value: configureActionSeatA},
+		{Label: councilSeatMenuLabel(cfg, "B"), Value: configureActionSeatB},
+	}
+	for _, complexity := range allComplexities {
+		items = append(items, configureMenuItem{
+			Label: complexityMenuLabel(complexity),
+			Value: complexityMenuValue(complexity),
+		})
+	}
+	items = append(items, configureMenuItem{Label: "back", Value: configureActionBack})
+	return items
+}
+
+func councilSeatMenuItems() []configureMenuItem {
+	items := []configureMenuItem{
+		{Label: "use planner routing", Value: configureActionInherit},
+		{Label: "seat default", Value: configureActionDefault},
+	}
+	for _, complexity := range allComplexities {
+		items = append(items, configureMenuItem{
+			Label: complexityMenuLabel(complexity),
+			Value: complexityMenuValue(complexity),
+		})
+	}
+	items = append(items, configureMenuItem{Label: "back", Value: configureActionBack})
+	return items
+}
+
+func routeSlotValuesFromKey(key PoolKey) routeSlotValues {
+	return routeSlotValues{
+		DisplayProvider: configToDisplay(key.Provider),
+		Model:           key.Model,
+		ConfigProvider:  key.Provider,
+	}
+}
+
+func routeEditorValuesFromRule(rule RoutingRule) routeEditorValues {
+	values := routeEditorValues{}
+	if len(rule.Prefer) > 0 {
+		values.Primary = routeSlotValuesFromKey(rule.Prefer[0])
+	}
+	if len(rule.Prefer) > 1 {
+		values.preferTail = append([]PoolKey(nil), rule.Prefer[1:]...)
+	}
+	if len(rule.Fallback) > 0 {
+		values.FallbackOne = routeSlotValuesFromKey(rule.Fallback[0])
+	}
+	if len(rule.Fallback) > 1 {
+		values.FallbackTwo = routeSlotValuesFromKey(rule.Fallback[1])
+	}
+	if len(rule.Fallback) > 2 {
+		values.fallbackTail = append([]PoolKey(nil), rule.Fallback[2:]...)
+	}
+	return values
+}
+
+func validateRouteEditorSlot(name string, slot routeSlotValues, required bool) error {
+	provider := strings.TrimSpace(slot.DisplayProvider)
+	model := strings.TrimSpace(slot.Model)
+	if required {
+		if provider == "" || model == "" {
+			return fmt.Errorf("%s provider and model are required", name)
+		}
+		return nil
+	}
+	if (provider == "") != (model == "") {
+		return fmt.Errorf("%s provider and model must both be set or both be empty", name)
+	}
+	return nil
+}
+
+func routingRuleFromEditorValues(values routeEditorValues) (RoutingRule, error) {
+	if err := validateRouteEditorSlot("primary route", values.Primary, true); err != nil {
+		return RoutingRule{}, err
+	}
+	if err := validateRouteEditorSlot("fallback 1", values.FallbackOne, false); err != nil {
+		return RoutingRule{}, err
+	}
+	if err := validateRouteEditorSlot("fallback 2", values.FallbackTwo, false); err != nil {
+		return RoutingRule{}, err
+	}
+
+	rule := RoutingRule{
+		Prefer: []PoolKey{{
+			Provider: displayToConfig(values.Primary.DisplayProvider, values.Primary.ConfigProvider),
+			Model:    strings.TrimSpace(values.Primary.Model),
+		}},
+	}
+	if provider := strings.TrimSpace(values.FallbackOne.DisplayProvider); provider != "" {
+		rule.Fallback = append(rule.Fallback, PoolKey{
+			Provider: displayToConfig(provider, values.FallbackOne.ConfigProvider),
+			Model:    strings.TrimSpace(values.FallbackOne.Model),
+		})
+	}
+	if provider := strings.TrimSpace(values.FallbackTwo.DisplayProvider); provider != "" {
+		rule.Fallback = append(rule.Fallback, PoolKey{
+			Provider: displayToConfig(provider, values.FallbackTwo.ConfigProvider),
+			Model:    strings.TrimSpace(values.FallbackTwo.Model),
+		})
+	}
+	if len(values.preferTail) > 0 {
+		rule.Prefer = append(rule.Prefer, values.preferTail...)
+	}
+	if len(values.fallbackTail) > 0 {
+		rule.Fallback = append(rule.Fallback, values.fallbackTail...)
+	}
+	return rule, nil
+}
+
+func routingRuleSummary(rule RoutingRule) string {
+	var parts []string
+	for _, key := range rule.Prefer {
+		parts = append(parts, fmt.Sprintf("%s/%s", configToDisplay(key.Provider), key.Model))
+	}
+	for _, key := range rule.Fallback {
+		parts = append(parts, fmt.Sprintf("%s/%s", configToDisplay(key.Provider), key.Model))
+	}
+	if len(parts) == 0 {
+		return "(none)"
+	}
+	return strings.Join(parts, " -> ")
+}
+
+func inheritedRouteDescription(prefix string, rule RoutingRule) string {
+	return prefix + ": " + routingRuleSummary(rule)
+}
+
+func editRoutingRuleForm(title string, initial RoutingRule, allowNone bool) (RoutingRule, error) {
+	values := routeEditorValuesFromRule(initial)
+	for {
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title(title+" — Primary provider").
+					Options(providerOptions(false)...).
+					Value(&values.Primary.DisplayProvider),
+				huh.NewInput().
+					Title(title+" — Primary model").
+					Value(&values.Primary.Model),
+				huh.NewSelect[string]().
+					Title(title+" — Fallback 1 provider").
+					Options(providerOptions(allowNone)...).
+					Value(&values.FallbackOne.DisplayProvider),
+				huh.NewInput().
+					Title(title+" — Fallback 1 model").
+					Value(&values.FallbackOne.Model),
+				huh.NewSelect[string]().
+					Title(title+" — Fallback 2 provider").
+					Options(providerOptions(allowNone)...).
+					Value(&values.FallbackTwo.DisplayProvider),
+				huh.NewInput().
+					Title(title+" — Fallback 2 model").
+					Value(&values.FallbackTwo.Model),
+			),
+		).WithShowHelp(true).Run(); err != nil {
+			return RoutingRule{}, err
+		}
+		rule, err := routingRuleFromEditorValues(values)
+		if err == nil {
+			return rule, nil
+		}
+		fmt.Fprintln(os.Stderr, err)
+	}
+}
+
+func inheritedRoleDefaultRule(cfg KitchenConfig) RoutingRule {
+	return cloneRoutingRule(cfg.Routing[ComplexityMedium])
+}
+
+func inheritedRoleComplexityRule(cfg KitchenConfig, role string, complexity Complexity) RoutingRule {
+	if rule, ok := roleDefaultRule(cfg, role); ok {
+		return cloneRoutingRule(rule)
+	}
+	return cloneRoutingRule(cfg.Routing[complexity])
+}
+
+func inheritedCouncilSeatDefaultRule(cfg KitchenConfig, seat string) RoutingRule {
+	return cloneRoutingRule(effectiveRoutingForRole(cfg, plannerTaskRole)[ComplexityMedium])
+}
+
+func inheritedCouncilSeatComplexityRule(cfg KitchenConfig, seat string, complexity Complexity) RoutingRule {
+	seatCfg, ok := councilSeatRoutingConfig(cfg, seat)
+	if ok && len(seatCfg.Default.Prefer) > 0 {
+		return cloneRoutingRule(seatCfg.Default)
+	}
+	return cloneRoutingRule(effectiveRoutingForRole(cfg, plannerTaskRole)[complexity])
+}
+
+func applyRoleDefaultSelection(cfg *KitchenConfig, role string, rule RoutingRule) {
+	if routingRuleEqual(rule, inheritedRoleDefaultRule(*cfg)) {
+		setRoleDefault(cfg, role, RoutingRule{})
+		return
+	}
+	setRoleDefault(cfg, role, rule)
+}
+
+func applyRoleComplexitySelection(cfg *KitchenConfig, role string, complexity Complexity, rule RoutingRule) {
+	if routingRuleEqual(rule, inheritedRoleComplexityRule(*cfg, role, complexity)) {
+		clearRoleComplexityOverride(cfg, role, complexity)
+		return
+	}
+	setRoleComplexityOverride(cfg, role, complexity, rule)
+}
+
+func applyCouncilSeatDefaultSelection(cfg *KitchenConfig, seat string, rule RoutingRule) {
+	if routingRuleEqual(rule, inheritedCouncilSeatDefaultRule(*cfg, seat)) {
+		clearCouncilSeatDefault(cfg, seat)
+		return
+	}
+	setCouncilSeatDefault(cfg, seat, rule)
+}
+
+func applyCouncilSeatComplexitySelection(cfg *KitchenConfig, seat string, complexity Complexity, rule RoutingRule) {
+	if routingRuleEqual(rule, inheritedCouncilSeatComplexityRule(*cfg, seat, complexity)) {
+		clearCouncilSeatComplexityOverride(cfg, seat, complexity)
+		return
+	}
+	setCouncilSeatComplexityOverride(cfg, seat, complexity, rule)
+}
+
+func runRoutingTargetMenu(title, description string, current RoutingRule, clearLabel string, allowClear bool) (routingTargetAction, RoutingRule, error) {
+	action := configureActionEdit
+	options := []huh.Option[string]{
+		huh.NewOption[string]("edit route", configureActionEdit),
+	}
+	if allowClear {
+		options = append(options, huh.NewOption[string](clearLabel, string(routingTargetActionClear)))
+	}
+	options = append(options, huh.NewOption[string]("back", configureActionBack))
+	if err := huh.NewSelect[string]().
+		Title(title).
+		Description(description).
+		Options(options...).
+		Value(&action).
+		Run(); err != nil {
+		return routingTargetActionBack, RoutingRule{}, err
+	}
+	switch action {
+	case configureActionBack:
+		return routingTargetActionBack, RoutingRule{}, nil
+	case string(routingTargetActionClear):
+		return routingTargetActionClear, RoutingRule{}, nil
+	}
+	rule, err := editRoutingRuleForm(title, current, true)
+	if err != nil {
+		return routingTargetActionBack, RoutingRule{}, err
+	}
+	return routingTargetActionSave, rule, nil
+}
 
 func runConfigure() error {
 	paths, err := DefaultKitchenPaths()
@@ -97,6 +451,9 @@ func runConfigure() error {
 		}
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	if err := SaveKitchenConfigFile(paths.ConfigPath, &cfg); err != nil {
 		return err
 	}
@@ -107,102 +464,117 @@ func runConfigure() error {
 
 func runConfigureRole(cfg *KitchenConfig, role string) error {
 	role = normalizeRoutingRole(role)
-	if role == plannerTaskRole {
+	switch role {
+	case defaultRoutingRole:
+		return runConfigureDefault(cfg)
+	case plannerTaskRole:
 		return runConfigurePlanner(cfg)
+	default:
+		return runConfigureStandardRole(cfg, role)
 	}
-	if role == defaultRoutingRole {
-		routing, err := editRoleRouting(role, effectiveRoutingForRole(*cfg, role))
+}
+
+func runConfigureDefault(cfg *KitchenConfig) error {
+	for {
+		selection := complexityMenuValue(ComplexityMedium)
+		if err := huh.NewSelect[string]().
+			Title("default").
+			Description("Shared per-complexity routing used as the baseline for all non-default roles.").
+			Options(configureMenuOptions(defaultMenuItems())...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
+		}
+		if selection == configureActionBack {
+			return nil
+		}
+		complexity, ok := parseComplexityMenuValue(selection)
+		if !ok {
+			continue
+		}
+		current := cloneRoutingRule(cfg.Routing[complexity])
+		action, rule, err := runRoutingTargetMenu(
+			complexityMenuLabel(complexity),
+			inheritedRouteDescription("Shared default route", current),
+			current,
+			"",
+			false,
+		)
 		if err != nil {
 			return err
 		}
-		setRoutingForRole(cfg, role, routing)
-		return nil
+		if action == routingTargetActionSave {
+			setRoutingComplexity(cfg, complexity, rule)
+		}
 	}
-
-	action := "edit"
-	options := []huh.Option[string]{
-		huh.NewOption[string]("Edit role default and overrides", "edit"),
-		huh.NewOption[string]("Use default routing", "inherit"),
-		huh.NewOption[string]("Back", "back"),
-	}
-	if err := huh.NewSelect[string]().
-		Title(routingRoleDisplayName(role)).
-		Description(routingRoleStatus(cfg, role)).
-		Options(options...).
-		Value(&action).
-		Run(); err != nil {
-		return err
-	}
-	switch action {
-	case "back":
-		return nil
-	case "inherit":
-		clearRoutingForRole(cfg, role)
-		return nil
-	}
-
-	defaultRule, overrides, err := editRoleDefaultsAndOverrides(*cfg, role)
-	if err != nil {
-		return err
-	}
-	setRoleDefault(cfg, role, defaultRule)
-	setRoleComplexityOverrides(cfg, role, overrides)
-	return nil
 }
 
-func runConfigurePlanner(cfg *KitchenConfig) error {
+func runConfigureStandardRole(cfg *KitchenConfig, role string) error {
 	for {
-		selection := "planner"
-		options := []huh.Option[string]{
-			huh.NewOption[string]("Edit planner routing", "planner"),
-			huh.NewOption[string](councilSeatMenuLabel(*cfg, "A"), "seat:A"),
-			huh.NewOption[string](councilSeatMenuLabel(*cfg, "B"), "seat:B"),
-			huh.NewOption[string]("Back", "back"),
-		}
+		selection := configureActionDefault
 		if err := huh.NewSelect[string]().
-			Title("planner").
-			Description("Planner routing is the shared baseline for both council seats. Seat routing stores only the differences from planner.").
-			Options(options...).
+			Title(routingRoleDisplayName(role)).
+			Description(routingRoleStatus(cfg, role)).
+			Options(configureMenuOptions(roleMenuItems())...).
 			Value(&selection).
 			Run(); err != nil {
 			return err
 		}
 		switch selection {
-		case "back":
+		case configureActionBack:
 			return nil
-		case "planner":
-			action := "edit"
-			if err := huh.NewSelect[string]().
-				Title("planner").
-				Description(routingRoleStatus(cfg, plannerTaskRole)).
-				Options(
-					huh.NewOption[string]("Edit role default and overrides", "edit"),
-					huh.NewOption[string]("Use default routing", "inherit"),
-					huh.NewOption[string]("Back", "back"),
-				).
-				Value(&action).
-				Run(); err != nil {
+		case configureActionInherit:
+			clearRoutingForRole(cfg, role)
+		case configureActionDefault:
+			if err := runConfigureRoleDefaultTarget(cfg, role); err != nil {
 				return err
 			}
-			switch action {
-			case "back":
-				continue
-			case "inherit":
-				clearRoutingForRole(cfg, plannerTaskRole)
+		default:
+			complexity, ok := parseComplexityMenuValue(selection)
+			if !ok {
 				continue
 			}
-			defaultRule, overrides, err := editRoleDefaultsAndOverrides(*cfg, plannerTaskRole)
-			if err != nil {
+			if err := runConfigureRoleComplexityTarget(cfg, role, complexity); err != nil {
 				return err
 			}
-			setRoleDefault(cfg, plannerTaskRole, defaultRule)
-			setRoleComplexityOverrides(cfg, plannerTaskRole, overrides)
-		case "seat:A":
+		}
+	}
+}
+
+func runConfigurePlanner(cfg *KitchenConfig) error {
+	for {
+		selection := configureActionDefault
+		if err := huh.NewSelect[string]().
+			Title("planner").
+			Description("Planner routing is the shared baseline for both council seats. Seat routing stores only the differences from planner.").
+			Options(configureMenuOptions(plannerMenuItems(*cfg))...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
+		}
+		switch selection {
+		case configureActionBack:
+			return nil
+		case configureActionInherit:
+			clearRoutingForRole(cfg, plannerTaskRole)
+		case configureActionDefault:
+			if err := runConfigureRoleDefaultTarget(cfg, plannerTaskRole); err != nil {
+				return err
+			}
+		case configureActionSeatA:
 			if err := runConfigureCouncilSeat(cfg, "A"); err != nil {
 				return err
 			}
-		case "seat:B":
+		case configureActionSeatB:
 			if err := runConfigureCouncilSeat(cfg, "B"); err != nil {
+				return err
+			}
+		default:
+			complexity, ok := parseComplexityMenuValue(selection)
+			if !ok {
+				continue
+			}
+			if err := runConfigureRoleComplexityTarget(cfg, plannerTaskRole, complexity); err != nil {
 				return err
 			}
 		}
@@ -214,264 +586,125 @@ func runConfigureCouncilSeat(cfg *KitchenConfig, seat string) error {
 	if seat == "" {
 		return nil
 	}
-	action := "edit"
-	if err := huh.NewSelect[string]().
-		Title("Council seat "+seat).
-		Description(councilSeatStatus(*cfg, seat)).
-		Options(
-			huh.NewOption[string]("Edit seat default and overrides", "edit"),
-			huh.NewOption[string]("Use planner routing", "inherit"),
-			huh.NewOption[string]("Back", "back"),
-		).
-		Value(&action).
-		Run(); err != nil {
-		return err
+	for {
+		selection := configureActionDefault
+		if err := huh.NewSelect[string]().
+			Title("Council seat " + seat).
+			Description(councilSeatStatus(*cfg, seat)).
+			Options(configureMenuOptions(councilSeatMenuItems())...).
+			Value(&selection).
+			Run(); err != nil {
+			return err
+		}
+		switch selection {
+		case configureActionBack:
+			return nil
+		case configureActionInherit:
+			clearCouncilSeatRoutingConfig(cfg, seat)
+		case configureActionDefault:
+			if err := runConfigureCouncilSeatDefaultTarget(cfg, seat); err != nil {
+				return err
+			}
+		default:
+			complexity, ok := parseComplexityMenuValue(selection)
+			if !ok {
+				continue
+			}
+			if err := runConfigureCouncilSeatComplexityTarget(cfg, seat, complexity); err != nil {
+				return err
+			}
+		}
 	}
-	switch action {
-	case "back":
-		return nil
-	case "inherit":
-		clearCouncilSeatRoutingConfig(cfg, seat)
-		return nil
+}
+
+func runConfigureRoleDefaultTarget(cfg *KitchenConfig, role string) error {
+	current, ok := roleDefaultRule(*cfg, role)
+	desc := ""
+	if ok {
+		desc = inheritedRouteDescription("Current role default", current)
+	} else {
+		current = inheritedRoleDefaultRule(*cfg)
+		desc = inheritedRouteDescription("Currently inherits shared route", current)
 	}
-	seatCfg, err := editCouncilSeatDefaultsAndOverrides(*cfg, seat)
+	action, rule, err := runRoutingTargetMenu("role default", desc, current, "use shared default", true)
 	if err != nil {
 		return err
 	}
-	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
+	switch action {
+	case routingTargetActionSave:
+		applyRoleDefaultSelection(cfg, role, rule)
+	case routingTargetActionClear:
+		setRoleDefault(cfg, role, RoutingRule{})
+	}
 	return nil
 }
 
-func editRoleRouting(role string, routing map[Complexity]RoutingRule) (map[Complexity]RoutingRule, error) {
-	values := roleFormValuesFromRouting(routing)
-
-	groups := make([]*huh.Group, len(allComplexities))
-	for i, c := range allComplexities {
-		idx := i
-		name := complexityDisplayName(c)
-
-		groups[i] = huh.NewGroup(
-			huh.NewSelect[string]().
-				Title(name+" — Primary provider").
-				Options(providerOptions(false)...).
-				Value(&values[idx].PrimaryProvider),
-			huh.NewInput().
-				Title(name+" — Primary model").
-				Value(&values[idx].PrimaryModel),
-			huh.NewSelect[string]().
-				Title(name+" — Fallback provider").
-				Options(providerOptions(true)...).
-				Value(&values[idx].FallbackProvider),
-			huh.NewInput().
-				Title(name+" — Fallback model").
-				Value(&values[idx].FallbackModel),
-		).Description(fmt.Sprintf("%s routing for %s complexity", routingRoleDisplayName(role), name))
-	}
-
-	if err := huh.NewForm(groups...).WithShowHelp(true).Run(); err != nil {
-		return nil, err
-	}
-	return routingFromRoleFormValues(values), nil
-}
-
-func roleFormValuesFromRouting(routing map[Complexity]RoutingRule) []roleFormValues {
-	values := make([]roleFormValues, len(allComplexities))
-	for i, c := range allComplexities {
-		rule := routing[c]
-		if len(rule.Prefer) > 0 {
-			values[i].PrimaryProvider = configToDisplay(rule.Prefer[0].Provider)
-			values[i].PrimaryModel = rule.Prefer[0].Model
-		}
-		if len(rule.Fallback) > 0 {
-			values[i].FallbackProvider = configToDisplay(rule.Fallback[0].Provider)
-			values[i].FallbackModel = rule.Fallback[0].Model
-		}
-	}
-	return values
-}
-
-func routingFromRoleFormValues(values []roleFormValues) map[Complexity]RoutingRule {
-	routing := make(map[Complexity]RoutingRule, len(allComplexities))
-	for i, c := range allComplexities {
-		routing[c] = routingRuleFromFormValues(values[i])
-	}
-	return routing
-}
-
-func editRoleDefaultsAndOverrides(cfg KitchenConfig, role string) (RoutingRule, map[Complexity]RoutingRule, error) {
-	effective := effectiveRoutingForRole(cfg, role)
-	defaultRule, hasDefault := roleDefaultRule(cfg, role)
-	defaultValues := roleFormValues{}
-	if hasDefault {
-		defaultValues = roleFormValuesFromRule(defaultRule)
+func runConfigureRoleComplexityTarget(cfg *KitchenConfig, role string, complexity Complexity) error {
+	current, ok := cfg.RoleRouting[normalizeRoutingRole(role)][complexity]
+	desc := ""
+	if ok {
+		desc = inheritedRouteDescription("Current override", current)
 	} else {
-		defaultValues = roleFormValuesFromRule(effective[ComplexityMedium])
+		current = inheritedRoleComplexityRule(*cfg, role, complexity)
+		desc = inheritedRouteDescription("Currently inherits route", current)
 	}
+	action, rule, err := runRoutingTargetMenu(complexityMenuLabel(complexity), desc, current, "use inherited routing", true)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case routingTargetActionSave:
+		applyRoleComplexitySelection(cfg, role, complexity, rule)
+	case routingTargetActionClear:
+		clearRoleComplexityOverride(cfg, role, complexity)
+	}
+	return nil
+}
 
-	useRoleDefault := hasDefault
-	if err := huh.NewConfirm().
-		Title("Set a role-level default route?").
-		Description("Applies one provider/model to this whole role, with optional per-complexity overrides afterward.").
-		Value(&useRoleDefault).
-		Run(); err != nil {
-		return RoutingRule{}, nil, err
-	}
-	if useRoleDefault {
-		rule, err := editSingleRoutingRule("Role default routing", defaultValues, false)
-		if err != nil {
-			return RoutingRule{}, nil, err
-		}
-		defaultRule = rule
+func runConfigureCouncilSeatDefaultTarget(cfg *KitchenConfig, seat string) error {
+	currentSeatCfg, ok := councilSeatRoutingConfig(*cfg, seat)
+	current := currentSeatCfg.Default
+	desc := ""
+	if ok && len(current.Prefer) > 0 {
+		desc = inheritedRouteDescription("Current seat default", current)
 	} else {
-		defaultRule = RoutingRule{}
+		current = inheritedCouncilSeatDefaultRule(*cfg, seat)
+		desc = inheritedRouteDescription("Currently inherits planner route", current)
 	}
-
-	overrides := make(map[Complexity]RoutingRule)
-	for _, complexity := range allComplexities {
-		existingRule, hasExisting := cfg.RoleRouting[role][complexity]
-		enabled := hasExisting
-		if !enabled && !useRoleDefault && !routingRuleEqual(effective[complexity], cfg.Routing[complexity]) {
-			enabled = true
-		}
-		overrideLabel := complexityDisplayName(complexity) + " override"
-		if err := huh.NewConfirm().
-			Title("Override " + complexityDisplayName(complexity) + " complexity?").
-			Description("Leave off to use the role default or inherited shared default for this complexity.").
-			Value(&enabled).
-			Run(); err != nil {
-			return RoutingRule{}, nil, err
-		}
-		if !enabled {
-			continue
-		}
-		initial := effective[complexity]
-		if hasExisting {
-			initial = existingRule
-		} else if useRoleDefault {
-			initial = defaultRule
-		}
-		rule, err := editSingleRoutingRule(overrideLabel, roleFormValuesFromRule(initial), true)
-		if err != nil {
-			return RoutingRule{}, nil, err
-		}
-		overrides[complexity] = rule
+	action, rule, err := runRoutingTargetMenu("seat default", desc, current, "use planner routing", true)
+	if err != nil {
+		return err
 	}
-
-	return defaultRule, overrides, nil
+	switch action {
+	case routingTargetActionSave:
+		applyCouncilSeatDefaultSelection(cfg, seat, rule)
+	case routingTargetActionClear:
+		clearCouncilSeatDefault(cfg, seat)
+	}
+	return nil
 }
 
-func editCouncilSeatDefaultsAndOverrides(cfg KitchenConfig, seat string) (CouncilSeatRoutingConfig, error) {
-	effective := effectiveRoutingForCouncilSeat(cfg, seat)
-	seatCfg, _ := councilSeatRoutingConfig(cfg, seat)
-	defaultValues := roleFormValuesFromRule(seatCfg.Default)
-	if len(seatCfg.Default.Prefer) == 0 {
-		defaultValues = roleFormValuesFromRule(effective[ComplexityMedium])
+func runConfigureCouncilSeatComplexityTarget(cfg *KitchenConfig, seat string, complexity Complexity) error {
+	seatCfg, _ := councilSeatRoutingConfig(*cfg, seat)
+	current, ok := seatCfg.Routing[complexity]
+	desc := ""
+	if ok {
+		desc = inheritedRouteDescription("Current seat override", current)
+	} else {
+		current = inheritedCouncilSeatComplexityRule(*cfg, seat, complexity)
+		desc = inheritedRouteDescription("Currently inherits route", current)
 	}
-
-	useSeatDefault := len(seatCfg.Default.Prefer) > 0
-	if err := huh.NewConfirm().
-		Title("Set a seat-level default route?").
-		Description("Applies one provider/model to this council seat, with optional per-complexity overrides afterward.").
-		Value(&useSeatDefault).
-		Run(); err != nil {
-		return CouncilSeatRoutingConfig{}, err
+	action, rule, err := runRoutingTargetMenu(complexityMenuLabel(complexity), desc, current, "use inherited routing", true)
+	if err != nil {
+		return err
 	}
-	defaultRule := RoutingRule{}
-	if useSeatDefault {
-		rule, err := editSingleRoutingRule("Seat default routing", defaultValues, false)
-		if err != nil {
-			return CouncilSeatRoutingConfig{}, err
-		}
-		defaultRule = rule
+	switch action {
+	case routingTargetActionSave:
+		applyCouncilSeatComplexitySelection(cfg, seat, complexity, rule)
+	case routingTargetActionClear:
+		clearCouncilSeatComplexityOverride(cfg, seat, complexity)
 	}
-
-	overrides := make(map[Complexity]RoutingRule)
-	for _, complexity := range allComplexities {
-		existingRule, hasExisting := seatCfg.Routing[complexity]
-		enabled := hasExisting
-		plannerRouting := effectiveRoutingForRole(cfg, plannerTaskRole)
-		if !enabled && !useSeatDefault && !routingRuleEqual(effective[complexity], plannerRouting[complexity]) {
-			enabled = true
-		}
-		if err := huh.NewConfirm().
-			Title("Override " + complexityDisplayName(complexity) + " complexity?").
-			Description("Leave off to use the planner baseline or the seat default for this complexity.").
-			Value(&enabled).
-			Run(); err != nil {
-			return CouncilSeatRoutingConfig{}, err
-		}
-		if !enabled {
-			continue
-		}
-		initial := effective[complexity]
-		if hasExisting {
-			initial = existingRule
-		} else if useSeatDefault {
-			initial = defaultRule
-		}
-		rule, err := editSingleRoutingRule(complexityDisplayName(complexity)+" override", roleFormValuesFromRule(initial), true)
-		if err != nil {
-			return CouncilSeatRoutingConfig{}, err
-		}
-		overrides[complexity] = rule
-	}
-
-	return CouncilSeatRoutingConfig{Default: defaultRule, Routing: overrides}, nil
-}
-
-func editSingleRoutingRule(title string, values roleFormValues, includeNone bool) (RoutingRule, error) {
-	if err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title(title+" — Primary provider").
-				Options(providerOptions(false)...).
-				Value(&values.PrimaryProvider),
-			huh.NewInput().
-				Title(title+" — Primary model").
-				Value(&values.PrimaryModel),
-			huh.NewSelect[string]().
-				Title(title+" — Fallback provider").
-				Options(providerOptions(includeNone)...).
-				Value(&values.FallbackProvider),
-			huh.NewInput().
-				Title(title+" — Fallback model").
-				Value(&values.FallbackModel),
-		),
-	).WithShowHelp(true).Run(); err != nil {
-		return RoutingRule{}, err
-	}
-	return routingRuleFromFormValues(values), nil
-}
-
-func roleFormValuesFromRule(rule RoutingRule) roleFormValues {
-	var values roleFormValues
-	if len(rule.Prefer) > 0 {
-		values.PrimaryProvider = configToDisplay(rule.Prefer[0].Provider)
-		values.PrimaryModel = rule.Prefer[0].Model
-	}
-	if len(rule.Fallback) > 0 {
-		values.FallbackProvider = configToDisplay(rule.Fallback[0].Provider)
-		values.FallbackModel = rule.Fallback[0].Model
-	}
-	return values
-}
-
-func routingRuleFromFormValues(v roleFormValues) RoutingRule {
-	rule := RoutingRule{
-		Prefer: []PoolKey{{
-			Provider: displayToConfig(v.PrimaryProvider),
-			Model:    strings.TrimSpace(v.PrimaryModel),
-		}},
-	}
-	fbProvider := strings.TrimSpace(v.FallbackProvider)
-	fbModel := strings.TrimSpace(v.FallbackModel)
-	if fbProvider != "" && fbModel != "" {
-		rule.Fallback = []PoolKey{{
-			Provider: displayToConfig(fbProvider),
-			Model:    fbModel,
-		}}
-	}
-	return rule
+	return nil
 }
 
 func routingRoleOptions(cfg KitchenConfig) []huh.Option[string] {
@@ -518,7 +751,7 @@ func routingRoleStatus(cfg *KitchenConfig, role string) string {
 		return ""
 	}
 	if roleHasRoutingOverride(*cfg, role) {
-		return "This role currently has custom per-complexity routing."
+		return "This role currently has custom routing."
 	}
 	return "This role currently inherits the shared default routing."
 }

@@ -16,8 +16,20 @@ func TestLoadKitchenConfigMissingReturnsDefaults(t *testing.T) {
 	if got := cfg.Concurrency.MaxWorkersTotal; got != 12 {
 		t.Fatalf("MaxWorkersTotal = %d, want 12", got)
 	}
-	if len(cfg.Routing[ComplexityMedium].Fallback) != 2 {
-		t.Fatalf("medium fallback = %+v, want two entries (gemini then opus)", cfg.Routing[ComplexityMedium].Fallback)
+	for _, complexity := range allComplexities {
+		rule := cfg.Routing[complexity]
+		if got := rule.Prefer[0]; got.Provider != "anthropic" || got.Model != "sonnet" {
+			t.Fatalf("%s prefer = %+v, want anthropic/sonnet", complexity, got)
+		}
+		if len(rule.Fallback) != 2 {
+			t.Fatalf("%s fallback = %+v, want two entries", complexity, rule.Fallback)
+		}
+		if got := rule.Fallback[0]; got.Provider != "openai" || got.Model != "gpt-5.4" {
+			t.Fatalf("%s fallback[0] = %+v, want openai/gpt-5.4", complexity, got)
+		}
+		if got := rule.Fallback[1]; got.Provider != "gemini" || got.Model != "gemini-3-flash-preview" {
+			t.Fatalf("%s fallback[1] = %+v, want gemini/gemini-3-flash-preview", complexity, got)
+		}
 	}
 	if got := cfg.Snapshots.PlanHistoryLimit; got != defaultPlanProgressHistoryLimit {
 		t.Fatalf("PlanHistoryLimit = %d, want %d", got, defaultPlanProgressHistoryLimit)

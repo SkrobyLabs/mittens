@@ -227,6 +227,26 @@ func TestKitchenCapabilitiesCommandOutputsCapabilityMap(t *testing.T) {
 	if !ok || evidenceCaps["defaultTier"] != evidenceTierRich {
 		t.Fatalf("evidence capabilities = %#v, want default rich tier", cliCaps["evidence"])
 	}
+	providers, ok := payload["providers"].([]any)
+	if !ok || len(providers) != 3 {
+		t.Fatalf("providers capabilities = %#v, want three providers", payload["providers"])
+	}
+	wantModels := map[string]string{
+		"anthropic": "sonnet",
+		"codex":     "gpt-5.4",
+		"gemini":    "gemini-3-flash-preview",
+	}
+	for _, raw := range providers {
+		providerCaps, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("provider capability entry = %#v, want object", raw)
+		}
+		name, _ := providerCaps["provider"].(string)
+		models, ok := providerCaps["models"].([]any)
+		if !ok || len(models) != 1 || models[0] != wantModels[name] {
+			t.Fatalf("provider models for %q = %#v, want [%s]", name, providerCaps["models"], wantModels[name])
+		}
+	}
 
 	output = runKitchenCommand(t, k, "capabilities", "--cli")
 	payload = nil

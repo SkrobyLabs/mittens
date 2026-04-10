@@ -200,19 +200,19 @@ func kitchenCapabilities() map[string]any {
 			{
 				"provider":    "anthropic",
 				"adapter":     "claude-code",
-				"models":      []string{"haiku", "sonnet", "opus"},
+				"models":      []string{"sonnet"},
 				"description": "Anthropic Claude via claude-code CLI",
 			},
 			{
 				"provider":    "codex",
 				"adapter":     "openai-codex",
-				"models":      []string{"codex-mini", "o4-mini"},
+				"models":      []string{"gpt-5.4"},
 				"description": "OpenAI Codex via codex CLI",
 			},
 			{
 				"provider":    "gemini",
 				"adapter":     "gemini-cli",
-				"models":      []string{"gemini-2.0-flash", "gemini-2.5-pro"},
+				"models":      []string{"gemini-3-flash-preview"},
 				"description": "Google Gemini via gemini-cli",
 			},
 		},
