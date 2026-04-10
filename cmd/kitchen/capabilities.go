@@ -181,8 +181,16 @@ func kitchenCapabilities() map[string]any {
 			"workerDrivenReview":        true,
 			"automaticReviewRefinement": true,
 			"plannerQuestions":          true,
-			"historyPersistence":        true,
-			"reviewStates":              []string{"planning", "reviewing", "pending_approval", "active", "planning_failed", "completed", "merged", "closed", "rejected"},
+			"reviewCouncil": map[string]any{
+				"name":        "review_council",
+				"description": "Two-seat review council for plan-level implementation reviews, converges on verdict agreement",
+				"metadata": map[string]string{
+					"default_max_turns": "4",
+					"hard_cap":          "8",
+				},
+			},
+			"historyPersistence": true,
+			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "active", "planning_failed", "completed", "merged", "closed", "rejected"},
 		},
 		"git": map[string]any{
 			"lineageMerge":      true,

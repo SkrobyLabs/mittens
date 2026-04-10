@@ -23,24 +23,28 @@ type PlanCycleProgress struct {
 }
 
 type PlanProgress struct {
-	PlanID              string              `json:"planId"`
-	Lineage             string              `json:"lineage,omitempty"`
-	Title               string              `json:"title,omitempty"`
-	State               string              `json:"state,omitempty"`
-	Phase               string              `json:"phase,omitempty"`
-	ImplReviewRequested bool                `json:"implReviewRequested,omitempty"`
-	ImplReviewStatus    string              `json:"implReviewStatus,omitempty"`
-	ImplReviewFindings  []string            `json:"implReviewFindings,omitempty"`
-	PendingQuestions    int                 `json:"pendingQuestions"`
-	PendingQuestionIDs  []string            `json:"pendingQuestionIds,omitempty"`
-	ActiveTaskIDs       []string            `json:"activeTaskIds,omitempty"`
-	CompletedTaskIDs    []string            `json:"completedTaskIds,omitempty"`
-	FailedTaskIDs       []string            `json:"failedTaskIds,omitempty"`
-	Cycles              []PlanCycleProgress `json:"cycles,omitempty"`
-	History             []PlanHistoryEntry  `json:"history,omitempty"`
-	HistoryTotal        int                 `json:"historyTotal,omitempty"`
-	HistoryIncluded     int                 `json:"historyIncluded,omitempty"`
-	HistoryTruncated    bool                `json:"historyTruncated,omitempty"`
+	PlanID                      string              `json:"planId"`
+	Lineage                     string              `json:"lineage,omitempty"`
+	Title                       string              `json:"title,omitempty"`
+	State                       string              `json:"state,omitempty"`
+	Phase                       string              `json:"phase,omitempty"`
+	ImplReviewRequested         bool                `json:"implReviewRequested,omitempty"`
+	ImplReviewStatus            string              `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings          []string            `json:"implReviewFindings,omitempty"`
+	ReviewCouncilTurnsCompleted int                 `json:"reviewCouncilTurnsCompleted,omitempty"`
+	ReviewCouncilMaxTurns       int                 `json:"reviewCouncilMaxTurns,omitempty"`
+	ReviewCouncilFinalDecision  string              `json:"reviewCouncilFinalDecision,omitempty"`
+	ReviewCouncilActiveSeat     string              `json:"reviewCouncilActiveSeat,omitempty"`
+	PendingQuestions            int                 `json:"pendingQuestions"`
+	PendingQuestionIDs          []string            `json:"pendingQuestionIds,omitempty"`
+	ActiveTaskIDs               []string            `json:"activeTaskIds,omitempty"`
+	CompletedTaskIDs            []string            `json:"completedTaskIds,omitempty"`
+	FailedTaskIDs               []string            `json:"failedTaskIds,omitempty"`
+	Cycles                      []PlanCycleProgress `json:"cycles,omitempty"`
+	History                     []PlanHistoryEntry  `json:"history,omitempty"`
+	HistoryTotal                int                 `json:"historyTotal,omitempty"`
+	HistoryIncluded             int                 `json:"historyIncluded,omitempty"`
+	HistoryTruncated            bool                `json:"historyTruncated,omitempty"`
 }
 
 type PlanDetail struct {
@@ -135,12 +139,15 @@ func (k *Kitchen) OpenPlanProgressWithLimit(historyLimit int) ([]PlanProgress, e
 	progress := make([]PlanProgress, 0, len(plans))
 	for _, plan := range plans {
 		switch plan.State {
-		case planStateCompleted, planStateMerged, planStateClosed, planStateRejected:
+		case planStateCompleted, planStateMerged, planStateClosed:
 			continue
 		}
 		detail, err := k.PlanDetail(plan.PlanID)
 		if err != nil {
 			return nil, err
+		}
+		if detail.Plan.State == planStateRejected && !canExtendReviewCouncil(detail.Plan.State, detail.Execution) {
+			continue
 		}
 		detail.Progress.History, detail.Progress.HistoryTotal, detail.Progress.HistoryIncluded, detail.Progress.HistoryTruncated = windowPlanProgressHistory(detail.History, historyLimit)
 		progress = append(progress, detail.Progress)
@@ -167,22 +174,28 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 	sort.Strings(pendingQuestionIDs)
 
 	progress := PlanProgress{
-		PlanID:              planID,
-		Lineage:             bundle.Plan.Lineage,
-		Title:               bundle.Plan.Title,
-		State:               bundle.Execution.State,
-		ImplReviewRequested: bundle.Execution.ImplReviewRequested,
-		ImplReviewStatus:    bundle.Execution.ImplReviewStatus,
-		ImplReviewFindings:  append([]string(nil), bundle.Execution.ImplReviewFindings...),
-		PendingQuestions:    len(pendingQuestionIDs),
-		PendingQuestionIDs:  pendingQuestionIDs,
-		ActiveTaskIDs:       append([]string(nil), bundle.Execution.ActiveTaskIDs...),
-		CompletedTaskIDs:    append([]string(nil), bundle.Execution.CompletedTaskIDs...),
-		FailedTaskIDs:       append([]string(nil), bundle.Execution.FailedTaskIDs...),
+		PlanID:                      planID,
+		Lineage:                     bundle.Plan.Lineage,
+		Title:                       bundle.Plan.Title,
+		State:                       bundle.Execution.State,
+		ImplReviewRequested:         bundle.Execution.ImplReviewRequested,
+		ImplReviewStatus:            bundle.Execution.ImplReviewStatus,
+		ImplReviewFindings:          append([]string(nil), bundle.Execution.ImplReviewFindings...),
+		ReviewCouncilTurnsCompleted: bundle.Execution.ReviewCouncilTurnsCompleted,
+		ReviewCouncilMaxTurns:       bundle.Execution.ReviewCouncilMaxTurns,
+		ReviewCouncilFinalDecision:  bundle.Execution.ReviewCouncilFinalDecision,
+		PendingQuestions:            len(pendingQuestionIDs),
+		PendingQuestionIDs:          pendingQuestionIDs,
+		ActiveTaskIDs:               append([]string(nil), bundle.Execution.ActiveTaskIDs...),
+		CompletedTaskIDs:            append([]string(nil), bundle.Execution.CompletedTaskIDs...),
+		FailedTaskIDs:               append([]string(nil), bundle.Execution.FailedTaskIDs...),
 	}
 	sort.Strings(progress.ActiveTaskIDs)
 	sort.Strings(progress.CompletedTaskIDs)
 	sort.Strings(progress.FailedTaskIDs)
+	if progress.ReviewCouncilFinalDecision == "" && progress.ReviewCouncilMaxTurns > 0 {
+		progress.ReviewCouncilActiveSeat = reviewCouncilSeatForTurn(progress.ReviewCouncilTurnsCompleted + 1)
+	}
 	progress.Cycles = k.planCycles(bundle)
 	progress.History = append([]PlanHistoryEntry(nil), bundle.Execution.History...)
 	progress.HistoryTotal = len(progress.History)
@@ -266,17 +279,35 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 		cycles = append(cycles, cycle)
 	}
 
-	implAttempts := bundle.Execution.ImplReviewAttempts
-	if bundle.Execution.State == planStateImplementationReview && implAttempts < 1 {
-		implAttempts = 1
+	completedTurns := bundle.Execution.ReviewCouncilTurnsCompleted
+	if bundle.Execution.State == planStateImplementationReview && completedTurns == 0 {
+		irTaskID := reviewCouncilTaskID(planID, 1)
+		cycles = append(cycles, PlanCycleProgress{
+			Index:               1,
+			ImplReviewTaskID:    irTaskID,
+			ImplReviewTaskState: string(tasks[irTaskID]),
+		})
 	}
-	for i := 1; i <= implAttempts; i++ {
-		irTaskID := planImplReviewRuntimeID(planID, i)
+	for i := 1; i <= completedTurns; i++ {
+		irTaskID := reviewCouncilTaskID(planID, i)
 		cycles = append(cycles, PlanCycleProgress{
 			Index:               i,
 			ImplReviewTaskID:    irTaskID,
 			ImplReviewTaskState: string(tasks[irTaskID]),
 		})
+	}
+	if bundle.Execution.State == planStateImplementationReview &&
+		bundle.Execution.ReviewCouncilFinalDecision == "" &&
+		completedTurns > 0 {
+		nextTurn := completedTurns + 1
+		irTaskID := reviewCouncilTaskID(planID, nextTurn)
+		if _, ok := tasks[irTaskID]; ok {
+			cycles = append(cycles, PlanCycleProgress{
+				Index:               nextTurn,
+				ImplReviewTaskID:    irTaskID,
+				ImplReviewTaskState: string(tasks[irTaskID]),
+			})
+		}
 	}
 
 	return cycles

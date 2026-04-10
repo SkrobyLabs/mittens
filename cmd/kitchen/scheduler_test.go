@@ -29,6 +29,23 @@ func (h *schedulerHostAPI) KillWorker(_ context.Context, workerID string) error 
 	return nil
 }
 
+func reviewCouncilTestArtifact(t *testing.T, seat string, turn int, verdict, stance string, adopted bool, findings []adapter.ReviewFinding) string {
+	t.Helper()
+	body, err := json.Marshal(adapter.ReviewCouncilTurnArtifact{
+		Seat:                seat,
+		Turn:                turn,
+		Stance:              stance,
+		Verdict:             verdict,
+		AdoptedPriorVerdict: adopted,
+		Findings:            findings,
+		Summary:             "review council artifact",
+	})
+	if err != nil {
+		t.Fatalf("marshal review council artifact: %v", err)
+	}
+	return "<review_council_turn>" + string(body) + "</review_council_turn>"
+}
+
 func (h *schedulerHostAPI) ListContainers(_ context.Context, _ string) ([]pool.ContainerInfo, error) {
 	return h.containers, nil
 }
@@ -1846,29 +1863,29 @@ func TestSyncPlanExecution_ImplReviewEnqueued(t *testing.T) {
 		t.Fatalf("expected completedAt to be nil while review pending, got %v", bundle.Execution.CompletedAt)
 	}
 
-	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTaskID := reviewCouncilTaskID(planID, 1)
 	reviewTask, ok := pm.Task(reviewTaskID)
 	if !ok {
-		t.Fatalf("impl review task %q not found in pool", reviewTaskID)
+		t.Fatalf("review council task %q not found in pool", reviewTaskID)
 	}
 	if reviewTask.Status != pool.TaskQueued {
-		t.Fatalf("impl review task status = %q, want %q", reviewTask.Status, pool.TaskQueued)
+		t.Fatalf("review council task status = %q, want %q", reviewTask.Status, pool.TaskQueued)
 	}
 	if reviewTask.PlanID != planID {
-		t.Fatalf("impl review task planID = %q, want %q", reviewTask.PlanID, planID)
+		t.Fatalf("review council task planID = %q, want %q", reviewTask.PlanID, planID)
 	}
 	host.spawnSpecs = nil
 	if err := s.schedule(); err != nil {
 		t.Fatalf("schedule(spawn review): %v", err)
 	}
 	if len(host.spawnSpecs) != 1 {
-		t.Fatalf("spawn specs = %d, want 1 impl review worker", len(host.spawnSpecs))
+		t.Fatalf("spawn specs = %d, want 1 review council worker", len(host.spawnSpecs))
 	}
 	if host.spawnSpecs[0].WorkspacePath == "" {
-		t.Fatal("expected impl review worker to receive a review worktree")
+		t.Fatal("expected review council worker to receive a review worktree")
 	}
 	if _, err := os.Stat(filepath.Join(host.spawnSpecs[0].WorkspacePath, ".git")); err != nil {
-		t.Fatalf("impl review worktree missing .git: %v", err)
+		t.Fatalf("review council worktree missing .git: %v", err)
 	}
 }
 
@@ -1972,8 +1989,22 @@ func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 			State:   planStateImplementationReview,
 		},
 		Execution: ExecutionRecord{
-			State:               planStateImplementationReview,
-			ImplReviewRequested: true,
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "pass",
+					Summary: "initial review",
+				},
+			}},
 		},
 	})
 	if err != nil {
@@ -1989,7 +2020,7 @@ func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
 	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
 
-	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
 	if _, err := pm.EnqueueTask(pool.TaskSpec{
 		ID:         reviewTaskID,
 		PlanID:     planID,
@@ -2014,7 +2045,7 @@ func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll worker state: %v", err)
 	}
-	output := "<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>"
+	output := reviewCouncilTestArtifact(t, "B", 2, "pass", "converged", true, nil)
 	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
 		t.Fatalf("WriteFile review result: %v", err)
 	}
@@ -2041,6 +2072,9 @@ func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	}
 	if len(bundle.Execution.ImplReviewFindings) != 0 {
 		t.Fatalf("impl review findings = %v, want empty for pass", bundle.Execution.ImplReviewFindings)
+	}
+	if bundle.Execution.ReviewCouncilFinalDecision != reviewCouncilConverged {
+		t.Fatalf("review council decision = %q, want %q", bundle.Execution.ReviewCouncilFinalDecision, reviewCouncilConverged)
 	}
 	if bundle.Execution.CompletedAt == nil {
 		t.Fatal("expected completedAt to be set after impl review pass")
@@ -2076,8 +2110,22 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 			},
 		},
 		Execution: ExecutionRecord{
-			State:               planStateImplementationReview,
-			ImplReviewRequested: true,
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "pass",
+					Summary: "initial review",
+				},
+			}},
 			Anchor: PlanAnchor{
 				Branch: "main",
 				Commit: strings.TrimSpace(head),
@@ -2097,7 +2145,7 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
 	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
 
-	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
 	if _, err := pm.EnqueueTask(pool.TaskSpec{
 		ID:         reviewTaskID,
 		PlanID:     planID,
@@ -2116,7 +2164,7 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	}
 	wt := host.spawnSpecs[0].WorkspacePath
 	if wt == "" {
-		t.Fatal("expected worktree for impl review")
+		t.Fatal("expected worktree for review council turn")
 	}
 	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
 		t.Fatalf("RegisterWorker reviewer: %v", err)
@@ -2129,7 +2177,7 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll worker state: %v", err)
 	}
-	output := "<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>"
+	output := reviewCouncilTestArtifact(t, "B", 2, "pass", "converged", true, nil)
 	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
 		t.Fatalf("WriteFile review result: %v", err)
 	}
@@ -2142,11 +2190,11 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	}
 
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
-		t.Fatalf("expected impl review worktree to be removed, stat err = %v", err)
+		t.Fatalf("expected review council worktree to be removed, stat err = %v", err)
 	}
 	worker, ok := pm.Worker("w-1")
 	if !ok || worker.Status != pool.WorkerDead {
-		t.Fatalf("worker state = %+v, want dead after impl review completion", worker)
+		t.Fatalf("worker state = %+v, want dead after review council completion", worker)
 	}
 }
 
@@ -2170,8 +2218,22 @@ func TestOnImplementationReviewCompleted_Fail(t *testing.T) {
 			State:   planStateImplementationReview,
 		},
 		Execution: ExecutionRecord{
-			State:               planStateImplementationReview,
-			ImplReviewRequested: true,
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "fail",
+					Summary: "initial review",
+				},
+			}},
 		},
 	})
 	if err != nil {
@@ -2187,7 +2249,7 @@ func TestOnImplementationReviewCompleted_Fail(t *testing.T) {
 	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
 	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
 
-	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
 	if _, err := pm.EnqueueTask(pool.TaskSpec{
 		ID:         reviewTaskID,
 		PlanID:     planID,
@@ -2212,7 +2274,14 @@ func TestOnImplementationReviewCompleted_Fail(t *testing.T) {
 	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll worker state: %v", err)
 	}
-	output := "<review><verdict>fail</verdict><feedback>Missing error handling in the new path</feedback><severity>major</severity></review>"
+	output := reviewCouncilTestArtifact(t, "B", 2, "fail", "converged", true, []adapter.ReviewFinding{{
+		ID:          "f1",
+		File:        "pkg/service.go",
+		Line:        27,
+		Category:    "correctness",
+		Description: "Missing error handling in the new path",
+		Severity:    "major",
+	}})
 	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
 		t.Fatalf("WriteFile review result: %v", err)
 	}
@@ -2272,8 +2341,11 @@ func TestOnImplementationReviewFailed(t *testing.T) {
 			State:   planStateImplementationReview,
 		},
 		Execution: ExecutionRecord{
-			State:               planStateImplementationReview,
-			ImplReviewRequested: true,
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
 		},
 	})
 	if err != nil {
@@ -2289,7 +2361,7 @@ func TestOnImplementationReviewFailed(t *testing.T) {
 	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
 	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
 
-	reviewTaskID := implReviewRuntimeID(planID)
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
 	if _, err := pm.EnqueueTask(pool.TaskSpec{
 		ID:         reviewTaskID,
 		PlanID:     planID,
@@ -2321,11 +2393,212 @@ func TestOnImplementationReviewFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get plan: %v", err)
 	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q (environment failure should requeue review council turn)", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	task, ok := pm.Task(reviewTaskID)
+	if !ok || task.Status != pool.TaskQueued {
+		t.Fatalf("review task = %+v, want queued retry", task)
+	}
+}
+
+func TestOnImplementationReviewFailed_PlanFailureUsesBlockedArtifactPath(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_plan_fail",
+			Lineage: "feat-ir-plan-fail",
+			Title:   "Impl review plan failure test",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "fail",
+					Summary: "initial fail",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-plan-fail"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+	if err := pm.FailTask("w-rev", reviewTaskID, "invalid review council artifact (after 3 attempts): missing block"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+
+	if err := s.onTaskFailed(reviewTaskID, FailurePlan); err != nil {
+		t.Fatalf("onTaskFailed(review): %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
 	if bundle.Execution.State != planStateCompleted {
-		t.Fatalf("execution state = %q, want %q (infra failure should not block completion)", bundle.Execution.State, planStateCompleted)
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusFailed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusFailed)
+	}
+	if bundle.Execution.ReviewCouncilFinalDecision != reviewCouncilConverged {
+		t.Fatalf("review council final decision = %q, want %q", bundle.Execution.ReviewCouncilFinalDecision, reviewCouncilConverged)
+	}
+	found := false
+	for _, finding := range bundle.Execution.ImplReviewFindings {
+		if strings.Contains(finding, "invalid review council artifact") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("impl review findings = %v, want blocked artifact message", bundle.Execution.ImplReviewFindings)
+	}
+}
+
+func TestRecoverReviewCouncilPlansOnStartup_FinalizesLegacyCompletedReview(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_legacy_ir_pass",
+			Lineage: "feat-legacy-ir-pass",
+			Title:   "Legacy impl review pass",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateImplementationReview,
+			ImplReviewRequested: true,
+			ActiveTaskIDs:       []string{planTaskRuntimeID("plan_legacy_ir_pass", "impl-review-1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-legacy-ir-pass"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID := planTaskRuntimeID(planID, "impl-review-1")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "legacy implementation review",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-legacy", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-legacy", "container-w-legacy"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-legacy"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), "w-legacy")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := "<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>"
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask("w-legacy", taskID); err != nil {
+		t.Fatalf("CompleteTask review: %v", err)
+	}
+
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverReviewCouncilPlansOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
 	}
 	if bundle.Plan.State != planStateCompleted {
 		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusPassed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusPassed)
+	}
+	if _, ok := pm.Task(taskID); ok {
+		t.Fatalf("legacy task %q still present after recovery", taskID)
 	}
 }
 

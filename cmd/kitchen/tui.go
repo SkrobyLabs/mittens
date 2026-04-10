@@ -1179,7 +1179,7 @@ func (m kitchenTUIModel) canExtendSelectedPlan() bool {
 	if m.detail == nil {
 		return false
 	}
-	return canExtendCouncil(m.detail.Plan.State, m.detail.Execution)
+	return canExtendCouncil(m.detail.Plan.State, m.detail.Execution) || canExtendReviewCouncil(m.detail.Plan.State, m.detail.Execution)
 }
 
 func (m kitchenTUIModel) canCancelSelectedPlan() bool {
@@ -1839,6 +1839,33 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			}
 		}
 	}
+	if detail.Execution.State == planStateImplementationReview || hasReviewCouncilState(detail.Execution) {
+		activeTurn := detail.Execution.ReviewCouncilTurnsCompleted + 1
+		if strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) != "" && detail.Execution.ReviewCouncilTurnsCompleted > 0 {
+			activeTurn = detail.Execution.ReviewCouncilTurnsCompleted
+		}
+		activeSeat := reviewCouncilSeatForTurn(detail.Execution.ReviewCouncilTurnsCompleted + 1)
+		if strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) != "" && len(detail.Execution.ReviewCouncilTurns) > 0 {
+			last := detail.Execution.ReviewCouncilTurns[len(detail.Execution.ReviewCouncilTurns)-1]
+			activeSeat = firstNonEmpty(strings.TrimSpace(last.Seat), reviewCouncilSeatForTurn(last.Turn))
+		}
+		status := firstNonEmpty(strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision), "reviewing")
+		trajectory := make([]string, 0, len(detail.Execution.ReviewCouncilTurns))
+		for _, turn := range detail.Execution.ReviewCouncilTurns {
+			verdict := "-"
+			if turn.Artifact != nil && strings.TrimSpace(turn.Artifact.Verdict) != "" {
+				verdict = strings.TrimSpace(turn.Artifact.Verdict)
+			}
+			trajectory = append(trajectory, fmt.Sprintf("%s: %s", firstNonEmpty(turn.Seat, reviewCouncilSeatForTurn(turn.Turn)), verdict))
+		}
+		if detail.Execution.State == planStateImplementationReview && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
+			trajectory = append(trajectory, fmt.Sprintf("%s: -", activeSeat))
+		}
+		lines = append(lines,
+			fmt.Sprintf("Review Council: turn %d/%d · Seat %s [%s]", max(1, activeTurn), max(1, detail.Execution.ReviewCouncilMaxTurns), activeSeat, status),
+			fmt.Sprintf("Review verdicts: %s", firstNonEmpty(strings.Join(trajectory, ", "), "-")),
+		)
+	}
 	if hasCouncilState(detail.Execution) {
 		now := time.Now().UTC()
 		lines = append(lines, "", "Council:")
@@ -2132,6 +2159,18 @@ func hasCouncilState(exec ExecutionRecord) bool {
 		return true
 	}
 	for _, seat := range exec.CouncilSeats {
+		if strings.TrimSpace(seat.Seat) != "" || strings.TrimSpace(seat.WorkerID) != "" || seat.IdleSince != nil || seat.Rehydrated {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReviewCouncilState(exec ExecutionRecord) bool {
+	if exec.ReviewCouncilMaxTurns > 0 || exec.ReviewCouncilTurnsCompleted > 0 || strings.TrimSpace(exec.ReviewCouncilFinalDecision) != "" || len(exec.ReviewCouncilTurns) > 0 || len(exec.ReviewCouncilWarnings) > 0 || len(exec.ReviewCouncilUnresolvedDisagreements) > 0 {
+		return true
+	}
+	for _, seat := range exec.ReviewCouncilSeats {
 		if strings.TrimSpace(seat.Seat) != "" || strings.TrimSpace(seat.WorkerID) != "" || seat.IdleSince != nil || seat.Rehydrated {
 			return true
 		}

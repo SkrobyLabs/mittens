@@ -129,6 +129,41 @@ func TestExecuteForCouncilTurn_MidRetryAdapterErrorStopsImmediately(t *testing.T
 	}
 }
 
+func TestExecuteForReviewCouncilTurn_RetriesAndSucceeds(t *testing.T) {
+	ad := &retryTestAdapter{
+		results: []Result{
+			{Output: "missing review council turn\n```\nextra fence", InputTokens: 11, OutputTokens: 21},
+			{Output: `<review_council_turn>{"seat":"A","turn":1,"stance":"propose","verdict":"fail","summary":"Recovered review"}</review_council_turn>`},
+		},
+	}
+	var logs []string
+
+	artifact, result, err := ExecuteForReviewCouncilTurn(context.Background(), ad, "original prompt", "prior context", func(msg string) {
+		logs = append(logs, msg)
+	})
+	if err != nil {
+		t.Fatalf("ExecuteForReviewCouncilTurn: %v", err)
+	}
+	if artifact == nil || artifact.Summary != "Recovered review" {
+		t.Fatalf("artifact = %+v, want recovered review artifact", artifact)
+	}
+	if result.Output == "" {
+		t.Fatal("expected final result output")
+	}
+	if len(ad.prompts) != 2 {
+		t.Fatalf("calls = %d, want 2", len(ad.prompts))
+	}
+	if ad.priorCtxs[0] != "prior context" || ad.priorCtxs[1] != "" {
+		t.Fatalf("priorCtxs = %v, want original then empty retry context", ad.priorCtxs)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "attempt 2/3") {
+		t.Fatalf("logs = %v, want retry attempt 2/3", logs)
+	}
+	if !strings.Contains(ad.prompts[1], "## Original Task") || !strings.Contains(ad.prompts[1], "## Parse Error") {
+		t.Fatalf("retry prompt = %q, want self-contained correction prompt", ad.prompts[1])
+	}
+}
+
 func TestExecuteForReviewVerdict_EmptyVerdictRetries(t *testing.T) {
 	ad := &retryTestAdapter{
 		results: []Result{

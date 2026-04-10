@@ -7,10 +7,11 @@ import (
 )
 
 var structuredTagRegexes = map[string]*regexp.Regexp{
-	"plan":         regexp.MustCompile(`(?is)<\s*plan\s*>(.*?)</\s*plan\s*>`),
-	"council_turn": regexp.MustCompile(`(?is)<\s*council_turn\s*>(.*?)</\s*council_turn\s*>`),
-	"handover":     regexp.MustCompile(`(?is)<\s*handover\s*>(.*?)</\s*handover\s*>`),
-	"review":       regexp.MustCompile(`(?is)<\s*review\s*>(.*?)</\s*review\s*>`),
+	"plan":                regexp.MustCompile(`(?is)<\s*plan\s*>(.*?)</\s*plan\s*>`),
+	"council_turn":        regexp.MustCompile(`(?is)<\s*council_turn\s*>(.*?)</\s*council_turn\s*>`),
+	"review_council_turn": regexp.MustCompile(`(?is)<\s*review_council_turn\s*>(.*?)</\s*review_council_turn\s*>`),
+	"handover":            regexp.MustCompile(`(?is)<\s*handover\s*>(.*?)</\s*handover\s*>`),
+	"review":              regexp.MustCompile(`(?is)<\s*review\s*>(.*?)</\s*review\s*>`),
 }
 
 var innerTagRegexes = map[string]*regexp.Regexp{

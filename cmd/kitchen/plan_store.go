@@ -102,35 +102,42 @@ type PlanRecord struct {
 }
 
 type ExecutionRecord struct {
-	PlanID             string             `json:"planId"`
-	State              string             `json:"state"`
-	AutoApproved       bool               `json:"autoApproved,omitempty"`
-	Approved           bool               `json:"approved,omitempty"`
-	History            []PlanHistoryEntry `json:"history,omitempty"`
-	Branch             string             `json:"branch,omitempty"`
-	Anchor             PlanAnchor         `json:"anchor,omitempty"`
-	ActiveTaskIDs      []string           `json:"activeTaskIds,omitempty"`
-	CompletedTaskIDs   []string           `json:"completedTaskIds,omitempty"`
-	FailedTaskIDs      []string           `json:"failedTaskIds,omitempty"`
-	CreatedAt          time.Time          `json:"createdAt"`
-	UpdatedAt          time.Time          `json:"updatedAt"`
-	ApprovedAt         *time.Time         `json:"approvedAt,omitempty"`
-	ActivatedAt        *time.Time         `json:"activatedAt,omitempty"`
-	CompletedAt        *time.Time         `json:"completedAt,omitempty"`
-	ImplReviewRequested bool              `json:"implReviewRequested,omitempty"`
-	ImplReviewAttempts  int               `json:"implReviewAttempts,omitempty"`
-	ImplReviewStatus    string            `json:"implReviewStatus,omitempty"`
-	ImplReviewFindings  []string          `json:"implReviewFindings,omitempty"`
-	ImplReviewedAt      *time.Time        `json:"implReviewedAt,omitempty"`
-	CouncilMaxTurns                int                        `json:"councilMaxTurns,omitempty"`
-	CouncilTurnsCompleted          int                        `json:"councilTurnsCompleted,omitempty"`
-	CouncilAwaitingAnswers         bool                       `json:"councilAwaitingAnswers,omitempty"`
-	CouncilFinalDecision           string                     `json:"councilFinalDecision,omitempty"`
-	CouncilSeats                   [2]CouncilSeatRecord       `json:"councilSeats,omitempty"`
-	CouncilTurns                   []CouncilTurnRecord        `json:"councilTurns,omitempty"`
-	CouncilWarnings                []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
-	CouncilUnresolvedDisagreements []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
-	RejectedBy                     string                     `json:"rejectedBy,omitempty"`
+	PlanID                               string                        `json:"planId"`
+	State                                string                        `json:"state"`
+	AutoApproved                         bool                          `json:"autoApproved,omitempty"`
+	Approved                             bool                          `json:"approved,omitempty"`
+	History                              []PlanHistoryEntry            `json:"history,omitempty"`
+	Branch                               string                        `json:"branch,omitempty"`
+	Anchor                               PlanAnchor                    `json:"anchor,omitempty"`
+	ActiveTaskIDs                        []string                      `json:"activeTaskIds,omitempty"`
+	CompletedTaskIDs                     []string                      `json:"completedTaskIds,omitempty"`
+	FailedTaskIDs                        []string                      `json:"failedTaskIds,omitempty"`
+	CreatedAt                            time.Time                     `json:"createdAt"`
+	UpdatedAt                            time.Time                     `json:"updatedAt"`
+	ApprovedAt                           *time.Time                    `json:"approvedAt,omitempty"`
+	ActivatedAt                          *time.Time                    `json:"activatedAt,omitempty"`
+	CompletedAt                          *time.Time                    `json:"completedAt,omitempty"`
+	ImplReviewRequested                  bool                          `json:"implReviewRequested,omitempty"`
+	ImplReviewStatus                     string                        `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings                   []string                      `json:"implReviewFindings,omitempty"`
+	ImplReviewedAt                       *time.Time                    `json:"implReviewedAt,omitempty"`
+	CouncilMaxTurns                      int                           `json:"councilMaxTurns,omitempty"`
+	CouncilTurnsCompleted                int                           `json:"councilTurnsCompleted,omitempty"`
+	CouncilAwaitingAnswers               bool                          `json:"councilAwaitingAnswers,omitempty"`
+	CouncilFinalDecision                 string                        `json:"councilFinalDecision,omitempty"`
+	CouncilSeats                         [2]CouncilSeatRecord          `json:"councilSeats,omitempty"`
+	CouncilTurns                         []CouncilTurnRecord           `json:"councilTurns,omitempty"`
+	CouncilWarnings                      []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
+	CouncilUnresolvedDisagreements       []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
+	ReviewCouncilMaxTurns                int                           `json:"reviewCouncilMaxTurns,omitempty"`
+	ReviewCouncilTurnsCompleted          int                           `json:"reviewCouncilTurnsCompleted,omitempty"`
+	ReviewCouncilAwaitingAnswers         bool                          `json:"reviewCouncilAwaitingAnswers,omitempty"`
+	ReviewCouncilFinalDecision           string                        `json:"reviewCouncilFinalDecision,omitempty"`
+	ReviewCouncilSeats                   [2]CouncilSeatRecord          `json:"reviewCouncilSeats,omitempty"`
+	ReviewCouncilTurns                   []ReviewCouncilTurnRecord     `json:"reviewCouncilTurns,omitempty"`
+	ReviewCouncilWarnings                []adapter.CouncilDisagreement `json:"reviewCouncilWarnings,omitempty"`
+	ReviewCouncilUnresolvedDisagreements []adapter.CouncilDisagreement `json:"reviewCouncilUnresolvedDisagreements,omitempty"`
+	RejectedBy                           string                        `json:"rejectedBy,omitempty"`
 }
 
 type CouncilSeatRecord struct {
@@ -147,6 +154,13 @@ type CouncilTurnRecord struct {
 	Turn       int                          `json:"turn"`
 	Artifact   *adapter.CouncilTurnArtifact `json:"artifact"`
 	OccurredAt time.Time                    `json:"occurredAt"`
+}
+
+type ReviewCouncilTurnRecord struct {
+	Seat       string                             `json:"seat"`
+	Turn       int                                `json:"turn"`
+	Artifact   *adapter.ReviewCouncilTurnArtifact `json:"artifact"`
+	OccurredAt time.Time                          `json:"occurredAt"`
 }
 
 type AffinityRecord struct {

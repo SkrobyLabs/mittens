@@ -69,7 +69,7 @@ func canExtendCouncil(planState string, exec ExecutionRecord) bool {
 	}
 	switch exec.CouncilFinalDecision {
 	case councilReject:
-		return planState == planStateRejected && exec.RejectedBy == "council"
+		return planState == planStateRejected && exec.RejectedBy == rejectedByCouncil
 	case councilConverged:
 		return planState == planStatePendingApproval && len(exec.CouncilWarnings) > 0 && exec.RejectedBy == ""
 	default:

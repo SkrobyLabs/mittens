@@ -24,6 +24,21 @@ func formatNotification(n pool.Notification) string {
 			return fmt.Sprintf("[PLAN REVIEW] %s: queued for review", n.Message)
 		}
 		return fmt.Sprintf("[PLAN REVIEW] %s", n.ID)
+	case "plan_impl_review_requested":
+		if n.Message != "" {
+			return fmt.Sprintf("[IMPL REVIEW] %s: queued for review", n.Message)
+		}
+		return fmt.Sprintf("[IMPL REVIEW] %s", n.ID)
+	case "plan_impl_review_passed":
+		if n.Message != "" {
+			return fmt.Sprintf("[IMPL REVIEW PASS] %s", n.Message)
+		}
+		return fmt.Sprintf("[IMPL REVIEW PASS] %s", n.ID)
+	case "plan_impl_review_failed":
+		if n.Message != "" {
+			return fmt.Sprintf("[IMPL REVIEW FAIL] %s", n.Message)
+		}
+		return fmt.Sprintf("[IMPL REVIEW FAIL] %s", n.ID)
 	case "plan_review_passed":
 		if n.Message != "" {
 			return fmt.Sprintf("[PLAN REVIEW PASS] %s", n.Message)
@@ -34,6 +49,14 @@ func formatNotification(n pool.Notification) string {
 			return fmt.Sprintf("[PLAN REVIEW FAIL] %s", n.Message)
 		}
 		return fmt.Sprintf("[PLAN REVIEW FAIL] %s", n.ID)
+	case "plan_review_council_started":
+		return fmt.Sprintf("[REVIEW COUNCIL] %s: started", firstNonEmpty(n.Message, n.ID))
+	case "plan_review_council_turn_completed":
+		return fmt.Sprintf("[REVIEW COUNCIL] %s: %s", n.ID, n.Message)
+	case "plan_review_council_converged":
+		return fmt.Sprintf("[REVIEW COUNCIL PASS] %s: %s", n.ID, n.Message)
+	case "plan_review_council_rejected":
+		return fmt.Sprintf("[REVIEW COUNCIL FAIL] %s: %s", n.ID, n.Message)
 	case "plan_revising":
 		if n.Message != "" {
 			return fmt.Sprintf("[PLAN REVISION] %s: queued for revision", n.Message)
@@ -108,7 +131,8 @@ func formatNotification(n pool.Notification) string {
 func notificationLevel(eventType string) string {
 	switch eventType {
 	case "question", "task_failed", "pipeline_failed",
-		"plan_failed", "plan_review_failed",
+		"plan_failed", "plan_review_failed", "plan_impl_review_failed",
+		"plan_review_council_rejected",
 		"escalation_accept", "escalation_retry", "escalation_abort",
 		"review_fail":
 		return "warning"

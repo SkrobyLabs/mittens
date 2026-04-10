@@ -1137,6 +1137,44 @@ func TestExecuteTask_PlannerTaskMissingArtifactReportsFail(t *testing.T) {
 	}
 }
 
+func TestExecuteTask_ReviewCouncilTaskMissingArtifactReportsFail(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		results: []adapter.Result{
+			{Output: "Review complete but forgot the structured block."},
+			{Output: "Still missing the review council block."},
+			{Output: "Third attempt still malformed."},
+		},
+	}
+	task := &pool.Task{
+		ID:     "t-review-council",
+		Role:   "reviewer",
+		Prompt: adapter.BuildReviewCouncilTurnPrompt("Typed parser errors", "Summary", "[]", "A", 1, "HEAD~1", nil),
+		Status: pool.TaskDispatched,
+	}
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.completed) != 0 {
+		t.Fatalf("completed = %v, want none", m.completed)
+	}
+	if len(m.failed) != 1 || m.failed[0] != "t-review-council" {
+		t.Fatalf("failed = %v, want [t-review-council]", m.failed)
+	}
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "invalid review council artifact (after 3 attempts)") {
+		t.Fatalf("failedErrors = %v, want review council artifact retry error", m.failedErrors)
+	}
+	if len(ad.prompts) != 3 {
+		t.Fatalf("execute count = %d, want 3", len(ad.prompts))
+	}
+}
+
 func TestExecuteTask_ReviewTaskErrorReportsFail(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")

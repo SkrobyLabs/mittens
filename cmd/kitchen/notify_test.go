@@ -28,6 +28,21 @@ func TestFormatNotification(t *testing.T) {
 			want: "[PLAN REVIEW] Typed parser errors: queued for review",
 		},
 		{
+			name: "impl review requested",
+			n:    pool.Notification{Type: "plan_impl_review_requested", ID: "plan_1", Message: "Typed parser errors"},
+			want: "[IMPL REVIEW] Typed parser errors: queued for review",
+		},
+		{
+			name: "impl review passed",
+			n:    pool.Notification{Type: "plan_impl_review_passed", ID: "plan_1", Message: "Typed parser errors"},
+			want: "[IMPL REVIEW PASS] Typed parser errors",
+		},
+		{
+			name: "impl review failed",
+			n:    pool.Notification{Type: "plan_impl_review_failed", ID: "plan_1", Message: "Typed parser errors"},
+			want: "[IMPL REVIEW FAIL] Typed parser errors",
+		},
+		{
 			name: "plan review passed",
 			n:    pool.Notification{Type: "plan_review_passed", ID: "plan_1", Message: "Typed parser errors"},
 			want: "[PLAN REVIEW PASS] Typed parser errors",
@@ -41,6 +56,26 @@ func TestFormatNotification(t *testing.T) {
 			name: "plan revising",
 			n:    pool.Notification{Type: "plan_revising", ID: "plan_1", Message: "Typed parser errors"},
 			want: "[PLAN REVISION] Typed parser errors: queued for revision",
+		},
+		{
+			name: "review council started",
+			n:    pool.Notification{Type: "plan_review_council_started", ID: "plan_1", Message: "Typed parser errors"},
+			want: "[REVIEW COUNCIL] Typed parser errors: started",
+		},
+		{
+			name: "review council turn completed",
+			n:    pool.Notification{Type: "plan_review_council_turn_completed", ID: "plan_1", Message: "Seat A: pass"},
+			want: "[REVIEW COUNCIL] plan_1: Seat A: pass",
+		},
+		{
+			name: "review council converged",
+			n:    pool.Notification{Type: "plan_review_council_converged", ID: "plan_1", Message: "pass"},
+			want: "[REVIEW COUNCIL PASS] plan_1: pass",
+		},
+		{
+			name: "review council rejected",
+			n:    pool.Notification{Type: "plan_review_council_rejected", ID: "plan_1", Message: "Typed parser errors"},
+			want: "[REVIEW COUNCIL FAIL] plan_1: Typed parser errors",
 		},
 		{
 			name: "plan deleted",
@@ -157,7 +192,8 @@ func TestFormatNotification(t *testing.T) {
 func TestNotificationLevel(t *testing.T) {
 	warnTypes := []string{
 		"question", "task_failed", "pipeline_failed",
-		"plan_failed", "plan_review_failed",
+		"plan_failed", "plan_review_failed", "plan_impl_review_failed",
+		"plan_review_council_rejected",
 		"escalation_accept", "escalation_retry", "escalation_abort",
 		"review_fail",
 	}
@@ -170,6 +206,8 @@ func TestNotificationLevel(t *testing.T) {
 	infoTypes := []string{
 		"task_completed", "plan_completed", "pipeline_created", "review_pass",
 		"plan_submitted", "plan_ready", "plan_review_requested", "plan_review_passed", "plan_revising",
+		"plan_impl_review_requested", "plan_impl_review_passed",
+		"plan_review_council_started", "plan_review_council_turn_completed", "plan_review_council_converged",
 		"runtime_worker_spawned", "runtime_assignment_submitted",
 	}
 	for _, typ := range infoTypes {

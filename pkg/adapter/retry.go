@@ -64,6 +64,37 @@ func ExecuteForCouncilTurn(ctx context.Context, ad Adapter, prompt, priorContext
 	return nil, Result{}, fmt.Errorf("unreachable extraction retry state")
 }
 
+func ExecuteForReviewCouncilTurn(ctx context.Context, ad Adapter, prompt, priorContext string, log func(string)) (*ReviewCouncilTurnArtifact, Result, error) {
+	totalAttempts := extractionRetryBudget + 1
+	currentPrompt := prompt
+	currentPriorContext := priorContext
+
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		result, err := ad.Execute(ctx, currentPrompt, currentPriorContext)
+		if err != nil {
+			return nil, result, err
+		}
+		if result.ExitCode != 0 {
+			return nil, result, fmt.Errorf("adapter exited with code %d", result.ExitCode)
+		}
+
+		artifact, err := ExtractReviewCouncilTurnArtifact(result.Output)
+		if err == nil {
+			return artifact, result, nil
+		}
+		if attempt == totalAttempts {
+			return nil, result, &extractionError{attempts: attempt, err: err}
+		}
+
+		nextAttempt := attempt + 1
+		log(fmt.Sprintf("attempt %d/%d: %v (input_tokens=%d output_tokens=%d)", nextAttempt, totalAttempts, err, result.InputTokens, result.OutputTokens))
+		currentPrompt = buildExtractionRetryPrompt(prompt, result.Output, err)
+		currentPriorContext = ""
+	}
+
+	return nil, Result{}, fmt.Errorf("unreachable extraction retry state")
+}
+
 func ExecuteForReviewVerdict(ctx context.Context, ad Adapter, prompt, priorContext string, log func(string)) (verdict, feedback, severity string, result Result, err error) {
 	totalAttempts := extractionRetryBudget + 1
 	currentPrompt := prompt

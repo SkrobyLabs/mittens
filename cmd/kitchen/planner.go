@@ -318,6 +318,34 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 	if err != nil {
 		return err
 	}
+	isLiveReviewCouncil := bundle.Plan.State == planStateImplementationReview
+	isRejectedReviewCouncil := bundle.Plan.State == planStateRejected && bundle.Execution.RejectedBy == rejectedByReviewCouncil
+	if isLiveReviewCouncil || isRejectedReviewCouncil {
+		if !canExtendReviewCouncil(bundle.Plan.State, bundle.Execution) {
+			return fmt.Errorf("plan %s is not eligible for review council extension", planID)
+		}
+		if bundle.Execution.ReviewCouncilTurnsCompleted+turns > ReviewCouncilHardCap {
+			return fmt.Errorf("extension would exceed review council hard cap of %d turns", ReviewCouncilHardCap)
+		}
+		bundle.Execution.ReviewCouncilMaxTurns += turns
+		bundle.Execution.ReviewCouncilFinalDecision = ""
+		bundle.Execution.ReviewCouncilWarnings = nil
+		bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
+		bundle.Execution.ReviewCouncilAwaitingAnswers = false
+		bundle.Execution.RejectedBy = ""
+		bundle.Execution.ActiveTaskIDs = nil
+		bundle.Execution.ImplReviewStatus = ""
+		bundle.Execution.ImplReviewFindings = nil
+		bundle.Execution.ImplReviewedAt = nil
+		bundle.Plan.State = planStateImplementationReview
+		bundle.Execution.State = planStateImplementationReview
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryReviewCouncilExtended,
+			TaskID:  reviewCouncilTaskID(planID, bundle.Execution.ReviewCouncilTurnsCompleted+1),
+			Summary: fmt.Sprintf("Review council extended by %d turns.", turns),
+		})
+		return k.scheduler.enqueueReviewCouncilTurn(bundle)
+	}
 	if !canExtendCouncil(bundle.Plan.State, bundle.Execution) {
 		return fmt.Errorf("plan %s is not eligible for council extension", planID)
 	}
@@ -1249,38 +1277,6 @@ func pendingQuestionsForPlan(pm *pool.PoolManager, planID string) []pool.Questio
 	return questions
 }
 
-func planImplReviewRuntimeID(planID string, attempt int) string {
-	if attempt <= 0 {
-		attempt = 1
-	}
-	return planTaskRuntimeID(planID, fmt.Sprintf("%s-%d", implReviewTaskID, attempt))
-}
-
-func implReviewRuntimeID(planID string) string {
-	return planImplReviewRuntimeID(planID, 1)
-}
-
-func implementationReviewFindings(verdict, feedback, severity string) []string {
-	var findings []string
-	if verdict == pool.ReviewFail && strings.TrimSpace(severity) != "" {
-		findings = append(findings, "Severity: "+strings.TrimSpace(severity))
-	}
-	for _, line := range strings.Split(strings.TrimSpace(feedback), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			findings = append(findings, line)
-		}
-	}
-	if len(findings) == 0 {
-		if verdict == pool.ReviewPass {
-			findings = append(findings, "Plan review passed.")
-		} else {
-			findings = append(findings, "Plan review failed.")
-		}
-	}
-	return findings
-}
-
 func appendUniqueIDs(existing []string, ids ...string) []string {
 	seen := make(map[string]bool, len(existing)+len(ids))
 	result := make([]string, 0, len(existing)+len(ids))
@@ -1359,7 +1355,6 @@ func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanR
 const (
 	plannerTaskRole     = "planner"
 	lineageFixMergeRole = "lineage-fix-merge"
-	implReviewTaskID    = "impl-review"
 )
 
 func isValidComplexity(value Complexity) bool {

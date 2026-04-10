@@ -3,32 +3,39 @@ package main
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	planHistoryPlanningStarted          = "planning_started"
-	planHistoryPlanningCompleted        = "planning_completed"
-	planHistoryPlanningFailed           = "planning_failed"
-	planHistoryCouncilStarted           = "council_started"
-	planHistoryCouncilTurnCompleted     = "council_turn_completed"
-	planHistoryCouncilWaitingAnswers    = "council_waiting_answers"
-	planHistoryCouncilResumed           = "council_resumed"
-	planHistoryCouncilConverged         = "council_converged"
-	planHistoryCouncilAutoConverged     = "council_auto_converged"
-	planHistoryCouncilRejected          = "council_rejected"
-	planHistoryCouncilSeatRehydrated    = "council_seat_rehydrated"
-	planHistoryCouncilExtended          = "council_extended"
-	planHistoryConflictRetried          = "conflict_retried"
-	planHistoryManualRetried            = "manual_retried"
-	planHistoryConflictFixRequested     = "conflict_fix_requested"
-	planHistoryLineageFixMergeRequested = "lineage_fix_merge_requested"
-	planHistoryLineageFixMergeCompleted = "lineage_fix_merge_completed"
-	planHistoryImplReviewRequested      = "impl_review_requested"
-	planHistoryImplReviewPassed         = "impl_review_passed"
-	planHistoryImplReviewFailed         = "impl_review_failed"
+	planHistoryPlanningStarted             = "planning_started"
+	planHistoryPlanningCompleted           = "planning_completed"
+	planHistoryPlanningFailed              = "planning_failed"
+	planHistoryCouncilStarted              = "council_started"
+	planHistoryCouncilTurnCompleted        = "council_turn_completed"
+	planHistoryCouncilWaitingAnswers       = "council_waiting_answers"
+	planHistoryCouncilResumed              = "council_resumed"
+	planHistoryCouncilConverged            = "council_converged"
+	planHistoryCouncilAutoConverged        = "council_auto_converged"
+	planHistoryCouncilRejected             = "council_rejected"
+	planHistoryCouncilSeatRehydrated       = "council_seat_rehydrated"
+	planHistoryCouncilExtended             = "council_extended"
+	planHistoryReviewCouncilStarted        = "review_council_started"
+	planHistoryReviewCouncilTurnCompleted  = "review_council_turn_completed"
+	planHistoryReviewCouncilWaitingAnswers = "review_council_waiting_answers"
+	planHistoryReviewCouncilResumed        = "review_council_resumed"
+	planHistoryReviewCouncilConverged      = "review_council_converged"
+	planHistoryReviewCouncilRejected       = "review_council_rejected"
+	planHistoryReviewCouncilSeatRehydrated = "review_council_seat_rehydrated"
+	planHistoryReviewCouncilExtended       = "review_council_extended"
+	planHistoryConflictRetried             = "conflict_retried"
+	planHistoryManualRetried               = "manual_retried"
+	planHistoryConflictFixRequested        = "conflict_fix_requested"
+	planHistoryLineageFixMergeRequested    = "lineage_fix_merge_requested"
+	planHistoryLineageFixMergeCompleted    = "lineage_fix_merge_completed"
+	planHistoryImplReviewRequested         = "impl_review_requested"
+	planHistoryImplReviewPassed            = "impl_review_passed"
+	planHistoryImplReviewFailed            = "impl_review_failed"
 )
 
 type PlanHistoryEntry struct {
@@ -60,16 +67,6 @@ func appendPlanHistory(ex ExecutionRecord, entry PlanHistoryEntry) ExecutionReco
 func plannerCycleForTask(planID, taskID string) int {
 	if turn := councilTurnNumberFromTaskID(planID, taskID); turn > 0 {
 		return turn
-	}
-	return 1
-}
-
-func implReviewCycleForTask(planID, taskID string) int {
-	prefix := planTaskRuntimeID(planID, implReviewTaskID+"-")
-	if rest, ok := strings.CutPrefix(strings.TrimSpace(taskID), prefix); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
-			return n
-		}
 	}
 	return 1
 }
@@ -140,6 +137,22 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Council seat rehydrated"
 	case planHistoryCouncilExtended:
 		return "Council extended"
+	case planHistoryReviewCouncilStarted:
+		return "Review council started"
+	case planHistoryReviewCouncilTurnCompleted:
+		return "Review council turn completed"
+	case planHistoryReviewCouncilWaitingAnswers:
+		return "Review council waiting for answers"
+	case planHistoryReviewCouncilResumed:
+		return "Review council resumed"
+	case planHistoryReviewCouncilConverged:
+		return "Review council converged"
+	case planHistoryReviewCouncilRejected:
+		return "Review council rejected"
+	case planHistoryReviewCouncilSeatRehydrated:
+		return "Review council seat rehydrated"
+	case planHistoryReviewCouncilExtended:
+		return "Review council extended"
 	case planHistoryConflictRetried:
 		return "Conflict retried"
 	case planHistoryManualRetried:

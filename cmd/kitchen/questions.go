@@ -136,6 +136,20 @@ func (k *Kitchen) queueCouncilResumeIfReady(planID string) error {
 	if k == nil || k.planStore == nil || k.pm == nil || strings.TrimSpace(planID) == "" {
 		return nil
 	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if bundle.Execution.State == planStateImplementationReview {
+		return k.queueReviewCouncilResumeIfReady(planID)
+	}
+	return k.queuePlannerCouncilResumeIfReady(planID)
+}
+
+func (k *Kitchen) queuePlannerCouncilResumeIfReady(planID string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || strings.TrimSpace(planID) == "" {
+		return nil
+	}
 
 	k.councilResumeMu.Lock()
 	defer k.councilResumeMu.Unlock()
@@ -180,5 +194,61 @@ func (k *Kitchen) queueCouncilResumeIfReady(planID string) error {
 		TaskID:  nextTaskID,
 		Summary: "Council resumed after operator answers.",
 	})
+	return k.planStore.UpdateExecution(planID, bundle.Execution)
+}
+
+func (k *Kitchen) queueReviewCouncilResumeIfReady(planID string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || strings.TrimSpace(planID) == "" {
+		return nil
+	}
+
+	k.councilResumeMu.Lock()
+	defer k.councilResumeMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if bundle.Execution.State != planStateImplementationReview || !bundle.Execution.ReviewCouncilAwaitingAnswers {
+		return nil
+	}
+	if len(pendingReviewCouncilQuestionsForPlan(k.pm, planID)) > 0 {
+		return nil
+	}
+
+	nextTurn := bundle.Execution.ReviewCouncilTurnsCompleted + 1
+	nextTaskID := reviewCouncilTaskID(planID, nextTurn)
+	if _, exists := k.pm.Task(nextTaskID); exists {
+		return nil
+	}
+
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryReviewCouncilResumed,
+		Cycle:   nextTurn,
+		TaskID:  nextTaskID,
+		Summary: "Review council resumed after operator answers.",
+	})
+	if k.scheduler != nil {
+		return k.scheduler.enqueueReviewCouncilTurn(bundle)
+	}
+
+	prompt, err := buildReviewCouncilTurnPrompt(bundle, nextTurn)
+	if err != nil {
+		return err
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         nextTaskID,
+		PlanID:     planID,
+		Prompt:     prompt,
+		Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
+		Priority:   len(bundle.Plan.Tasks) + 1,
+		Role:       "reviewer",
+	}); err != nil {
+		return err
+	}
+
+	bundle.Execution.ActiveTaskIDs = []string{nextTaskID}
 	return k.planStore.UpdateExecution(planID, bundle.Execution)
 }

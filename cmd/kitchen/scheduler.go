@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,7 +63,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		return
 	}
 
-	stopReaper := pool.StartReaperWithReservations(s.pm, s.reapInterval, s.reapTimeout, s.reservedCouncilWorkerIDs)
+	stopReaper := pool.StartReaperWithReservations(s.pm, s.reapInterval, s.reapTimeout, s.reservedWorkerIDs)
 	defer stopReaper()
 
 	// One-shot reconciliation of plan execution state against the
@@ -80,6 +79,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 	if err := s.recoverCouncilPlansOnStartup(); err != nil {
 		s.logf("scheduler council recovery: %v", err)
+	}
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		s.logf("scheduler review council recovery: %v", err)
 	}
 	if err := s.enforceTaskTimeouts(); err != nil {
 		s.logf("scheduler timeouts: %v", err)
@@ -220,8 +222,8 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	if task.Role == lineageFixMergeRole {
 		return s.onLineageFixMergeCompleted(*task)
 	}
-	if isImplReviewTask(*task) {
-		return s.onImplementationReviewCompleted(*task)
+	if isReviewCouncilTask(*task) {
+		return s.onReviewCouncilTurnCompleted(*task)
 	}
 	bundle, err := s.plans.Get(task.PlanID)
 	if err != nil {
@@ -392,8 +394,8 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 	if task.Role == plannerTaskRole {
 		return s.onCouncilTurnFailed(*task, class)
 	}
-	if isImplReviewTask(*task) {
-		return s.onImplementationReviewFailed(*task)
+	if isReviewCouncilTask(*task) {
+		return s.onReviewCouncilTurnFailed(*task, class)
 	}
 	bundle, err := s.plans.Get(task.PlanID)
 	if err != nil {
@@ -715,7 +717,11 @@ func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 			continue
 		}
 		seen[planID] = true
-		if _, err := s.plans.Get(planID); err != nil {
+		bundle, err := s.plans.Get(planID)
+		if err != nil {
+			continue
+		}
+		if bundle.Execution.State == planStateReviewing || bundle.Execution.State == planStateImplementationReview {
 			continue
 		}
 		if err := s.syncPlanExecution(planID); err != nil {
@@ -826,6 +832,9 @@ func (s *Scheduler) lineageWorkerCount(lineage string) (int, error) {
 }
 
 func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
+	if allowed, handled := s.workerCanRunReviewCouncilTask(worker, task); handled {
+		return allowed
+	}
 	if allowed, handled := s.workerCanRunCouncilTask(worker, task); handled {
 		return allowed
 	}
@@ -1028,39 +1037,31 @@ func (s *Scheduler) markPlanningFailed(task pool.Task, message string) error {
 	return nil
 }
 
-func isImplReviewTask(task pool.Task) bool {
-	return task.PlanID != "" && strings.HasPrefix(task.ID, planTaskRuntimeID(task.PlanID, implReviewTaskID+"-"))
-}
-
 func (s *Scheduler) enqueueImplementationReview(bundle StoredPlan) error {
 	if s == nil || s.pm == nil || s.plans == nil {
 		return nil
 	}
-	reviewTaskID := planImplReviewRuntimeID(bundle.Plan.PlanID, bundle.Execution.ImplReviewAttempts+1)
-	if _, exists := s.pm.Task(reviewTaskID); !exists {
-		prompt, err := buildImplementationReviewPrompt(bundle.Plan, bundle.Execution)
-		if err != nil {
-			return err
-		}
-		if _, err := s.pm.EnqueueTask(pool.TaskSpec{
-			ID:         reviewTaskID,
-			PlanID:     bundle.Plan.PlanID,
-			Prompt:     prompt,
-			Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
-			Priority:   len(bundle.Plan.Tasks) + 1,
-			Role:       "reviewer",
-		}); err != nil {
-			return err
-		}
+	if bundle.Execution.ReviewCouncilTurnsCompleted > 0 || bundle.Execution.ReviewCouncilFinalDecision != "" {
+		return nil
 	}
+	bundle.Execution.ReviewCouncilMaxTurns = 4
+	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
+	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.ReviewCouncilTurns = nil
+	bundle.Execution.ReviewCouncilWarnings = nil
+	bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
 	bundle.Plan.State = planStateImplementationReview
 	bundle.Execution.State = planStateImplementationReview
-	bundle.Execution.ActiveTaskIDs = []string{reviewTaskID}
+	bundle.Execution.ActiveTaskIDs = nil
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryImplReviewRequested,
-		Cycle:   implReviewCycleForTask(bundle.Plan.PlanID, reviewTaskID),
-		TaskID:  reviewTaskID,
 		Summary: "Implementation queued for post-implementation review.",
+	})
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryReviewCouncilStarted,
+		Summary: "Review council started.",
 	})
 	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
 		return err
@@ -1070,185 +1071,13 @@ func (s *Scheduler) enqueueImplementationReview(bundle StoredPlan) error {
 	}
 	if s.notify != nil {
 		s.notify(pool.Notification{Type: "plan_impl_review_requested", ID: bundle.Plan.PlanID, Message: bundle.Plan.Title})
+		s.notify(pool.Notification{Type: "plan_review_council_started", ID: bundle.Plan.PlanID, Message: bundle.Plan.Title})
 	}
-	return nil
-}
-
-func buildImplementationReviewPrompt(plan PlanRecord, execution ExecutionRecord) (string, error) {
-	var b strings.Builder
-	b.WriteString("## Post-Implementation Review\n\n")
-	b.WriteString("Review the implementation of the plan below. Your job is to verify that every task's success criteria has been met by inspecting the actual code changes.\n\n")
-
-	b.WriteString("### Plan Title\n\n")
-	b.WriteString(strings.TrimSpace(plan.Title))
-	b.WriteString("\n\n")
-
-	if plan.Summary != "" {
-		b.WriteString("### Plan Summary\n\n")
-		b.WriteString(strings.TrimSpace(plan.Summary))
-		b.WriteString("\n\n")
-	}
-
-	data, err := json.MarshalIndent(plan.Tasks, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal tasks for impl review: %w", err)
-	}
-	b.WriteString("### Task List\n\n```json\n")
-	b.Write(data)
-	b.WriteString("\n```\n\n")
-
-	b.WriteString("### How to Review\n\n")
-	b.WriteString("1. From this review worktree, run `git diff ")
-	if execution.Anchor.Commit != "" {
-		b.WriteString(execution.Anchor.Commit)
-	} else if plan.Anchor.Commit != "" {
-		b.WriteString(plan.Anchor.Commit)
-	} else {
-		b.WriteString("HEAD~1")
-	}
-	b.WriteString("` on the lineage branch to see what was implemented.\n")
-	b.WriteString("2. For each task, verify that the success criteria have been met.\n")
-	b.WriteString("3. Check for regressions, missing edge cases, and incomplete work.\n")
-	b.WriteString("4. Conclude with your review verdict.\n\n")
-
-	b.WriteString("At the end of your review, output a review block:\n")
-	b.WriteString("<review>\n<verdict>pass|fail</verdict>\n<feedback>...</feedback>\n<severity>minor|major|critical</severity>\n</review>\n\n")
-	b.WriteString("Use verdict=pass if every task's success criteria has been met, fail otherwise.\n")
-	b.WriteString("Severity is only meaningful when verdict is fail: minor=small issues, major=significant gaps, critical=broken/unsafe.")
-	return b.String(), nil
-}
-
-func (s *Scheduler) onImplementationReviewCompleted(task pool.Task) error {
-	if s.plans == nil || s.pm == nil || task.PlanID == "" || task.WorkerID == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(pool.WorkerStatePath(s.pm.StateDir(), task.WorkerID, pool.WorkerResultFile))
-	if err != nil {
-		return s.onImplementationReviewFailed(pool.Task{
-			ID:       task.ID,
-			PlanID:   task.PlanID,
-			Result:   &pool.TaskResult{Error: fmt.Sprintf("read impl review output: %v", err)},
-			WorkerID: task.WorkerID,
-		})
-	}
-	verdict, feedback, severity := adapter.ExtractReviewVerdict(string(raw))
-	if verdict == "" {
-		verdict = pool.ReviewFail
-		feedback = "implementation review verdict not found in output"
-		if severity == "" {
-			severity = pool.SeverityMajor
-		}
-	}
-
-	bundle, err := s.plans.Get(task.PlanID)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	bundle.Execution.ImplReviewAttempts++
-	bundle.Execution.ImplReviewedAt = &now
-	if verdict == pool.ReviewPass {
-		bundle.Execution.ImplReviewStatus = planReviewStatusPassed
-	} else {
-		bundle.Execution.ImplReviewStatus = planReviewStatusFailed
-	}
-
-	if verdict == pool.ReviewPass {
-		bundle.Execution.ImplReviewFindings = nil
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-			Type:    planHistoryImplReviewPassed,
-			Cycle:   implReviewCycleForTask(task.PlanID, task.ID),
-			TaskID:  task.ID,
-			Verdict: verdict,
-		})
-		if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
-			return err
-		}
-		if s.notify != nil {
-			s.notify(pool.Notification{Type: "plan_impl_review_passed", ID: task.PlanID, Message: bundle.Plan.Title})
-		}
-		if err := s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage); err != nil {
-			return err
-		}
-		return s.syncPlanExecution(task.PlanID)
-	}
-
-	// verdict == fail
-	bundle.Execution.ImplReviewFindings = implementationReviewFindings(verdict, feedback, severity)
-	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-		Type:     planHistoryImplReviewFailed,
-		Cycle:    implReviewCycleForTask(task.PlanID, task.ID),
-		TaskID:   task.ID,
-		Verdict:  verdict,
-		Findings: bundle.Execution.ImplReviewFindings,
-	})
-	completedAt := time.Now().UTC()
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.CompletedAt = &completedAt
-	bundle.Execution.ActiveTaskIDs = nil
-	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
-		return err
-	}
-	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
-		return err
-	}
-	if s.notify != nil {
-		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
-	}
-	return s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage)
-}
-
-func (s *Scheduler) onImplementationReviewFailed(task pool.Task) error {
-	if s.plans == nil || task.PlanID == "" {
-		return nil
-	}
-	bundle, err := s.plans.Get(task.PlanID)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	bundle.Execution.ImplReviewStatus = planReviewStatusFailed
-	msg := "implementation review task failed"
-	if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {
-		msg = strings.TrimSpace(task.Result.Error)
-	}
-	bundle.Execution.ImplReviewFindings = []string{msg}
-	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-		Type:     planHistoryImplReviewFailed,
-		Cycle:    implReviewCycleForTask(task.PlanID, task.ID),
-		TaskID:   task.ID,
-		Verdict:  pool.ReviewFail,
-		Findings: bundle.Execution.ImplReviewFindings,
-	})
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.CompletedAt = &now
-	bundle.Execution.ActiveTaskIDs = nil
-	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
-		return err
-	}
-	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
-		return err
-	}
-	if s.notify != nil {
-		s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
-	}
-	return s.cleanupImplementationReviewTask(task, bundle.Plan.Lineage)
+	return s.enqueueReviewCouncilTurn(bundle)
 }
 
 func isPlanControlTask(task pool.Task) bool {
 	return task.Role == plannerTaskRole
-}
-
-func (s *Scheduler) cleanupImplementationReviewTask(task pool.Task, lineage string) error {
-	if s.git != nil && strings.TrimSpace(lineage) != "" {
-		if err := s.git.DiscardChild(lineage, task.ID); err != nil {
-			return err
-		}
-	}
-	s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
-	return nil
 }
 
 func implementationReviewComplexityForPlan(plan PlanRecord) Complexity {

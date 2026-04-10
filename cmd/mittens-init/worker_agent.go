@@ -389,17 +389,23 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 	// Execute — BuildPrompt is called inside Execute(), do not call it here.
 	ctx := context.Background()
 	expectsCouncilTurn := task.Role == "planner" && adapterHasCouncilTurnPrompt(prompt)
+	expectsReviewCouncilTurn := task.Role == "reviewer" && adapterHasReviewCouncilTurnPrompt(prompt)
 	var (
-		result          adapter.Result
-		err             error
-		councilArtifact *adapter.CouncilTurnArtifact
-		verdict         string
-		feedback        string
-		severity        string
+		result                adapter.Result
+		err                   error
+		councilArtifact       *adapter.CouncilTurnArtifact
+		reviewCouncilArtifact *adapter.ReviewCouncilTurnArtifact
+		verdict               string
+		feedback              string
+		severity              string
 	)
 	switch {
 	case expectsCouncilTurn:
 		councilArtifact, result, err = adapter.ExecuteForCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
+			logInfo("adapter retry: %s", msg)
+		})
+	case expectsReviewCouncilTurn:
+		reviewCouncilArtifact, result, err = adapter.ExecuteForReviewCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
 			logInfo("adapter retry: %s", msg)
 		})
 	case task.Status == pool.TaskReviewing:
@@ -415,8 +421,11 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		}
 		if attempts := adapter.ExtractionAttempts(err); attempts > 0 {
 			reportMsg := fmt.Sprintf("invalid review verdict (after %d attempts): %v", attempts, err)
-			if expectsCouncilTurn {
+			switch {
+			case expectsCouncilTurn:
 				reportMsg = fmt.Sprintf("invalid plan artifact (after %d attempts): %v", attempts, err)
+			case expectsReviewCouncilTurn:
+				reportMsg = fmt.Sprintf("invalid review council artifact (after %d attempts): %v", attempts, err)
 			}
 			logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
 			writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
@@ -457,6 +466,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			reportReviewWithRetries(client, workerID, task.ID, verdict, feedback, severity)
 		} else {
 			// Signal-only completion — data is on filesystem.
+			_ = reviewCouncilArtifact
 			reportCompleteWithRetries(client, workerID, task.ID)
 		}
 		logInfo("worker: %s completed task %s", workerID, task.ID)
@@ -471,6 +481,10 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 
 func adapterHasCouncilTurnPrompt(prompt string) bool {
 	return hasSubstringFold(prompt, "<council_turn>")
+}
+
+func adapterHasReviewCouncilTurnPrompt(prompt string) bool {
+	return hasSubstringFold(prompt, "<review_council_turn>")
 }
 
 func hasSubstringFold(s, needle string) bool {
