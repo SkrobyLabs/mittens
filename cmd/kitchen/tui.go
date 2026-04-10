@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 
 	"github.com/SkrobyLabs/mittens/pkg/adapter"
@@ -1944,8 +1945,10 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 	if task == nil {
 		return []string{"No selected task."}
 	}
+	rawHeader := task.Title + " · activity log"
+	rawHeader = ansi.Truncate(rawHeader, max(1, innerWidth-2), "…")
 	lines := []string{
-		lipgloss.NewStyle().Bold(true).Render(task.Title + " · activity log"),
+		paneTitle(rawHeader, true),
 		fmt.Sprintf("Task ID: %s", task.ID),
 		fmt.Sprintf("Runtime ID: %s", task.RuntimeID),
 		"",
@@ -2350,6 +2353,10 @@ func windowAndWrapLines(lines []string, width, height, offset int) (string, int)
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			wrapped = append(wrapped, "")
+			continue
+		}
+		if ansi.StringWidth(line) <= width {
+			wrapped = append(wrapped, line)
 			continue
 		}
 		for _, item := range wrapText(line, width) {

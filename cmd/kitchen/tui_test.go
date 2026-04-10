@@ -9,6 +9,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
@@ -1100,6 +1102,83 @@ func TestRenderTaskDetailLinesIncludesFinalOutput(t *testing.T) {
 	}
 	if !strings.Contains(joined, "Final output body that should be") {
 		t.Fatalf("detail lines missing final output body:\n%s", joined)
+	}
+}
+
+func TestRenderTaskLogLinesHighlightsHeader(t *testing.T) {
+	model := kitchenTUIModel{
+		tasks: []kitchenTUITaskItem{{
+			Title:     "Planner cycle 1",
+			ID:        "t1",
+			RuntimeID: "r1",
+		}},
+	}
+
+	lines := model.renderTaskLogLines(80)
+	if len(lines) == 0 {
+		t.Fatal("expected at least one line")
+	}
+	expected := paneTitle("Planner cycle 1 · activity log", true)
+	if lines[0] != expected {
+		t.Fatalf("first line = %q, want %q", lines[0], expected)
+	}
+}
+
+func TestRenderTaskDetailLinesUsesPlainBoldHeader(t *testing.T) {
+	model := kitchenTUIModel{
+		tasks: []kitchenTUITaskItem{{
+			Title: "Planner cycle 1",
+			ID:    "t1",
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	if len(lines) == 0 {
+		t.Fatal("expected at least one line")
+	}
+	expected := lipgloss.NewStyle().Bold(true).Render("Planner cycle 1")
+	if lines[0] != expected {
+		t.Fatalf("first line = %q, want %q", lines[0], expected)
+	}
+}
+
+func TestRenderTaskLogLinesTruncatesHeaderForNarrowPane(t *testing.T) {
+	longTitle := strings.Repeat("ABC", 20)
+	model := kitchenTUIModel{
+		tasks: []kitchenTUITaskItem{{
+			Title: longTitle,
+			ID:    "t1",
+		}},
+	}
+
+	lines := model.renderTaskLogLines(30)
+	if len(lines) == 0 {
+		t.Fatal("expected at least one line")
+	}
+	overhead := len(paneTitle("M", true)) - 1
+	if len(lines[0]) > 30+overhead {
+		t.Fatalf("first line len = %d, want <= %d", len(lines[0]), 30+overhead)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(ansi.Strip(lines[0])), "…") {
+		t.Fatalf("first line = %q, want stripped header to end with ellipsis", lines[0])
+	}
+}
+
+func TestWindowAndWrapLinesKeepsStyledHeaderOnSingleLine(t *testing.T) {
+	header := paneTitle("Planner cycle 1 · activity log", true)
+	rendered, total := windowAndWrapLines([]string{header}, ansi.StringWidth(header), 2, 0)
+	rows := strings.Split(rendered, "\n")
+	if total != 1 {
+		t.Fatalf("total = %d, want 1 line", total)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 padded rows", rows)
+	}
+	if rows[0] != header {
+		t.Fatalf("first row = %q, want header preserved", rows[0])
+	}
+	if rows[1] != "" {
+		t.Fatalf("second row = %q, want empty padding row", rows[1])
 	}
 }
 
