@@ -24,6 +24,8 @@ var innerTagRegexes = map[string]*regexp.Regexp{
 	"severity":       regexp.MustCompile(`(?is)<\s*severity\s*>(.*?)</\s*severity\s*>`),
 }
 
+var genericTagRegex = regexp.MustCompile(`(?is)<\s*(/?)\s*([a-z_]+)\s*>`)
+
 func extractTaggedBlock(output, tag string) (string, error) {
 	return extractTaggedBlockWithMode(output, tag, false)
 }
@@ -134,15 +136,39 @@ func repairJSONBody(body string) string {
 }
 
 func extractTag(block, tag string) string {
-	regex, ok := innerTagRegexes[tag]
+	if _, ok := innerTagRegexes[tag]; !ok {
+		return ""
+	}
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	matches := genericTagRegex.FindAllStringSubmatchIndex(block, -1)
+	depth := 0
+	start := -1
+	for _, match := range matches {
+		closing := match[2] != -1 && strings.TrimSpace(block[match[2]:match[3]]) == "/"
+		name := strings.ToLower(strings.TrimSpace(block[match[4]:match[5]]))
+		if !closing {
+			if depth == 0 && name == tag {
+				start = match[1]
+			}
+			depth++
+			continue
+		}
+		if depth > 0 {
+			depth--
+		}
+		if start >= 0 && depth == 0 && name == tag {
+			return strings.TrimSpace(block[start:match[0]])
+		}
+	}
+	return ""
+}
+
+func hasTaggedBlock(output, tag string) bool {
+	regex, ok := structuredTagRegexes[tag]
 	if !ok {
-		return ""
+		return false
 	}
-	matches := regex.FindAllStringSubmatch(block, -1)
-	if len(matches) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(matches[len(matches)-1][1])
+	return regex.FindStringIndex(output) != nil
 }
 
 func blockLabel(tag string) string {

@@ -111,9 +111,8 @@ func buildExtractionRetryPrompt(prompt, output string, err error) string {
 	b.WriteString("\n\n## Parse Error\n\n")
 	b.WriteString(strings.TrimSpace(err.Error()))
 	b.WriteString("\n\n## Previous Output Tail\n\n")
-	b.WriteString("```text\n")
-	b.WriteString(truncateOutputTail(output))
-	b.WriteString("\n```\n\n")
+	b.WriteString(indentRetryBlock(truncateOutputTail(output)))
+	b.WriteString("\n\n")
 	b.WriteString("Return a corrected response for the same task. Preserve the intent of the prior answer, but fix the required structured block so it parses cleanly.")
 	return b.String()
 }
@@ -124,4 +123,15 @@ func truncateOutputTail(output string) string {
 		return output
 	}
 	return output[len(output)-extractionOutputTailMax:]
+}
+
+func indentRetryBlock(output string) string {
+	if output == "" {
+		return "    (empty)"
+	}
+	lines := strings.Split(output, "\n")
+	for i := range lines {
+		lines[i] = "    " + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }

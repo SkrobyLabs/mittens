@@ -218,6 +218,22 @@ func TestExtractCouncilTurnArtifact_LenientJSONBody(t *testing.T) {
 	}
 }
 
+func TestExtractCouncilTurnArtifact_UsesLastCouncilTurnBlock(t *testing.T) {
+	output := `<council_turn>{"seat":"A","turn":1,"stance":"propose","candidatePlan":{"title":"Old","tasks":[{"id":"t1","title":"Old","prompt":"Old","complexity":"low"}]}}</council_turn>
+<council_turn>{"seat":"B","turn":2,"stance":"revise","candidatePlan":{"title":"New","tasks":[{"id":"t1","title":"New","prompt":"New","complexity":"medium"}]}}</council_turn>`
+
+	artifact, err := ExtractCouncilTurnArtifact(output)
+	if err != nil {
+		t.Fatalf("ExtractCouncilTurnArtifact: %v", err)
+	}
+	if artifact.Seat != "B" || artifact.Turn != 2 {
+		t.Fatalf("artifact = %+v, want seat B turn 2", artifact)
+	}
+	if artifact.CandidatePlan == nil || artifact.CandidatePlan.Title != "New" {
+		t.Fatalf("candidate plan = %+v, want New", artifact.CandidatePlan)
+	}
+}
+
 func TestRepairJSONBody(t *testing.T) {
 	tests := []struct {
 		name string

@@ -1014,6 +1014,38 @@ func TestExecuteTask_RegularTaskStillReportsComplete(t *testing.T) {
 	}
 }
 
+func TestExecuteTask_GenericPlannerTaskStillReportsComplete(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		result: adapter.Result{Output: "generic planner summary\n<handover><summary>ok</summary></handover>"},
+	}
+	task := &pool.Task{
+		ID:     "t-generic-plan",
+		Role:   "planner",
+		Prompt: "Create a design summary for this feature.",
+		Status: pool.TaskDispatched,
+	}
+	teamDir := t.TempDir()
+
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.completed) != 1 || m.completed[0] != "t-generic-plan" {
+		t.Fatalf("completed = %v, want [t-generic-plan]", m.completed)
+	}
+	if len(m.failed) != 0 {
+		t.Fatalf("failed = %v, want none", m.failed)
+	}
+	if _, err := os.Stat(filepath.Join(teamDir, pool.WorkerPlanFile)); !os.IsNotExist(err) {
+		t.Fatalf("plan artifact should not be written for non-council planner task, stat err = %v", err)
+	}
+	if len(ad.prompts) != 1 {
+		t.Fatalf("execute count = %d, want 1", len(ad.prompts))
+	}
+}
+
 func TestExecuteTask_PlannerTaskWritesCouncilArtifactAndCompletes(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")

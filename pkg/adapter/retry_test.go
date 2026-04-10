@@ -39,7 +39,7 @@ func (a *retryTestAdapter) Healthy() bool       { return true }
 func TestExecuteForCouncilTurn_RetriesAndSucceeds(t *testing.T) {
 	ad := &retryTestAdapter{
 		results: []Result{
-			{Output: "missing council turn", InputTokens: 10, OutputTokens: 20},
+			{Output: "missing council turn\n```\nextra fence", InputTokens: 10, OutputTokens: 20},
 			{Output: `<council_turn>{"seat":"A","turn":1,"stance":"propose","candidatePlan":{"title":"Recovered","tasks":[{"id":"t1","title":"Task","prompt":"Do it","complexity":"low"}]}}</council_turn>`},
 		},
 	}
@@ -68,6 +68,9 @@ func TestExecuteForCouncilTurn_RetriesAndSucceeds(t *testing.T) {
 	}
 	if !strings.Contains(ad.prompts[1], "## Original Task") || !strings.Contains(ad.prompts[1], "## Parse Error") {
 		t.Fatalf("retry prompt = %q, want self-contained correction prompt", ad.prompts[1])
+	}
+	if strings.Contains(ad.prompts[1], "```text") {
+		t.Fatalf("retry prompt = %q, want indented previous output block instead of fenced block", ad.prompts[1])
 	}
 }
 

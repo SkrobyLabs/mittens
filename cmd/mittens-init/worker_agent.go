@@ -388,6 +388,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 
 	// Execute — BuildPrompt is called inside Execute(), do not call it here.
 	ctx := context.Background()
+	expectsCouncilTurn := task.Role == "planner" && adapterHasCouncilTurnPrompt(prompt)
 	var (
 		result          adapter.Result
 		err             error
@@ -397,7 +398,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		severity        string
 	)
 	switch {
-	case task.Role == "planner":
+	case expectsCouncilTurn:
 		councilArtifact, result, err = adapter.ExecuteForCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
 			logInfo("adapter retry: %s", msg)
 		})
@@ -414,7 +415,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		}
 		if attempts := adapter.ExtractionAttempts(err); attempts > 0 {
 			reportMsg := fmt.Sprintf("invalid review verdict (after %d attempts): %v", attempts, err)
-			if task.Role == "planner" {
+			if expectsCouncilTurn {
 				reportMsg = fmt.Sprintf("invalid plan artifact (after %d attempts): %v", attempts, err)
 			}
 			logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
@@ -446,7 +447,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			}
 		}
 
-		if task.Role == "planner" {
+		if expectsCouncilTurn {
 			if data, err := json.MarshalIndent(councilArtifact, "", "  "); err == nil {
 				writeTeamFileAtomic(state.teamDir, teamPlanFile, data)
 			}
@@ -466,6 +467,14 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		logWarn("worker: clear session: %v", err)
 	}
 	return false
+}
+
+func adapterHasCouncilTurnPrompt(prompt string) bool {
+	return hasSubstringFold(prompt, "<council_turn>")
+}
+
+func hasSubstringFold(s, needle string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(needle))
 }
 
 // cleanTeamDir removes stale files from previous task cycle.
