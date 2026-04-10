@@ -73,7 +73,7 @@ func ClassifyFailure(reported string, detail json.RawMessage, signals KitchenSig
 		return FailureEnvironment
 	case strings.Contains(msg, "unsupported"), strings.Contains(msg, "cannot"), strings.Contains(msg, "too large"), strings.Contains(msg, "capability"):
 		return FailureCapability
-	case strings.Contains(msg, "invalid plan"), strings.Contains(msg, "bad plan"), strings.Contains(msg, "unclear task"):
+	case strings.Contains(msg, "invalid plan"), strings.Contains(msg, "invalid review verdict (after"), strings.Contains(msg, "bad plan"), strings.Contains(msg, "unclear task"):
 		return FailurePlan
 	default:
 		return FailureUnknown

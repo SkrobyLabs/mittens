@@ -211,18 +211,9 @@ func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat strin
 
 // ExtractPlanArtifact parses the final <plan> JSON block from adapter output.
 func ExtractPlanArtifact(output string) (*PlanArtifact, error) {
-	end := strings.LastIndex(output, "</plan>")
-	if end < 0 {
-		return nil, fmt.Errorf("plan block not found")
-	}
-	start := strings.LastIndex(output[:end], "<plan>")
-	if start < 0 {
-		return nil, fmt.Errorf("plan block not found")
-	}
-
-	body := strings.TrimSpace(output[start+len("<plan>") : end])
-	if body == "" {
-		return nil, fmt.Errorf("plan block is empty")
+	body, err := extractTaggedJSON(output, "plan")
+	if err != nil {
+		return nil, err
 	}
 
 	var plan PlanArtifact

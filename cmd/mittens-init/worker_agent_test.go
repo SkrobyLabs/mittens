@@ -131,19 +131,32 @@ func newMockLeaderServer(t *testing.T) *mockLeaderServer {
 type fakeAdapter struct {
 	result      adapter.Result
 	err         error
+	results     []adapter.Result
+	errs        []error
 	prompts     []string
 	priorCtxs   []string
 	clearCalls  int
 	forceCleans int
+	calls       int
 }
 
 func (a *fakeAdapter) Execute(ctx context.Context, prompt string, priorContext string) (adapter.Result, error) {
 	a.prompts = append(a.prompts, prompt)
 	a.priorCtxs = append(a.priorCtxs, priorContext)
-	if a.err != nil {
-		return adapter.Result{}, a.err
+	idx := a.calls
+	a.calls++
+	result := a.result
+	err := a.err
+	if idx < len(a.results) {
+		result = a.results[idx]
 	}
-	return a.result, nil
+	if idx < len(a.errs) {
+		err = a.errs[idx]
+	}
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (a *fakeAdapter) ClearSession() error {
@@ -899,8 +912,9 @@ func TestExecuteTask_ReviewTaskReportsReview(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 	ad := &fakeAdapter{
-		result: adapter.Result{
-			Output: "Review complete.\n<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>",
+		results: []adapter.Result{
+			{Output: "Review complete but forgot the structured block."},
+			{Output: "Review complete.\n<review><verdict>pass</verdict><feedback>LGTM</feedback><severity>minor</severity></review>"},
 		},
 	}
 	task := &pool.Task{
@@ -916,14 +930,17 @@ func TestExecuteTask_ReviewTaskReportsReview(t *testing.T) {
 
 	executeTask(client, ad, "w-1", task, state)
 
-	if len(ad.prompts) != 1 {
-		t.Fatalf("execute count = %d, want 1", len(ad.prompts))
+	if len(ad.prompts) != 2 {
+		t.Fatalf("execute count = %d, want 2", len(ad.prompts))
 	}
 	if !strings.Contains(ad.prompts[0], "## Review Request") {
 		t.Errorf("prompt = %q, want review framing", ad.prompts[0])
 	}
-	if len(ad.priorCtxs) != 1 || ad.priorCtxs[0] != "" {
-		t.Errorf("priorContext = %q, want empty", ad.priorCtxs[0])
+	if len(ad.priorCtxs) != 2 || ad.priorCtxs[0] != "" || ad.priorCtxs[1] != "" {
+		t.Errorf("priorContexts = %v, want empty contexts", ad.priorCtxs)
+	}
+	if !strings.Contains(ad.prompts[1], "## Parse Error") {
+		t.Fatalf("retry prompt = %q, want parse error context", ad.prompts[1])
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -938,11 +955,15 @@ func TestExecuteTask_ReviewTaskReportsReview(t *testing.T) {
 	}
 }
 
-func TestExecuteTask_ReviewTaskMissingVerdictDefaultsToFail(t *testing.T) {
+func TestExecuteTask_ReviewTaskMissingVerdictFailsAfterRetries(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 	ad := &fakeAdapter{
-		result: adapter.Result{Output: "review text without structured verdict"},
+		results: []adapter.Result{
+			{Output: "review text without structured verdict"},
+			{Output: "still no verdict"},
+			{Output: "final attempt still missing the review block"},
+		},
 	}
 	task := &pool.Task{
 		ID:     "t-review",
@@ -955,14 +976,17 @@ func TestExecuteTask_ReviewTaskMissingVerdictDefaultsToFail(t *testing.T) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.reviewed) != 1 {
-		t.Fatalf("reviewed = %d, want 1", len(m.reviewed))
+	if len(m.reviewed) != 0 {
+		t.Fatalf("reviewed = %d, want 0", len(m.reviewed))
 	}
-	if m.reviewed[0].Verdict != pool.ReviewFail {
-		t.Errorf("verdict = %q, want fail", m.reviewed[0].Verdict)
+	if len(m.failed) != 1 || m.failed[0] != "t-review" {
+		t.Fatalf("failed = %v, want [t-review]", m.failed)
 	}
-	if m.reviewed[0].Severity != pool.SeverityMajor {
-		t.Errorf("severity = %q, want %q", m.reviewed[0].Severity, pool.SeverityMajor)
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "invalid review verdict (after 3 attempts)") {
+		t.Fatalf("failedErrors = %v, want invalid review verdict retry message", m.failedErrors)
+	}
+	if len(ad.prompts) != 3 {
+		t.Fatalf("execute count = %d, want 3", len(ad.prompts))
 	}
 }
 
@@ -990,20 +1014,20 @@ func TestExecuteTask_RegularTaskStillReportsComplete(t *testing.T) {
 	}
 }
 
-func TestExecuteTask_PlannerTaskWritesPlanArtifactAndCompletes(t *testing.T) {
+func TestExecuteTask_PlannerTaskWritesCouncilArtifactAndCompletes(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 	ad := &fakeAdapter{
 		result: adapter.Result{
 			Output: `Planning complete.
-<plan>{"title":"Typed parser errors","tasks":[{"id":"t1","title":"Add typed errors","prompt":"Implement typed parser errors.","complexity":"medium","reviewComplexity":"medium"}]}</plan>
+<council_turn>{"seat":"A","turn":1,"stance":"propose","candidatePlan":{"title":"Typed parser errors","tasks":[{"id":"t1","title":"Add typed errors","prompt":"Implement typed parser errors.","complexity":"medium","reviewComplexity":"medium"}]}}</council_turn>
 <handover><summary>Drafted the implementation plan.</summary></handover>`,
 		},
 	}
 	task := &pool.Task{
 		ID:     "t-plan",
 		Role:   "planner",
-		Prompt: "Plan this change",
+		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, ""),
 		Status: pool.TaskDispatched,
 	}
 	teamDir := t.TempDir()
@@ -1013,20 +1037,20 @@ func TestExecuteTask_PlannerTaskWritesPlanArtifactAndCompletes(t *testing.T) {
 	if len(ad.prompts) != 1 {
 		t.Fatalf("execute count = %d, want 1", len(ad.prompts))
 	}
-	if !strings.Contains(ad.prompts[0], "## Planning Request") {
-		t.Fatalf("prompt = %q, want planning framing", ad.prompts[0])
+	if !strings.Contains(ad.prompts[0], "## Planner Council Turn") {
+		t.Fatalf("prompt = %q, want council planning framing", ad.prompts[0])
 	}
 
 	raw, err := os.ReadFile(filepath.Join(teamDir, pool.WorkerPlanFile))
 	if err != nil {
 		t.Fatalf("read plan artifact: %v", err)
 	}
-	var plan adapter.PlanArtifact
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		t.Fatalf("unmarshal plan artifact: %v", err)
+	var artifact adapter.CouncilTurnArtifact
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatalf("unmarshal council artifact: %v", err)
 	}
-	if plan.Title != "Typed parser errors" {
-		t.Fatalf("plan title = %q, want Typed parser errors", plan.Title)
+	if artifact.CandidatePlan == nil || artifact.CandidatePlan.Title != "Typed parser errors" {
+		t.Fatalf("candidate plan = %+v, want Typed parser errors", artifact.CandidatePlan)
 	}
 
 	m.mu.Lock()
@@ -1043,12 +1067,16 @@ func TestExecuteTask_PlannerTaskMissingArtifactReportsFail(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 	ad := &fakeAdapter{
-		result: adapter.Result{Output: "Planning complete but forgot the structured block."},
+		results: []adapter.Result{
+			{Output: "Planning complete but forgot the structured block."},
+			{Output: "Still missing the council turn block."},
+			{Output: "Third attempt still malformed."},
+		},
 	}
 	task := &pool.Task{
 		ID:     "t-plan",
 		Role:   "planner",
-		Prompt: "Plan this change",
+		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, ""),
 		Status: pool.TaskDispatched,
 	}
 	teamDir := t.TempDir()
@@ -1069,8 +1097,11 @@ func TestExecuteTask_PlannerTaskMissingArtifactReportsFail(t *testing.T) {
 	if len(m.failed) != 1 || m.failed[0] != "t-plan" {
 		t.Fatalf("failed = %v, want [t-plan]", m.failed)
 	}
-	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "planner artifact invalid") {
-		t.Fatalf("failedErrors = %v, want planner artifact error", m.failedErrors)
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "invalid plan artifact (after 3 attempts)") {
+		t.Fatalf("failedErrors = %v, want planner artifact retry error", m.failedErrors)
+	}
+	if len(ad.prompts) != 3 {
+		t.Fatalf("execute count = %d, want 3", len(ad.prompts))
 	}
 }
 

@@ -46,15 +46,10 @@ func BuildPrompt(taskPrompt string, priorContext string) string {
 // ExtractHandover parses a <handover> block from adapter output text.
 // Returns nil if no valid handover block is found.
 func ExtractHandover(taskID, output string) *pool.TaskHandover {
-	end := strings.LastIndex(output, "</handover>")
-	if end < 0 {
+	block, err := extractTaggedBlockAllowEmpty(output, "handover")
+	if err != nil {
 		return nil
 	}
-	start := strings.LastIndex(output[:end], "<handover>")
-	if start < 0 {
-		return nil
-	}
-	block := output[start+len("<handover>") : end]
 
 	h := &pool.TaskHandover{TaskID: taskID}
 	h.Summary = extractTag(block, "summary")
@@ -135,15 +130,10 @@ func BuildReviewPrompt(taskPrompt, implementerSummary, priorContext string) stri
 // ExtractReviewVerdict parses a <review> block from reviewer AI output and returns
 // (verdict, feedback, severity). Returns ("", "", "") if no valid block is found.
 func ExtractReviewVerdict(output string) (verdict, feedback, severity string) {
-	end := strings.LastIndex(output, "</review>")
-	if end < 0 {
+	block, err := extractTaggedBlock(output, "review")
+	if err != nil {
 		return "", "", ""
 	}
-	start := strings.LastIndex(output[:end], "<review>")
-	if start < 0 {
-		return "", "", ""
-	}
-	block := output[start+len("<review>") : end]
 	verdict = extractTag(block, "verdict")
 	feedback = extractTag(block, "feedback")
 	severity = extractTag(block, "severity")
@@ -154,17 +144,9 @@ func ExtractReviewVerdict(output string) (verdict, feedback, severity string) {
 }
 
 func ExtractCouncilTurnArtifact(output string) (*CouncilTurnArtifact, error) {
-	end := strings.LastIndex(output, "</council_turn>")
-	if end < 0 {
-		return nil, fmt.Errorf("council turn block not found")
-	}
-	start := strings.LastIndex(output[:end], "<council_turn>")
-	if start < 0 {
-		return nil, fmt.Errorf("council turn block not found")
-	}
-	body := strings.TrimSpace(output[start+len("<council_turn>") : end])
-	if body == "" {
-		return nil, fmt.Errorf("council turn block is empty")
+	body, err := extractTaggedJSON(output, "council_turn")
+	if err != nil {
+		return nil, err
 	}
 	var artifact CouncilTurnArtifact
 	if err := json.Unmarshal([]byte(body), &artifact); err != nil {
@@ -174,19 +156,4 @@ func ExtractCouncilTurnArtifact(output string) (*CouncilTurnArtifact, error) {
 		return nil, err
 	}
 	return &artifact, nil
-}
-
-// extractTag finds <tag>content</tag> in a block and returns the trimmed content.
-func extractTag(block, tag string) string {
-	open := "<" + tag + ">"
-	close := "</" + tag + ">"
-	start := strings.Index(block, open)
-	if start < 0 {
-		return ""
-	}
-	end := strings.Index(block[start:], close)
-	if end < 0 {
-		return ""
-	}
-	return strings.TrimSpace(block[start+len(open) : start+end])
 }

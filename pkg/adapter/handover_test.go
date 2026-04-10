@@ -82,6 +82,30 @@ func TestExtractHandover_EmptyBlock(t *testing.T) {
 	}
 }
 
+func TestExtractHandover_CaseInsensitiveTags(t *testing.T) {
+	output := `<HANDOVER>
+<SUMMARY>New summary</SUMMARY>
+<DECISIONS>First
+Second</DECISIONS>
+<FILES_CHANGED>new.go:added:new file</FILES_CHANGED>
+<CONTEXT>Carry this forward</CONTEXT>
+</HANDOVER>`
+
+	h := ExtractHandover("t-case", output)
+	if h == nil {
+		t.Fatal("expected handover, got nil")
+	}
+	if h.Summary != "New summary" {
+		t.Fatalf("Summary = %q, want New summary", h.Summary)
+	}
+	if len(h.KeyDecisions) != 2 {
+		t.Fatalf("KeyDecisions = %v, want 2 entries", h.KeyDecisions)
+	}
+	if h.ContextForNext != "Carry this forward" {
+		t.Fatalf("ContextForNext = %q, want Carry this forward", h.ContextForNext)
+	}
+}
+
 func TestExtractHandover_EchoedPriorContext(t *testing.T) {
 	// BuildPrompt echoes a prior handover in the prompt. The adapter output
 	// may contain that echoed block followed by the real, new handover.
@@ -216,6 +240,14 @@ Line three.</feedback>
 	}
 	if s != "critical" {
 		t.Errorf("severity = %q, want critical", s)
+	}
+}
+
+func TestExtractReviewVerdict_CaseInsensitiveTags(t *testing.T) {
+	output := `<REVIEW><VERDICT>pass</VERDICT><FEEDBACK>LGTM</FEEDBACK><SEVERITY>minor</SEVERITY></REVIEW>`
+	v, f, s := ExtractReviewVerdict(output)
+	if v != "pass" || f != "LGTM" || s != "minor" {
+		t.Fatalf("got (%q, %q, %q), want pass/LGTM/minor", v, f, s)
 	}
 }
 

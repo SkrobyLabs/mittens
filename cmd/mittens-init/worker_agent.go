@@ -388,8 +388,44 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 
 	// Execute — BuildPrompt is called inside Execute(), do not call it here.
 	ctx := context.Background()
-	result, err := ad.Execute(ctx, prompt, priorContext)
+	var (
+		result          adapter.Result
+		err             error
+		councilArtifact *adapter.CouncilTurnArtifact
+		verdict         string
+		feedback        string
+		severity        string
+	)
+	switch {
+	case task.Role == "planner":
+		councilArtifact, result, err = adapter.ExecuteForCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
+			logInfo("adapter retry: %s", msg)
+		})
+	case task.Status == pool.TaskReviewing:
+		verdict, feedback, severity, result, err = adapter.ExecuteForReviewVerdict(ctx, ad, prompt, priorContext, func(msg string) {
+			logInfo("adapter retry: %s", msg)
+		})
+	default:
+		result, err = ad.Execute(ctx, prompt, priorContext)
+	}
 	if err != nil {
+		if result.Output != "" {
+			writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
+		}
+		if attempts := adapter.ExtractionAttempts(err); attempts > 0 {
+			reportMsg := fmt.Sprintf("invalid review verdict (after %d attempts): %v", attempts, err)
+			if task.Role == "planner" {
+				reportMsg = fmt.Sprintf("invalid plan artifact (after %d attempts): %v", attempts, err)
+			}
+			logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
+			writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
+			reportFailWithRetries(client, workerID, task.ID, reportMsg)
+			if err := ad.ClearSession(); err != nil {
+				logWarn("worker: clear session: %v", err)
+			}
+			return false
+		}
+
 		logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
 		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(err.Error()))
 		reportMsg, stopWorker := classifyTaskFailure(err)
@@ -411,30 +447,12 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		}
 
 		if task.Role == "planner" {
-			councilArtifact, err := adapter.ExtractCouncilTurnArtifact(result.Output)
-			if err != nil {
-				reportMsg := fmt.Sprintf("planner artifact invalid: %v", err)
-				writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
-				reportFailWithRetries(client, workerID, task.ID, reportMsg)
-				if err := ad.ClearSession(); err != nil {
-					logWarn("worker: clear session: %v", err)
-				}
-				return false
-			}
 			if data, err := json.MarshalIndent(councilArtifact, "", "  "); err == nil {
 				writeTeamFileAtomic(state.teamDir, teamPlanFile, data)
 			}
 		}
 
 		if task.Status == pool.TaskReviewing {
-			verdict, feedback, severity := adapter.ExtractReviewVerdict(result.Output)
-			if verdict == "" {
-				verdict = pool.ReviewFail
-				feedback = "review verdict not found in output"
-				if severity == "" {
-					severity = pool.SeverityMajor
-				}
-			}
 			reportReviewWithRetries(client, workerID, task.ID, verdict, feedback, severity)
 		} else {
 			// Signal-only completion — data is on filesystem.
