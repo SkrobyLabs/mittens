@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"strings"
@@ -158,6 +159,48 @@ func (c *kitchenAPIClient) TaskActivity(taskID string) ([]pool.WorkerActivityRec
 	}
 	err := c.request(http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/activity", nil, &resp)
 	return resp.Transcript, err
+}
+
+func (c *kitchenAPIClient) TaskOutput(taskID string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("kitchen api client not configured")
+	}
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/v1/tasks/"+url.PathEscape(taskID)+"/output", nil)
+	if err != nil {
+		return "", err
+	}
+	if c.token != "" {
+		req.Header.Set("X-Kitchen-Token", c.token)
+	}
+	httpResp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode == http.StatusNotFound {
+		return "", &fs.PathError{
+			Op:   "GET",
+			Path: "/v1/tasks/" + url.PathEscape(taskID) + "/output",
+			Err:  fs.ErrNotExist,
+		}
+	}
+	if httpResp.StatusCode >= 400 {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(httpResp.Body).Decode(&apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
+			return "", fmt.Errorf(apiErr.Error)
+		}
+		return "", fmt.Errorf("GET /v1/tasks/%s/output returned %d", url.PathEscape(taskID), httpResp.StatusCode)
+	}
+	var resp struct {
+		TaskID string `json:"taskId"`
+		Output string `json:"output"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return "", err
+	}
+	return resp.Output, nil
 }
 
 func (c *kitchenAPIClient) ApprovePlan(planID string) (map[string]any, error) {

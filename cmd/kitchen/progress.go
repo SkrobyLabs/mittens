@@ -107,6 +107,17 @@ func (k *Kitchen) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, erro
 	return append([]pool.WorkerActivityRecord(nil), transcript...), nil
 }
 
+func (k *Kitchen) TaskOutput(taskID string) (string, error) {
+	if k == nil || k.pm == nil {
+		return "", nil
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", fmt.Errorf("task ID must not be empty")
+	}
+	return k.pm.ReadTaskOutput(taskID)
+}
+
 func (k *Kitchen) OpenPlanProgress() ([]PlanProgress, error) {
 	return k.OpenPlanProgressWithLimit(k.snapshotPlanHistoryLimit())
 }

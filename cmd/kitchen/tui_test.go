@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +27,9 @@ type fakeKitchenTUIBackend struct {
 	retryCalls                int
 	answeredQuestionID        string
 	answeredQuestionAnswer    string
+	taskOutputs               map[string]string
+	taskOutputErr             error
+	taskOutputCalls           int
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -42,6 +47,13 @@ func (b *fakeKitchenTUIBackend) PlanDetail(planID string) (PlanDetail, error) {
 }
 func (b *fakeKitchenTUIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
 	return nil, nil
+}
+func (b *fakeKitchenTUIBackend) TaskOutput(taskID string) (string, error) {
+	b.taskOutputCalls++
+	if b.taskOutputErr != nil {
+		return "", b.taskOutputErr
+	}
+	return b.taskOutputs[taskID], nil
 }
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
@@ -535,6 +547,209 @@ func TestKitchenTUILoadCmdFallsBackWhenSelectedPlanWasDeleted(t *testing.T) {
 	}
 }
 
+func TestKitchenTUILoadCmdSkipsTaskOutputOutsideDetailPane(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{
+		plans: []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		taskOutputs: map[string]string{
+			"plan_a-t1": "final output",
+		},
+	}
+	model := kitchenTUIModel{
+		backend:      backend,
+		leftMode:     kitchenTUILeftTasks,
+		taskPaneMode: kitchenTUITaskPaneLogs,
+		plans:        []kitchenTUIPlanItem{{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}},
+		tasks:        []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+	}
+
+	msg := model.loadCmd()()
+	loaded, ok := msg.(kitchenTUILoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUILoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("loaded err = %v", loaded.err)
+	}
+	if backend.taskOutputCalls != 0 {
+		t.Fatalf("taskOutputCalls = %d, want 0", backend.taskOutputCalls)
+	}
+}
+
+func TestKitchenTUILoadCmdSwallowsMissingTaskOutput(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{
+		plans:         []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		taskOutputErr: fmt.Errorf("read task output: %w", os.ErrNotExist),
+	}
+	model := kitchenTUIModel{
+		backend:      backend,
+		leftMode:     kitchenTUILeftTasks,
+		taskPaneMode: kitchenTUITaskPaneDetail,
+		plans:        []kitchenTUIPlanItem{{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}},
+		tasks:        []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+	}
+
+	msg := model.loadCmd()()
+	loaded, ok := msg.(kitchenTUILoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUILoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("loaded err = %v, want swallowed not-exist", loaded.err)
+	}
+	if loaded.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want empty", loaded.taskOutput)
+	}
+	updated, _ := model.Update(loaded)
+	got := updated.(kitchenTUIModel)
+	if got.errText != "" {
+		t.Fatalf("errText = %q, want empty", got.errText)
+	}
+}
+
+func TestKitchenTUILoadCmdLoadsTaskOutputInDetailPane(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{
+		plans: []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		taskOutputs: map[string]string{
+			"plan_a-t1": "loaded final output",
+		},
+	}
+	model := kitchenTUIModel{
+		backend:      backend,
+		leftMode:     kitchenTUILeftTasks,
+		taskPaneMode: kitchenTUITaskPaneDetail,
+		plans:        []kitchenTUIPlanItem{{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}},
+		tasks:        []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+	}
+
+	msg := model.loadCmd()()
+	loaded, ok := msg.(kitchenTUILoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUILoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("loaded err = %v", loaded.err)
+	}
+	if backend.taskOutputCalls != 1 {
+		t.Fatalf("taskOutputCalls = %d, want 1", backend.taskOutputCalls)
+	}
+	if loaded.taskOutput != "loaded final output" {
+		t.Fatalf("taskOutput = %q, want loaded final output", loaded.taskOutput)
+	}
+}
+
+func TestKitchenTUILoadCmdKeepsRefreshAliveOnTaskOutputError(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{
+		plans:         []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		taskOutputErr: fmt.Errorf("output endpoint failed"),
+	}
+	model := kitchenTUIModel{
+		backend:      backend,
+		leftMode:     kitchenTUILeftTasks,
+		taskPaneMode: kitchenTUITaskPaneDetail,
+		plans:        []kitchenTUIPlanItem{{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}},
+		tasks:        []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+	}
+
+	msg := model.loadCmd()()
+	loaded, ok := msg.(kitchenTUILoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUILoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("loaded err = %v, want degraded task output error", loaded.err)
+	}
+	if loaded.taskOutputErr == nil || !strings.Contains(loaded.taskOutputErr.Error(), "output endpoint failed") {
+		t.Fatalf("taskOutputErr = %v, want preserved task output error", loaded.taskOutputErr)
+	}
+	if loaded.detail == nil || loaded.detail.Plan.PlanID != "plan_a" {
+		t.Fatalf("detail = %+v, want loaded plan detail", loaded.detail)
+	}
+}
+
+func TestKitchenTUILoadedMsgClearsTaskOutputOutsideTasks(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:          kitchenTUILeftPlans,
+		taskOutput:        "stale output",
+		taskOutputLoading: true,
+	}
+
+	updated, _ := model.Update(kitchenTUILoadedMsg{
+		status: tuiStatusSnapshot{},
+		plans:  []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		detail: &PlanDetail{Plan: PlanRecord{PlanID: "plan_a", Title: "A"}},
+	})
+	got := updated.(kitchenTUIModel)
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want cleared", got.taskOutput)
+	}
+	if got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = true, want cleared")
+	}
+}
+
+func TestKitchenTUILoadedMsgTaskOutputErrorDoesNotAbortStateUpdate(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:          kitchenTUILeftTasks,
+		taskPaneMode:      kitchenTUITaskPaneDetail,
+		taskOutputLoading: true,
+	}
+
+	updated, _ := model.Update(kitchenTUILoadedMsg{
+		status:                tuiStatusSnapshot{},
+		plans:                 []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		detail:                &PlanDetail{Plan: PlanRecord{PlanID: "plan_a", Title: "A", Tasks: []PlanTask{{ID: "t1", Title: "Task 1"}}}},
+		selectedTaskRuntimeID: "plan_a-t1",
+		taskOutputTaskID:      "plan_a-t1",
+		taskOutputErr:         fmt.Errorf("backend unavailable"),
+	})
+	got := updated.(kitchenTUIModel)
+	if got.detail == nil || got.detail.Plan.PlanID != "plan_a" {
+		t.Fatalf("detail = %+v, want loaded detail despite task output error", got.detail)
+	}
+	if !strings.Contains(got.errText, "task output: backend unavailable") {
+		t.Fatalf("errText = %q, want task output warning", got.errText)
+	}
+	if got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = true, want cleared after response")
+	}
+}
+
+func TestKitchenLocalBackendTaskOutput(t *testing.T) {
+	repo := initGitRepo(t)
+	t.Setenv("KITCHEN_HOME", t.TempDir())
+	paths, err := DefaultKitchenPaths()
+	if err != nil {
+		t.Fatalf("DefaultKitchenPaths: %v", err)
+	}
+	if err := paths.Ensure(); err != nil {
+		t.Fatalf("Ensure paths: %v", err)
+	}
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatalf("Ensure project: %v", err)
+	}
+	taskID := "task_local_output"
+	outputDir := filepath.Join(project.PoolsDir, defaultPoolStateName, "outputs")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll outputs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, taskID+".txt"), []byte("local backend output"), 0o644); err != nil {
+		t.Fatalf("WriteFile output: %v", err)
+	}
+
+	backend := &kitchenLocalBackend{repoPath: repo}
+	output, err := backend.TaskOutput(taskID)
+	if err != nil {
+		t.Fatalf("TaskOutput: %v", err)
+	}
+	if output != "local backend output" {
+		t.Fatalf("output = %q, want local backend output", output)
+	}
+}
+
 func TestKitchenTUIFooterShowsTaskActionsOnlyForSelectedTask(t *testing.T) {
 	model := kitchenTUIModel{
 		leftMode: kitchenTUILeftTasks,
@@ -546,6 +761,9 @@ func TestKitchenTUIFooterShowsTaskActionsOnlyForSelectedTask(t *testing.T) {
 	footer := model.renderFooter()
 	if !strings.Contains(footer, "R retry") {
 		t.Fatalf("footer = %q, want retry action", footer)
+	}
+	if !strings.Contains(footer, "PgUp/PgDn scroll") {
+		t.Fatalf("footer = %q, want scroll hint", footer)
 	}
 	if !strings.Contains(footer, "U reuse") {
 		t.Fatalf("footer = %q, want reuse action", footer)
@@ -606,6 +824,9 @@ func TestKitchenTUIFooterShowsPlanActionsOnlyWhenActionable(t *testing.T) {
 	footer := model.renderFooter()
 	if !strings.Contains(footer, "a approve") {
 		t.Fatalf("footer = %q, want approve action", footer)
+	}
+	if !strings.Contains(footer, "PgUp/PgDn scroll") {
+		t.Fatalf("footer = %q, want scroll hint", footer)
 	}
 	if !strings.Contains(footer, "p replan") || !strings.Contains(footer, "D delete") || !strings.Contains(footer, "m check") {
 		t.Fatalf("footer = %q, want actionable plan actions", footer)
@@ -856,6 +1077,281 @@ func TestRenderQuestionDetailPaneAlreadyAnswered(t *testing.T) {
 	}
 	if strings.Contains(out, "Press 'a' to answer") {
 		t.Fatalf("output should not contain answer hint for already-answered question: %q", out)
+	}
+}
+
+func TestRenderTaskDetailLinesIncludesFinalOutput(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		tasks: []kitchenTUITaskItem{{
+			ID:        "t1",
+			RuntimeID: "plan_a-t1",
+			Title:     "Task 1",
+			Prompt:    "Prompt body",
+			Summary:   "Summary body",
+		}},
+		taskOutput: "Final output body that should be rendered.",
+	}
+
+	lines := model.renderTaskDetailLines(40)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Final output:") {
+		t.Fatalf("detail lines missing final output header:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Final output body that should be") {
+		t.Fatalf("detail lines missing final output body:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesShowsLoadingIndicator(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		tasks: []kitchenTUITaskItem{{
+			ID:        "t1",
+			RuntimeID: "plan_a-t1",
+			Title:     "Task 1",
+			Prompt:    "Prompt body",
+		}},
+		taskOutputLoading: true,
+		taskOutput:        "stale output that should stay hidden",
+	}
+
+	lines := model.renderTaskDetailLines(40)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Final output:\nloading...") {
+		t.Fatalf("detail lines missing loading indicator:\n%s", joined)
+	}
+	if strings.Contains(joined, "stale output that should stay hidden") {
+		t.Fatalf("detail lines still show stale output while loading:\n%s", joined)
+	}
+}
+
+func TestKitchenTUIEnterTaskDetailStartsTaskOutputReload(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:          &fakeKitchenTUIBackend{},
+		leftMode:         kitchenTUILeftPlans,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
+		rightPaneOffsets: map[string]int{},
+		tasks:            []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+		taskOutput:       "stale output",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected reload command when entering task detail")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.leftMode != kitchenTUILeftTasks {
+		t.Fatalf("leftMode = %q, want tasks", got.leftMode)
+	}
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want cleared before reload", got.taskOutput)
+	}
+	if !got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = false, want loading state when entering task detail")
+	}
+}
+
+func TestWindowAndWrapLinesSupportsOffsets(t *testing.T) {
+	lines := []string{
+		"one two three four five",
+		"six seven eight nine ten",
+	}
+
+	rendered, total := windowAndWrapLines(lines, 10, 2, 1)
+	if total <= 2 {
+		t.Fatalf("total = %d, want more than visible height", total)
+	}
+	rows := strings.Split(rendered, "\n")
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2", rows)
+	}
+	if rows[0] == "one two" {
+		t.Fatalf("rows = %+v, want offset window instead of first wrapped row", rows)
+	}
+}
+
+func TestWindowAndWrapLinesClampsOverscroll(t *testing.T) {
+	rendered, total := windowAndWrapLines([]string{"one two three four five"}, 8, 2, 99)
+	if total == 0 {
+		t.Fatal("total = 0, want wrapped content")
+	}
+	rows := strings.Split(rendered, "\n")
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 padded rows", rows)
+	}
+	if strings.TrimSpace(rows[0]) == "" {
+		t.Fatalf("rows = %+v, want clamped content instead of empty overscroll window", rows)
+	}
+}
+
+func TestKitchenTUIPageDownScrollsTaskDetailPane(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:          &fakeKitchenTUIBackend{},
+		width:            120,
+		height:           28,
+		leftMode:         kitchenTUILeftTasks,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
+		rightPaneOffsets: map[string]int{},
+		tasks: []kitchenTUITaskItem{{
+			ID:        "t1",
+			RuntimeID: "plan_a-t1",
+			Title:     "Task 1",
+			Prompt:    strings.Repeat("scroll me ", 80),
+		}},
+		taskOutput: strings.Repeat("final output body ", 120),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	got := updated.(kitchenTUIModel)
+	if got.rightPaneOffsets["task_detail"] <= 0 {
+		t.Fatalf("rightPaneOffsets = %+v, want task_detail offset to increase", got.rightPaneOffsets)
+	}
+}
+
+func TestKitchenTUITaskSelectionReloadsDetailOutput(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:          &fakeKitchenTUIBackend{},
+		leftMode:         kitchenTUILeftTasks,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
+		rightPaneOffsets: map[string]int{},
+		selectedTask:     0,
+		tasks: []kitchenTUITaskItem{
+			{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"},
+			{ID: "t2", RuntimeID: "plan_a-t2", Title: "Task 2"},
+		},
+		taskOutput: "stale output",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if cmd == nil {
+		t.Fatal("expected reload command after selecting next task in detail pane")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.selectedTask != 1 {
+		t.Fatalf("selectedTask = %d, want 1", got.selectedTask)
+	}
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want cleared before reload", got.taskOutput)
+	}
+	if !got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = false, want loading state while fetching next task output")
+	}
+}
+
+func TestKitchenTUILoadedMsgIgnoresStaleTaskOutputForOldRuntime(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:          kitchenTUILeftTasks,
+		taskPaneMode:      kitchenTUITaskPaneDetail,
+		selectedTask:      1,
+		taskOutputLoading: true,
+		tasks: []kitchenTUITaskItem{
+			{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"},
+			{ID: "t2", RuntimeID: "plan_a-t2", Title: "Task 2"},
+		},
+	}
+
+	updated, _ := model.Update(kitchenTUILoadedMsg{
+		status:                tuiStatusSnapshot{},
+		plans:                 []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		detail:                &PlanDetail{Plan: PlanRecord{PlanID: "plan_a", Title: "A", Tasks: []PlanTask{{ID: "t2", Title: "Task 2"}, {ID: "t1", Title: "Task 1"}}}},
+		selectedTaskRuntimeID: "plan_a-t2",
+		taskOutputTaskID:      "plan_a-t1",
+		taskOutput:            "stale output",
+	})
+	got := updated.(kitchenTUIModel)
+	if got.selectedTask != 0 {
+		t.Fatalf("selectedTask = %d, want reselection by runtime ID", got.selectedTask)
+	}
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want stale output ignored", got.taskOutput)
+	}
+	if !got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = false, want loading to continue until the matching response arrives")
+	}
+}
+
+func TestKitchenTUILoadedMsgKeepsCurrentSelectionWhenOlderResponseArrives(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:          kitchenTUILeftTasks,
+		taskPaneMode:      kitchenTUITaskPaneDetail,
+		selectedTask:      1,
+		taskOutputLoading: true,
+		tasks: []kitchenTUITaskItem{
+			{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"},
+			{ID: "t2", RuntimeID: "plan_a-t2", Title: "Task 2"},
+		},
+	}
+
+	updated, _ := model.Update(kitchenTUILoadedMsg{
+		status:                tuiStatusSnapshot{},
+		plans:                 []PlanRecord{{PlanID: "plan_a", Title: "A"}},
+		detail:                &PlanDetail{Plan: PlanRecord{PlanID: "plan_a", Title: "A", Tasks: []PlanTask{{ID: "t1", Title: "Task 1"}, {ID: "t2", Title: "Task 2"}}}},
+		selectedTaskRuntimeID: "plan_a-t1",
+		taskOutputTaskID:      "plan_a-t1",
+		taskOutput:            "stale output",
+		taskOutputErr:         fmt.Errorf("stale request failed"),
+	})
+	got := updated.(kitchenTUIModel)
+	if got.selectedTask != 1 {
+		t.Fatalf("selectedTask = %d, want current selection preserved", got.selectedTask)
+	}
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want stale output ignored", got.taskOutput)
+	}
+	if got.errText != "" {
+		t.Fatalf("errText = %q, want stale task output error ignored", got.errText)
+	}
+	if !got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = false, want loading to continue for the current task")
+	}
+}
+
+func TestKitchenTUISwitchingPanesResetsDestinationOffset(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:          &fakeKitchenTUIBackend{},
+		leftMode:         kitchenTUILeftTasks,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
+		rightPaneOffsets: map[string]int{"task_detail": 4, "task_log": 7},
+		tasks:            []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	got := updated.(kitchenTUIModel)
+	if got.taskPaneMode != kitchenTUITaskPaneLogs {
+		t.Fatalf("taskPaneMode = %q, want logs", got.taskPaneMode)
+	}
+	if _, exists := got.rightPaneOffsets["task_log"]; exists {
+		t.Fatalf("rightPaneOffsets = %+v, want destination task_log offset reset", got.rightPaneOffsets)
+	}
+	if got.rightPaneOffsets["task_detail"] != 4 {
+		t.Fatalf("rightPaneOffsets = %+v, want task_detail offset preserved", got.rightPaneOffsets)
+	}
+}
+
+func TestKitchenTUIReturningFromLogsStartsTaskOutputReload(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:          &fakeKitchenTUIBackend{},
+		leftMode:         kitchenTUILeftTasks,
+		taskPaneMode:     kitchenTUITaskPaneLogs,
+		rightPaneOffsets: map[string]int{"task_detail": 2, "task_log": 7},
+		tasks:            []kitchenTUITaskItem{{ID: "t1", RuntimeID: "plan_a-t1", Title: "Task 1"}},
+		taskOutput:       "stale output",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if cmd == nil {
+		t.Fatal("expected reload command when returning to detail pane")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.taskPaneMode != kitchenTUITaskPaneDetail {
+		t.Fatalf("taskPaneMode = %q, want detail", got.taskPaneMode)
+	}
+	if got.taskOutput != "" {
+		t.Fatalf("taskOutput = %q, want cleared before reload", got.taskOutput)
+	}
+	if !got.taskOutputLoading {
+		t.Fatal("taskOutputLoading = false, want loading state when returning to detail pane")
 	}
 }
 

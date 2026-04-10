@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,6 +26,7 @@ type kitchenTUIBackend interface {
 	ListPlans() ([]PlanRecord, error)
 	PlanDetail(planID string) (PlanDetail, error)
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
+	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
 	SubmitIdea(idea string, implReview bool) (string, error)
 	ExtendCouncil(planID string, turns int) error
@@ -74,6 +76,9 @@ func (b *kitchenAPIBackend) PlanDetail(planID string) (PlanDetail, error) {
 }
 func (b *kitchenAPIBackend) TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error) {
 	return b.client.TaskActivity(taskID)
+}
+func (b *kitchenAPIBackend) TaskOutput(taskID string) (string, error) {
+	return b.client.TaskOutput(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
 func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
@@ -217,6 +222,16 @@ func (b *kitchenLocalBackend) TaskActivity(taskID string) ([]pool.WorkerActivity
 		return err
 	})
 	return transcript, err
+}
+
+func (b *kitchenLocalBackend) TaskOutput(taskID string) (string, error) {
+	var output string
+	err := b.withKitchen(func(k *Kitchen) error {
+		var err error
+		output, err = k.TaskOutput(taskID)
+		return err
+	})
+	return output, err
 }
 
 func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
@@ -371,13 +386,18 @@ func decodeTUIStatus(src map[string]any) (tuiStatusSnapshot, error) {
 }
 
 type kitchenTUILoadedMsg struct {
-	status     tuiStatusSnapshot
-	plans      []PlanRecord
-	questions  []pool.Question
-	detail     *PlanDetail
-	taskLog    []pool.WorkerActivityRecord
-	err        error
-	newBackend kitchenTUIBackend
+	status                tuiStatusSnapshot
+	plans                 []PlanRecord
+	questions             []pool.Question
+	detail                *PlanDetail
+	selectedTaskRuntimeID string
+	taskLogTaskID         string
+	taskLog               []pool.WorkerActivityRecord
+	taskOutputTaskID      string
+	taskOutput            string
+	taskOutputErr         error
+	err                   error
+	newBackend            kitchenTUIBackend
 }
 
 type kitchenTUIActionMsg struct {
@@ -446,6 +466,9 @@ type kitchenTUIModel struct {
 	taskPaneMode      kitchenTUITaskPaneMode
 	detail            *PlanDetail
 	taskLog           []pool.WorkerActivityRecord
+	taskOutput        string
+	taskOutputLoading bool
+	rightPaneOffsets  map[string]int
 	input             textinput.Model
 	inputMode         kitchenTUIInputMode
 	submitImplReview  bool
@@ -468,12 +491,13 @@ func runKitchenTUI(repoPath string) error {
 	input.CharLimit = 1000
 	input.Prompt = "> "
 	model := kitchenTUIModel{
-		backend:      backend,
-		repoPath:     repoPath,
-		input:        input,
-		loading:      true,
-		leftMode:     kitchenTUILeftPlans,
-		taskPaneMode: kitchenTUITaskPaneDetail,
+		backend:          backend,
+		repoPath:         repoPath,
+		input:            input,
+		loading:          true,
+		leftMode:         kitchenTUILeftPlans,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
+		rightPaneOffsets: map[string]int{},
 	}
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	return err
@@ -494,32 +518,66 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case kitchenTUILoadedMsg:
 		m.loading = false
+		currentSelectedTaskRuntimeID := ""
+		if m.leftMode == kitchenTUILeftTasks {
+			if task := m.selectedTaskItem(); task != nil {
+				currentSelectedTaskRuntimeID = strings.TrimSpace(task.RuntimeID)
+			}
+		}
 		if msg.newBackend != nil {
 			m.backend = msg.newBackend
 		}
 		if msg.err != nil {
+			m.taskOutputLoading = false
 			m.errText = msg.err.Error()
 			return m, nil
 		}
-		m.errText = ""
 		m.status = msg.status
 		m.plans = buildPlanItems(msg.plans, msg.status)
 		m.questions = append([]pool.Question(nil), msg.questions...)
 		m.syncPlanSelection()
 		m.detail = msg.detail
-		m.taskLog = append([]pool.WorkerActivityRecord(nil), msg.taskLog...)
 		m.tasks = buildTaskItems(m.detail, m.status)
-		if m.selectedTask >= len(m.tasks) {
+		selectionRuntimeID := currentSelectedTaskRuntimeID
+		if selectionRuntimeID == "" {
+			selectionRuntimeID = msg.selectedTaskRuntimeID
+		}
+		if idx := findTaskIndexByRuntimeID(m.tasks, selectionRuntimeID); idx >= 0 {
+			m.selectedTask = idx
+		} else if m.selectedTask >= len(m.tasks) {
 			m.selectedTask = max(0, len(m.tasks)-1)
+		}
+		if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneLogs && runtimeIDMatchesSelectedTask(m.tasks, m.selectedTask, msg.taskLogTaskID) {
+			m.taskLog = append([]pool.WorkerActivityRecord(nil), msg.taskLog...)
+		} else if m.leftMode != kitchenTUILeftTasks || m.taskPaneMode != kitchenTUITaskPaneLogs {
+			m.taskLog = nil
+		}
+		if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneDetail && runtimeIDMatchesSelectedTask(m.tasks, m.selectedTask, msg.taskOutputTaskID) {
+			m.taskOutput = msg.taskOutput
+			m.taskOutputLoading = false
+		} else if m.leftMode != kitchenTUILeftTasks || m.taskPaneMode != kitchenTUITaskPaneDetail {
+			m.taskOutput = ""
+			m.taskOutputLoading = false
+		}
+		if m.leftMode != kitchenTUILeftTasks {
+			m.taskLog = nil
+			m.taskOutput = ""
+			m.taskOutputLoading = false
 		}
 		if m.leftMode == kitchenTUILeftTasks && len(m.tasks) == 0 {
 			m.leftMode = kitchenTUILeftPlans
 			m.taskPaneMode = kitchenTUITaskPaneDetail
 			m.taskLog = nil
+			m.taskOutput = ""
+			m.taskOutputLoading = false
 		}
 		if m.flash == "refreshing..." {
 			m.flash = ""
 			m.flashUntil = time.Time{}
+		}
+		m.errText = ""
+		if msg.taskOutputErr != nil && runtimeIDMatchesSelectedTask(m.tasks, m.selectedTask, msg.taskOutputTaskID) {
+			m.errText = fmt.Sprintf("task output: %v", msg.taskOutputErr)
 		}
 		return m, nil
 	case kitchenTUIActionMsg:
@@ -562,10 +620,18 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadCmd()
 		case "up", "k":
 			if m.leftMode == kitchenTUILeftTasks {
+				moved := false
 				if m.selectedTask > 0 {
 					m.selectedTask--
+					(&m).resetCurrentRightPaneOffset()
+					moved = true
 				}
 				if m.taskPaneMode == kitchenTUITaskPaneLogs {
+					return m, m.loadCmd()
+				}
+				if moved {
+					m.taskOutput = ""
+					m.taskOutputLoading = true
 					return m, m.loadCmd()
 				}
 				return m, nil
@@ -573,6 +639,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.leftMode == kitchenTUILeftQuestions {
 				if m.selectedQuestion > 0 {
 					m.selectedQuestion--
+					(&m).resetCurrentRightPaneOffset()
 				}
 				return m, nil
 			}
@@ -580,15 +647,24 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedPlan--
 				m.pendingSelectedID = m.selectedPlanID()
 				m.selectedTask = 0
+				(&m).resetCurrentRightPaneOffset()
 				return m, m.loadCmd()
 			}
 			return m, nil
 		case "down", "j":
 			if m.leftMode == kitchenTUILeftTasks {
+				moved := false
 				if m.selectedTask < len(m.tasks)-1 {
 					m.selectedTask++
+					(&m).resetCurrentRightPaneOffset()
+					moved = true
 				}
 				if m.taskPaneMode == kitchenTUITaskPaneLogs {
+					return m, m.loadCmd()
+				}
+				if moved {
+					m.taskOutput = ""
+					m.taskOutputLoading = true
 					return m, m.loadCmd()
 				}
 				return m, nil
@@ -609,6 +685,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.selectedQuestion < count-1 {
 					m.selectedQuestion++
+					(&m).resetCurrentRightPaneOffset()
 				}
 				return m, nil
 			}
@@ -616,6 +693,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedPlan++
 				m.pendingSelectedID = m.selectedPlanID()
 				m.selectedTask = 0
+				(&m).resetCurrentRightPaneOffset()
 				return m, m.loadCmd()
 			}
 			return m, nil
@@ -623,10 +701,14 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.leftMode == kitchenTUILeftPlans && len(m.tasks) > 0 {
 				m.leftMode = kitchenTUILeftTasks
 				m.taskPaneMode = kitchenTUITaskPaneDetail
-				return m, nil
+				(&m).resetCurrentRightPaneOffset()
+				m.taskOutput = ""
+				m.taskOutputLoading = true
+				return m, m.loadCmd()
 			}
 			if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneDetail && len(m.tasks) > 0 {
 				m.taskPaneMode = kitchenTUITaskPaneLogs
+				(&m).resetCurrentRightPaneOffset()
 				return m, m.loadCmd()
 			}
 			return m, nil
@@ -634,19 +716,49 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.leftMode == kitchenTUILeftTasks {
 				if m.taskPaneMode == kitchenTUITaskPaneLogs {
 					m.taskPaneMode = kitchenTUITaskPaneDetail
-					return m, nil
+					(&m).resetCurrentRightPaneOffset()
+					m.taskOutput = ""
+					m.taskOutputLoading = true
+					return m, m.loadCmd()
 				}
 				m.leftMode = kitchenTUILeftPlans
 				m.taskPaneMode = kitchenTUITaskPaneDetail
+				(&m).resetCurrentRightPaneOffset()
 			} else if m.leftMode == kitchenTUILeftQuestions {
 				m.leftMode = kitchenTUILeftPlans
+				(&m).resetCurrentRightPaneOffset()
 			}
 			return m, nil
 		case "?":
 			if m.leftMode == kitchenTUILeftPlans {
 				m.leftMode = kitchenTUILeftQuestions
 				m.selectedQuestion = 0
+				(&m).resetCurrentRightPaneOffset()
 			}
+			return m, nil
+		case "pgup":
+			lines, innerWidth, _ := m.measureCurrentRightPane()
+			if _, total := windowAndWrapLines(lines, innerWidth, 0, 0); total > 0 {
+				(&m).setRightPaneOffset(m.rightPaneOffset() - max(1, m.pageScrollDelta()))
+			}
+			return m, nil
+		case "pgdown":
+			lines, innerWidth, _ := m.measureCurrentRightPane()
+			if _, total := windowAndWrapLines(lines, innerWidth, 0, 0); total > 0 {
+				(&m).setRightPaneOffset(m.rightPaneOffset() + max(1, m.pageScrollDelta()))
+			}
+			return m, nil
+		case "home":
+			(&m).setRightPaneOffset(0)
+			return m, nil
+		case "end":
+			lines, innerWidth, height := m.measureCurrentRightPane()
+			_, total := windowAndWrapLines(lines, innerWidth, 0, 0)
+			maxOffset := total - height
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			(&m).setRightPaneOffset(maxOffset)
 			return m, nil
 		case "n":
 			m.openSubmitInput()
@@ -1036,6 +1148,27 @@ func (m kitchenTUIModel) selectedTaskItem() *kitchenTUITaskItem {
 	return &m.tasks[m.selectedTask]
 }
 
+func findTaskIndexByRuntimeID(tasks []kitchenTUITaskItem, runtimeID string) int {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return -1
+	}
+	for i, task := range tasks {
+		if strings.TrimSpace(task.RuntimeID) == runtimeID {
+			return i
+		}
+	}
+	return -1
+}
+
+func runtimeIDMatchesSelectedTask(tasks []kitchenTUITaskItem, selected int, runtimeID string) bool {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" || selected < 0 || selected >= len(tasks) {
+		return false
+	}
+	return strings.TrimSpace(tasks[selected].RuntimeID) == runtimeID
+}
+
 func (m kitchenTUIModel) canApproveSelectedPlan() bool {
 	plan := m.selectedPlanItem()
 	return plan != nil && planDisplayState(*plan) == planStatePendingApproval
@@ -1168,6 +1301,7 @@ func (m kitchenTUIModel) footerActions() []string {
 
 	actions := []string{"n submit"}
 	if m.leftMode == kitchenTUILeftTasks {
+		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canCancelSelectedTask() {
 			actions = append(actions, "c cancel")
 		}
@@ -1181,6 +1315,7 @@ func (m kitchenTUIModel) footerActions() []string {
 	} else if m.leftMode == kitchenTUILeftQuestions {
 		actions = append(actions, "a answer", "esc back")
 	} else {
+		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canApproveSelectedPlan() {
 			actions = append(actions, "a approve")
 		}
@@ -1209,10 +1344,23 @@ func (m kitchenTUIModel) footerActions() []string {
 
 func (m kitchenTUIModel) loadCmd() tea.Cmd {
 	selectedPlanID := m.selectedPlanID()
-	selectedTaskID := ""
+	selectedTaskLogID := ""
+	selectedTaskOutputID := ""
+	selectedTaskRuntimeID := ""
+	currentTaskOutput := m.taskOutput
+	if m.leftMode == kitchenTUILeftTasks {
+		if task := m.selectedTaskItem(); task != nil {
+			selectedTaskRuntimeID = strings.TrimSpace(task.RuntimeID)
+		}
+	}
 	if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneLogs {
 		if task := m.selectedTaskItem(); task != nil {
-			selectedTaskID = strings.TrimSpace(task.RuntimeID)
+			selectedTaskLogID = strings.TrimSpace(task.RuntimeID)
+		}
+	}
+	if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneDetail {
+		if task := m.selectedTaskItem(); task != nil {
+			selectedTaskOutputID = strings.TrimSpace(task.RuntimeID)
 		}
 	}
 	if strings.TrimSpace(m.pendingSelectedID) != "" {
@@ -1260,7 +1408,8 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 			}
 			if !found {
 				planID = ""
-				selectedTaskID = ""
+				selectedTaskLogID = ""
+				selectedTaskOutputID = ""
 			}
 		}
 		if planID == "" && len(plans) > 0 {
@@ -1275,19 +1424,39 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 			detail = &got
 		}
 		var taskLog []pool.WorkerActivityRecord
-		if selectedTaskID != "" {
-			taskLog, err = backend.TaskActivity(selectedTaskID)
+		if selectedTaskLogID != "" {
+			taskLog, err = backend.TaskActivity(selectedTaskLogID)
 			if err != nil {
 				return kitchenTUILoadedMsg{err: err, newBackend: upgraded}
 			}
 		}
+		taskOutput := currentTaskOutput
+		var taskOutputErr error
+		if selectedTaskOutputID != "" {
+			out, err := backend.TaskOutput(selectedTaskOutputID)
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					taskOutput = ""
+					taskOutputErr = err
+				} else {
+					taskOutput = ""
+				}
+			} else {
+				taskOutput = out
+			}
+		}
 		return kitchenTUILoadedMsg{
-			status:     status,
-			plans:      plans,
-			questions:  questions,
-			detail:     detail,
-			taskLog:    taskLog,
-			newBackend: upgraded,
+			status:                status,
+			plans:                 plans,
+			questions:             questions,
+			detail:                detail,
+			selectedTaskRuntimeID: selectedTaskRuntimeID,
+			taskLogTaskID:         selectedTaskLogID,
+			taskLog:               taskLog,
+			taskOutputTaskID:      selectedTaskOutputID,
+			taskOutput:            taskOutput,
+			taskOutputErr:         taskOutputErr,
+			newBackend:            upgraded,
 		}
 	}
 }
@@ -1314,14 +1483,18 @@ func (m kitchenTUIModel) renderHeader() string {
 	if branch == "" {
 		branch = "unknown"
 	}
+	backendLabel := "unknown"
+	if m.backend != nil {
+		backendLabel = m.backend.Label()
+	}
 	headline := fmt.Sprintf("Kitchen  %s  %s@%s", repo, branch, shortenSHA(m.status.Anchor.Commit))
-	summary := fmt.Sprintf("backend=%s  workers=%d/%d  pendingQuestions=%d  plans=%d", m.backend.Label(), m.status.Queue.AliveWorkers, m.status.Queue.MaxWorkers, len(m.questions), len(m.plans))
+	summary := fmt.Sprintf("backend=%s  workers=%d/%d  pendingQuestions=%d  plans=%d", backendLabel, m.status.Queue.AliveWorkers, m.status.Queue.MaxWorkers, len(m.questions), len(m.plans))
 	rows := []string{titleStyle.Render(headline), metaStyle.Render(summary)}
 	// In local backend mode the TUI talks to a transient Kitchen that
 	// does not run the scheduler, so any queued task will sit there
 	// forever. Surface that clearly so the operator knows to start
 	// `kitchen serve` in another terminal.
-	if m.backend.Label() == "local" {
+	if backendLabel == "local" {
 		queued := 0
 		for _, t := range m.status.Queue.Tasks {
 			if t.Status == pool.TaskQueued {
@@ -1451,7 +1624,8 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 	} else {
 		lines = m.renderPlanDetailLines(innerWidth)
 	}
-	return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+	rendered, _ := windowAndWrapLines(lines, innerWidth, height, m.rightPaneOffset())
+	return paneBox(width, height, rendered)
 }
 
 func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
@@ -1460,42 +1634,41 @@ func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
 		return paneBox(width, height, "Question Detail\n\nNo selected question.")
 	}
 	innerWidth := max(24, width-6)
+	lines := m.renderQuestionDetailLines(innerWidth)
+	rendered, _ := windowAndWrapLines(lines, innerWidth, height, m.rightPaneOffset())
+	return paneBox(width, height, rendered)
+}
+
+func (m kitchenTUIModel) renderQuestionDetailLines(innerWidth int) []string {
+	q := m.selectedQuestionItem()
+	if q == nil {
+		return []string{"Question Detail", "", "No selected question."}
+	}
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	boldStyle := lipgloss.NewStyle().Bold(true)
 	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
 
-	var lines []string
-
-	// Header
-	lines = append(lines, dimStyle.Render(fmt.Sprintf("Question %s · %s", q.ID, firstNonEmpty(q.Category, "general"))))
-	lines = append(lines, "")
-
-	// Full question text
-	lines = append(lines, boldStyle.Render("Question:"))
+	lines := []string{
+		dimStyle.Render(fmt.Sprintf("Question %s · %s", q.ID, firstNonEmpty(q.Category, "general"))),
+		"",
+		boldStyle.Render("Question:"),
+	}
 	lines = append(lines, wrapText(q.Question, innerWidth)...)
 	lines = append(lines, "")
-
-	// Context block
 	if strings.TrimSpace(q.Context) != "" {
 		lines = append(lines, dimStyle.Render("Context:"))
 		lines = append(lines, wrapText(q.Context, innerWidth)...)
 		lines = append(lines, "")
 	}
-
-	// Provenance
 	lines = append(lines, dimStyle.Render(fmt.Sprintf("Worker: %s  Task: %s", firstNonEmpty(q.WorkerID, "-"), firstNonEmpty(q.TaskID, "-"))))
 	if !q.AskedAt.IsZero() {
 		lines = append(lines, dimStyle.Render("Asked: "+q.AskedAt.UTC().Format("2006-01-02 15:04:05")))
 	}
 	lines = append(lines, "")
-
-	// Already answered guard
 	if q.Answered {
 		lines = append(lines, boldStyle.Render("Answer: ")+q.Answer)
-		return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+		return lines
 	}
-
-	// Options or free-text hint
 	if len(q.Options) > 0 {
 		lines = append(lines, boldStyle.Render("Options:"))
 		for i, opt := range q.Options {
@@ -1511,13 +1684,127 @@ func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
 		} else {
 			lines = append(lines, "", dimStyle.Render("Press 'a' to answer"))
 		}
-	} else {
-		if m.inputMode != kitchenTUIInputAnswer {
-			lines = append(lines, dimStyle.Render("Press 'a' to answer"))
-		}
+		return lines
 	}
+	if m.inputMode != kitchenTUIInputAnswer {
+		lines = append(lines, dimStyle.Render("Press 'a' to answer"))
+	}
+	return lines
+}
 
-	return paneBox(width, height, fitAndWrapLines(lines, innerWidth, height))
+func (m kitchenTUIModel) currentRightPaneKey() string {
+	switch m.leftMode {
+	case kitchenTUILeftPlans:
+		return "plan"
+	case kitchenTUILeftTasks:
+		if m.taskPaneMode == kitchenTUITaskPaneLogs {
+			return "task_log"
+		}
+		return "task_detail"
+	case kitchenTUILeftQuestions:
+		return "question"
+	default:
+		return ""
+	}
+}
+
+func (m kitchenTUIModel) rightPaneOffset() int {
+	key := m.currentRightPaneKey()
+	if key == "" || m.rightPaneOffsets == nil {
+		return 0
+	}
+	offset := m.rightPaneOffsets[key]
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
+func (m *kitchenTUIModel) setRightPaneOffset(v int) {
+	if m == nil {
+		return
+	}
+	if v < 0 {
+		v = 0
+	}
+	key := m.currentRightPaneKey()
+	if key == "" {
+		return
+	}
+	lines, innerWidth, height := m.measureCurrentRightPane()
+	_, total := windowAndWrapLines(lines, innerWidth, 0, 0)
+	maxOffset := total - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if v > maxOffset {
+		v = maxOffset
+	}
+	if m.rightPaneOffsets == nil {
+		m.rightPaneOffsets = map[string]int{}
+	}
+	if v == 0 {
+		delete(m.rightPaneOffsets, key)
+		return
+	}
+	m.rightPaneOffsets[key] = v
+}
+
+func (m *kitchenTUIModel) resetCurrentRightPaneOffset() {
+	if m == nil || m.rightPaneOffsets == nil {
+		return
+	}
+	key := m.currentRightPaneKey()
+	if key == "" {
+		return
+	}
+	delete(m.rightPaneOffsets, key)
+}
+
+func (m kitchenTUIModel) measureCurrentRightPane() ([]string, int, int) {
+	_, height, innerWidth := m.rightPaneDimensions()
+	switch m.leftMode {
+	case kitchenTUILeftPlans:
+		if m.detail == nil {
+			return []string{"No selected plan."}, innerWidth, height
+		}
+		return m.renderPlanDetailLines(innerWidth), innerWidth, height
+	case kitchenTUILeftTasks:
+		if m.taskPaneMode == kitchenTUITaskPaneLogs {
+			return m.renderTaskLogLines(innerWidth), innerWidth, height
+		}
+		return m.renderTaskDetailLines(innerWidth), innerWidth, height
+	case kitchenTUILeftQuestions:
+		return m.renderQuestionDetailLines(innerWidth), innerWidth, height
+	default:
+		return nil, innerWidth, height
+	}
+}
+
+func (m kitchenTUIModel) rightPaneDimensions() (width, height, innerWidth int) {
+	header := m.renderHeader()
+	footer := m.renderFooter()
+	bar := ""
+	if m.inputMode != kitchenTUIInputNone {
+		bar = m.renderInputBar()
+	}
+	barHeight := lipgloss.Height(bar)
+	if bar == "" {
+		barHeight = 0
+	}
+	height = max(10, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-barHeight-2)
+	leftWidth := max(54, (m.width*2)/5)
+	width = max(58, m.width-leftWidth-4)
+	innerWidth = max(24, width-6)
+	return width, height, innerWidth
+}
+
+func (m kitchenTUIModel) pageScrollDelta() int {
+	_, height, _ := m.rightPaneDimensions()
+	if height <= 1 {
+		return 1
+	}
+	return max(1, height-2)
 }
 
 func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
@@ -1642,6 +1929,12 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 	if task.Prompt != "" {
 		lines = append(lines, "", "Prompt:")
 		lines = append(lines, wrapText(task.Prompt, innerWidth)...)
+	}
+	if m.taskOutputLoading {
+		lines = append(lines, "", "Final output:", "loading...")
+	} else if strings.TrimSpace(m.taskOutput) != "" {
+		lines = append(lines, "", "Final output:")
+		lines = append(lines, wrapText(m.taskOutput, innerWidth)...)
 	}
 	return lines
 }
@@ -2045,26 +2338,47 @@ func fitListLines(lines []string, height int) string {
 }
 
 func fitAndWrapLines(lines []string, width, height int) string {
+	rendered, _ := windowAndWrapLines(lines, width, height, 0)
+	return rendered
+}
+
+func windowAndWrapLines(lines []string, width, height, offset int) (string, int) {
 	if width <= 0 {
 		width = 1
 	}
-	if height <= 0 {
-		return ""
-	}
-	var out []string
+	wrapped := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
+			wrapped = append(wrapped, "")
 			continue
 		}
-		for _, wrapped := range wrapText(line, width) {
-			out = append(out, truncate(wrapped, width))
+		for _, item := range wrapText(line, width) {
+			wrapped = append(wrapped, truncate(item, width))
 		}
 	}
-	if len(out) > height {
-		out = out[:height]
+	total := len(wrapped)
+	if height <= 0 {
+		return "", total
 	}
-	return strings.Join(out, "\n")
+	if offset < 0 {
+		offset = 0
+	}
+	maxOffset := total - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	end := offset + height
+	if end > total {
+		end = total
+	}
+	view := append([]string(nil), wrapped[offset:end]...)
+	for len(view) < height {
+		view = append(view, "")
+	}
+	return strings.Join(view, "\n"), total
 }
 
 func wrapText(s string, width int) []string {

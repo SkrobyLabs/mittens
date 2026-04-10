@@ -27,6 +27,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/plans/{id}/evidence", k.withAPIAuth(token, k.handlePlanEvidence))
 	mux.HandleFunc("POST /v1/plans/{id}/extend", k.withAPIAuth(token, k.handleExtendCouncil))
 	mux.HandleFunc("GET /v1/tasks/{id}/activity", k.withAPIAuth(token, k.handleTaskActivity))
+	mux.HandleFunc("GET /v1/tasks/{id}/output", k.withAPIAuth(token, k.handleTaskOutput))
 	mux.HandleFunc("POST /v1/tasks/{id}/retry", k.withAPIAuth(token, k.handleRetryTask))
 	mux.HandleFunc("POST /v1/tasks/{id}/fix-conflicts", k.withAPIAuth(token, k.handleFixConflicts))
 	mux.HandleFunc("DELETE /v1/tasks/{id}", k.withAPIAuth(token, k.handleCancelTask))
@@ -231,6 +232,18 @@ func (k *Kitchen) handleTaskActivity(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"taskId":     r.PathValue("id"),
 		"transcript": transcript,
+	})
+}
+
+func (k *Kitchen) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
+	output, err := k.TaskOutput(r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"taskId": r.PathValue("id"),
+		"output": output,
 	})
 }
 

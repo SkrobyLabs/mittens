@@ -139,6 +139,7 @@ func kitchenCapabilities() map[string]any {
 				"planDelete":     "/v1/plans/{id}/purge",
 				"planHistory":    "/v1/plans/{id}/history",
 				"planEvidence":   "/v1/plans/{id}/evidence",
+				"taskOutput":     "/v1/tasks/{id}/output",
 				"taskRetry":      "/v1/tasks/{id}/retry",
 				"questions":      "/v1/questions",
 				"queue":          "/v1/queue",

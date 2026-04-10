@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +123,102 @@ func TestKitchenAPIPlanHistoryCycleFilter(t *testing.T) {
 			t.Fatalf("history entry = %+v, want cycle 2", entry)
 		}
 	}
+}
+
+func TestKitchenAPITaskOutputEndpoint(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	t.Run("success", func(t *testing.T) {
+		taskID := "task_output_1"
+		outputDir := filepath.Join(k.pm.StateDir(), "outputs")
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll outputs: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outputDir, taskID+".txt"), []byte("final response"), 0o644); err != nil {
+			t.Fatalf("WriteFile output: %v", err)
+		}
+
+		resp := apiRequest(t, server, http.MethodGet, "/v1/tasks/"+taskID+"/output", nil)
+		var payload map[string]any
+		decodeResponse(t, resp, &payload)
+		if payload["taskId"] != taskID || payload["output"] != "final response" {
+			t.Fatalf("payload = %+v, want task output response", payload)
+		}
+	})
+
+	t.Run("missing side file returns 404", func(t *testing.T) {
+		resp := apiRequestExpectStatus(t, server, http.MethodGet, "/v1/tasks/missing_output/output", nil, http.StatusNotFound)
+		defer resp.Body.Close()
+	})
+
+	t.Run("invalid id returns 400", func(t *testing.T) {
+		resp := apiRequestExpectStatus(t, server, http.MethodGet, "/v1/tasks/invalid$id/output", nil, http.StatusBadRequest)
+		defer resp.Body.Close()
+	})
+}
+
+func TestKitchenAPIClientTaskOutput(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			if r.URL.Path != "/v1/tasks/task_a-1/output" {
+				t.Fatalf("path = %s, want task output path", r.URL.Path)
+			}
+			writeAPIJSON(w, http.StatusOK, map[string]any{
+				"taskId": "task_a-1",
+				"output": "client task output",
+			})
+		}))
+		defer server.Close()
+
+		client := &kitchenAPIClient{
+			baseURL:    server.URL,
+			httpClient: server.Client(),
+		}
+		output, err := client.TaskOutput("task_a-1")
+		if err != nil {
+			t.Fatalf("TaskOutput: %v", err)
+		}
+		if output != "client task output" {
+			t.Fatalf("output = %q, want client task output", output)
+		}
+	})
+
+	t.Run("not found maps to os.ErrNotExist", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeAPIError(w, http.StatusNotFound, "read task output: open missing: no such file or directory")
+		}))
+		defer server.Close()
+
+		client := &kitchenAPIClient{
+			baseURL:    server.URL,
+			httpClient: server.Client(),
+		}
+		_, err := client.TaskOutput("task_missing")
+		if !os.IsNotExist(err) {
+			t.Fatalf("err = %v, want os.ErrNotExist", err)
+		}
+	})
+
+	t.Run("server errors are preserved", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeAPIError(w, http.StatusBadGateway, "upstream output fetch failed")
+		}))
+		defer server.Close()
+
+		client := &kitchenAPIClient{
+			baseURL:    server.URL,
+			httpClient: server.Client(),
+		}
+		_, err := client.TaskOutput("task_bad_gateway")
+		if err == nil || !strings.Contains(err.Error(), "upstream output fetch failed") {
+			t.Fatalf("err = %v, want preserved server error", err)
+		}
+	})
 }
 
 func TestKitchenAPIImplReviewRequest(t *testing.T) {
@@ -444,8 +542,8 @@ func TestKitchenAPIMetaEndpoint(t *testing.T) {
 		t.Fatalf("api capabilities = %#v, want object", caps["api"])
 	}
 	endpoints, ok := apiCaps["endpoints"].(map[string]any)
-	if !ok || endpoints["taskRetry"] != "/v1/tasks/{id}/retry" || endpoints["planDelete"] != "/v1/plans/{id}/purge" {
-		t.Fatalf("api endpoints = %#v, want taskRetry and planDelete endpoints", apiCaps["endpoints"])
+	if !ok || endpoints["taskRetry"] != "/v1/tasks/{id}/retry" || endpoints["taskOutput"] != "/v1/tasks/{id}/output" || endpoints["planDelete"] != "/v1/plans/{id}/purge" {
+		t.Fatalf("api endpoints = %#v, want taskRetry, taskOutput, and planDelete endpoints", apiCaps["endpoints"])
 	}
 	eventsCaps, ok := apiCaps["events"].(map[string]any)
 	if !ok || eventsCaps["query"] == nil {
