@@ -148,6 +148,14 @@ func (s *Scheduler) onCouncilTurnCompleted(task pool.Task) error {
 	if err := validateCouncilTurnAgainstTask(task, &artifact); err != nil {
 		return s.handleCouncilArtifactFailure(task, bundle, err.Error())
 	}
+	if artifact.CandidatePlan == nil {
+		if artifact.Turn >= 2 && artifact.AdoptedPriorPlan && artifact.Stance == "converged" {
+			// An adopted prior plan reuses the already-applied bundle plan verbatim.
+			// Skip lineage re-validation because nothing in the plan changed.
+			return s.applyCouncilTurnResult(task, bundle, &artifact, bundle.Plan)
+		}
+		return s.handleCouncilArtifactFailure(task, bundle, "candidate plan must not be nil")
+	}
 	planned := planFromArtifact(bundle.Plan, artifact.CandidatePlan)
 	if err := validatePlanRecord(planned, s.lineages); err != nil {
 		return s.handleCouncilArtifactFailure(task, bundle, fmt.Sprintf("validate candidate plan: %v", err))
@@ -502,7 +510,7 @@ func (s *Scheduler) onCouncilTurnFailed(task pool.Task, class FailureClass) erro
 			return err
 		}
 		return s.plans.UpdateExecution(task.PlanID, bundle.Execution)
-	case FailureCapability, FailureTimeout:
+	case FailurePlan, FailureCapability, FailureTimeout:
 		turn := councilTurnNumberFromTaskID(task.PlanID, task.ID)
 		msg := "council seat blocked"
 		if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {

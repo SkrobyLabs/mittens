@@ -100,8 +100,8 @@ func decideCouncilNext(bundle StoredPlan, artifact *adapter.CouncilTurnArtifact)
 	if artifact.Turn >= 2 && artifact.AdoptedPriorPlan && artifact.Stance == "converged" {
 		return councilConverged, nil
 	}
-	if artifact.Turn >= 2 {
-		if prev := previousCouncilCandidatePlan(bundle); prev != nil && adapter.PlanArtifactsEqual(prev, artifact.CandidatePlan) {
+	if artifact.Turn >= 2 && artifact.Stance != "blocked" {
+		if prev := previousCouncilCandidatePlan(bundle); prev != nil && artifact.CandidatePlan != nil && adapter.PlanArtifactsEqual(prev, artifact.CandidatePlan) {
 			var autoWarnings []adapter.CouncilDisagreement
 			for _, item := range artifact.Disagreements {
 				if strings.TrimSpace(item.Severity) == pool.SeverityCritical {

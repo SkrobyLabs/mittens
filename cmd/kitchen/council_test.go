@@ -134,6 +134,16 @@ func TestDecideCouncilNext(t *testing.T) {
 			},
 			want: councilContinue,
 		},
+		{
+			name: "blocked turn never auto converges even with equal candidate",
+			bundle: StoredPlan{Execution: ExecutionRecord{
+				CouncilMaxTurns:       4,
+				CouncilTurnsCompleted: 2,
+				CouncilTurns:          []CouncilTurnRecord{{Turn: 1, Artifact: &adapter.CouncilTurnArtifact{Turn: 1, CandidatePlan: prev}}, {Turn: 2, Artifact: &adapter.CouncilTurnArtifact{Turn: 2, CandidatePlan: equal}}},
+			}},
+			artifact: &adapter.CouncilTurnArtifact{Turn: 2, Stance: "blocked", CandidatePlan: equal},
+			want:     councilContinue,
+		},
 	}
 
 	for _, tt := range tests {

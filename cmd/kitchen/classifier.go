@@ -67,7 +67,17 @@ func ClassifyFailure(reported string, detail json.RawMessage, signals KitchenSig
 		return FailureConflict
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "forbidden"), strings.Contains(msg, "api key"), strings.Contains(msg, "auth"):
 		return FailureAuth
-	case strings.Contains(msg, "docker"), strings.Contains(msg, "container"), strings.Contains(msg, "oom"), strings.Contains(msg, "heartbeat"), strings.Contains(msg, "network"):
+	case strings.Contains(msg, "docker"),
+		strings.Contains(msg, "container"),
+		strings.Contains(msg, "oom"),
+		strings.Contains(msg, "heartbeat"),
+		strings.Contains(msg, "network"),
+		strings.Contains(msg, "websocket"),
+		strings.Contains(msg, "failed to connect"),
+		strings.Contains(msg, "500 internal server"),
+		strings.Contains(msg, "502 bad gateway"),
+		strings.Contains(msg, "503 service unavailable"),
+		strings.Contains(msg, "504 gateway"):
 		return FailureInfrastructure
 	case strings.Contains(msg, "missing dependency"), strings.Contains(msg, "tool not found"), strings.Contains(msg, "environment"), strings.Contains(msg, "permission denied"):
 		return FailureEnvironment
@@ -75,9 +85,7 @@ func ClassifyFailure(reported string, detail json.RawMessage, signals KitchenSig
 		return FailureCapability
 	case strings.Contains(msg, "invalid plan"),
 		strings.Contains(msg, "invalid review verdict (after"),
-		strings.Contains(msg, "invalid review council artifact (after"),
-		strings.Contains(msg, "bad plan"),
-		strings.Contains(msg, "unclear task"):
+		strings.Contains(msg, "invalid review council artifact (after"):
 		return FailurePlan
 	default:
 		return FailureUnknown

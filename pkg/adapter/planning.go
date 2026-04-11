@@ -153,6 +153,8 @@ At the end of your response, output a council turn block with valid JSON:
 }
 </council_turn>
 
+When adoptedPriorPlan=true and stance=converged on turn 2+, candidatePlan may be null to indicate exact adoption of the prior plan.
+
 Return only valid JSON inside <council_turn>.`
 
 // BuildPlannerPrompt creates a prompt that instructs the planner AI to output a
@@ -178,6 +180,7 @@ func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat strin
 	b.WriteString("### Council Rules\n\n")
 	b.WriteString("- Seats alternate A then B.\n")
 	b.WriteString("- If after reviewing the prior plan you have no substantive improvements to add, set `adoptedPriorPlan=true` and `stance=converged`. Do not re-emit the prior plan verbatim with `adoptedPriorPlan=false`.\n")
+	b.WriteString("- When adopting a prior plan on turn 2+, `candidatePlan` may be null to indicate an exact adoption.\n")
 	b.WriteString("- Use `stance=converged` only when you adopt the prior plan and believe the council has converged.\n")
 	b.WriteString("- Use `questionsForUser` only for genuinely blocking operator input.\n")
 	b.WriteString("- `seatMemo` and `rejectedAlternatives` should help rehydration if your seat is replaced.\n\n")

@@ -1907,6 +1907,10 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 				if i > 0 && detail.Execution.CouncilTurns[i-1].Artifact != nil {
 					prev = detail.Execution.CouncilTurns[i-1].Artifact.CandidatePlan
 				}
+				if turn.Artifact.CandidatePlan == nil && turn.Artifact.AdoptedPriorPlan {
+					lines = append(lines, fmt.Sprintf("  Seat %s adopted prior plan (no changes)", firstNonEmpty(turn.Artifact.Seat, turn.Seat, "-")))
+					continue
+				}
 				lines = append(lines, renderCouncilTurnDiffLines(prev, turn.Artifact.CandidatePlan, innerWidth, 12)...)
 			}
 		}

@@ -32,6 +32,9 @@ func TestBuildCouncilTurnPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "Do not re-emit the prior plan verbatim") {
 		t.Fatal("council prompt missing verbatim re-emission warning")
 	}
+	if !strings.Contains(prompt, "`candidatePlan` may be null") {
+		t.Fatal("council prompt missing nil candidate adoption guidance")
+	}
 }
 
 func TestExtractPlanArtifact_Valid(t *testing.T) {

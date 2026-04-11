@@ -31,10 +31,10 @@ type CouncilDisagreement struct {
 }
 
 type CouncilUserQuestion struct {
-	ID            string `json:"id"`
-	Question      string `json:"question"`
-	WhyItMatters  string `json:"whyItMatters,omitempty"`
-	Blocking      bool   `json:"blocking,omitempty"`
+	ID           string `json:"id"`
+	Question     string `json:"question"`
+	WhyItMatters string `json:"whyItMatters,omitempty"`
+	Blocking     bool   `json:"blocking,omitempty"`
 }
 
 func validateCouncilTurnArtifact(artifact *CouncilTurnArtifact) error {
@@ -81,9 +81,10 @@ func validateCouncilTurnArtifact(artifact *CouncilTurnArtifact) error {
 		return fmt.Errorf("invalid council stance %q", artifact.Stance)
 	}
 	if artifact.CandidatePlan == nil {
-		return fmt.Errorf("candidate plan must not be nil")
-	}
-	if err := validatePlanArtifact(artifact.CandidatePlan); err != nil {
+		if !(artifact.Turn >= 2 && artifact.AdoptedPriorPlan && artifact.Stance == "converged") {
+			return fmt.Errorf("candidate plan must not be nil")
+		}
+	} else if err := validatePlanArtifact(artifact.CandidatePlan); err != nil {
 		return fmt.Errorf("candidate plan: %w", err)
 	}
 	for _, item := range artifact.Disagreements {

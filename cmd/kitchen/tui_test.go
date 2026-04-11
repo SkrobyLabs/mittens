@@ -453,6 +453,65 @@ func TestRenderPlanDetailLinesIncludesCouncilTurnDiffs(t *testing.T) {
 	}
 }
 
+func TestRenderPlanDetailLinesLabelsAdoptedPriorPlanCouncilTurn(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_adopted",
+			Title:   "Parser cleanup",
+			Summary: "Keep adoption visible.",
+			Lineage: "parser-cleanup",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 2,
+			CouncilSeats:          newCouncilSeats(),
+			CouncilTurns: []CouncilTurnRecord{
+				{
+					Seat: "A",
+					Turn: 1,
+					Artifact: &adapter.CouncilTurnArtifact{
+						Seat:    "A",
+						Turn:    1,
+						Stance:  "propose",
+						Summary: "Initial proposal.",
+						CandidatePlan: &adapter.PlanArtifact{
+							Title: "Parser cleanup",
+							Tasks: []adapter.PlanArtifactTask{{ID: "t1", Title: "Normalize parser errors", Prompt: "Do work", Complexity: "medium"}},
+						},
+					},
+				},
+				{
+					Seat: "B",
+					Turn: 2,
+					Artifact: &adapter.CouncilTurnArtifact{
+						Seat:             "B",
+						Turn:             2,
+						Stance:           "converged",
+						AdoptedPriorPlan: true,
+						Summary:          "Adopts the prior plan.",
+						CandidatePlan:    nil,
+					},
+				},
+			},
+		},
+		Progress: PlanProgress{
+			PlanID: "plan_council_adopted",
+			Phase:  "planning",
+		},
+	}
+	model := kitchenTUIModel{detail: detail}
+
+	joined := strings.Join(model.renderPlanDetailLines(80), "\n")
+	if !strings.Contains(joined, "Seat B adopted prior plan (no changes)") {
+		t.Fatalf("detail output missing adopted-prior-plan label:\n%s", joined)
+	}
+	if strings.Contains(joined, "no change (auto-converge eligible)") {
+		t.Fatalf("detail output should not use generic no-change label for adopted plan:\n%s", joined)
+	}
+}
+
 func TestKitchenTUISubmitTabTogglesImplReview(t *testing.T) {
 	model := kitchenTUIModel{inputMode: kitchenTUIInputSubmit}
 
