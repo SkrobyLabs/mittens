@@ -900,14 +900,19 @@ func TestReplanPreservesDependsOn(t *testing.T) {
 		t.Fatalf("Replan: %v", err)
 	}
 
-	// The replan path for plans with tasks creates a new plan copying the old one.
-	// Since the old plan had tasks, the new plan should inherit DependsOn.
+	// Replan should start a fresh planning pass while preserving plan dependencies.
 	newBundle, err := k.GetPlan(newPlanID)
 	if err != nil {
 		t.Fatalf("GetPlan(new): %v", err)
 	}
+	if newBundle.Execution.State != planStatePlanning {
+		t.Fatalf("execution state = %q, want %q", newBundle.Execution.State, planStatePlanning)
+	}
 	if len(newBundle.Plan.DependsOn) != 1 || newBundle.Plan.DependsOn[0] != "plan_dep_replan" {
 		t.Fatalf("DependsOn = %+v, want [plan_dep_replan]", newBundle.Plan.DependsOn)
+	}
+	if len(newBundle.Plan.Tasks) != 0 {
+		t.Fatalf("tasks = %+v, want no inherited task list on fresh replan", newBundle.Plan.Tasks)
 	}
 }
 

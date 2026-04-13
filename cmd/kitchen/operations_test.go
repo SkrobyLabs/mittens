@@ -817,13 +817,14 @@ func TestKitchenCancelCommandCancelsActivePlan(t *testing.T) {
 	}
 }
 
-func TestKitchenReplanCommandCreatesPendingApprovalClone(t *testing.T) {
+func TestKitchenReplanCommandStartsFreshPlanningPass(t *testing.T) {
 	k := newTestKitchen(t)
 	bundle, err := k.SubmitIdea("Add typed parser errors", "parser-errors", false, false)
 	if err != nil {
 		t.Fatalf("SubmitIdea: %v", err)
 	}
 	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add typed parser errors"))
+	oldRuntimeTaskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
 
 	output := runKitchenCommand(t, k, "replan", bundle.Plan.PlanID, "--reason", "Need a narrower rollout")
 	var payload map[string]string
@@ -839,14 +840,20 @@ func TestKitchenReplanCommandCreatesPendingApprovalClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	if replanned.Execution.State != planStatePendingApproval {
-		t.Fatalf("execution state = %q, want %q", replanned.Execution.State, planStatePendingApproval)
+	if replanned.Execution.State != planStatePlanning {
+		t.Fatalf("execution state = %q, want %q", replanned.Execution.State, planStatePlanning)
 	}
 	if replanned.Plan.PlanID == bundle.Plan.PlanID {
 		t.Fatalf("replanned plan reused source plan ID %q", replanned.Plan.PlanID)
 	}
 	if !bytes.Contains([]byte(replanned.Plan.Summary), []byte("Need a narrower rollout")) {
 		t.Fatalf("replanned summary = %q, want appended reason", replanned.Plan.Summary)
+	}
+	if len(replanned.Plan.Tasks) != 0 {
+		t.Fatalf("replanned plan tasks = %+v, want fresh planner-generated tasks", replanned.Plan.Tasks)
+	}
+	if _, ok := k.pm.Task(oldRuntimeTaskID); ok {
+		t.Fatalf("superseded runtime task %q still exists after replan", oldRuntimeTaskID)
 	}
 	// Replan supersedes the source plan; the old record must be gone
 	// so the operator doesn't have to prune it manually.

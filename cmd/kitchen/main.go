@@ -355,7 +355,7 @@ func newRootCommand() *cobra.Command {
 
 	replanCmd := &cobra.Command{
 		Use:   "replan PLAN_ID",
-		Short: "Clone a plan back to pending approval",
+		Short: "Start a fresh planning pass for a plan",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {

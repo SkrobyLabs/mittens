@@ -1008,47 +1008,15 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 		}
 		newPlan.Summary += "Replan requested: " + reason
 	}
-	if len(newPlan.Tasks) == 0 {
-		replanned, err := k.SubmitIdeaAt(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested, preferredAnchorRef(newPlan.Anchor), bundle.Plan.DependsOn...)
-		if err != nil {
-			return "", err
-		}
-		// Replan supersedes the old plan: delete it once the
-		// successor is safely persisted so the operator doesn't have
-		// to clean up the previous record by hand.
-		if err := k.DeletePlan(planID); err != nil {
-			return "", fmt.Errorf("delete superseded plan %s: %w", planID, err)
-		}
-		k.sendNotify(pool.Notification{Type: "plan_replanned", ID: replanned.Plan.PlanID, Message: replanned.Plan.Title})
-		return replanned.Plan.PlanID, nil
-	}
-	if err := k.ValidatePlan(newPlan); err != nil {
-		return "", err
-	}
-
-	newPlanID, err := k.planStore.Create(StoredPlan{
-		Plan: newPlan,
-		Execution: ExecutionRecord{
-			State:        planStatePendingApproval,
-			AutoApproved: false,
-			Branch:       lineageBranchName(newPlan.Lineage),
-			Anchor:       newPlan.Anchor,
-		},
-		Affinity: AffinityRecord{
-			PreferredProviders: append([]PoolKey(nil), bundle.Affinity.PreferredProviders...),
-		},
-	})
+	replanned, err := k.SubmitIdeaAt(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested, preferredAnchorRef(newPlan.Anchor), bundle.Plan.DependsOn...)
 	if err != nil {
 		return "", err
 	}
-	// Replan supersedes the old plan: delete it once the successor is
-	// safely persisted so the operator doesn't have to clean up the
-	// previous record by hand.
 	if err := k.DeletePlan(planID); err != nil {
 		return "", fmt.Errorf("delete superseded plan %s: %w", planID, err)
 	}
-	k.sendNotify(pool.Notification{Type: "plan_replanned", ID: newPlanID, Message: newPlan.Title})
-	return newPlanID, nil
+	k.sendNotify(pool.Notification{Type: "plan_replanned", ID: replanned.Plan.PlanID, Message: replanned.Plan.Title})
+	return replanned.Plan.PlanID, nil
 }
 
 func (k *Kitchen) ListPlans(includeCompleted bool) ([]PlanRecord, error) {
