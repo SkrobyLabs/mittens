@@ -1175,6 +1175,7 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 		},
 		ContainerName:   a.ContainerName,
 		InstanceName:    a.InstanceName,
+		HostWorkspace:   a.EffectiveWorkspace,
 		ImagePasteKey:   a.ImagePasteKey,
 		CredStagingDirs: a.credStagingDirs,
 	}
@@ -1256,7 +1257,6 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
 
-		initCfg.HostWorkspace = a.EffectiveWorkspace
 	}
 
 	// Extra directory mounts.
