@@ -44,6 +44,10 @@ type fakeKitchenTUIBackend struct {
 	fixMergeCalls             int
 	reappliedLineage          string
 	reapplyCalls              int
+	cancelledPlanID           string
+	cancelPlanCalls           int
+	cancelledTaskID           string
+	cancelTaskCalls           int
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -89,13 +93,21 @@ func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
 	return nil
 }
 func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error { return nil }
-func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error  { return nil }
+func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error {
+	b.cancelPlanCalls++
+	b.cancelledPlanID = planID
+	return nil
+}
 func (b *fakeKitchenTUIBackend) DeletePlan(planID string) error {
 	b.deleteCalls++
 	b.deletedPlanID = planID
 	return nil
 }
-func (b *fakeKitchenTUIBackend) CancelTask(taskID string) error { return nil }
+func (b *fakeKitchenTUIBackend) CancelTask(taskID string) error {
+	b.cancelTaskCalls++
+	b.cancelledTaskID = taskID
+	return nil
+}
 func (b *fakeKitchenTUIBackend) RetryTask(taskID string, requireFreshWorker bool) error {
 	b.retryCalls++
 	b.retriedTaskID = taskID
@@ -1062,10 +1074,87 @@ func TestKitchenTUIFooterShowsAgainForCompletedTask(t *testing.T) {
 	if !strings.Contains(footer, "U reuse") {
 		t.Fatalf("footer = %q, want reuse action", footer)
 	}
-	if strings.Contains(footer, "c cancel") {
+	if strings.Contains(footer, "C cancel") {
 		t.Fatalf("footer = %q, did not expect cancel action for completed task", footer)
 	}
 }
+
+func TestKitchenTUICancelShortcutRequiresShiftForPlans(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend: backend,
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{{
+			Record: PlanRecord{PlanID: "plan_cancel", Title: "Cancelable", State: planStateActive},
+		}},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	got := updated.(kitchenTUIModel)
+	if cmd != nil {
+		t.Fatal("lowercase c unexpectedly produced a command")
+	}
+	if backend.cancelPlanCalls != 0 {
+		t.Fatalf("cancel plan calls = %d, want 0", backend.cancelPlanCalls)
+	}
+
+	updated, cmd = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	got = updated.(kitchenTUIModel)
+	if cmd == nil {
+		t.Fatal("uppercase C did not produce a cancel command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd message = %#v, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("cancel action err = %v", action.err)
+	}
+	if backend.cancelPlanCalls != 1 || backend.cancelledPlanID != "plan_cancel" {
+		t.Fatalf("cancel plan calls = %d id = %q, want 1 and %q", backend.cancelPlanCalls, backend.cancelledPlanID, "plan_cancel")
+	}
+}
+
+func TestKitchenTUICancelShortcutRequiresShiftForTasks(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend: backend,
+		leftMode: kitchenTUILeftTasks,
+		tasks: []kitchenTUITaskItem{{
+			ID:        "t1",
+			RuntimeID: "plan_cancel-t1",
+			Title:     "Cancelable task",
+			State:     pool.TaskDispatched,
+		}},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	got := updated.(kitchenTUIModel)
+	if cmd != nil {
+		t.Fatal("lowercase c unexpectedly produced a command")
+	}
+	if backend.cancelTaskCalls != 0 {
+		t.Fatalf("cancel task calls = %d, want 0", backend.cancelTaskCalls)
+	}
+
+	updated, cmd = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	if cmd == nil {
+		t.Fatal("uppercase C did not produce a cancel command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd message = %#v, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("cancel action err = %v", action.err)
+	}
+	if backend.cancelTaskCalls != 1 || backend.cancelledTaskID != "plan_cancel-t1" {
+		t.Fatalf("cancel task calls = %d id = %q, want 1 and %q", backend.cancelTaskCalls, backend.cancelledTaskID, "plan_cancel-t1")
+	}
+}
+
 func TestKitchenTUIFooterShowsPlanActionsOnlyWhenActionable(t *testing.T) {
 	model := kitchenTUIModel{
 		leftMode: kitchenTUILeftPlans,
@@ -2257,6 +2346,84 @@ func TestBuildTaskItemsInterleavesRepeatedImplementationAndReviewRounds(t *testi
 
 	if items[0].RowKey == items[3].RowKey {
 		t.Fatalf("row keys = %q and %q, want round-specific task row identity", items[0].RowKey, items[3].RowKey)
+	}
+}
+
+func TestBuildTaskItemsPlacesLineageFixMergeTasksAfterReviewTimeline(t *testing.T) {
+	planID := "plan_fix_timeline"
+	fixTaskID := "fix-merge-20260413T225759"
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID: planID,
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "Refresh docs", Complexity: ComplexityMedium},
+				{ID: fixTaskID, Title: "Fix fix-stale-docs→feat/kitchen-headless merge conflicts", Complexity: ComplexityMedium},
+			},
+		},
+		Progress: PlanProgress{
+			Cycles: []PlanCycleProgress{
+				{
+					Index:            1,
+					PlannerTaskID:    councilTaskID(planID, 1),
+					PlannerTaskState: pool.TaskCompleted,
+				},
+				{
+					Index:            2,
+					PlannerTaskID:    councilTaskID(planID, 2),
+					PlannerTaskState: pool.TaskCompleted,
+				},
+				{
+					Index:               1,
+					ImplReviewTaskID:    reviewCouncilTaskID(planID, 1),
+					ImplReviewTaskState: pool.TaskCompleted,
+				},
+				{
+					Index:               2,
+					ImplReviewTaskID:    reviewCouncilTaskID(planID, 2),
+					ImplReviewTaskState: pool.TaskCompleted,
+				},
+			},
+		},
+		History: []PlanHistoryEntry{
+			{Type: planHistoryImplReviewRequested},
+			{Type: planHistoryImplReviewPassed, Cycle: 1, TaskID: reviewCouncilTaskID(planID, 1)},
+			{Type: planHistoryImplReviewRequested},
+			{Type: planHistoryImplReviewPassed, Cycle: 2, TaskID: reviewCouncilTaskID(planID, 2)},
+			{Type: planHistoryLineageFixMergeRequested, TaskID: planTaskRuntimeID(planID, fixTaskID)},
+		},
+	}
+	snapshot := tuiStatusSnapshot{
+		Queue: struct {
+			AliveWorkers     int                `json:"aliveWorkers"`
+			MaxWorkers       int                `json:"maxWorkers"`
+			PendingQuestions int                `json:"pendingQuestions"`
+			Tasks            []pool.TaskSummary `json:"tasks"`
+		}{
+			Tasks: []pool.TaskSummary{
+				{ID: planTaskRuntimeID(planID, "t1"), Status: pool.TaskCompleted},
+				{ID: planTaskRuntimeID(planID, fixTaskID), Status: pool.TaskDispatched},
+			},
+		},
+	}
+
+	items := buildTaskItems(detail, snapshot)
+	gotRuntimeIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		gotRuntimeIDs = append(gotRuntimeIDs, item.RuntimeID)
+	}
+	wantRuntimeIDs := []string{
+		councilTaskID(planID, 1),
+		councilTaskID(planID, 2),
+		planTaskRuntimeID(planID, "t1"),
+		reviewCouncilTaskID(planID, 1),
+		reviewCouncilTaskID(planID, 2),
+		planTaskRuntimeID(planID, fixTaskID),
+	}
+	if strings.Join(gotRuntimeIDs, ",") != strings.Join(wantRuntimeIDs, ",") {
+		t.Fatalf("runtimeIDs = %v, want %v", gotRuntimeIDs, wantRuntimeIDs)
+	}
+	if items[len(items)-1].Kind != "implementation" || items[len(items)-1].ID != fixTaskID {
+		t.Fatalf("last item = %+v, want trailing lineage fix-merge task", items[len(items)-1])
 	}
 }
 

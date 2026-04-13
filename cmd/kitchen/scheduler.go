@@ -1126,7 +1126,6 @@ func (s *Scheduler) recoverWaitingPlansOnStartup() {
 	}
 }
 
-
 // reapOrphanPlanTasks cancels any non-terminal task whose referenced plan
 // has been removed from disk. Without this, the scheduler would repeatedly
 // try to load the missing plan on every reconcile tick and spam errors.
@@ -1374,7 +1373,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	}
 
 	if len(active) == 0 && len(failed) == 0 {
-		if bundle.Execution.ImplReviewRequested && bundle.Execution.State == planStateActive {
+		if shouldEnqueueImplementationReview(bundle.Execution) {
 			return s.enqueueImplementationReview(bundle)
 		}
 		now := time.Now().UTC()
@@ -1401,6 +1400,19 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		s.notify(pool.Notification{Type: "plan_completed", ID: planID, Message: title})
 	}
 	return nil
+}
+
+func shouldEnqueueImplementationReview(exec ExecutionRecord) bool {
+	if !exec.ImplReviewRequested || exec.State != planStateActive {
+		return false
+	}
+	if strings.TrimSpace(exec.ImplReviewStatus) != "" || exec.ImplReviewedAt != nil {
+		return false
+	}
+	if exec.ReviewCouncilTurnsCompleted > 0 || strings.TrimSpace(exec.ReviewCouncilFinalDecision) != "" || len(exec.ReviewCouncilTurns) > 0 {
+		return false
+	}
+	return true
 }
 
 func (s *Scheduler) markPlanningFailed(task pool.Task, message string) error {

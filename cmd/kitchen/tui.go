@@ -859,7 +859,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.flashUntil = time.Now().Add(4 * time.Second)
 			}
 			return m, nil
-		case "c":
+		case "C":
 			if m.leftMode == kitchenTUILeftTasks {
 				if task := m.selectedTaskItem(); task != nil {
 					if !m.canCancelSelectedTask() {
@@ -1558,11 +1558,11 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 	}
 
-	actions := []string{"n submit"}
+		actions := []string{"n submit"}
 	if m.leftMode == kitchenTUILeftTasks {
 		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canCancelSelectedTask() {
-			actions = append(actions, "c cancel")
+			actions = append(actions, "C cancel")
 		}
 		if m.canRetrySelectedTask() {
 			actions = append(actions, "R "+m.selectedTaskRetryLabel())
@@ -1585,7 +1585,7 @@ func (m kitchenTUIModel) footerActions() []string {
 			actions = append(actions, "v review")
 		}
 		if m.canCancelSelectedPlan() {
-			actions = append(actions, "c cancel")
+			actions = append(actions, "C cancel")
 		}
 		if m.selectedPlanItem() != nil {
 			actions = append(actions, "p replan")
@@ -2620,6 +2620,15 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	}
 
 	var items []kitchenTUITaskItem
+	var implementationTasks []PlanTask
+	var trailingTimelineTasks []PlanTask
+	for _, task := range detail.Plan.Tasks {
+		if isLineageFixMergePlanTask(task.ID) {
+			trailingTimelineTasks = append(trailingTimelineTasks, task)
+			continue
+		}
+		implementationTasks = append(implementationTasks, task)
+	}
 	for _, cycle := range detail.Progress.Cycles {
 		if cycle.PlannerTaskID != "" {
 			items = append(items, buildCycleTaskItem("planner", cycle.PlannerTaskID, "Planner cycle "+fmt.Sprint(cycle.Index), cycle.PlannerTaskState, taskSummaryByID[cycle.PlannerTaskID]))
@@ -2633,14 +2642,45 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 		roundCount = 1
 	}
 	for round := 1; round <= roundCount; round++ {
-		for _, task := range detail.Plan.Tasks {
+		for _, task := range implementationTasks {
 			items = append(items, buildImplementationTaskItem(*detail, task, round, taskSummaryByID))
 		}
 		for _, cycle := range reviewCyclesByRound[round] {
 			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, "Implementation review "+fmt.Sprint(max(1, cycle.Index)), cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
 		}
 	}
+	for _, task := range orderTrailingTimelineTasks(trailingTimelineTasks, detail.History) {
+		items = append(items, buildImplementationTaskItem(*detail, task, 1, taskSummaryByID))
+	}
 	return items
+}
+
+func isLineageFixMergePlanTask(taskID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(taskID), "fix-merge-")
+}
+
+func orderTrailingTimelineTasks(tasks []PlanTask, history []PlanHistoryEntry) []PlanTask {
+	if len(tasks) <= 1 {
+		return append([]PlanTask(nil), tasks...)
+	}
+	orderIndex := make(map[string]int, len(tasks))
+	for idx, task := range tasks {
+		orderIndex[strings.TrimSpace(task.ID)] = len(history) + idx
+	}
+	for idx, entry := range history {
+		if strings.TrimSpace(entry.Type) != planHistoryLineageFixMergeRequested {
+			continue
+		}
+		taskID := strings.TrimSpace(entry.TaskID)
+		if _, ok := orderIndex[taskID]; ok {
+			orderIndex[taskID] = idx
+		}
+	}
+	ordered := append([]PlanTask(nil), tasks...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return orderIndex[strings.TrimSpace(ordered[i].ID)] < orderIndex[strings.TrimSpace(ordered[j].ID)]
+	})
+	return ordered
 }
 
 type executionRoundInfo struct {

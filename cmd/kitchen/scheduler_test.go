@@ -2163,6 +2163,98 @@ func TestSyncPlanExecution_NoImplReview(t *testing.T) {
 	}
 }
 
+func TestSyncPlanExecution_DoesNotRequeueCompletedImplementationReviewAfterFixMerge(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	reviewedAt := time.Now().UTC()
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_fix_merge_review_passed",
+			Lineage: "feat-fix-merge-review-passed",
+			Title:   "Fix merge after review pass",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateActive,
+			ImplReviewRequested:         true,
+			ImplReviewStatus:            planReviewStatusPassed,
+			ImplReviewedAt:              &reviewedAt,
+			ReviewCouncilTurnsCompleted: 2,
+			ReviewCouncilFinalDecision:  reviewCouncilConverged,
+			ActiveTaskIDs:               []string{planTaskRuntimeID("plan_fix_merge_review_passed", "fix-merge-123")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-fix-merge-review-passed"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	fixTaskID := planTaskRuntimeID(planID, "fix-merge-123")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         fixTaskID,
+		PlanID:     planID,
+		Prompt:     "resolve merge conflicts",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       lineageFixMergeRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: lineageFixMergeRole}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(fixTaskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.CompleteTask("w-1", fixTaskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusPassed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusPassed)
+	}
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set after fix-merge completion")
+	}
+	if _, ok := pm.Task(reviewCouncilTaskID(planID, 1)); ok {
+		t.Fatalf("unexpected review council task %q enqueued after fix-merge completion", reviewCouncilTaskID(planID, 1))
+	}
+}
+
 func TestSyncPlanExecution_PreservesReviewingPlanWithoutTasks(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
