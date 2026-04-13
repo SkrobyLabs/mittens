@@ -26,6 +26,8 @@ type fakeKitchenTUIBackend struct {
 	submittedImplReview       bool
 	submittedAnchorRef        string
 	submittedDependsOn        []string
+	requestedReviewPlanID     string
+	requestReviewCalls        int
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
@@ -73,8 +75,13 @@ func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorR
 	return b.submitPlanID, nil
 }
 func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { return nil }
-func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error              { return nil }
-func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error               { return nil }
+func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
+	b.requestReviewCalls++
+	b.requestedReviewPlanID = planID
+	return nil
+}
+func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error { return nil }
+func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error  { return nil }
 func (b *fakeKitchenTUIBackend) DeletePlan(planID string) error {
 	b.deleteCalls++
 	b.deletedPlanID = planID
@@ -1099,6 +1106,9 @@ func TestKitchenTUIFooterShowsMergeOnlyForCompletedPlan(t *testing.T) {
 	if !strings.Contains(footer, "M merge") {
 		t.Fatalf("footer = %q, want merge action for completed plan", footer)
 	}
+	if !strings.Contains(footer, "v review") {
+		t.Fatalf("footer = %q, want review action for completed plan", footer)
+	}
 }
 
 func TestKitchenTUIFooterHidesMergeForFailedImplementationReview(t *testing.T) {
@@ -1119,6 +1129,45 @@ func TestKitchenTUIFooterHidesMergeForFailedImplementationReview(t *testing.T) {
 	footer := model.renderFooter()
 	if strings.Contains(footer, "M merge") {
 		t.Fatalf("footer = %q, did not expect merge action after failed impl review", footer)
+	}
+	if !strings.Contains(footer, "v review") {
+		t.Fatalf("footer = %q, want review action after failed impl review", footer)
+	}
+}
+
+func TestKitchenTUIReviewKeyRequestsReviewForSelectedPlan(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:  backend,
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_review", Title: "Review", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+	}
+
+	_, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if cmd == nil {
+		t.Fatal("expected review command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "review requested plan_review" {
+		t.Fatalf("action status = %q", action.status)
+	}
+	if action.selectedPlanID != "plan_review" {
+		t.Fatalf("selectedPlanID = %q, want plan_review", action.selectedPlanID)
+	}
+	if backend.requestReviewCalls != 1 || backend.requestedReviewPlanID != "plan_review" {
+		t.Fatalf("backend review = %+v", backend)
 	}
 }
 

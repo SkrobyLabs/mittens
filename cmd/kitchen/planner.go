@@ -497,6 +497,47 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 	return k.scheduler.enqueueCouncilTurn(bundle)
 }
 
+func (k *Kitchen) RequestReview(planID string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
+		return fmt.Errorf("kitchen is not fully configured")
+	}
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return fmt.Errorf("plan ID must not be empty")
+	}
+
+	k.councilExtendMu.Lock()
+	defer k.councilExtendMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	state := strings.TrimSpace(bundle.Execution.State)
+	if state == "" {
+		state = strings.TrimSpace(bundle.Plan.State)
+	}
+	switch state {
+	case planStateCompleted, planStateImplementationReviewFailed:
+	default:
+		return fmt.Errorf("invalid plan state %q for manual review", state)
+	}
+
+	bundle.Execution.ImplReviewRequested = true
+	bundle.Execution.ImplReviewStatus = ""
+	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewedAt = nil
+	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.RejectedBy = ""
+	bundle.Execution.CompletedAt = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryImplReviewRequested,
+		Summary: "Manual implementation review requested.",
+	})
+	return k.scheduler.enqueueImplementationReview(bundle)
+}
+
 func (k *Kitchen) CancelPlan(planID string) error {
 	if k == nil || k.planStore == nil {
 		return fmt.Errorf("kitchen plan store not configured")

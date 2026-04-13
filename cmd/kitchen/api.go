@@ -34,6 +34,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("DELETE /v1/plans/{id}", k.withAPIAuth(token, k.handleCancelPlan))
 	mux.HandleFunc("DELETE /v1/plans/{id}/purge", k.withAPIAuth(token, k.handleDeletePlan))
 	mux.HandleFunc("POST /v1/plans/{id}/replan", k.withAPIAuth(token, k.handleReplanPlan))
+	mux.HandleFunc("POST /v1/plans/{id}/review", k.withAPIAuth(token, k.handleRequestReview))
 	mux.HandleFunc("POST /v1/plans/{id}/approve", k.withAPIAuth(token, k.handleApprovePlan))
 	mux.HandleFunc("POST /v1/plans/{id}/affinity/invalidate", k.withAPIAuth(token, k.handleInvalidateAffinity))
 	mux.HandleFunc("POST /v1/plans/{id}/reject", k.withAPIAuth(token, k.handleRejectPlan))
@@ -368,6 +369,20 @@ func (k *Kitchen) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 		resultState = bundle.Execution.State
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]string{"status": resultState})
+}
+
+func (k *Kitchen) handleRequestReview(w http.ResponseWriter, r *http.Request) {
+	planID := r.PathValue("id")
+	if err := k.RequestReview(planID); err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	detail, err := k.PlanDetail(planID)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, detail)
 }
 
 func (k *Kitchen) handleInvalidateAffinity(w http.ResponseWriter, r *http.Request) {

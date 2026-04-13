@@ -31,6 +31,7 @@ type kitchenTUIBackend interface {
 	ListQuestions() ([]pool.Question, error)
 	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error)
 	ExtendCouncil(planID string, turns int) error
+	RequestReview(planID string) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
 	DeletePlan(planID string) error
@@ -95,6 +96,10 @@ func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef s
 }
 func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
 	_, err := b.client.ExtendCouncil(planID, turns)
+	return err
+}
+func (b *kitchenAPIBackend) RequestReview(planID string) error {
+	_, err := b.client.RequestReview(planID)
 	return err
 }
 func (b *kitchenAPIBackend) ApprovePlan(planID string) error {
@@ -260,6 +265,12 @@ func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef
 func (b *kitchenLocalBackend) ExtendCouncil(planID string, turns int) error {
 	return b.withKitchen(func(k *Kitchen) error {
 		return k.ExtendCouncil(planID, turns)
+	})
+}
+
+func (b *kitchenLocalBackend) RequestReview(planID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.RequestReview(planID)
 	})
 }
 
@@ -850,6 +861,22 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openInput(kitchenTUIInputReplan, "Replan reason", "Need a narrower retry")
 			}
 			return m, nil
+		case "v":
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				if !m.canRequestReviewSelectedPlan() {
+					m.flash = "selected plan cannot be reviewed"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				return m, m.actionCmd(func() (string, string, error) {
+					err := m.backend.RequestReview(plan.Record.PlanID)
+					return "review requested " + plan.Record.PlanID, plan.Record.PlanID, err
+				})
+			}
+			return m, nil
 		case "m":
 			if plan := m.selectedPlanItem(); plan != nil {
 				return m, m.actionCmd(func() (string, string, error) {
@@ -1291,6 +1318,19 @@ func (m kitchenTUIModel) canExtendSelectedPlan() bool {
 	return canExtendCouncil(m.detail.Plan.State, m.detail.Execution) || canExtendReviewCouncil(m.detail.Plan.State, m.detail.Execution)
 }
 
+func (m kitchenTUIModel) canRequestReviewSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil {
+		return false
+	}
+	switch planDisplayState(*plan) {
+	case planStateCompleted, planStateImplementationReviewFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m kitchenTUIModel) canCancelSelectedPlan() bool {
 	plan := m.selectedPlanItem()
 	if plan == nil {
@@ -1435,6 +1475,9 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 		if m.canExtendSelectedPlan() {
 			actions = append(actions, "e extend")
+		}
+		if m.canRequestReviewSelectedPlan() {
+			actions = append(actions, "v review")
 		}
 		if m.canCancelSelectedPlan() {
 			actions = append(actions, "c cancel")

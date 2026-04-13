@@ -228,6 +228,11 @@ func (c *kitchenAPIClient) ReplanPlan(planID, reason string) (map[string]any, er
 	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/replan", map[string]any{"reason": reason}, &resp)
 }
 
+func (c *kitchenAPIClient) RequestReview(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/review", map[string]any{}, &resp)
+}
+
 func (c *kitchenAPIClient) CancelPlan(planID string) (map[string]any, error) {
 	var resp map[string]any
 	return resp, c.request(http.MethodDelete, "/v1/plans/"+url.PathEscape(planID), nil, &resp)

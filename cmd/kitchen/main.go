@@ -383,6 +383,38 @@ func newRootCommand() *cobra.Command {
 	}
 	replanCmd.Flags().StringVar(&replanReason, "reason", "", "optional reason to append to the replanned summary")
 
+	reviewCmd := &cobra.Command{
+		Use:   "review PLAN_ID",
+		Short: "Trigger a manual implementation review",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.RequestReview(args[0])
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			if err := k.RequestReview(args[0]); err != nil {
+				return err
+			}
+			detail, err := k.PlanDetail(args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), detail)
+		},
+	}
+
 	cancelCmd := &cobra.Command{
 		Use:   "cancel PLAN_ID",
 		Short: "Cancel a plan",
@@ -1017,6 +1049,7 @@ func newRootCommand() *cobra.Command {
 		approveCmd,
 		rejectCmd,
 		replanCmd,
+		reviewCmd,
 		cancelCmd,
 		deleteCmd,
 		retryCmd,

@@ -418,6 +418,50 @@ func TestKitchenAPIDeletePlanEndpointRemovesPlanTasksAndQuestions(t *testing.T) 
 	}
 }
 
+func TestKitchenAPIRequestReviewEndpoint(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_api_review",
+			Lineage: "api-review",
+			Title:   "API review",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			CompletedAt: &now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/review", map[string]any{})
+	var detail PlanDetail
+	decodeResponse(t, resp, &detail)
+	if detail.Plan.PlanID != planID {
+		t.Fatalf("plan id = %q, want %q", detail.Plan.PlanID, planID)
+	}
+	if detail.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", detail.Execution.State, planStateImplementationReview)
+	}
+	if !detail.Execution.ImplReviewRequested {
+		t.Fatalf("execution = %+v, want impl review requested", detail.Execution)
+	}
+}
+
 func TestKitchenAPIRetryTaskEndpoint(t *testing.T) {
 	k := newTestKitchen(t)
 	taskID, planID := seedFailedImplementationTask(t, k)

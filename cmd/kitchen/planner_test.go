@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
@@ -916,6 +917,182 @@ func TestReplanPreservesDependsOn(t *testing.T) {
 	}
 }
 
+func TestReplanPreservesImplReviewRequested(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Replan with impl review", "replan-impl-review-lineage", false, true)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Replan with impl review",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "W", Prompt: "w",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	newPlanID, err := k.Replan(bundle.Plan.PlanID, "re-test")
+	if err != nil {
+		t.Fatalf("Replan: %v", err)
+	}
+
+	newBundle, err := k.GetPlan(newPlanID)
+	if err != nil {
+		t.Fatalf("GetPlan(new): %v", err)
+	}
+	if !newBundle.Execution.ImplReviewRequested {
+		t.Fatalf("execution = %+v, want impl review requested preserved", newBundle.Execution)
+	}
+}
+
+func TestRequestReviewOnCompletedPlan(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_manual_review_completed",
+			Lineage: "manual-review-completed",
+			Title:   "Manual review completed",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			CompletedAt: &now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.RequestReview(planID); err != nil {
+		t.Fatalf("RequestReview: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if !bundle.Execution.ImplReviewRequested {
+		t.Fatalf("execution = %+v, want impl review requested", bundle.Execution)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want cleared", bundle.Execution.CompletedAt)
+	}
+	if bundle.Execution.ReviewCouncilMaxTurns != 4 {
+		t.Fatalf("review council max turns = %d, want 4", bundle.Execution.ReviewCouncilMaxTurns)
+	}
+	task, ok := k.pm.Task(reviewCouncilTaskID(planID, 1))
+	if !ok {
+		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskID(planID, 1))
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+}
+
+func TestRequestReviewOnNonCompletedPlanReturnsError(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+
+	bundle, err := k.SubmitIdea("Still planning", "manual-review-invalid", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	err = k.RequestReview(bundle.Plan.PlanID)
+	if err == nil {
+		t.Fatal("expected RequestReview to reject non-completed plan")
+	}
+	if !strings.Contains(err.Error(), "invalid plan state") {
+		t.Fatalf("error = %q, want invalid plan state", err)
+	}
+}
+
+func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_manual_review_failed",
+			Lineage: "manual-review-failed",
+			Title:   "Manual review failed",
+			State:   planStateImplementationReviewFailed,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReviewFailed,
+			CompletedAt:                 &now,
+			ImplReviewRequested:         true,
+			ImplReviewStatus:            planReviewStatusFailed,
+			ImplReviewFindings:          []string{"missing tests"},
+			ImplReviewedAt:              &now,
+			ReviewCouncilMaxTurns:       6,
+			ReviewCouncilTurnsCompleted: 5,
+			ReviewCouncilFinalDecision:  reviewCouncilReject,
+			RejectedBy:                  rejectedByReviewCouncil,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.RequestReview(planID); err != nil {
+		t.Fatalf("RequestReview: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Execution.ImplReviewStatus != "" {
+		t.Fatalf("impl review status = %q, want cleared", bundle.Execution.ImplReviewStatus)
+	}
+	if len(bundle.Execution.ImplReviewFindings) != 0 {
+		t.Fatalf("impl review findings = %v, want cleared", bundle.Execution.ImplReviewFindings)
+	}
+	if bundle.Execution.ImplReviewedAt != nil {
+		t.Fatalf("impl reviewed at = %v, want cleared", bundle.Execution.ImplReviewedAt)
+	}
+	if bundle.Execution.RejectedBy != "" {
+		t.Fatalf("rejectedBy = %q, want cleared", bundle.Execution.RejectedBy)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want cleared", bundle.Execution.CompletedAt)
+	}
+	task, ok := k.pm.Task(reviewCouncilTaskID(planID, 1))
+	if !ok {
+		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskID(planID, 1))
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+}
+
 func TestApproveAPIReturnsWaitingState(t *testing.T) {
 	k := newTestKitchen(t)
 
@@ -1134,6 +1311,19 @@ func newTestKitchen(t *testing.T) *Kitchen {
 		paths:      paths,
 		project:    project,
 	}
+}
+
+func attachTestScheduler(t *testing.T, k *Kitchen) {
+	t.Helper()
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	s := NewScheduler(k.pm, &schedulerHostAPI{}, k.router, gitMgr, k.planStore, k.lineageMgr, k.cfg.Concurrency, "kitchen-test")
+	s.notify = k.sendNotify
+	s.activatePlan = k.ApprovePlan
+	k.scheduler = s
 }
 
 func completePlanningTask(t *testing.T, k *Kitchen, planID string, artifact adapter.PlanArtifact) {
