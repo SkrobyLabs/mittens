@@ -1378,6 +1378,364 @@ func TestRenderTaskDetailLinesIncludesFinalOutput(t *testing.T) {
 	}
 }
 
+func TestRenderTaskDetailLinesIncludesImplementationReviewTLDRForApprovedReview(t *testing.T) {
+	planID := "plan_review_pass"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateCompleted,
+				ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+					Turn: 1,
+					Artifact: &adapter.ReviewCouncilTurnArtifact{
+						Seat:    "A",
+						Turn:    1,
+						Verdict: pool.ReviewPass,
+						Summary: "All requested changes look correct.",
+					},
+				}},
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 1),
+			RuntimeID: reviewCouncilTaskID(planID, 1),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 1",
+			State:     pool.TaskCompleted,
+		}},
+		taskOutput: "Final output body that should still render.",
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Review TL;DR:") {
+		t.Fatalf("detail lines missing review TLDR header:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Status: approved") {
+		t.Fatalf("detail lines missing approved status:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Findings: 0") {
+		t.Fatalf("detail lines missing zero findings summary:\n%s", joined)
+	}
+	if !strings.Contains(joined, "All requested changes look correct.") {
+		t.Fatalf("detail lines missing artifact summary:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Final output:") {
+		t.Fatalf("detail lines missing final output header:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesIncludesImplementationReviewTLDRForFailedReview(t *testing.T) {
+	planID := "plan_review_fail"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateImplementationReviewFailed,
+				ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+					Turn: 1,
+					Artifact: &adapter.ReviewCouncilTurnArtifact{
+						Seat:    "B",
+						Turn:    1,
+						Verdict: pool.ReviewFail,
+						Summary: "The implementation needs another pass.",
+						Findings: []adapter.ReviewFinding{
+							{ID: "f1", File: "a.go", Category: "correctness", Description: "Missing guard", Severity: "major"},
+							{ID: "f2", File: "b.go", Category: "coverage", Description: "Missing test", Severity: "major"},
+							{ID: "f3", File: "b.go", Category: "resilience", Description: "Retry path ignored", Severity: "minor"},
+						},
+						Disagreements: []adapter.CouncilDisagreement{{
+							ID:       "d1",
+							Severity: pool.SeverityMajor,
+							Category: "correctness",
+							Title:    "Mismatch",
+							Impact:   "Review cannot pass yet.",
+						}},
+					},
+				}},
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusFailed,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 1),
+			RuntimeID: reviewCouncilTaskID(planID, 1),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 1",
+			State:     pool.TaskFailed,
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Status: failed") {
+		t.Fatalf("detail lines missing failed status:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Findings: 3 across 2 files") {
+		t.Fatalf("detail lines missing structured finding count:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Disagreements: 1") {
+		t.Fatalf("detail lines missing disagreement count:\n%s", joined)
+	}
+	if !strings.Contains(joined, "The implementation needs another pass.") {
+		t.Fatalf("detail lines missing summary text:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesIncludesImplementationReviewTLDRForPendingReview(t *testing.T) {
+	planID := "plan_review_pending"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateImplementationReview,
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 2),
+			RuntimeID: reviewCouncilTaskID(planID, 2),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 2",
+			State:     pool.TaskQueued,
+		}},
+		taskOutput: "Pending review output placeholder.",
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Status: pending") {
+		t.Fatalf("detail lines missing pending status:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Implementation review is pending.") {
+		t.Fatalf("detail lines missing pending summary:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Final output:") {
+		t.Fatalf("detail lines missing final output header:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesUsesLegacyImplementationReviewFallback(t *testing.T) {
+	planID := "plan_review_legacy"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateImplementationReviewFailed,
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusFailed,
+				ImplReviewFindings:  []string{"adapter exited with code 1"},
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        planTaskRuntimeID(planID, "impl-review-1"),
+			RuntimeID: planTaskRuntimeID(planID, "impl-review-1"),
+			Kind:      "implementation-review",
+			Title:     "Legacy implementation review",
+			State:     pool.TaskFailed,
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Status: failed") {
+		t.Fatalf("detail lines missing failed legacy status:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Findings: 1") {
+		t.Fatalf("detail lines missing legacy fallback findings count:\n%s", joined)
+	}
+	if !strings.Contains(joined, "adapter exited with code 1") {
+		t.Fatalf("detail lines missing legacy fallback summary:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesUsesSelectedImplementationReviewTurn(t *testing.T) {
+	planID := "plan_review_turns"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateCompleted,
+				ReviewCouncilTurns: []ReviewCouncilTurnRecord{
+					{
+						Turn: 1,
+						Artifact: &adapter.ReviewCouncilTurnArtifact{
+							Seat:    "A",
+							Turn:    1,
+							Verdict: pool.ReviewFail,
+							Summary: "Turn one found missing tests.",
+							Findings: []adapter.ReviewFinding{
+								{ID: "f1", File: "first.go", Category: "coverage", Description: "Missing tests", Severity: "major"},
+							},
+						},
+					},
+					{
+						Turn: 2,
+						Artifact: &adapter.ReviewCouncilTurnArtifact{
+							Seat:    "B",
+							Turn:    2,
+							Verdict: pool.ReviewPass,
+							Summary: "Turn two cleared the review.",
+						},
+					},
+				},
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 1),
+			RuntimeID: reviewCouncilTaskID(planID, 1),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 1",
+			State:     pool.TaskFailed,
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Status: failed") {
+		t.Fatalf("detail lines should follow selected failed turn:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Turn one found missing tests.") {
+		t.Fatalf("detail lines missing selected-turn summary:\n%s", joined)
+	}
+	if strings.Contains(joined, "Turn two cleared the review.") {
+		t.Fatalf("detail lines should not show summary from another review turn:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesDoesNotMisattributeMissingReviewTurnArtifact(t *testing.T) {
+	planID := "plan_review_missing_turn"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State:                       planStateCompleted,
+				ReviewCouncilTurnsCompleted: 2,
+				ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+					Turn: 2,
+					Artifact: &adapter.ReviewCouncilTurnArtifact{
+						Seat:    "B",
+						Turn:    2,
+						Verdict: pool.ReviewPass,
+						Summary: "Later turn passed.",
+					},
+				}},
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 1),
+			RuntimeID: reviewCouncilTaskID(planID, 1),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 1",
+			State:     pool.TaskFailed,
+			Summary:   "Selected turn summary.",
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Status: failed") {
+		t.Fatalf("detail lines should follow selected task state when turn data is missing:\n%s", joined)
+	}
+	if strings.Contains(joined, "Status: approved") {
+		t.Fatalf("detail lines should not inherit overall approved status for missing selected turn:\n%s", joined)
+	}
+	if strings.Contains(joined, "Later turn passed.") {
+		t.Fatalf("detail lines should not show another turn's summary when selected turn data is missing:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesPlacesReviewTLDRBeforeFinalOutput(t *testing.T) {
+	planID := "plan_review_order"
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: planID},
+			Execution: ExecutionRecord{
+				State: planStateCompleted,
+				ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+					Turn: 1,
+					Artifact: &adapter.ReviewCouncilTurnArtifact{
+						Seat:    "A",
+						Turn:    1,
+						Verdict: pool.ReviewPass,
+						Summary: "Summary comes first.",
+					},
+				}},
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+			},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        reviewCouncilTaskID(planID, 1),
+			RuntimeID: reviewCouncilTaskID(planID, 1),
+			Kind:      "implementation-review",
+			Title:     "Implementation review 1",
+			State:     pool.TaskCompleted,
+			Summary:   "Task summary body.",
+		}},
+		taskOutput: "Final output body.",
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if strings.Index(joined, "Review TL;DR:") > strings.Index(joined, "Final output:") {
+		t.Fatalf("review TLDR should render before final output:\n%s", joined)
+	}
+	if strings.Index(joined, "Review TL;DR:") > strings.Index(joined, "Latest summary:") {
+		t.Fatalf("review TLDR should render before latest summary:\n%s", joined)
+	}
+}
+
+func TestRenderTaskDetailLinesOmitsReviewTLDRForNonReviewTasks(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: "plan_generic"},
+		},
+		tasks: []kitchenTUITaskItem{{
+			ID:        "task-1",
+			RuntimeID: "plan_generic-task-1",
+			Kind:      "implementation",
+			Title:     "Implementation task",
+			State:     pool.TaskCompleted,
+		}},
+		taskOutput: "Implementation output.",
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "Review TL;DR:") {
+		t.Fatalf("non-review task should not render review TLDR:\n%s", joined)
+	}
+}
+
 func TestRenderTaskLogLinesHighlightsHeader(t *testing.T) {
 	model := kitchenTUIModel{
 		tasks: []kitchenTUITaskItem{{

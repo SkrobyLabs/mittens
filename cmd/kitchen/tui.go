@@ -2165,6 +2165,12 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 	if task.Complexity != "" {
 		lines = append(lines, fmt.Sprintf("Complexity: %s", task.Complexity))
 	}
+	if task.Kind == "implementation-review" {
+		if summary := m.renderImplementationReviewTLDR(*task, innerWidth); len(summary) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, summary...)
+		}
+	}
 	if task.Summary != "" {
 		lines = append(lines, "", "Latest summary:")
 		lines = append(lines, wrapText(task.Summary, innerWidth)...)
@@ -2180,6 +2186,207 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 		lines = append(lines, wrapText(m.taskOutput, innerWidth)...)
 	}
 	return lines
+}
+
+type implementationReviewTLDR struct {
+	Status              string
+	Summary             string
+	FindingCount        int
+	DistinctFileCount   int
+	DisagreementCount   int
+	HasStructuredCounts bool
+}
+
+func (m kitchenTUIModel) renderImplementationReviewTLDR(task kitchenTUITaskItem, innerWidth int) []string {
+	tldr, ok := summarizeImplementationReviewTask(m.detail, task)
+	if !ok {
+		return nil
+	}
+
+	lines := []string{
+		"Review TL;DR:",
+		fmt.Sprintf("Status: %s", firstNonEmpty(tldr.Status, "pending")),
+	}
+	if tldr.HasStructuredCounts {
+		findings := fmt.Sprintf("%d", tldr.FindingCount)
+		if tldr.DistinctFileCount > 0 {
+			findings = fmt.Sprintf("%d across %d files", tldr.FindingCount, tldr.DistinctFileCount)
+		}
+		lines = append(lines, fmt.Sprintf("Findings: %s", findings))
+	} else if tldr.Status == "failed" && tldr.FindingCount > 0 {
+		lines = append(lines, fmt.Sprintf("Findings: %d", tldr.FindingCount))
+	}
+	if tldr.DisagreementCount > 0 {
+		lines = append(lines, fmt.Sprintf("Disagreements: %d", tldr.DisagreementCount))
+	}
+	if strings.TrimSpace(tldr.Summary) != "" {
+		lines = append(lines, "Summary:")
+		lines = append(lines, wrapText(tldr.Summary, innerWidth)...)
+	}
+	return lines
+}
+
+func summarizeImplementationReviewTask(detail *PlanDetail, task kitchenTUITaskItem) (implementationReviewTLDR, bool) {
+	if detail == nil || task.Kind != "implementation-review" {
+		return implementationReviewTLDR{}, false
+	}
+
+	turn := implementationReviewTurnForTask(detail.Plan.PlanID, task.RuntimeID)
+	if record := findReviewCouncilTurn(detail.Execution.ReviewCouncilTurns, turn); record != nil && record.Artifact != nil {
+		artifact := record.Artifact
+		status := "failed"
+		if strings.TrimSpace(artifact.Verdict) == pool.ReviewPass {
+			status = "approved"
+		}
+		return implementationReviewTLDR{
+			Status:              status,
+			Summary:             firstNonEmpty(strings.TrimSpace(artifact.Summary), strings.TrimSpace(task.Summary), defaultImplementationReviewSummary(status)),
+			FindingCount:        len(artifact.Findings),
+			DistinctFileCount:   countDistinctReviewFindingFiles(artifact.Findings),
+			DisagreementCount:   len(artifact.Disagreements),
+			HasStructuredCounts: true,
+		}, true
+	}
+
+	if !shouldUsePlanLevelImplementationReviewFallback(detail, task, turn) {
+		status := summarizeImplementationReviewStatus(nil, task)
+		return implementationReviewTLDR{
+			Status:              status,
+			Summary:             firstNonEmpty(strings.TrimSpace(task.Summary), defaultImplementationReviewSummary(status)),
+			FindingCount:        0,
+			DistinctFileCount:   0,
+			DisagreementCount:   0,
+			HasStructuredCounts: false,
+		}, true
+	}
+
+	status := summarizeImplementationReviewStatus(detail, task)
+	findingCount := len(detail.Progress.ImplReviewFindings)
+	summary := firstNonEmpty(strings.TrimSpace(task.Summary), firstPlanReviewFinding(detail.Progress.ImplReviewFindings), defaultImplementationReviewSummary(status))
+	if status == "approved" {
+		findingCount = 0
+	}
+	return implementationReviewTLDR{
+		Status:              status,
+		Summary:             summary,
+		FindingCount:        findingCount,
+		DistinctFileCount:   0,
+		DisagreementCount:   0,
+		HasStructuredCounts: status == "approved" || status == "failed",
+	}, true
+}
+
+func shouldUsePlanLevelImplementationReviewFallback(detail *PlanDetail, task kitchenTUITaskItem, turn int) bool {
+	if detail == nil {
+		return false
+	}
+	if turn <= 0 || len(detail.Execution.ReviewCouncilTurns) == 0 {
+		return true
+	}
+	switch strings.TrimSpace(task.State) {
+	case pool.TaskQueued, pool.TaskDispatched, pool.TaskReviewing, "active", "planned":
+		return true
+	}
+	return turn > detail.Execution.ReviewCouncilTurnsCompleted
+}
+
+func summarizeImplementationReviewStatus(detail *PlanDetail, task kitchenTUITaskItem) string {
+	if detail != nil {
+		switch strings.TrimSpace(detail.Progress.ImplReviewStatus) {
+		case planReviewStatusPassed:
+			return "approved"
+		case planReviewStatusFailed:
+			return "failed"
+		}
+		switch detail.Execution.State {
+		case planStateCompleted:
+			if detail.Progress.ImplReviewRequested {
+				return "approved"
+			}
+		case planStateImplementationReviewFailed:
+			return "failed"
+		case planStateImplementationReview:
+			switch strings.TrimSpace(task.State) {
+			case pool.TaskDispatched, pool.TaskReviewing, "active":
+				return "reviewing"
+			default:
+				return "pending"
+			}
+		}
+	}
+
+	switch strings.TrimSpace(task.State) {
+	case pool.TaskCompleted, pool.TaskAccepted:
+		return "approved"
+	case pool.TaskFailed:
+		return "failed"
+	case pool.TaskDispatched, pool.TaskReviewing, "active":
+		return "reviewing"
+	default:
+		return "pending"
+	}
+}
+
+func defaultImplementationReviewSummary(status string) string {
+	switch strings.TrimSpace(status) {
+	case "approved":
+		return "Implementation review approved."
+	case "failed":
+		return "Implementation review failed."
+	case "reviewing":
+		return "Implementation review is in progress."
+	default:
+		return "Implementation review is pending."
+	}
+}
+
+func firstPlanReviewFinding(findings []string) string {
+	for _, finding := range findings {
+		if finding = strings.TrimSpace(finding); finding != "" {
+			return finding
+		}
+	}
+	return ""
+}
+
+func implementationReviewTurnForTask(planID, runtimeID string) int {
+	if turn := reviewCouncilTurnNumberFromTaskID(planID, runtimeID); turn > 0 {
+		return turn
+	}
+	prefix := planTaskRuntimeID(planID, "impl-review-")
+	if !strings.HasPrefix(strings.TrimSpace(runtimeID), prefix) {
+		return 0
+	}
+	var turn int
+	if _, err := fmt.Sscanf(strings.TrimSpace(runtimeID), prefix+"%d", &turn); err == nil && turn > 0 {
+		return turn
+	}
+	return 0
+}
+
+func findReviewCouncilTurn(turns []ReviewCouncilTurnRecord, turn int) *ReviewCouncilTurnRecord {
+	if turn <= 0 {
+		return nil
+	}
+	for i := range turns {
+		if turns[i].Turn == turn {
+			return &turns[i]
+		}
+	}
+	return nil
+}
+
+func countDistinctReviewFindingFiles(findings []adapter.ReviewFinding) int {
+	if len(findings) == 0 {
+		return 0
+	}
+	paths := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		if path := strings.TrimSpace(finding.File); path != "" {
+			paths[path] = struct{}{}
+		}
+	}
+	return len(paths)
 }
 
 func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
