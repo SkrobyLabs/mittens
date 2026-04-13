@@ -702,6 +702,39 @@ func TestKitchenSubmitCommandReadsIdeaFromFile(t *testing.T) {
 	}
 }
 
+func TestKitchenSubmitCommandPersistsExplicitAnchorRef(t *testing.T) {
+	k := newTestKitchen(t)
+	mustRunGit(t, k.repoPath, "checkout", "-b", "feature-anchor")
+	writeFile(t, filepath.Join(k.repoPath, "feature.txt"), "feature\n")
+	mustRunGit(t, k.repoPath, "add", "feature.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "feature")
+
+	output := runKitchenCommand(t, k, "submit", "--anchor-ref", "main", "Add typed parser errors")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("submit output is not JSON: %v\n%s", err, output)
+	}
+
+	planID, _ := payload["planId"].(string)
+	if planID == "" {
+		t.Fatalf("planId missing from payload: %+v", payload)
+	}
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	mainHead, err := runGit(k.repoPath, "rev-parse", "main^{commit}")
+	if err != nil {
+		t.Fatalf("rev-parse main: %v", err)
+	}
+	if bundle.Plan.Anchor.Branch != "main" {
+		t.Fatalf("anchor branch = %q, want main", bundle.Plan.Anchor.Branch)
+	}
+	if bundle.Plan.Anchor.Commit != strings.TrimSpace(mainHead) {
+		t.Fatalf("anchor commit = %q, want %q", bundle.Plan.Anchor.Commit, strings.TrimSpace(mainHead))
+	}
+}
+
 func TestKitchenSubmitCommandReadsIdeaFromStdin(t *testing.T) {
 	k := newTestKitchen(t)
 	idea := "Add typed parser errors from stdin"
@@ -963,6 +996,48 @@ func TestKitchenRetryCommandSameWorkerClearsFreshWorkerRequirement(t *testing.T)
 	last := bundle.Execution.History[len(bundle.Execution.History)-1]
 	if last.Type != planHistoryManualRetried || !strings.Contains(last.Summary, "fresh worker required=false") {
 		t.Fatalf("last history entry = %+v, want manual retry entry with reuse", last)
+	}
+}
+
+func TestKitchenRetryCommandRequeuesFailedReviewCouncilTaskIntoImplementationReview(t *testing.T) {
+	k := newTestKitchen(t)
+	taskID, planID := seedFailedReviewCouncilTask(t, k)
+
+	output := runKitchenCommand(t, k, "retry", taskID)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("retry output is not JSON: %v\n%s", err, output)
+	}
+	if payload["status"] != "retried" || payload["taskId"] != taskID {
+		t.Fatalf("retry payload = %+v", payload)
+	}
+
+	reopened, closeFn, err := openKitchen(k.repoPath)
+	if err != nil {
+		t.Fatalf("openKitchen: %v", err)
+	}
+	defer func() { _ = closeFn() }()
+
+	task, ok := reopened.pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+
+	bundle, err := reopened.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.ImplReviewStatus != "" || len(bundle.Execution.ImplReviewFindings) != 0 {
+		t.Fatalf("impl review metadata = %+v, want cleared before retry", bundle.Execution)
 	}
 }
 
@@ -1237,6 +1312,57 @@ func seedFailedImplementationTask(t *testing.T, k *Kitchen) (string, string) {
 		t.Fatalf("FailTask: %v", err)
 	}
 	return taskID, bundle.Plan.PlanID
+}
+
+func seedFailedReviewCouncilTask(t *testing.T, k *Kitchen) (string, string) {
+	t.Helper()
+
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_failed_review_retry",
+			Lineage: "failed-review-retry",
+			Title:   "Failed review retry",
+			State:   planStateImplementationReviewFailed,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReviewFailed,
+			ImplReviewRequested:         true,
+			ImplReviewStatus:            planReviewStatusFailed,
+			ImplReviewFindings:          []string{"adapter exited with code 1"},
+			ReviewCouncilMaxTurns:       6,
+			ReviewCouncilTurnsCompleted: 5,
+			FailedTaskIDs:               []string{reviewCouncilTaskID("plan_failed_review_retry", 6)},
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	taskID := reviewCouncilTaskID(planID, 6)
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-review-retry", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-review-retry", "container-w-review-retry"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-review-retry"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := k.pm.FailTask("w-review-retry", taskID, "adapter exited with code 1"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+	return taskID, planID
 }
 
 func containsString(items []string, want string) bool {

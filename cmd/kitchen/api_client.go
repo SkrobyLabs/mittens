@@ -86,11 +86,18 @@ func (c *kitchenAPIClient) request(method, path string, body any, dst any) error
 }
 
 func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, implReview bool) (map[string]any, error) {
+	return c.SubmitIdeaAt(idea, lineage, auto, implReview, "")
+}
+
+func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview bool, anchorRef string) (map[string]any, error) {
 	req := map[string]any{
 		"idea":       idea,
 		"lineage":    lineage,
 		"auto":       auto,
 		"implReview": implReview,
+	}
+	if strings.TrimSpace(anchorRef) != "" {
+		req["anchorRef"] = strings.TrimSpace(anchorRef)
 	}
 	var resp map[string]any
 	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)

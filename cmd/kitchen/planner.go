@@ -30,6 +30,10 @@ const (
 )
 
 func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool) (*StoredPlan, error) {
+	return k.SubmitIdeaAt(idea, lineage, auto, implReview, "")
+}
+
+func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, anchorRef string) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
@@ -46,7 +50,7 @@ func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview 
 		return nil, err
 	}
 
-	anchor, err := k.currentAnchor()
+	anchor, err := k.anchorForRef(anchorRef)
 	if err != nil {
 		return nil, err
 	}
@@ -562,8 +566,26 @@ func (k *Kitchen) RetryTask(taskID string, requireFreshWorker bool) error {
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
-	bundle.Plan.State = planStateActive
-	bundle.Execution.State = planStateActive
+	switch {
+	case isReviewCouncilTask(*task):
+		bundle.Plan.State = planStateImplementationReview
+		bundle.Execution.State = planStateImplementationReview
+		bundle.Execution.ReviewCouncilAwaitingAnswers = false
+		bundle.Execution.ImplReviewStatus = ""
+		bundle.Execution.ImplReviewFindings = nil
+		bundle.Execution.ImplReviewedAt = nil
+	case task.Role == plannerTaskRole:
+		if bundle.Execution.CouncilTurnsCompleted > 0 || len(bundle.Execution.CouncilTurns) > 0 {
+			bundle.Plan.State = planStateReviewing
+			bundle.Execution.State = planStateReviewing
+		} else {
+			bundle.Plan.State = planStatePlanning
+			bundle.Execution.State = planStatePlanning
+		}
+	default:
+		bundle.Plan.State = planStateActive
+		bundle.Execution.State = planStateActive
+	}
 	bundle.Execution.CompletedAt = nil
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryManualRetried,
@@ -836,6 +858,9 @@ func planHistoryCycleForTask(planID string, task pool.Task) int {
 		if turn := councilTurnNumberFromTaskID(planID, task.ID); turn > 0 {
 			return turn
 		}
+	}
+	if turn := reviewCouncilTurnNumberFromTaskID(planID, task.ID); turn > 0 {
+		return turn
 	}
 	return 1
 }
@@ -1198,6 +1223,47 @@ func (k *Kitchen) currentAnchor() (PlanAnchor, error) {
 		Branch:    strings.TrimSpace(branch),
 		Timestamp: time.Now().UTC(),
 	}, nil
+}
+
+func (k *Kitchen) anchorForRef(ref string) (PlanAnchor, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return k.currentAnchor()
+	}
+	if strings.TrimSpace(k.repoPath) == "" {
+		return PlanAnchor{}, fmt.Errorf("repo path not configured")
+	}
+	commit, err := runGit(k.repoPath, "rev-parse", ref+"^{commit}")
+	if err != nil {
+		return PlanAnchor{}, fmt.Errorf("unknown anchor ref %q", ref)
+	}
+	current, err := k.currentAnchor()
+	if err != nil {
+		return PlanAnchor{}, err
+	}
+	branch := current.Branch
+	if isNamedGitBranchRef(k.repoPath, ref) {
+		branch = ref
+	}
+	return PlanAnchor{
+		Commit:    strings.TrimSpace(commit),
+		Branch:    strings.TrimSpace(branch),
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
+func isNamedGitBranchRef(repoPath, ref string) bool {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return false
+	}
+	if _, err := runGit(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+ref); err == nil {
+		return true
+	}
+	if _, err := runGit(repoPath, "show-ref", "--verify", "--quiet", "refs/remotes/"+ref); err == nil {
+		return true
+	}
+	return false
 }
 
 func derivePlanTitle(idea string) string {

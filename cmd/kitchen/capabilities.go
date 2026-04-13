@@ -52,6 +52,10 @@ func kitchenCapabilities() map[string]any {
 					"lineage": map[string]any{
 						"type": "string",
 					},
+					"anchorRef": map[string]any{
+						"type":    "string",
+						"default": "current",
+					},
 					"auto": map[string]any{
 						"type":    "bool",
 						"default": false,

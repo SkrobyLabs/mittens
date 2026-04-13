@@ -32,26 +32,26 @@ var (
 // Kitchen is the top-level orchestrator that will own the scheduler,
 // persistence, and API surfaces as the implementation plan lands.
 type Kitchen struct {
-	pm         *pool.PoolManager
-	wal        *pool.WAL
-	hostAPI    pool.RuntimeAPI
-	router     *ComplexityRouter
-	health     *ProviderHealth
-	planStore  *PlanStore
-	lineageMgr *LineageManager
-	workerBkr  *WorkerBroker
-	scheduler  *Scheduler
-	apiServer  *http.Server
-	notifyMu   sync.RWMutex
-	notifySubs map[int]chan pool.Notification
-	notifySeq  int
-	repoMutex  sync.Mutex
+	pm              *pool.PoolManager
+	wal             *pool.WAL
+	hostAPI         pool.RuntimeAPI
+	router          *ComplexityRouter
+	health          *ProviderHealth
+	planStore       *PlanStore
+	lineageMgr      *LineageManager
+	workerBkr       *WorkerBroker
+	scheduler       *Scheduler
+	apiServer       *http.Server
+	notifyMu        sync.RWMutex
+	notifySubs      map[int]chan pool.Notification
+	notifySeq       int
+	repoMutex       sync.Mutex
 	councilResumeMu sync.Mutex
 	councilExtendMu sync.Mutex
-	cfg        KitchenConfig
-	repoPath   string
-	paths      KitchenPaths
-	project    ProjectPaths
+	cfg             KitchenConfig
+	repoPath        string
+	paths           KitchenPaths
+	project         ProjectPaths
 	// keepDeadWorkers retains finished worker containers via docker
 	// instead of removing them when their task ends, for post-mortem
 	// debugging. When set, the scheduler evicts the oldest retained
@@ -71,6 +71,7 @@ func newRootCommand() *cobra.Command {
 	var submitAuto bool
 	var submitImplReview bool
 	var submitFile string
+	var submitAnchorRef string
 	var plansCompleted bool
 	var historyCycle int
 	var historyJSON bool
@@ -108,7 +109,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	submitCmd := &cobra.Command{
-		Use:   "submit [--lineage LINEAGE] [--auto] [--file PATH|-] [IDEA]",
+		Use:   "submit [--lineage LINEAGE] [--anchor-ref REF] [--auto] [--file PATH|-] [IDEA]",
 		Short: "Submit an idea for planning",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -119,7 +120,7 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.SubmitIdea(idea, submitLineage, submitAuto, submitImplReview)
+				resp, err := client.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef)
 				if err != nil {
 					return err
 				}
@@ -132,20 +133,21 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.SubmitIdea(idea, submitLineage, submitAuto, submitImplReview)
+			bundle, err := k.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef)
 			if err != nil {
 				return err
 			}
 			resp := map[string]any{
-				"planId":  bundle.Plan.PlanID,
-				"state":   bundle.Execution.State,
-				"lineage": bundle.Plan.Lineage,
+				"planId":          bundle.Plan.PlanID,
+				"state":           bundle.Execution.State,
+				"lineage":         bundle.Plan.Lineage,
 				"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
 			}
 			return writeJSON(cmd.OutOrStdout(), resp)
 		},
 	}
 	submitCmd.Flags().StringVar(&submitLineage, "lineage", "", "lineage to submit the idea into")
+	submitCmd.Flags().StringVar(&submitAnchorRef, "anchor-ref", "", "git branch or commit to anchor the plan to (defaults to current)")
 	submitCmd.Flags().BoolVar(&submitAuto, "auto", false, "auto-approve the generated plan")
 	submitCmd.Flags().StringVar(&submitFile, "file", "", "read the idea body from a file path or '-' for stdin")
 	submitCmd.Flags().BoolVar(&submitImplReview, "impl-review", false, "request a post-implementation adversarial review")

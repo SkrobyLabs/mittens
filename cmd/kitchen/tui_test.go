@@ -24,6 +24,7 @@ type fakeKitchenTUIBackend struct {
 	submitPlanID              string
 	submittedIdea             string
 	submittedImplReview       bool
+	submittedAnchorRef        string
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
@@ -60,9 +61,10 @@ func (b *fakeKitchenTUIBackend) TaskOutput(taskID string) (string, error) {
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
 }
-func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
+func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
 	b.submittedIdea = idea
 	b.submittedImplReview = implReview
+	b.submittedAnchorRef = anchorRef
 	if strings.TrimSpace(b.submitPlanID) == "" {
 		return "plan_submitted", nil
 	}
@@ -297,6 +299,54 @@ func TestKitchenTUISubmitEnterClosesInputAndQueuesLoad(t *testing.T) {
 	}
 	if !backend.submittedImplReview {
 		t.Fatal("submittedImplReview = false, want true")
+	}
+}
+
+func TestKitchenTUISubmitParsesAnchorPrefix(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{submitPlanID: "plan_new"}
+	model := kitchenTUIModel{
+		backend:          backend,
+		inputMode:        kitchenTUIInputSubmit,
+		submitImplReview: false,
+	}
+	model.input = textInputWithValue("[ref=main] Add typed parser errors")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.submittedIdea != "Add typed parser errors" {
+		t.Fatalf("submittedIdea = %q, want parsed idea", backend.submittedIdea)
+	}
+	if backend.submittedAnchorRef != "main" {
+		t.Fatalf("submittedAnchorRef = %q, want main", backend.submittedAnchorRef)
+	}
+}
+
+func TestKitchenTUIOpenSubmitInputPrefillsCurrentAnchorRef(t *testing.T) {
+	repo := initGitRepo(t)
+	model := kitchenTUIModel{
+		repoPath: repo,
+		input:    textinput.New(),
+	}
+
+	model.openSubmitInput()
+
+	if !strings.HasPrefix(model.input.Value(), "[ref=main] ") {
+		t.Fatalf("submit input value = %q, want main anchor prefix", model.input.Value())
 	}
 }
 

@@ -2548,11 +2548,11 @@ func TestOnImplementationReviewCompleted_Fail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get plan: %v", err)
 	}
-	if bundle.Execution.State != planStateCompleted {
-		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	if bundle.Execution.State != planStateImplementationReviewFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReviewFailed)
 	}
-	if bundle.Plan.State != planStateCompleted {
-		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	if bundle.Plan.State != planStateImplementationReviewFailed {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReviewFailed)
 	}
 	if bundle.Execution.ImplReviewStatus != planReviewStatusFailed {
 		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusFailed)
@@ -2739,8 +2739,8 @@ func TestOnImplementationReviewFailed_PlanFailureUsesBlockedArtifactPath(t *test
 	if err != nil {
 		t.Fatalf("Get plan: %v", err)
 	}
-	if bundle.Execution.State != planStateCompleted {
-		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	if bundle.Execution.State != planStateImplementationReviewFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReviewFailed)
 	}
 	if bundle.Execution.ImplReviewStatus != planReviewStatusFailed {
 		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusFailed)
@@ -2757,6 +2757,118 @@ func TestOnImplementationReviewFailed_PlanFailureUsesBlockedArtifactPath(t *test
 	}
 	if !found {
 		t.Fatalf("impl review findings = %v, want blocked artifact message", bundle.Execution.ImplReviewFindings)
+	}
+}
+
+func TestOnImplementationReviewTaskFailurePreservesPriorFindings(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_failure_preserve",
+			Lineage: "feat-ir-failure-preserve",
+			Title:   "Impl review preserve findings test",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       6,
+			ReviewCouncilTurnsCompleted: 5,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 5,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    5,
+					Stance:  "revise",
+					Verdict: "fail",
+					Findings: []adapter.ReviewFinding{{
+						ID:          "f1",
+						File:        "cmd/kitchen/planner.go",
+						Line:        101,
+						Category:    "correctness",
+						Description: "Preserve review findings when the next turn crashes",
+						Severity:    "major",
+					}},
+					Summary: "prior substantive fail",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-failure-preserve"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 6)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+	if err := pm.FailTask("w-rev", reviewTaskID, "adapter exited with code 1"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+
+	if err := s.onTaskFailed(reviewTaskID, FailureUnknown); err != nil {
+		t.Fatalf("onTaskFailed(review): %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReviewFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReviewFailed)
+	}
+	if !containsString(bundle.Execution.FailedTaskIDs, reviewTaskID) {
+		t.Fatalf("failed task ids = %+v, want %q present", bundle.Execution.FailedTaskIDs, reviewTaskID)
+	}
+	foundPrior := false
+	foundCrash := false
+	for _, finding := range bundle.Execution.ImplReviewFindings {
+		if strings.Contains(finding, "Preserve review findings") {
+			foundPrior = true
+		}
+		if strings.Contains(finding, "adapter exited with code 1") {
+			foundCrash = true
+		}
+	}
+	if !foundPrior || !foundCrash {
+		t.Fatalf("impl review findings = %v, want prior review finding and crash message preserved", bundle.Execution.ImplReviewFindings)
 	}
 }
 

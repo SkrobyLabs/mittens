@@ -29,7 +29,7 @@ type kitchenTUIBackend interface {
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
-	SubmitIdea(idea string, implReview bool) (string, error)
+	SubmitIdea(idea string, implReview bool, anchorRef string) (string, error)
 	ExtendCouncil(planID string, turns int) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
@@ -82,8 +82,8 @@ func (b *kitchenAPIBackend) TaskOutput(taskID string) (string, error) {
 	return b.client.TaskOutput(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
-func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool) (string, error) {
-	resp, err := b.client.SubmitIdea(idea, "", false, implReview)
+func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
+	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef)
 	if err != nil {
 		return "", err
 	}
@@ -244,10 +244,10 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 	return questions, err
 }
 
-func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool) (string, error) {
+func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdea(idea, "", false, implReview)
+		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, anchorRef)
 		if err != nil {
 			return err
 		}
@@ -944,14 +944,15 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		value := strings.TrimSpace(m.input.Value())
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
-			if value == "" {
-				m.errText = "idea must not be empty"
+			idea, anchorRef, err := parseSubmitInput(value)
+			if err != nil {
+				m.errText = err.Error()
 				return m, nil
 			}
 			implReview := m.submitImplReview
 			m.closeInput()
 			return m, m.actionCmd(func() (string, string, error) {
-				planID, err := m.backend.SubmitIdea(value, implReview)
+				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef)
 				if err != nil {
 					return "", "", err
 				}
@@ -1063,6 +1064,10 @@ func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholde
 func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitImplReview = true
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+	if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
+		m.input.SetValue("[ref=" + ref + "] ")
+		m.input.CursorEnd()
+	}
 }
 
 func (m *kitchenTUIModel) closeInput() {
@@ -1841,6 +1846,11 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 	}
 	if detail.Execution.State == planStateImplementationReview || hasReviewCouncilState(detail.Execution) {
 		activeTurn := detail.Execution.ReviewCouncilTurnsCompleted + 1
+		for _, cycle := range detail.Progress.Cycles {
+			if cycle.ImplReviewTaskID != "" && cycle.Index > activeTurn {
+				activeTurn = cycle.Index
+			}
+		}
 		if strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) != "" && detail.Execution.ReviewCouncilTurnsCompleted > 0 {
 			activeTurn = detail.Execution.ReviewCouncilTurnsCompleted
 		}
@@ -1848,8 +1858,13 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		if strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) != "" && len(detail.Execution.ReviewCouncilTurns) > 0 {
 			last := detail.Execution.ReviewCouncilTurns[len(detail.Execution.ReviewCouncilTurns)-1]
 			activeSeat = firstNonEmpty(strings.TrimSpace(last.Seat), reviewCouncilSeatForTurn(last.Turn))
+		} else if activeTurn > 0 {
+			activeSeat = reviewCouncilSeatForTurn(activeTurn)
 		}
 		status := firstNonEmpty(strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision), "reviewing")
+		if detail.Execution.State == planStateImplementationReviewFailed && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
+			status = "failed"
+		}
 		trajectory := make([]string, 0, len(detail.Execution.ReviewCouncilTurns))
 		for _, turn := range detail.Execution.ReviewCouncilTurns {
 			verdict := "-"
@@ -2603,4 +2618,42 @@ func compactState(state string) string {
 	default:
 		return state
 	}
+}
+
+func defaultSubmitAnchorRef(repoPath string) string {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return ""
+	}
+	branch, err := runGit(repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil {
+		branch = strings.TrimSpace(branch)
+		if branch != "" && branch != "HEAD" {
+			return branch
+		}
+	}
+	commit, err := runGit(repoPath, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(commit)
+}
+
+func parseSubmitInput(value string) (idea, anchorRef string, err error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "[ref=") {
+		end := strings.Index(value, "]")
+		if end < 0 {
+			return "", "", fmt.Errorf("submit reference must close with ]")
+		}
+		anchorRef = strings.TrimSpace(value[len("[ref="):end])
+		if anchorRef == "" {
+			return "", "", fmt.Errorf("submit reference must not be empty")
+		}
+		value = strings.TrimSpace(value[end+1:])
+	}
+	if value == "" {
+		return "", "", fmt.Errorf("idea must not be empty")
+	}
+	return value, anchorRef, nil
 }

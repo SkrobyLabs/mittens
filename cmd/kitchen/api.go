@@ -132,11 +132,12 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 		Lineage    string `json:"lineage"`
 		Auto       bool   `json:"auto"`
 		ImplReview bool   `json:"implReview"`
+		AnchorRef  string `json:"anchorRef"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
 	}
-	bundle, err := k.SubmitIdea(req.Idea, req.Lineage, req.Auto, req.ImplReview)
+	bundle, err := k.SubmitIdeaAt(req.Idea, req.Lineage, req.Auto, req.ImplReview, req.AnchorRef)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return

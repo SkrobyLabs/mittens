@@ -72,6 +72,43 @@ func TestKitchenAPIPlanLifecycleAndQueue(t *testing.T) {
 	}
 }
 
+func TestKitchenAPISubmitIdeaPersistsExplicitAnchorRef(t *testing.T) {
+	k := newTestKitchen(t)
+	mustRunGit(t, k.repoPath, "checkout", "-b", "feature-anchor")
+	writeFile(t, filepath.Join(k.repoPath, "feature.txt"), "feature\n")
+	mustRunGit(t, k.repoPath, "add", "feature.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "feature")
+
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/ideas", map[string]any{
+		"idea":      "Add typed parser errors",
+		"anchorRef": "main",
+	})
+	var created map[string]any
+	decodeResponse(t, resp, &created)
+	planID, _ := created["planId"].(string)
+	if planID == "" {
+		t.Fatal("expected planId")
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	mainHead, err := runGit(k.repoPath, "rev-parse", "main^{commit}")
+	if err != nil {
+		t.Fatalf("rev-parse main: %v", err)
+	}
+	if bundle.Plan.Anchor.Branch != "main" {
+		t.Fatalf("anchor branch = %q, want main", bundle.Plan.Anchor.Branch)
+	}
+	if bundle.Plan.Anchor.Commit != strings.TrimSpace(mainHead) {
+		t.Fatalf("anchor commit = %q, want %q", bundle.Plan.Anchor.Commit, strings.TrimSpace(mainHead))
+	}
+}
+
 func TestKitchenAPIStatusEndpoint(t *testing.T) {
 	k := newTestKitchen(t)
 	server := httptest.NewServer(k.NewAPIHandler(""))

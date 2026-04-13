@@ -238,9 +238,6 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 		bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
 		bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
 		bundle.Execution.ImplReviewedAt = &now
-		bundle.Plan.State = planStateCompleted
-		bundle.Execution.State = planStateCompleted
-		bundle.Execution.CompletedAt = &now
 		bundle.Execution.ActiveTaskIDs = nil
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilConverged,
@@ -249,6 +246,9 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			Summary: fmt.Sprintf("Review council converged on %s.", artifact.Verdict),
 		})
 		if strings.TrimSpace(artifact.Verdict) == pool.ReviewPass {
+			bundle.Plan.State = planStateCompleted
+			bundle.Execution.State = planStateCompleted
+			bundle.Execution.CompletedAt = &now
 			bundle.Execution.ImplReviewStatus = planReviewStatusPassed
 			bundle.Execution.ImplReviewFindings = nil
 			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
@@ -258,6 +258,9 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Verdict: artifact.Verdict,
 			})
 		} else {
+			bundle.Plan.State = planStateImplementationReviewFailed
+			bundle.Execution.State = planStateImplementationReviewFailed
+			bundle.Execution.CompletedAt = nil
 			bundle.Execution.ImplReviewStatus = planReviewStatusFailed
 			bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
 			if len(bundle.Execution.ImplReviewFindings) == 0 {
@@ -295,8 +298,8 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Summary:              artifact.Summary,
 			}
 		}
-		bundle.Plan.State = planStateRejected
-		bundle.Execution.State = planStateRejected
+		bundle.Plan.State = planStateImplementationReviewFailed
+		bundle.Execution.State = planStateImplementationReviewFailed
 		bundle.Execution.ReviewCouncilFinalDecision = reviewCouncilReject
 		bundle.Execution.ReviewCouncilWarnings = nil
 		bundle.Execution.ReviewCouncilUnresolvedDisagreements = append([]adapter.CouncilDisagreement(nil), rejectArtifact.Disagreements...)
@@ -411,6 +414,47 @@ func reviewCouncilFindingsToStrings(findings []adapter.ReviewFinding, disagreeme
 	return out
 }
 
+func latestReviewCouncilFindings(bundle StoredPlan) []string {
+	for i := len(bundle.Execution.ReviewCouncilTurns) - 1; i >= 0; i-- {
+		artifact := bundle.Execution.ReviewCouncilTurns[i].Artifact
+		if artifact == nil {
+			continue
+		}
+		findings := reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
+		if len(findings) > 0 {
+			return findings
+		}
+	}
+	return nil
+}
+
+func mergeReviewCouncilFailureFindings(bundle StoredPlan, message string) []string {
+	findings := append([]string(nil), bundle.Execution.ImplReviewFindings...)
+	if len(findings) == 0 {
+		findings = latestReviewCouncilFindings(bundle)
+	}
+	message = strings.TrimSpace(message)
+	if len(findings) == 0 {
+		if message == "" {
+			return []string{"Implementation review failed."}
+		}
+		return []string{message}
+	}
+	if message != "" {
+		present := false
+		for _, finding := range findings {
+			if strings.TrimSpace(finding) == message {
+				present = true
+				break
+			}
+		}
+		if !present {
+			findings = append(findings, message)
+		}
+	}
+	return findings
+}
+
 func (s *Scheduler) seedReviewCouncilQuestions(task pool.Task, questions []adapter.CouncilUserQuestion) error {
 	if s == nil || s.pm == nil || task.WorkerID == "" || len(questions) == 0 {
 		return nil
@@ -478,12 +522,13 @@ func (s *Scheduler) markReviewCouncilFailed(task pool.Task, message string) erro
 		return err
 	}
 	now := time.Now().UTC()
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.CompletedAt = &now
+	bundle.Plan.State = planStateImplementationReviewFailed
+	bundle.Execution.State = planStateImplementationReviewFailed
+	bundle.Execution.CompletedAt = nil
 	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.FailedTaskIDs = appendUniqueIDs(bundle.Execution.FailedTaskIDs, task.ID)
 	bundle.Execution.ImplReviewStatus = planReviewStatusFailed
-	bundle.Execution.ImplReviewFindings = []string{strings.TrimSpace(message)}
+	bundle.Execution.ImplReviewFindings = mergeReviewCouncilFailureFindings(bundle, message)
 	bundle.Execution.ImplReviewedAt = &now
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:     planHistoryImplReviewFailed,
@@ -679,10 +724,10 @@ func (s *Scheduler) finalizeLegacyImplementationReviewCompleted(task pool.Task, 
 	bundle.Execution.ActiveTaskIDs = nil
 	bundle.Execution.CompletedTaskIDs = appendUniqueIDs(bundle.Execution.CompletedTaskIDs, task.ID)
 	bundle.Execution.ImplReviewedAt = &now
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.CompletedAt = &now
 	if verdict == pool.ReviewPass {
+		bundle.Plan.State = planStateCompleted
+		bundle.Execution.State = planStateCompleted
+		bundle.Execution.CompletedAt = &now
 		bundle.Execution.ImplReviewStatus = planReviewStatusPassed
 		bundle.Execution.ImplReviewFindings = nil
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
@@ -704,6 +749,9 @@ func (s *Scheduler) finalizeLegacyImplementationReviewCompleted(task pool.Task, 
 		if len(findings) == 0 {
 			findings = []string{"Implementation review failed."}
 		}
+		bundle.Plan.State = planStateImplementationReviewFailed
+		bundle.Execution.State = planStateImplementationReviewFailed
+		bundle.Execution.CompletedAt = nil
 		bundle.Execution.ImplReviewStatus = planReviewStatusFailed
 		bundle.Execution.ImplReviewFindings = findings
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
@@ -739,10 +787,11 @@ func (s *Scheduler) finalizeLegacyImplementationReviewFailed(task pool.Task, bun
 	if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {
 		msg = strings.TrimSpace(task.Result.Error)
 	}
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.CompletedAt = &now
+	bundle.Plan.State = planStateImplementationReviewFailed
+	bundle.Execution.State = planStateImplementationReviewFailed
+	bundle.Execution.CompletedAt = nil
 	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.FailedTaskIDs = appendUniqueIDs(bundle.Execution.FailedTaskIDs, task.ID)
 	bundle.Execution.ImplReviewStatus = planReviewStatusFailed
 	bundle.Execution.ImplReviewFindings = []string{msg}
 	bundle.Execution.ImplReviewedAt = &now

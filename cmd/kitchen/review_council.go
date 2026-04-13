@@ -85,7 +85,7 @@ func canExtendReviewCouncil(planState string, exec ExecutionRecord) bool {
 	}
 	switch exec.ReviewCouncilFinalDecision {
 	case reviewCouncilReject:
-		return planState == planStateRejected && exec.RejectedBy == rejectedByReviewCouncil
+		return (planState == planStateRejected || planState == planStateImplementationReviewFailed) && exec.RejectedBy == rejectedByReviewCouncil
 	default:
 		return false
 	}

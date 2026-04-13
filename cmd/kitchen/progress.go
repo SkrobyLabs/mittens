@@ -274,43 +274,82 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 		cycle := PlanCycleProgress{
 			Index:            i,
 			PlannerTaskID:    plannerTaskID,
-			PlannerTaskState: string(tasks[plannerTaskID]),
+			PlannerTaskState: string(planProgressTaskState(bundle.Execution, plannerTaskID, tasks)),
 		}
 		cycles = append(cycles, cycle)
 	}
 
-	completedTurns := bundle.Execution.ReviewCouncilTurnsCompleted
-	if bundle.Execution.State == planStateImplementationReview && completedTurns == 0 {
-		irTaskID := reviewCouncilTaskID(planID, 1)
-		cycles = append(cycles, PlanCycleProgress{
-			Index:               1,
-			ImplReviewTaskID:    irTaskID,
-			ImplReviewTaskState: string(tasks[irTaskID]),
-		})
+	reviewTurns := maxObservedReviewCouncilTurn(bundle, tasks)
+	if bundle.Execution.State == planStateImplementationReview && reviewTurns == 0 {
+		reviewTurns = 1
 	}
-	for i := 1; i <= completedTurns; i++ {
+	for i := 1; i <= reviewTurns; i++ {
 		irTaskID := reviewCouncilTaskID(planID, i)
 		cycles = append(cycles, PlanCycleProgress{
 			Index:               i,
 			ImplReviewTaskID:    irTaskID,
-			ImplReviewTaskState: string(tasks[irTaskID]),
+			ImplReviewTaskState: string(planProgressTaskState(bundle.Execution, irTaskID, tasks)),
 		})
-	}
-	if bundle.Execution.State == planStateImplementationReview &&
-		bundle.Execution.ReviewCouncilFinalDecision == "" &&
-		completedTurns > 0 {
-		nextTurn := completedTurns + 1
-		irTaskID := reviewCouncilTaskID(planID, nextTurn)
-		if _, ok := tasks[irTaskID]; ok {
-			cycles = append(cycles, PlanCycleProgress{
-				Index:               nextTurn,
-				ImplReviewTaskID:    irTaskID,
-				ImplReviewTaskState: string(tasks[irTaskID]),
-			})
-		}
 	}
 
 	return cycles
+}
+
+func maxObservedReviewCouncilTurn(bundle StoredPlan, tasks map[string]poolTaskState) int {
+	planID := strings.TrimSpace(bundle.Plan.PlanID)
+	maxTurn := bundle.Execution.ReviewCouncilTurnsCompleted
+	for taskID := range tasks {
+		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.ActiveTaskIDs {
+		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.CompletedTaskIDs {
+		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.FailedTaskIDs {
+		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, entry := range bundle.Execution.History {
+		if turn := reviewCouncilTurnNumberFromTaskID(planID, entry.TaskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	return maxTurn
+}
+
+func planProgressTaskState(exec ExecutionRecord, taskID string, tasks map[string]poolTaskState) poolTaskState {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ""
+	}
+	if state, ok := tasks[taskID]; ok && state != "" {
+		return state
+	}
+	for _, id := range exec.ActiveTaskIDs {
+		if strings.TrimSpace(id) == taskID {
+			return poolTaskState(pool.TaskQueued)
+		}
+	}
+	for _, id := range exec.CompletedTaskIDs {
+		if strings.TrimSpace(id) == taskID {
+			return poolTaskState(pool.TaskCompleted)
+		}
+	}
+	for _, id := range exec.FailedTaskIDs {
+		if strings.TrimSpace(id) == taskID {
+			return poolTaskState(pool.TaskFailed)
+		}
+	}
+	return ""
 }
 
 type poolTaskState string
