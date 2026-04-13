@@ -139,7 +139,16 @@ func (s *Scheduler) handleNotification(n pool.Notification) {
 	case "task_canceled":
 		task, ok := s.pm.Task(n.ID)
 		if ok && strings.TrimSpace(task.PlanID) != "" {
-			if err := s.syncPlanExecution(task.PlanID); err != nil {
+			var err error
+			switch {
+			case task.Role == plannerTaskRole:
+				err = s.recoverCouncilPlansOnStartup()
+			case reviewCouncilTurnNumberFromTaskID(task.PlanID, task.ID) > 0:
+				err = s.recoverReviewCouncilPlansOnStartup()
+			default:
+				err = s.syncPlanExecution(task.PlanID)
+			}
+			if err != nil {
 				s.logf("task %s cancel handling: %v", n.ID, err)
 			}
 		}
@@ -969,6 +978,10 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
+	switch bundle.Execution.State {
+	case planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateImplementationReviewFailed:
+		return s.plans.UpdateExecution(planID, bundle.Execution)
+	}
 
 	if len(active) == 0 && len(failed) == 0 {
 		if bundle.Execution.ImplReviewRequested && bundle.Execution.State == planStateActive {

@@ -526,9 +526,6 @@ func (k *Kitchen) CancelTask(taskID string) error {
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
-	bundle.Plan.State = planStateActive
-	bundle.Execution.State = planStateActive
-	bundle.Execution.CompletedAt = nil
 	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
 		return err
 	}

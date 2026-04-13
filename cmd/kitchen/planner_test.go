@@ -240,6 +240,61 @@ func TestKitchenPlannerQuestionsBlockApprovalUntilAnswered(t *testing.T) {
 	}
 }
 
+func TestCancelTaskPreservesReviewingCouncilState(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Introduce typed parser errors for lexer failures", "", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completeCouncilTurnWithArtifact(t, k, bundle.Plan.PlanID, councilTaskID(bundle.Plan.PlanID, 1), adapter.CouncilTurnArtifact{
+		Seat:    "A",
+		Turn:    1,
+		Stance:  "revise",
+		Summary: "Needs one more planning turn.",
+		CandidatePlan: &adapter.PlanArtifact{
+			Title:   "Typed parser errors",
+			Summary: "Refine the plan in a second council turn.",
+			Tasks: []adapter.PlanArtifactTask{{
+				ID:               "t1",
+				Title:            "Implement typed parser errors",
+				Prompt:           "Introduce typed parser errors for lexer failures.",
+				Complexity:       string(ComplexityMedium),
+				ReviewComplexity: string(ComplexityMedium),
+			}},
+		},
+	})
+
+	taskID := councilTaskID(bundle.Plan.PlanID, 2)
+	if err := k.CancelTask(taskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Plan.State != planStateReviewing {
+		t.Fatalf("plan state = %q, want %q", got.Plan.State, planStateReviewing)
+	}
+	if got.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", got.Execution.State, planStateReviewing)
+	}
+	if len(got.Execution.ActiveTaskIDs) != 0 {
+		t.Fatalf("active task ids = %+v, want none", got.Execution.ActiveTaskIDs)
+	}
+	if got.Execution.CouncilTurnsCompleted != 1 {
+		t.Fatalf("council turns completed = %d, want 1", got.Execution.CouncilTurnsCompleted)
+	}
+	task, ok := k.pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskCanceled {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskCanceled)
+	}
+}
+
 func TestKitchenAutoApprovedPlanResumesAfterPlannerQuestionsAnswered(t *testing.T) {
 	k := newTestKitchen(t)
 

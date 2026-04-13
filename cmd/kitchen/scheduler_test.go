@@ -1969,6 +1969,63 @@ func TestSyncPlanExecution_NoImplReview(t *testing.T) {
 	}
 }
 
+func TestSyncPlanExecution_PreservesReviewingPlanWithoutTasks(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_reviewing_sync_guard",
+			Lineage: "feat-reviewing-sync-guard",
+			Title:   "Reviewing sync guard",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-reviewing-sync-guard"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateReviewing {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateReviewing)
+	}
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
@@ -2506,6 +2563,89 @@ func TestOnImplementationReviewFailed_PlanFailureUsesBlockedArtifactPath(t *test
 	}
 	if !found {
 		t.Fatalf("impl review findings = %v, want blocked artifact message", bundle.Execution.ImplReviewFindings)
+	}
+}
+
+func TestRecoverReviewCouncilPlansOnStartup_RevivesCanceledTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_cancel_recover",
+			Lineage: "feat-ir-cancel-recover",
+			Title:   "Impl review cancel recovery",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-cancel-recover"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	k := &Kitchen{pm: pm, planStore: store}
+	if err := k.CancelTask(reviewTaskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverReviewCouncilPlansOnStartup: %v", err)
+	}
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != reviewTaskID {
+		t.Fatalf("active task ids = %+v, want [%q]", bundle.Execution.ActiveTaskIDs, reviewTaskID)
 	}
 }
 

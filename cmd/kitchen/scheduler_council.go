@@ -385,7 +385,19 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 			bundle.Execution.CouncilTurnsCompleted < bundle.Execution.CouncilMaxTurns &&
 			!bundle.Execution.CouncilAwaitingAnswers &&
 			len(bundle.Execution.ActiveTaskIDs) == 0 {
-			if _, exists := s.pm.Task(nextTaskID); !exists {
+			task, exists := s.pm.Task(nextTaskID)
+			if !exists {
+				if err := s.enqueueCouncilTurn(bundle); err != nil {
+					return err
+				}
+				bundle, err = s.plans.Get(plan.PlanID)
+				if err != nil {
+					continue
+				}
+			} else if task.Status == pool.TaskCanceled {
+				if err := s.pm.ReviveCanceledTask(nextTaskID, false); err != nil {
+					return err
+				}
 				if err := s.enqueueCouncilTurn(bundle); err != nil {
 					return err
 				}

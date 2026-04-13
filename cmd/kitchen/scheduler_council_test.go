@@ -603,3 +603,84 @@ func TestOnCouncilTurnCompleted_InvalidNilCandidateReportsArtifactFailure(t *tes
 		t.Fatalf("council turns = %d, want 1", len(bundle.Execution.CouncilTurns))
 	}
 }
+
+func TestHandleNotification_TaskCanceledRevivesCouncilTurn(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_cancel_recover",
+			Lineage: "council-cancel-recover",
+			Title:   "Planner council cancel recovery",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 1,
+			CouncilSeats:          newCouncilSeats(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-cancel-recover"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID := councilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "plan this change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	k := &Kitchen{pm: pm, planStore: store}
+	if err := k.CancelTask(taskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	s.handleNotification(pool.Notification{Type: "task_canceled", ID: taskID})
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateReviewing {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateReviewing)
+	}
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != taskID {
+		t.Fatalf("active task ids = %+v, want [%q]", bundle.Execution.ActiveTaskIDs, taskID)
+	}
+}

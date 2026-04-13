@@ -943,6 +943,40 @@ func (pm *PoolManager) ReviveFailedTask(taskID string, requireFreshWorker bool) 
 	return nil
 }
 
+// ReviveCanceledTask moves a canceled task back to queued so the scheduler can resume it.
+func (pm *PoolManager) ReviveCanceledTask(taskID string, requireFreshWorker bool) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	t := pm.tasks[taskID]
+	if t == nil {
+		return fmt.Errorf("revive canceled task: task %q not found", taskID)
+	}
+	if t.Status != TaskCanceled {
+		return fmt.Errorf("revive canceled task: task %q is %q, expected canceled", taskID, t.Status)
+	}
+
+	e := Event{
+		Timestamp: time.Now(),
+		Type:      EventTaskRequeued,
+		TaskID:    taskID,
+		Data: marshalData(TaskRequeuedData{
+			RequireFreshWorker: requireFreshWorker,
+		}),
+	}
+	if _, err := pm.wal.Append(e); err != nil {
+		return fmt.Errorf("revive canceled task wal: %w", err)
+	}
+	Apply(pm, e)
+	pm.queue.Push(taskID, t.Priority, t.DependsOn)
+	message := "worker reuse allowed"
+	if requireFreshWorker {
+		message = "fresh worker required"
+	}
+	pm.sendNotify(Notification{Type: "task_requeued", ID: taskID, Message: message})
+	return nil
+}
+
 // DeleteTask permanently removes a terminal task and any questions tied to it.
 func (pm *PoolManager) DeleteTask(taskID string) error {
 	pm.mu.Lock()

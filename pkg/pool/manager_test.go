@@ -276,6 +276,48 @@ func TestReviveFailedTask(t *testing.T) {
 	}
 }
 
+func TestReviveCanceledTask(t *testing.T) {
+	pm := newTestPoolManager(t)
+	taskID, err := pm.EnqueueTask(TaskSpec{ID: "t-1", Prompt: "do work", Priority: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.CancelTask(taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.ReviveCanceledTask(taskID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != TaskQueued {
+		t.Fatalf("status = %q, want %q", task.Status, TaskQueued)
+	}
+	if task.RetryCount != 0 {
+		t.Fatalf("retryCount = %d, want 0", task.RetryCount)
+	}
+	if task.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", task.CompletedAt)
+	}
+
+	if _, err := pm.SpawnWorker(WorkerSpec{ID: "w-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.RegisterWorker("w-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	next, err := pm.DispatchNext("w-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == nil || next.ID != taskID {
+		t.Fatalf("DispatchNext returned %+v, want revived task %q", next, taskID)
+	}
+}
+
 func TestHeartbeat(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
