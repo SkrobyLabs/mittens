@@ -1126,6 +1126,7 @@ func (s *Scheduler) recoverWaitingPlansOnStartup() {
 	}
 }
 
+
 // reapOrphanPlanTasks cancels any non-terminal task whose referenced plan
 // has been removed from disk. Without this, the scheduler would repeatedly
 // try to load the missing plan on every reconcile tick and spam errors.

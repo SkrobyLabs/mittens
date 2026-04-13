@@ -32,7 +32,7 @@ kitchen status
 kitchen evidence PLAN_ID
 
 # Merge completed work
-kitchen merge --squash parser-errors
+kitchen merge parser-errors
 ```
 
 Manual `mittens daemon` startup still works, but it is the advanced/debug

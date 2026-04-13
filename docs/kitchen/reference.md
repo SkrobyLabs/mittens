@@ -24,6 +24,23 @@ routing:
     prefer:
       - provider: anthropic
         model: haiku
+roleDefaults:
+  reviewer:
+    prefer:
+      - provider: openai
+        model: gpt-5.4
+roleRouting:
+  reviewer:
+    high:
+      prefer:
+        - provider: anthropic
+          model: opus
+councilSeats:
+  A:
+    default:
+      prefer:
+        - provider: anthropic
+          model: sonnet
 concurrency:
   maxActiveLineages: 5
   maxPlanningWorkers: 2
@@ -31,6 +48,7 @@ concurrency:
   maxWorkersPerPool: 6
   maxWorkersPerLineage: 4
   maxIdlePerPool: 2
+  councilSeatIdleTTLSeconds: 270
 failure_policy:
   auth:
     action: try_next_provider
@@ -39,6 +57,68 @@ snapshots:
   planHistoryLimit: 8
 ```
 
+### `roleDefaults`
+
+Optional `map[string]RoutingRule`. Per-role default routing fallback. When a task has a role (e.g. `reviewer`, `implementer`) and no complexity-specific override exists in `roleRouting`, this provides the fallback routing rule for all complexity tiers. The role name `"default"` is reserved; use `routing` for the global default.
+
+```yaml
+roleDefaults:
+  implementer:
+    prefer:
+      - provider: anthropic
+        model: opus
+  reviewer:
+    prefer:
+      - provider: openai
+        model: gpt-5.4
+```
+
+### `roleRouting`
+
+Optional `map[string]map[Complexity]RoutingRule`. Per-role, per-complexity routing overrides. Allows different models for different roles at specific complexity tiers. Overrides `roleDefaults` for the specified role+complexity pairs. The role name `"default"` is reserved. Every referenced `prefer` list must be non-empty.
+
+```yaml
+roleRouting:
+  reviewer:
+    high:
+      prefer:
+        - provider: anthropic
+          model: opus
+    critical:
+      prefer:
+        - provider: anthropic
+          model: opus
+```
+
+### `councilSeats`
+
+Optional `map[string]CouncilSeatRoutingConfig`. Routing config for planner council seats. Only seat names `"A"` and `"B"` are valid. Each seat config has an optional `default` (RoutingRule applied to all complexity tiers for that seat) and optional `routing` (per-complexity overrides for that seat). Every referenced `prefer` list must be non-empty.
+
+```yaml
+councilSeats:
+  A:
+    default:
+      prefer:
+        - provider: anthropic
+          model: sonnet
+  B:
+    default:
+      prefer:
+        - provider: openai
+          model: gpt-5.4
+    routing:
+      high:
+        prefer:
+          - provider: anthropic
+            model: opus
+```
+
+**Routing resolution order** (most specific wins): `councilSeats` → `roleRouting` → `roleDefaults` → `routing`.
+
+### `concurrency`
+
+`councilSeatIdleTTLSeconds` (default `270`) controls how long an idle council-seat worker is kept alive before being reaped. All other concurrency fields must be positive; `maxIdlePerPool` may be zero.
+
 For snapshot-history behavior and overrides, see [Operations](./operations.md).
 
 ## CLI
@@ -46,7 +126,7 @@ For snapshot-history behavior and overrides, see [Operations](./operations.md).
 ### Planning
 
 ```bash
-kitchen submit [--lineage LINEAGE] [--auto] [--review] [--review-rounds N] [--max-review-revisions N] [--file PATH|-] [IDEA]
+kitchen submit [--lineage LINEAGE] [--auto] [--impl-review] [--file PATH|-] [IDEA]
 ```
 
 Input modes:
@@ -60,7 +140,7 @@ Examples:
 
 ```bash
 kitchen submit "Add typed parser errors"
-kitchen submit --lineage parser-errors --review --review-rounds 2 --max-review-revisions 1 "Add typed parser errors"
+kitchen submit --lineage parser-errors --impl-review "Add typed parser errors"
 kitchen submit --file docs/kitchen/design.md
 cat notes.md | kitchen submit --lineage tui
 ```
@@ -89,6 +169,7 @@ kitchen approve PLAN_ID
 kitchen reject PLAN_ID
 kitchen replan PLAN_ID [--reason TEXT]
 kitchen cancel PLAN_ID
+kitchen delete PLAN_ID
 ```
 
 ### Questions
@@ -107,7 +188,9 @@ kitchen config [--paths]
 kitchen capabilities [--cli]
 kitchen lineages
 kitchen merge-check LINEAGE
-kitchen merge [--squash] [--no-commit] LINEAGE
+kitchen merge [--no-commit] LINEAGE
+kitchen fix-merge LINEAGE
+kitchen retry TASK_ID [--same-worker]
 kitchen clean
 kitchen provider reset PROVIDER/MODEL
 ```
@@ -120,7 +203,23 @@ Notes:
 - `config` returns the effective Kitchen config plus resolved paths
 - `capabilities` returns machine-readable feature metadata for automation
 - `merge --no-commit` previews a lineage merge without moving the base branch
+- `fix-merge` queues a worker to resolve lineage→base merge conflicts
+- `retry` re-queues a failed task; `--same-worker` allows reuse of an existing idle worker
 - `clean` removes orphaned completed worktrees
+
+### Interactive and tooling
+
+```bash
+kitchen tui
+kitchen configure
+kitchen mittens [mittens args...]
+```
+
+Notes:
+
+- `tui` launches the interactive terminal UI (also the default when running `kitchen` with no subcommand)
+- `configure` starts an interactive setup wizard for provider and model routing
+- `mittens` runs the mittens binary with `--dir $KITCHEN_HOME` injected; all additional flags are forwarded
 
 ### Runtime
 
@@ -190,9 +289,7 @@ Request:
   "idea": "Add typed parser errors",
   "lineage": "parser-errors",
   "auto": false,
-  "review": true,
-  "reviewRounds": 2,
-  "maxReviewRevisions": 1
+  "implReview": false
 }
 ```
 
@@ -207,7 +304,17 @@ Endpoints:
 - `POST /v1/plans/{id}/reject`
 - `POST /v1/plans/{id}/replan`
 - `POST /v1/plans/{id}/affinity/invalidate`
-- `DELETE /v1/plans/{id}`
+- `POST /v1/plans/{id}/extend`
+- `DELETE /v1/plans/{id}` — cancel plan
+- `DELETE /v1/plans/{id}/purge` — permanently delete plan and tasks
+
+### Tasks
+
+- `GET /v1/tasks/{id}/activity` — task activity transcript
+- `GET /v1/tasks/{id}/output` — task output
+- `POST /v1/tasks/{id}/retry` — re-queue a failed task; optional body `{"requireFreshWorker": true}` (default true)
+- `POST /v1/tasks/{id}/fix-conflicts` — queue a conflict-resolution worker for a failed task
+- `DELETE /v1/tasks/{id}` — cancel a task
 
 ### Questions
 
@@ -252,6 +359,7 @@ Compatibility rules:
 - `GET /v1/lineages`
 - `GET /v1/lineages/{name}/merge-check`
 - `POST /v1/lineages/{name}/merge`
+- `POST /v1/lineages/{name}/fix-merge` — queue a worker to resolve lineage→base merge conflicts
 
 Merge request body:
 
@@ -421,4 +529,4 @@ Worktrees created at `~/.kitchen/worktrees/<lineage>/<taskId>/`.
 - Timeout enforcement reads budgets from pool tasks directly
 - Worker recycle operates via broker poll (non-interrupting)
 - Assignments endpoint persists data but workers do not consume it
-- No TUI/GUI — Kitchen is a headless control plane
+- Primary interface is the headless CLI/API; an interactive TUI is available via `kitchen tui`

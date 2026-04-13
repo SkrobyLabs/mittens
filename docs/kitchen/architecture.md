@@ -35,12 +35,20 @@ criteria, review complexity).
 Planners are stateless between runs except for affinity metadata tracked by
 Kitchen. Multiple planners can run concurrently on different lineages.
 
-### Reviewer
+### Council Planning
 
-When `--review` is used, a reviewer worker critiques the plan before it
-reaches the operator. The reviewer produces structured findings with
-severity, and the planner revises the plan. This cycle repeats for the
-configured number of rounds.
+Planning uses a multi-seat council model. Each plan starts with a council of
+two seats (A and B) running over multiple turns (default 4). Seats take
+different roles in the discussion, with each turn building on the previous.
+`POST /v1/plans/{id}/extend` can grant additional turns for complex plans.
+Council seat routing is configured via `councilSeats` in the Kitchen config.
+
+### Implementation Review
+
+When `--impl-review` is passed to `kitchen submit`, a post-implementation
+adversarial review is requested. After all implementation tasks complete, a
+reviewer worker critiques the result before the plan reaches the `completed`
+state. The plan enters `implementation_review` state during this phase.
 
 ### Plan Store
 
@@ -65,6 +73,15 @@ State is tracked under `~/.kitchen/projects/<repo>/lineages/<name>/`.
 Maps task complexity (trivial, low, medium, high, critical) to ordered
 provider/model preferences. Filters by provider health before returning
 candidates. Supports escalation to higher complexity on capability failure.
+
+The router is role-aware: each task can carry a role (e.g. `planner`,
+`implementer`, `reviewer`). Role-specific routing is resolved via
+`roleRouting` (per-role, per-complexity overrides) and `roleDefaults`
+(per-role fallback for all complexity tiers), layered on top of the
+global `routing` table. Council seats A and B have their own routing
+layer (`councilSeats`) resolved on top of the planner role routing.
+
+Resolution order (most specific wins): `councilSeats` → `roleRouting` → `roleDefaults` → `routing`.
 
 ### Provider Health
 
@@ -212,13 +229,13 @@ CLI: `kitchen evidence PLAN_ID` (rich) or `kitchen evidence --compact PLAN_ID`.
 Plans are held for operator approval by default:
 
 ```
-planning → pending_approval → active → completed → merged
+planning → pending_approval → active → [implementation_review →] completed → merged
 ```
 
 The `--auto` flag on `kitchen submit` skips `pending_approval` for
 trusted/low-risk work.
 
-Additional states: `planning_failed`, `rejected`, `reviewing`, `closed`.
+Additional states: `planning_failed`, `rejected`, `reviewing`, `implementation_review_failed`, `closed`.
 
 ## Concurrency Limits
 
@@ -230,6 +247,7 @@ concurrency:
   maxWorkersPerPool: 6
   maxWorkersPerLineage: 4
   maxIdlePerPool: 2
+  councilSeatIdleTTLSeconds: 270
 ```
 
 One active plan per lineage at a time is enforced. `maxWorkersPerLineage`
