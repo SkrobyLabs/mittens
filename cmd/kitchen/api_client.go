@@ -308,6 +308,11 @@ func (c *kitchenAPIClient) MergeLineage(lineage string, noCommit bool) (map[stri
 	return resp, c.request(http.MethodPost, "/v1/lineages/"+url.PathEscape(lineage)+"/merge", req, &resp)
 }
 
+func (c *kitchenAPIClient) ReapplyLineage(lineage string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/lineages/"+url.PathEscape(lineage)+"/reapply", nil, &resp)
+}
+
 func (c *kitchenAPIClient) MergeCheck(lineage string) (map[string]any, error) {
 	var resp map[string]any
 	return resp, c.request(http.MethodGet, "/v1/lineages/"+url.PathEscape(lineage)+"/merge-check", nil, &resp)

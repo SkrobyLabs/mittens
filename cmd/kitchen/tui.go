@@ -43,6 +43,7 @@ type kitchenTUIBackend interface {
 	MergeCheck(lineage string) (string, error)
 	MergeLineage(lineage string) (string, error)
 	FixLineageConflicts(lineage string) (string, error)
+	ReapplyLineage(lineage string) (string, error)
 }
 
 type tuiStatusSnapshot struct {
@@ -170,6 +171,14 @@ func (b *kitchenAPIBackend) MergeLineage(lineage string) (string, error) {
 		return "", err
 	}
 	return summarizeMerge(resp), nil
+}
+
+func (b *kitchenAPIBackend) ReapplyLineage(lineage string) (string, error) {
+	resp, err := b.client.ReapplyLineage(lineage)
+	if err != nil {
+		return "", err
+	}
+	return summarizeReapply(resp), nil
 }
 
 type kitchenLocalBackend struct {
@@ -374,6 +383,19 @@ func (b *kitchenLocalBackend) MergeLineage(lineage string) (string, error) {
 	return summary, err
 }
 
+func (b *kitchenLocalBackend) ReapplyLineage(lineage string) (string, error) {
+	var summary string
+	err := b.withKitchen(func(k *Kitchen) error {
+		resp, err := k.ReapplyLineage(lineage)
+		if err != nil {
+			return err
+		}
+		summary = summarizeReapply(resp)
+		return nil
+	})
+	return summary, err
+}
+
 func openKitchenTUIBackend(repoPath string) (kitchenTUIBackend, error) {
 	client, ok, err := openKitchenAPIClient(repoPath)
 	if err != nil {
@@ -426,10 +448,11 @@ type kitchenTUILeftMode string
 type kitchenTUITaskPaneMode string
 
 const (
-	kitchenTUIInputNone   kitchenTUIInputMode = ""
-	kitchenTUIInputSubmit kitchenTUIInputMode = "submit"
-	kitchenTUIInputReplan kitchenTUIInputMode = "replan"
-	kitchenTUIInputAnswer kitchenTUIInputMode = "answer"
+	kitchenTUIInputNone      kitchenTUIInputMode = ""
+	kitchenTUIInputSubmit    kitchenTUIInputMode = "submit"
+	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
+	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
+	kitchenTUIInputMergeMenu kitchenTUIInputMode = "merge-menu"
 
 	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
 	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
@@ -476,6 +499,7 @@ type kitchenTUIModel struct {
 	selectedTask      int
 	selectedQuestion  int
 	selectedOption    int
+	mergeMenuSelected int
 	leftMode          kitchenTUILeftMode
 	taskPaneMode      kitchenTUITaskPaneMode
 	detail            *PlanDetail
@@ -637,6 +661,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0 {
 			return m.updateMultipleChoiceInput(msg)
+		}
+		if m.inputMode == kitchenTUIInputMergeMenu {
+			return m.updateMergeMenuInput(msg)
 		}
 		if m.inputMode != kitchenTUIInputNone {
 			return m.updateInput(msg)
@@ -892,31 +919,13 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			return m, nil
-		case "m":
-			if plan := m.selectedPlanItem(); plan != nil {
-				return m, m.actionCmd(func() (string, string, error) {
-					summary, err := m.backend.MergeCheck(plan.Record.Lineage)
-					return summary, plan.Record.PlanID, err
-				})
-			}
-			return m, nil
 		case "M":
-			if plan := m.selectedPlanItem(); plan != nil {
-				return m, m.actionCmd(func() (string, string, error) {
-					summary, err := m.backend.MergeLineage(plan.Record.Lineage)
-					return summary, plan.Record.PlanID, err
-				})
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
 			}
-			return m, nil
-		case "F":
-			if plan := m.selectedPlanItem(); plan != nil {
-				return m, m.actionCmd(func() (string, string, error) {
-					newTaskID, err := m.backend.FixLineageConflicts(plan.Record.Lineage)
-					if err != nil {
-						return "", plan.Record.PlanID, err
-					}
-					return "fix-merge task queued: " + newTaskID, plan.Record.PlanID, nil
-				})
+			if m.canMergeSelectedPlan() {
+				m.inputMode = kitchenTUIInputMergeMenu
+				m.mergeMenuSelected = 0
 			}
 			return m, nil
 		case "R":
@@ -970,6 +979,65 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			return m, nil
+		}
+	}
+	return m, nil
+}
+
+var kitchenTUIMergeMenuOptions = []string{
+	"Check merge",
+	"Execute merge",
+	"Fix conflicts",
+	"Reapply on base",
+}
+
+func (m kitchenTUIModel) updateMergeMenuInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode = kitchenTUIInputNone
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.mergeMenuSelected > 0 {
+			m.mergeMenuSelected--
+		}
+		return m, nil
+	case "down", "j":
+		if m.mergeMenuSelected < len(kitchenTUIMergeMenuOptions)-1 {
+			m.mergeMenuSelected++
+		}
+		return m, nil
+	case "enter":
+		plan := m.selectedPlanItem()
+		m.inputMode = kitchenTUIInputNone
+		if plan == nil || strings.TrimSpace(plan.Record.Lineage) == "" {
+			return m, nil
+		}
+		switch m.mergeMenuSelected {
+		case 0:
+			return m, m.actionCmd(func() (string, string, error) {
+				summary, err := m.backend.MergeCheck(plan.Record.Lineage)
+				return summary, plan.Record.PlanID, err
+			})
+		case 1:
+			return m, m.actionCmd(func() (string, string, error) {
+				summary, err := m.backend.MergeLineage(plan.Record.Lineage)
+				return summary, plan.Record.PlanID, err
+			})
+		case 2:
+			return m, m.actionCmd(func() (string, string, error) {
+				newTaskID, err := m.backend.FixLineageConflicts(plan.Record.Lineage)
+				if err != nil {
+					return "", plan.Record.PlanID, err
+				}
+				return "fix-merge task queued: " + newTaskID, plan.Record.PlanID, nil
+			})
+		case 3:
+			return m, m.actionCmd(func() (string, string, error) {
+				summary, err := m.backend.ReapplyLineage(plan.Record.Lineage)
+				return summary, plan.Record.PlanID, err
+			})
 		}
 	}
 	return m, nil
@@ -1483,6 +1551,8 @@ func (m kitchenTUIModel) footerActions() []string {
 				return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 			}
 			return []string{"enter answer", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputMergeMenu:
+			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		default:
 			return []string{"esc cancel", "ctrl+c quit"}
 		}
@@ -1520,13 +1590,9 @@ func (m kitchenTUIModel) footerActions() []string {
 		if m.selectedPlanItem() != nil {
 			actions = append(actions, "p replan")
 			actions = append(actions, "D delete")
-			if m.canCheckMergeSelectedPlan() {
-				actions = append(actions, "m check")
-			}
 			if m.canMergeSelectedPlan() {
-				actions = append(actions, "M merge")
+				actions = append(actions, "M merge-menu")
 			}
-			actions = append(actions, "F fix-merge")
 			actions = append(actions, "? questions")
 		}
 	}
@@ -1820,6 +1886,10 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 		} else {
 			lines = m.renderTaskDetailLines(innerWidth)
 		}
+	} else if m.inputMode == kitchenTUIInputMergeMenu {
+		lines = append(lines, m.renderMergeMenuLines(innerWidth)...)
+		lines = append(lines, "")
+		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 	} else {
 		lines = m.renderPlanDetailLines(innerWidth)
 	}
@@ -1836,6 +1906,22 @@ func (m kitchenTUIModel) renderQuestionDetailPane(width, height int) string {
 	lines := m.renderQuestionDetailLines(innerWidth)
 	rendered, _ := windowAndWrapLines(lines, innerWidth, height, m.rightPaneOffset())
 	return paneBox(width, height, rendered)
+}
+
+func (m kitchenTUIModel) renderMergeMenuLines(innerWidth int) []string {
+	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Merge Menu"),
+		"Choose an action for the selected lineage.",
+	}
+	for i, option := range kitchenTUIMergeMenuOptions {
+		if i == m.mergeMenuSelected {
+			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
+			continue
+		}
+		lines = append(lines, truncate("  "+option, innerWidth))
+	}
+	return lines
 }
 
 func (m kitchenTUIModel) renderQuestionDetailLines(innerWidth int) []string {
@@ -1966,6 +2052,12 @@ func (m kitchenTUIModel) measureCurrentRightPane() ([]string, int, int) {
 	case kitchenTUILeftPlans:
 		if m.detail == nil {
 			return []string{"No selected plan."}, innerWidth, height
+		}
+		if m.inputMode == kitchenTUIInputMergeMenu {
+			lines := append([]string(nil), m.renderMergeMenuLines(innerWidth)...)
+			lines = append(lines, "")
+			lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+			return lines, innerWidth, height
 		}
 		return m.renderPlanDetailLines(innerWidth), innerWidth, height
 	case kitchenTUILeftTasks:
@@ -2428,7 +2520,7 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 
 func (m kitchenTUIModel) renderInputBar() string {
 	// Multiple-choice answer mode doesn't use the input bar
-	if m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0 {
+	if m.inputMode == kitchenTUIInputMergeMenu || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
 		return ""
 	}
 	label := "Input"
@@ -3121,6 +3213,29 @@ func summarizeMerge(resp map[string]any) string {
 		status = "merged"
 	}
 	return fmt.Sprintf("%s %s into %s", status, mode, baseBranch)
+}
+
+func summarizeReapply(resp map[string]any) string {
+	status, _ := resp["status"].(string)
+	baseBranch, _ := resp["baseBranch"].(string)
+	conflicts := stringSliceFromAny(resp["conflicts"])
+	switch strings.TrimSpace(status) {
+	case "up-to-date":
+		return fmt.Sprintf("reapply: up-to-date on %s", baseBranch)
+	case "conflicts":
+		summary := fmt.Sprintf("reapply: conflicts on %s", baseBranch)
+		if len(conflicts) > 0 {
+			summary += " files=" + strings.Join(conflicts, ", ")
+		}
+		return summary
+	default:
+		newAnchor, _ := resp["newAnchor"].(string)
+		summary := fmt.Sprintf("reapply: %s from %s", firstNonEmpty(status, "reapplied"), baseBranch)
+		if strings.TrimSpace(newAnchor) != "" {
+			summary += " @" + shortenSHA(newAnchor)
+		}
+		return summary
+	}
 }
 
 func stringSliceFromAny(v any) []string {

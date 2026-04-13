@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -657,6 +658,94 @@ func TestKitchenAPIProviderAndLineageEndpoints(t *testing.T) {
 	}
 	if preview["previewHead"] == nil || preview["previewHead"] == "" {
 		t.Fatalf("preview payload missing previewHead: %+v", preview)
+	}
+}
+
+func TestKitchenAPIReapplyLineageReturnsConflictPayload(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	poolStateDir := filepath.Join(k.project.PoolsDir, defaultPoolStateName)
+	workerStateDir := pool.WorkerStateDir(poolStateDir, "w-1")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch(bundle.Plan.Lineage, bundle.Plan.Anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	writeFile(t, filepath.Join(k.repoPath, "shared.txt"), "main change\n")
+	mustRunGit(t, k.repoPath, "add", "shared.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "main change")
+
+	mustRunGit(t, k.repoPath, "checkout", lineageBranchName(bundle.Plan.Lineage))
+	writeFile(t, filepath.Join(k.repoPath, "shared.txt"), "lineage change\n")
+	mustRunGit(t, k.repoPath, "add", "shared.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "lineage change")
+	mustRunGit(t, k.repoPath, "checkout", "main")
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/lineages/parser-errors/reapply", nil)
+	var payload map[string]any
+	decodeResponse(t, resp, &payload)
+	if payload["status"] != "conflicts" {
+		t.Fatalf("reapply payload = %+v, want status=conflicts", payload)
+	}
+	conflicts, ok := payload["conflicts"].([]any)
+	if !ok || len(conflicts) != 1 || conflicts[0] != "shared.txt" {
+		t.Fatalf("reapply conflicts = %#v, want [shared.txt]", payload["conflicts"])
+	}
+}
+
+func TestKitchenAPIReapplyLineageBlocksActiveTasksWithConflictStatus(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	resp := apiRequestExpectStatus(t, server, http.MethodPost, "/v1/lineages/parser-errors/reapply", nil, http.StatusConflict)
+	var payload map[string]any
+	decodeResponse(t, resp, &payload)
+	if !strings.Contains(fmt.Sprint(payload["error"]), "active tasks") {
+		t.Fatalf("payload = %+v, want active task error", payload)
 	}
 }
 

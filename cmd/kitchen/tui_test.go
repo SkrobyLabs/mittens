@@ -36,6 +36,14 @@ type fakeKitchenTUIBackend struct {
 	taskOutputs               map[string]string
 	taskOutputErr             error
 	taskOutputCalls           int
+	mergeCheckedLineage       string
+	mergeCheckCalls           int
+	mergedLineage             string
+	mergeCalls                int
+	fixMergeLineage           string
+	fixMergeCalls             int
+	reappliedLineage          string
+	reapplyCalls              int
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -101,10 +109,25 @@ func (b *fakeKitchenTUIBackend) AnswerQuestion(id, answer string) error {
 	b.answeredQuestionAnswer = answer
 	return nil
 }
-func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error)   { return "", nil }
-func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error) { return "", nil }
+func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error) {
+	b.mergeCheckCalls++
+	b.mergeCheckedLineage = lineage
+	return "merge-check: clean=true base=main", nil
+}
+func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error) {
+	b.mergeCalls++
+	b.mergedLineage = lineage
+	return "merged squash into main", nil
+}
 func (b *fakeKitchenTUIBackend) FixLineageConflicts(lineage string) (string, error) {
-	return "", nil
+	b.fixMergeCalls++
+	b.fixMergeLineage = lineage
+	return "fix-123", nil
+}
+func (b *fakeKitchenTUIBackend) ReapplyLineage(lineage string) (string, error) {
+	b.reapplyCalls++
+	b.reappliedLineage = lineage
+	return "reapply: reapplied from main @abc1234", nil
 }
 
 func textInputWithValue(value string) textinput.Model {
@@ -1061,7 +1084,7 @@ func TestKitchenTUIFooterShowsPlanActionsOnlyWhenActionable(t *testing.T) {
 	if !strings.Contains(footer, "PgUp/PgDn scroll") {
 		t.Fatalf("footer = %q, want scroll hint", footer)
 	}
-	if !strings.Contains(footer, "p replan") || !strings.Contains(footer, "D delete") || !strings.Contains(footer, "m check") {
+	if !strings.Contains(footer, "p replan") || !strings.Contains(footer, "D delete") {
 		t.Fatalf("footer = %q, want actionable plan actions", footer)
 	}
 	if strings.Contains(footer, "R retry") || strings.Contains(footer, "M merge") {
@@ -2381,5 +2404,236 @@ func TestKitchenTUIFooterHints(t *testing.T) {
 	}
 	if !strings.Contains(questionsFooter, "esc back") {
 		t.Fatalf("questions footer missing 'esc back' hint: %q", questionsFooter)
+	}
+}
+
+func TestKitchenTUIMergeMenuOpensOnCapitalM(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:  &fakeKitchenTUIBackend{},
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+		},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	if cmd != nil {
+		t.Fatalf("capital M should open menu without dispatch, got cmd %v", cmd)
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputMergeMenu {
+		t.Fatalf("inputMode = %q, want merge menu", got.inputMode)
+	}
+	if got.mergeMenuSelected != 0 {
+		t.Fatalf("mergeMenuSelected = %d, want 0", got.mergeMenuSelected)
+	}
+	detailPane := got.renderDetailPane(100, 20)
+	if !strings.Contains(detailPane, "Merge Menu") || !strings.Contains(detailPane, "Reapply on base") {
+		t.Fatalf("detail pane missing merge menu, got: %q", detailPane)
+	}
+}
+
+func TestKitchenTUIPlanListMDoesNothing(t *testing.T) {
+	model := kitchenTUIModel{
+		backend:  &fakeKitchenTUIBackend{},
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if cmd != nil {
+		t.Fatalf("lowercase m should not dispatch any action, got cmd %v", cmd)
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+}
+
+func TestKitchenTUIMergeMenuDispatchesReapply(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:           backend,
+		leftMode:          kitchenTUILeftPlans,
+		inputMode:         kitchenTUIInputMergeMenu,
+		mergeMenuSelected: 3,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+		},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected action command for merge menu selection")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want closed merge menu", got.inputMode)
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.reapplyCalls != 1 || backend.reappliedLineage != "parser-errors" {
+		t.Fatalf("reapply backend calls = %d lineage = %q", backend.reapplyCalls, backend.reappliedLineage)
+	}
+	if action.status != "reapply: reapplied from main @abc1234" {
+		t.Fatalf("action status = %q", action.status)
+	}
+}
+
+func TestKitchenTUIMergeMenuDispatchesOtherActions(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	cases := []struct {
+		name       string
+		selected   int
+		wantStatus string
+		verify     func(*testing.T)
+	}{
+		{
+			name:       "check",
+			selected:   0,
+			wantStatus: "merge-check: clean=true base=main",
+			verify: func(t *testing.T) {
+				if backend.mergeCheckCalls != 1 || backend.mergeCheckedLineage != "parser-errors" {
+					t.Fatalf("merge-check calls = %d lineage = %q", backend.mergeCheckCalls, backend.mergeCheckedLineage)
+				}
+			},
+		},
+		{
+			name:       "merge",
+			selected:   1,
+			wantStatus: "merged squash into main",
+			verify: func(t *testing.T) {
+				if backend.mergeCalls != 1 || backend.mergedLineage != "parser-errors" {
+					t.Fatalf("merge calls = %d lineage = %q", backend.mergeCalls, backend.mergedLineage)
+				}
+			},
+		},
+		{
+			name:       "fix",
+			selected:   2,
+			wantStatus: "fix-merge task queued: fix-123",
+			verify: func(t *testing.T) {
+				if backend.fixMergeCalls != 1 || backend.fixMergeLineage != "parser-errors" {
+					t.Fatalf("fix-merge calls = %d lineage = %q", backend.fixMergeCalls, backend.fixMergeLineage)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend.mergeCheckCalls = 0
+			backend.mergeCheckedLineage = ""
+			backend.mergeCalls = 0
+			backend.mergedLineage = ""
+			backend.fixMergeCalls = 0
+			backend.fixMergeLineage = ""
+
+			model := kitchenTUIModel{
+				backend:           backend,
+				leftMode:          kitchenTUILeftPlans,
+				inputMode:         kitchenTUIInputMergeMenu,
+				mergeMenuSelected: tc.selected,
+				plans: []kitchenTUIPlanItem{
+					{
+						Record:   PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+						Progress: &PlanProgress{State: planStateCompleted},
+					},
+				},
+				detail: &PlanDetail{
+					Plan: PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+				},
+			}
+
+			_, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if cmd == nil {
+				t.Fatal("expected action command")
+			}
+			msg := cmd()
+			action, ok := msg.(kitchenTUIActionMsg)
+			if !ok {
+				t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+			}
+			if action.status != tc.wantStatus {
+				t.Fatalf("action status = %q, want %q", action.status, tc.wantStatus)
+			}
+			tc.verify(t)
+		})
+	}
+}
+
+func TestKitchenTUIMergeMenuNavigationMovesSelection(t *testing.T) {
+	model := kitchenTUIModel{
+		inputMode: kitchenTUIInputMergeMenu,
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	got := updated.(kitchenTUIModel)
+	if got.mergeMenuSelected != 1 {
+		t.Fatalf("mergeMenuSelected = %d, want 1", got.mergeMenuSelected)
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyUp})
+	got = updated.(kitchenTUIModel)
+	if got.mergeMenuSelected != 0 {
+		t.Fatalf("mergeMenuSelected = %d, want 0", got.mergeMenuSelected)
+	}
+}
+
+func TestSummarizeReapply(t *testing.T) {
+	if got := summarizeReapply(map[string]any{"status": "up-to-date", "baseBranch": "main"}); got != "reapply: up-to-date on main" {
+		t.Fatalf("up-to-date summary = %q", got)
+	}
+	if got := summarizeReapply(map[string]any{"status": "conflicts", "baseBranch": "main", "conflicts": []string{"a.go", "b.go"}}); got != "reapply: conflicts on main files=a.go, b.go" {
+		t.Fatalf("conflicts summary = %q", got)
+	}
+}
+
+func TestKitchenTUIFooterShowsMergeMenuHints(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_merge", Title: "Merge", Lineage: "parser-errors", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "M merge-menu") {
+		t.Fatalf("plans footer missing merge menu hint: %q", footer)
+	}
+	if strings.Contains(footer, "F fix-merge") {
+		t.Fatalf("plans footer should not advertise old F fix-merge key: %q", footer)
+	}
+
+	model.inputMode = kitchenTUIInputMergeMenu
+	footer = model.renderFooter()
+	if !strings.Contains(footer, "↑/↓ navigate") || !strings.Contains(footer, "enter select") {
+		t.Fatalf("merge menu footer missing navigation hints: %q", footer)
 	}
 }

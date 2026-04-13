@@ -740,6 +740,35 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
+	reapplyCmd := &cobra.Command{
+		Use:   "reapply LINEAGE",
+		Short: "Merge base branch into lineage to absorb upstream changes",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.ReapplyLineage(args[0])
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			resp, err := k.ReapplyLineage(args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), resp)
+		},
+	}
+
 	fixMergeCmd := &cobra.Command{
 		Use:   "fix-merge LINEAGE",
 		Short: "Queue a worker to resolve lineage→base merge conflicts",
@@ -1062,6 +1091,7 @@ func newRootCommand() *cobra.Command {
 		lineagesCmd,
 		mergeCmd,
 		mergeCheckCmd,
+		reapplyCmd,
 		fixMergeCmd,
 		providerCmd,
 		cleanCmd,

@@ -293,6 +293,90 @@ func TestGitManagerMergeLineageSquashNoOpWhenBaseAlreadyContainsChanges(t *testi
 	}
 }
 
+func TestGitManagerReapplyLineageOnBaseMergesBaseIntoLineage(t *testing.T) {
+	repo := initGitRepo(t)
+	worktrees := filepath.Join(t.TempDir(), "worktrees")
+
+	gm, err := NewGitManager(repo, worktrees)
+	if err != nil {
+		t.Fatalf("NewGitManager: %v", err)
+	}
+	if err := gm.CreateLineageBranch("parser-errors", "HEAD"); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	lineageWT, err := gm.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(lineageWT, "lineage.txt"), "lineage change\n")
+	mustRunGit(t, lineageWT, "add", "lineage.txt")
+	mustRunGit(t, lineageWT, "commit", "-m", "lineage change")
+	if err := gm.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	writeFile(t, filepath.Join(repo, "base.txt"), "base change\n")
+	mustRunGit(t, repo, "add", "base.txt")
+	mustRunGit(t, repo, "commit", "-m", "base change")
+	mainHeadBefore, err := runGit(repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("rev-parse main before: %v", err)
+	}
+
+	clean, conflicts, err := gm.ReapplyLineageOnBase("parser-errors", "main")
+	if err != nil {
+		t.Fatalf("ReapplyLineageOnBase: %v", err)
+	}
+	if !clean || len(conflicts) != 0 {
+		t.Fatalf("clean=%t conflicts=%v, want clean reapply", clean, conflicts)
+	}
+	if _, err := runGit(repo, "merge-base", "--is-ancestor", "main", "kitchen/parser-errors/lineage"); err != nil {
+		t.Fatalf("main should be ancestor of lineage after reapply: %v", err)
+	}
+	mainHeadAfter, err := runGit(repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("rev-parse main after: %v", err)
+	}
+	if strings.TrimSpace(mainHeadBefore) != strings.TrimSpace(mainHeadAfter) {
+		t.Fatalf("main changed during reapply: before=%q after=%q", mainHeadBefore, mainHeadAfter)
+	}
+}
+
+func TestGitManagerReapplyLineageOnBaseReturnsConflicts(t *testing.T) {
+	repo := initGitRepo(t)
+	worktrees := filepath.Join(t.TempDir(), "worktrees")
+
+	gm, err := NewGitManager(repo, worktrees)
+	if err != nil {
+		t.Fatalf("NewGitManager: %v", err)
+	}
+	if err := gm.CreateLineageBranch("parser-errors", "HEAD"); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	writeFile(t, filepath.Join(repo, "shared.txt"), "main change\n")
+	mustRunGit(t, repo, "add", "shared.txt")
+	mustRunGit(t, repo, "commit", "-m", "main change")
+
+	mustRunGit(t, repo, "checkout", "kitchen/parser-errors/lineage")
+	writeFile(t, filepath.Join(repo, "shared.txt"), "lineage change\n")
+	mustRunGit(t, repo, "add", "shared.txt")
+	mustRunGit(t, repo, "commit", "-m", "lineage change")
+	mustRunGit(t, repo, "checkout", "main")
+
+	clean, conflicts, err := gm.ReapplyLineageOnBase("parser-errors", "main")
+	if err != nil {
+		t.Fatalf("ReapplyLineageOnBase: %v", err)
+	}
+	if clean {
+		t.Fatal("expected conflicted reapply")
+	}
+	if len(conflicts) != 1 || conflicts[0] != "shared.txt" {
+		t.Fatalf("conflicts = %+v, want [shared.txt]", conflicts)
+	}
+}
+
 func TestGitManagerFixLineageMergeWorktreeAndFinalize(t *testing.T) {
 	repo := initGitRepo(t)
 	worktrees := filepath.Join(t.TempDir(), "worktrees")

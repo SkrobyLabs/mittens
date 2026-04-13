@@ -192,8 +192,8 @@ func TestKitchenCapabilitiesCommandOutputsCapabilityMap(t *testing.T) {
 		t.Fatalf("capabilities meta = %#v, want schemaVersion and compatibility", payload["meta"])
 	}
 	cliCaps, ok := payload["cli"].(map[string]any)
-	if !ok || cliCaps["submit"] == nil || cliCaps["merge"] == nil || cliCaps["retry"] == nil || cliCaps["delete"] == nil {
-		t.Fatalf("cli capabilities = %#v, want submit, merge, retry, and delete sections", payload["cli"])
+	if !ok || cliCaps["submit"] == nil || cliCaps["merge"] == nil || cliCaps["reapply"] == nil || cliCaps["retry"] == nil || cliCaps["delete"] == nil {
+		t.Fatalf("cli capabilities = %#v, want submit, merge, reapply, retry, and delete sections", payload["cli"])
 	}
 	submitCaps, ok := cliCaps["submit"].(map[string]any)
 	if !ok || submitCaps["options"] == nil {
@@ -389,6 +389,107 @@ func TestKitchenMergeLineageBlocksFailedImplementationReview(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed post-implementation review") {
 		t.Fatalf("MergeLineage error = %q, want impl review failure", err)
+	}
+}
+
+func TestKitchenReapplyLineageUpdatesPlanAnchor(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	poolStateDir := filepath.Join(k.project.PoolsDir, defaultPoolStateName)
+	workerStateDir := pool.WorkerStateDir(poolStateDir, "w-1")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch(bundle.Plan.Lineage, bundle.Plan.Anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree(bundle.Plan.Lineage, "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild(bundle.Plan.Lineage, "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+	writeFile(t, filepath.Join(k.repoPath, "base.txt"), "base change\n")
+	mustRunGit(t, k.repoPath, "add", "base.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "base change")
+
+	resp, err := k.ReapplyLineage(bundle.Plan.Lineage)
+	if err != nil {
+		t.Fatalf("ReapplyLineage: %v", err)
+	}
+	if resp["status"] != "reapplied" {
+		t.Fatalf("reapply response = %+v, want status=reapplied", resp)
+	}
+
+	updated, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	lineageHead, err := runGit(k.repoPath, "rev-parse", lineageBranchName(bundle.Plan.Lineage))
+	if err != nil {
+		t.Fatalf("rev-parse lineage: %v", err)
+	}
+	lineageHead = strings.TrimSpace(lineageHead)
+	if updated.Plan.Anchor.Branch != bundle.Plan.Anchor.Branch {
+		t.Fatalf("anchor branch = %q, want %q", updated.Plan.Anchor.Branch, bundle.Plan.Anchor.Branch)
+	}
+	if updated.Plan.Anchor.Commit != lineageHead {
+		t.Fatalf("anchor commit = %q, want %q", updated.Plan.Anchor.Commit, lineageHead)
+	}
+}
+
+func TestKitchenReapplyLineageBlocksActiveTasks(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	_, err = k.ReapplyLineage(bundle.Plan.Lineage)
+	if err == nil {
+		t.Fatal("ReapplyLineage error = nil, want active task gate")
+	}
+	if !strings.Contains(err.Error(), "active tasks") {
+		t.Fatalf("ReapplyLineage error = %q, want active tasks", err)
 	}
 }
 
@@ -1209,6 +1310,67 @@ func TestKitchenMergeCheckCommandReportsCleanMerge(t *testing.T) {
 	}
 	if payload["baseBranch"] == "" {
 		t.Fatalf("merge-check payload missing baseBranch: %+v", payload)
+	}
+}
+
+func TestKitchenReapplyCommandReportsUpToDate(t *testing.T) {
+	k := newTestKitchen(t)
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	poolStateDir := filepath.Join(k.project.PoolsDir, defaultPoolStateName)
+	workerStateDir := pool.WorkerStateDir(poolStateDir, "w-1")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch(bundle.Plan.Lineage, bundle.Plan.Anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	lineageWT, err := gitMgr.CreateChildWorktree(bundle.Plan.Lineage, "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(lineageWT, "feature.txt"), "lineage change\n")
+	mustRunGit(t, lineageWT, "add", "feature.txt")
+	mustRunGit(t, lineageWT, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild(bundle.Plan.Lineage, "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	output := runKitchenCommand(t, k, "reapply", bundle.Plan.Lineage)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("reapply output is not JSON: %v\n%s", err, output)
+	}
+	if payload["status"] != "up-to-date" {
+		t.Fatalf("reapply payload = %+v, want status=up-to-date", payload)
 	}
 }
 

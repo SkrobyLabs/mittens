@@ -121,6 +121,10 @@ func kitchenCapabilities() map[string]any {
 					"default": "direct",
 				},
 			},
+			"reapply": map[string]any{
+				"target":  "lineage",
+				"effects": []string{"merge_base_into_lineage", "update_active_plan_anchor"},
+			},
 			"retry": map[string]any{
 				"target": "task",
 				"options": map[string]any{
@@ -154,6 +158,7 @@ func kitchenCapabilities() map[string]any {
 				"workers":        "/v1/workers",
 				"events":         "/v1/events",
 				"lineages":       "/v1/lineages",
+				"lineageReapply": "/v1/lineages/{name}/reapply",
 				"providerHealth": "/v1/providers/health",
 				"meta":           "/v1/meta",
 			},
@@ -202,6 +207,7 @@ func kitchenCapabilities() map[string]any {
 		},
 		"git": map[string]any{
 			"lineageMerge":      true,
+			"lineageReapply":    true,
 			"mergeCheck":        true,
 			"mergePreview":      true,
 			"worktreeCleanup":   true,

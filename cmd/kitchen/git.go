@@ -276,6 +276,37 @@ func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
 	return g.advanceBranchToSHA(baseBranch, head)
 }
 
+func (g *GitManager) ReapplyLineageOnBase(lineage, baseBranch string) (bool, []string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return false, nil, err
+	}
+	if err := g.validateBranchName("base branch", baseBranch); err != nil {
+		return false, nil, err
+	}
+	lineageBranch := lineageBranchName(lineage)
+
+	upToDate, err := g.isAncestor(baseBranch, lineageBranch)
+	if err != nil {
+		return false, nil, err
+	}
+	if upToDate {
+		return true, nil, nil
+	}
+
+	head, err := g.mergeIntoTemp(lineageBranch, baseBranch, false)
+	if err != nil {
+		conflicts := parseConflictList(err.Error())
+		if len(conflicts) > 0 {
+			return false, conflicts, nil
+		}
+		return false, nil, err
+	}
+	return true, nil, g.advanceBranchToSHA(lineageBranch, head)
+}
+
 func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -132,6 +132,82 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 	return resp, nil
 }
 
+func (k *Kitchen) ReapplyLineage(lineage string) (map[string]any, error) {
+	if k == nil {
+		return nil, fmt.Errorf("kitchen not configured")
+	}
+
+	var activePlanID string
+	if k.lineageMgr != nil {
+		activePlanID, _ = k.lineageMgr.ActivePlan(lineage)
+	}
+	if activePlanID != "" {
+		if blocked := k.blockingTasksForPlan(activePlanID); len(blocked) > 0 {
+			return nil, fmt.Errorf("lineage %s has active tasks: %s — complete or cancel them before reapply", lineage, strings.Join(blocked, ", "))
+		}
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		return nil, err
+	}
+
+	baseBranch := k.baseBranchForLineage(lineage)
+	lineageBranch := lineageBranchName(lineage)
+	lineageSHABefore, err := runGit(k.repoPath, "rev-parse", lineageBranch)
+	if err != nil {
+		return nil, err
+	}
+	lineageSHABefore = strings.TrimSpace(lineageSHABefore)
+
+	clean, conflicts, err := gitMgr.ReapplyLineageOnBase(lineage, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+	if !clean {
+		return map[string]any{
+			"status":     "conflicts",
+			"conflicts":  conflicts,
+			"baseBranch": baseBranch,
+		}, nil
+	}
+
+	lineageSHANow, err := runGit(k.repoPath, "rev-parse", lineageBranch)
+	if err != nil {
+		return nil, err
+	}
+	lineageSHANow = strings.TrimSpace(lineageSHANow)
+	if lineageSHANow == lineageSHABefore {
+		return map[string]any{
+			"status":     "up-to-date",
+			"baseBranch": baseBranch,
+		}, nil
+	}
+
+	if activePlanID != "" && k.planStore != nil {
+		bundle, err := k.planStore.Get(activePlanID)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		bundle.Plan.Anchor.Commit = lineageSHANow
+		bundle.Plan.Anchor.Timestamp = now
+		if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+			return nil, err
+		}
+	}
+
+	resp := map[string]any{
+		"status":     "reapplied",
+		"baseBranch": baseBranch,
+		"newAnchor":  lineageSHANow,
+	}
+	if activePlanID != "" {
+		resp["planId"] = activePlanID
+	}
+	return resp, nil
+}
+
 func executionHasBlockingImplementationReviewFailure(execution ExecutionRecord) bool {
 	return execution.ImplReviewRequested && strings.TrimSpace(execution.ImplReviewStatus) == planReviewStatusFailed
 }

@@ -48,6 +48,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/meta", k.withAPIAuth(token, k.handleMeta))
 	mux.HandleFunc("GET /v1/lineages", k.withAPIAuth(token, k.handleLineages))
 	mux.HandleFunc("POST /v1/lineages/{name}/merge", k.withAPIAuth(token, k.handleMergeLineage))
+	mux.HandleFunc("POST /v1/lineages/{name}/reapply", k.withAPIAuth(token, k.handleReapplyLineage))
 	mux.HandleFunc("POST /v1/lineages/{name}/fix-merge", k.withAPIAuth(token, k.handleFixLineageConflicts))
 	mux.HandleFunc("GET /v1/lineages/{name}/merge-check", k.withAPIAuth(token, k.handleMergeCheck))
 	mux.HandleFunc("GET /v1/providers/health", k.withAPIAuth(token, k.handleProviderHealth))
@@ -116,7 +117,7 @@ func apiErrorStatus(err error) int {
 		return http.StatusNotFound
 	case strings.Contains(msg, "not implemented"):
 		return http.StatusNotImplemented
-	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"):
+	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"), strings.Contains(msg, "active tasks"), strings.Contains(msg, "unfinished tasks"):
 		return http.StatusConflict
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "forbidden"):
 		return http.StatusUnauthorized
@@ -677,6 +678,15 @@ func (k *Kitchen) handleMergeLineage(w http.ResponseWriter, r *http.Request) {
 			resp["error"] = err.Error()
 		}
 		writeAPIJSON(w, status, resp)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+func (k *Kitchen) handleReapplyLineage(w http.ResponseWriter, r *http.Request) {
+	resp, err := k.ReapplyLineage(r.PathValue("name"))
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
