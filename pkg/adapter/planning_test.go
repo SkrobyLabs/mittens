@@ -19,6 +19,15 @@ func TestBuildPlannerPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "<plan>") {
 		t.Fatal("planner prompt missing plan block instructions")
 	}
+	if !strings.Contains(prompt, "Prefer fewer, larger, self-contained tasks") {
+		t.Fatal("planner prompt missing task decomposition guidance")
+	}
+	if !strings.Contains(prompt, "Do NOT split because:") {
+		t.Fatal("planner prompt missing anti-fragmentation guidance")
+	}
+	if !strings.Contains(prompt, "~60 minutes") {
+		t.Fatal("planner prompt missing worker resilience threshold")
+	}
 }
 
 func TestBuildCouncilTurnPrompt(t *testing.T) {
@@ -34,6 +43,50 @@ func TestBuildCouncilTurnPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "`candidatePlan` may be null") {
 		t.Fatal("council prompt missing nil candidate adoption guidance")
+	}
+	if !strings.Contains(prompt, "Prefer fewer, larger, self-contained tasks") {
+		t.Fatal("council prompt missing task decomposition guidance")
+	}
+	if !strings.Contains(prompt, "Do NOT split because:") {
+		t.Fatal("council prompt missing anti-fragmentation guidance")
+	}
+	if !strings.Contains(prompt, "~60 minutes") {
+		t.Fatal("council prompt missing worker resilience threshold")
+	}
+}
+
+func TestBuildCouncilTurnPrompt_PriorArtifactPlacement(t *testing.T) {
+	prior := []CouncilTurnArtifact{
+		{
+			Seat:   "A",
+			Turn:   1,
+			Stance: "propose",
+			CandidatePlan: &PlanArtifact{
+				Title: "Typed parser errors",
+				Tasks: []PlanArtifactTask{
+					{ID: "t1", Title: "Add typed errors", Prompt: "Implement typed parser errors.", Complexity: "medium"},
+				},
+			},
+		},
+	}
+
+	prompt := BuildCouncilTurnPrompt("Refine the parser plan.", prior, "B", 2, "Operator wants a safer rollout.")
+	inlineRule := "- Prefer fewer, larger, self-contained tasks. Split only when parallelism genuinely pays off"
+	idxRules := strings.Index(prompt, "### Council Rules")
+	idxInline := strings.Index(prompt, inlineRule)
+	idxCurrent := strings.Index(prompt, "### Current Turn")
+	idxPrior := strings.Index(prompt, "### Prior Artifact Chain")
+	idxGuidance := strings.LastIndex(prompt, "### Task Decomposition Guidance")
+	idxBlock := strings.LastIndex(prompt, "<council_turn>")
+
+	if idxRules == -1 || idxInline == -1 || idxCurrent == -1 || idxPrior == -1 || idxGuidance == -1 || idxBlock == -1 {
+		t.Fatalf("prompt missing expected sections:\n%s", prompt)
+	}
+	if !(idxRules < idxInline && idxInline < idxCurrent) {
+		t.Fatal("inline council rule should stay inside the Council Rules section before Current Turn")
+	}
+	if !(idxCurrent < idxPrior && idxPrior < idxGuidance && idxGuidance < idxBlock) {
+		t.Fatal("suffix guidance should appear after prior artifacts and before the council JSON block")
 	}
 }
 

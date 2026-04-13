@@ -51,6 +51,45 @@ type PlanArtifactQuestion struct {
 const plannerSuffix = `
 
 At the end of your response, output a plan block with valid JSON:
+
+### Task Decomposition Guidance
+
+Prefer fewer, larger, self-contained tasks. Each task you emit will run in
+its own task boundary and rebuild working context from its own prompt plus
+carried-forward handover context from dependencies. Even when the runtime
+reuses a session instead of starting a fresh worker, splitting work means
+paying that rehydration cost again, which often costs more than the task
+itself.
+
+Lean toward a single task per plan, but split when any of these apply:
+
+- **Parallelism that pays off**: Two or more tasks operate on independent
+  files/areas AND running them concurrently saves meaningful wall-clock
+  time. Splitting purely so things "could" run in parallel is not enough
+  if the shared context they each need to rebuild is large.
+- **Discovery boundary**: A later step depends on an output that cannot
+  reasonably be predicted in advance (the shape of a generated file, a
+  value the planner does not know, an operator decision gated on review).
+- **Review/revert boundary**: The operator may genuinely want to accept
+  one chunk and reject another independently - not just "they're separate
+  concerns" in the abstract.
+- **Worker recycle / resilience**: A single task would exceed the worker's
+  reasonable context budget, would plausibly run more than ~60 minutes of
+  wall-clock work, or needs a different role/complexity tier than the
+  rest. Splitting limits the blast radius of a worker timeout or hard
+  failure so partial progress is preserved.
+
+Do NOT split because:
+- Steps are sequential. Sequential work in the same area belongs in the
+  same task.
+- The work has natural sub-headings ("setup", "core", "tests"). Those
+  are sub-headings, not tasks.
+- The prompt feels long. A long single task is usually cheaper than two
+  shorter tasks linked by a handover.
+
+The goal is balance: do not over-decompose, but do not collapse genuinely
+parallel or genuinely risky work into one monster task either.
+
 <plan>
 {
   "title": "Short plan title",
@@ -92,6 +131,45 @@ Return only valid JSON inside <plan>. Use stable task IDs like t1, t2, t3.`
 const councilTurnSuffix = `
 
 At the end of your response, output a council turn block with valid JSON:
+
+### Task Decomposition Guidance
+
+Prefer fewer, larger, self-contained tasks. Each task you emit will run in
+its own task boundary and rebuild working context from its own prompt plus
+carried-forward handover context from dependencies. Even when the runtime
+reuses a session instead of starting a fresh worker, splitting work means
+paying that rehydration cost again, which often costs more than the task
+itself.
+
+Lean toward a single task per plan, but split when any of these apply:
+
+- **Parallelism that pays off**: Two or more tasks operate on independent
+  files/areas AND running them concurrently saves meaningful wall-clock
+  time. Splitting purely so things "could" run in parallel is not enough
+  if the shared context they each need to rebuild is large.
+- **Discovery boundary**: A later step depends on an output that cannot
+  reasonably be predicted in advance (the shape of a generated file, a
+  value the planner does not know, an operator decision gated on review).
+- **Review/revert boundary**: The operator may genuinely want to accept
+  one chunk and reject another independently - not just "they're separate
+  concerns" in the abstract.
+- **Worker recycle / resilience**: A single task would exceed the worker's
+  reasonable context budget, would plausibly run more than ~60 minutes of
+  wall-clock work, or needs a different role/complexity tier than the
+  rest. Splitting limits the blast radius of a worker timeout or hard
+  failure so partial progress is preserved.
+
+Do NOT split because:
+- Steps are sequential. Sequential work in the same area belongs in the
+  same task.
+- The work has natural sub-headings ("setup", "core", "tests"). Those
+  are sub-headings, not tasks.
+- The prompt feels long. A long single task is usually cheaper than two
+  shorter tasks linked by a handover.
+
+The goal is balance: do not over-decompose, but do not collapse genuinely
+parallel or genuinely risky work into one monster task either.
+
 <council_turn>
 {
   "seat": "A|B",
@@ -183,6 +261,7 @@ func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat strin
 	b.WriteString("- When adopting a prior plan on turn 2+, `candidatePlan` may be null to indicate an exact adoption.\n")
 	b.WriteString("- Use `stance=converged` only when you adopt the prior plan and believe the council has converged.\n")
 	b.WriteString("- Use `questionsForUser` only for genuinely blocking operator input.\n")
+	b.WriteString("- Prefer fewer, larger, self-contained tasks. Split only when parallelism genuinely pays off, a discovery boundary forces it, an independent revert boundary is wanted, or a single task would exceed the worker's reasonable context or time budget. Sequential steps in the same area belong in one task.\n")
 	b.WriteString("- `seatMemo` and `rejectedAlternatives` should help rehydration if your seat is replaced.\n\n")
 	b.WriteString("### Current Turn\n\n")
 	b.WriteString(fmt.Sprintf("Seat: %s\nTurn: %d\n\n", strings.TrimSpace(seat), turn))
