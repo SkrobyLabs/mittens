@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
 type FailureClass string
@@ -18,32 +20,32 @@ const (
 	FailureUnknown        FailureClass = "unknown"
 )
 
-type KitchenSignals struct {
-	HeartbeatTimeout bool `json:"heartbeatTimeout,omitempty"`
-	OOMKilled        bool `json:"oomKilled,omitempty"`
-	MergeConflict    bool `json:"mergeConflict,omitempty"`
-	AuthFailure      bool `json:"authFailure,omitempty"`
-	ExitCode         int  `json:"exitCode,omitempty"`
-}
+type KitchenSignals = pool.FailureSignals
 
 func ClassifyFailure(reported string, detail json.RawMessage, signals KitchenSignals) FailureClass {
 	if len(detail) > 0 {
-		var decoded KitchenSignals
+		var decoded pool.FailureDetail
 		if json.Unmarshal(detail, &decoded) == nil {
-			if decoded.HeartbeatTimeout {
+			if decoded.Signals.HeartbeatTimeout {
 				signals.HeartbeatTimeout = true
 			}
-			if decoded.OOMKilled {
+			if decoded.Signals.OOMKilled {
 				signals.OOMKilled = true
 			}
-			if decoded.MergeConflict {
+			if decoded.Signals.MergeConflict {
 				signals.MergeConflict = true
 			}
-			if decoded.AuthFailure {
+			if decoded.Signals.AuthFailure {
 				signals.AuthFailure = true
 			}
-			if decoded.ExitCode != 0 {
-				signals.ExitCode = decoded.ExitCode
+			if decoded.Signals.ExitCode != 0 {
+				signals.ExitCode = decoded.Signals.ExitCode
+			}
+		}
+		if decoded == (pool.FailureDetail{}) {
+			var legacy KitchenSignals
+			if json.Unmarshal(detail, &legacy) == nil {
+				signals = legacy
 			}
 		}
 	}

@@ -88,7 +88,8 @@ type TaskCreatedData struct {
 }
 
 type TaskRequeuedData struct {
-	RequireFreshWorker bool `json:"requireFreshWorker,omitempty"`
+	RequireFreshWorker bool            `json:"requireFreshWorker,omitempty"`
+	RetryRoute         *RetryRouteHint `json:"retryRoute,omitempty"`
 }
 
 type TaskDeletedData struct {
@@ -326,6 +327,8 @@ func Apply(pm *PoolManager, e Event) error {
 				t.Result = &TaskResult{}
 			}
 			t.Result.Error = d.Error
+			t.Result.FailureClass = d.FailureClass
+			t.Result.Detail = append(json.RawMessage(nil), d.Detail...)
 		}
 		w := pm.workers[e.WorkerID]
 		if w != nil {
@@ -370,6 +373,7 @@ func Apply(pm *PoolManager, e Event) error {
 			t.WorkerID = ""
 			t.ReviewerID = ""
 			t.RequireFreshWorker = d.RequireFreshWorker
+			t.RetryRoute = cloneRetryRouteHint(d.RetryRoute)
 			t.DispatchedAt = nil
 			t.CompletedAt = nil
 			t.Result = nil
@@ -578,4 +582,12 @@ func Apply(pm *PoolManager, e Event) error {
 		return fmt.Errorf("apply event: unknown type %q", e.Type)
 	}
 	return nil
+}
+
+func cloneRetryRouteHint(route *RetryRouteHint) *RetryRouteHint {
+	if route == nil {
+		return nil
+	}
+	cp := *route
+	return &cp
 }

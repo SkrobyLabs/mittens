@@ -168,11 +168,13 @@ func (c *kitchenClient) ReportComplete(workerID, taskID string) error {
 }
 
 // ReportFail reports a task as failed.
-func (c *kitchenClient) ReportFail(workerID, taskID, errMsg string) error {
-	payload := map[string]string{
-		"workerId": workerID,
-		"taskId":   taskID,
-		"error":    sanitizeFailureMessage(errMsg),
+func (c *kitchenClient) ReportFail(workerID, taskID string, report taskFailureReport) error {
+	payload := map[string]any{
+		"workerId":     workerID,
+		"taskId":       taskID,
+		"error":        sanitizeFailureMessage(report.Error),
+		"failureClass": report.FailureClass,
+		"detail":       report.Detail,
 	}
 	resp, err := c.postJSON("/fail", payload)
 	if err != nil {

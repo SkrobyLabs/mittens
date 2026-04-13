@@ -823,6 +823,11 @@ func (pm *PoolManager) readWorkerOutput(workerID string) string {
 
 // FailTask marks a task as failed and sets worker idle.
 func (pm *PoolManager) FailTask(workerID, taskID, errMsg string) error {
+	return pm.FailTaskDetailed(workerID, taskID, errMsg, "", nil)
+}
+
+// FailTaskDetailed marks a task as failed and persists structured failure data.
+func (pm *PoolManager) FailTaskDetailed(workerID, taskID, errMsg, failureClass string, detail json.RawMessage) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -842,7 +847,11 @@ func (pm *PoolManager) FailTask(workerID, taskID, errMsg string) error {
 		Type:      EventTaskFailed,
 		TaskID:    taskID,
 		WorkerID:  workerID,
-		Data:      marshalData(TaskFailedData{Error: errMsg}),
+		Data: marshalData(TaskFailedData{
+			Error:        errMsg,
+			FailureClass: strings.TrimSpace(failureClass),
+			Detail:       append(json.RawMessage(nil), detail...),
+		}),
 	}
 	if _, err := pm.wal.Append(e); err != nil {
 		return fmt.Errorf("fail task wal: %w", err)
@@ -911,6 +920,12 @@ func (pm *PoolManager) SetTaskConflictInfo(taskID string, info *ConflictInfo) er
 
 // ReviveFailedTask moves a failed task back to queued so the scheduler can retry it.
 func (pm *PoolManager) ReviveFailedTask(taskID string, requireFreshWorker bool) error {
+	return pm.ReviveFailedTaskWithRoute(taskID, requireFreshWorker, nil)
+}
+
+// ReviveFailedTaskWithRoute moves a failed task back to queued and optionally
+// constrains the retry to one concrete route key.
+func (pm *PoolManager) ReviveFailedTaskWithRoute(taskID string, requireFreshWorker bool, retryRoute *RetryRouteHint) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -928,6 +943,7 @@ func (pm *PoolManager) ReviveFailedTask(taskID string, requireFreshWorker bool) 
 		TaskID:    taskID,
 		Data: marshalData(TaskRequeuedData{
 			RequireFreshWorker: requireFreshWorker,
+			RetryRoute:         cloneRetryRouteHint(retryRoute),
 		}),
 	}
 	if _, err := pm.wal.Append(e); err != nil {

@@ -506,7 +506,75 @@ func (s *Scheduler) onCouncilTurnFailed(task pool.Task, class FailureClass) erro
 		return err
 	}
 	switch class {
-	case FailureEnvironment, FailureInfrastructure, FailureAuth:
+	case FailureAuth:
+		rule := s.authFailureRule()
+		action := strings.TrimSpace(rule.Action)
+		summary := s.taskFailureSummary(task)
+		switch action {
+		case authActionRetrySameProvider, authActionRecycleWorkerRetrySameProvider:
+			if !s.authRetryAllowed(task, rule) {
+				return s.markPlanningFailed(task, summary)
+			}
+			requireFresh := action == authActionRecycleWorkerRetrySameProvider
+			if requireFresh {
+				if err := s.pm.KillWorker(task.WorkerID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+					return err
+				}
+			}
+			if err := s.pm.ReviveFailedTaskWithRoute(task.ID, requireFresh, s.failedTaskRetryRoute(task)); err != nil {
+				return err
+			}
+			bundle.Plan.State = planStatePlanning
+			bundle.Execution.State = planStatePlanning
+			if bundle.Execution.CouncilTurnsCompleted > 0 {
+				bundle.Plan.State = planStateReviewing
+				bundle.Execution.State = planStateReviewing
+			}
+			bundle.Execution.ActiveTaskIDs = []string{task.ID}
+			if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+				return err
+			}
+			if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+				return err
+			}
+			if requireFresh {
+				if revivedTask, ok := s.pm.Task(task.ID); ok {
+					return s.spawnWorkerForTask(*revivedTask)
+				}
+			}
+			return nil
+		case authActionTryNextProvider:
+			if err := s.applyAuthRouteCooldown(s.failedTaskRetryRoute(task), rule.Cooldown); err != nil {
+				return err
+			}
+			if err := s.pm.KillWorker(task.WorkerID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return err
+			}
+			if err := s.pm.ReviveFailedTaskWithRoute(task.ID, true, nil); err != nil {
+				return err
+			}
+			if bundle.Execution.CouncilTurnsCompleted == 0 {
+				bundle.Plan.State = planStatePlanning
+				bundle.Execution.State = planStatePlanning
+			} else {
+				bundle.Plan.State = planStateReviewing
+				bundle.Execution.State = planStateReviewing
+			}
+			bundle.Execution.ActiveTaskIDs = []string{task.ID}
+			if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+				return err
+			}
+			if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+				return err
+			}
+			if revivedTask, ok := s.pm.Task(task.ID); ok {
+				return s.spawnWorkerForTask(*revivedTask)
+			}
+			return nil
+		default:
+			return s.markPlanningFailed(task, summary)
+		}
+	case FailureEnvironment, FailureInfrastructure:
 		if err := s.pm.ReviveFailedTask(task.ID, false); err != nil {
 			return err
 		}

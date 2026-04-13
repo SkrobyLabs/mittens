@@ -127,7 +127,7 @@ func DefaultKitchenConfig() KitchenConfig {
 			"plan":           {Action: "replan", Max: 1},
 			"environment":    {Action: "retry", Max: 2},
 			"conflict":       {Action: "retry_merge", Max: 1},
-			"auth":           {Action: "try_next_provider", Cooldown: "60s"},
+			"auth":           {Action: "recycle_worker_retry_same_provider", Max: 1},
 			"infrastructure": {Action: "respawn", Max: 1},
 		},
 		Snapshots: SnapshotConfig{

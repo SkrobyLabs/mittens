@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,13 @@ import (
 
 	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
+)
+
+const (
+	authActionRetrySameProvider              = "retry_same_provider"
+	authActionRecycleWorkerRetrySameProvider = "recycle_worker_retry_same_provider"
+	authActionTryNextProvider                = "try_next_provider"
+	authActionFail                           = "fail"
 )
 
 type Scheduler struct {
@@ -134,11 +142,7 @@ func (s *Scheduler) handleNotification(n pool.Notification) {
 		if !ok {
 			return
 		}
-		var reported string
-		if task.Result != nil {
-			reported = task.Result.Error
-		}
-		if err := s.onTaskFailed(n.ID, ClassifyFailure(reported, nil, KitchenSignals{})); err != nil {
+		if err := s.onTaskFailed(n.ID, s.taskFailureClass(task)); err != nil {
 			s.logf("task %s failure handling: %v", n.ID, err)
 		}
 	case "task_requeued":
@@ -159,6 +163,232 @@ func (s *Scheduler) handleNotification(n pool.Notification) {
 				s.logf("task %s cancel handling: %v", n.ID, err)
 			}
 		}
+	}
+}
+
+func (s *Scheduler) taskFailurePayload(task *pool.Task) (string, json.RawMessage) {
+	if task == nil || task.Result == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(task.Result.Error), append(json.RawMessage(nil), task.Result.Detail...)
+}
+
+func (s *Scheduler) taskFailureClass(task *pool.Task) FailureClass {
+	if task == nil {
+		return FailureUnknown
+	}
+	if task.Result != nil && strings.TrimSpace(task.Result.FailureClass) != "" {
+		return FailureClass(strings.TrimSpace(task.Result.FailureClass))
+	}
+	reported, detail := s.taskFailurePayload(task)
+	return ClassifyFailure(reported, detail, KitchenSignals{})
+}
+
+func (s *Scheduler) taskFailureDetail(task *pool.Task) pool.FailureDetail {
+	if task == nil || task.Result == nil || len(task.Result.Detail) == 0 {
+		return pool.FailureDetail{}
+	}
+	var detail pool.FailureDetail
+	if json.Unmarshal(task.Result.Detail, &detail) != nil {
+		return pool.FailureDetail{}
+	}
+	return detail
+}
+
+func (s *Scheduler) taskFailureSummary(task pool.Task) string {
+	if detail := s.taskFailureDetail(&task); strings.TrimSpace(detail.Summary) != "" {
+		return strings.TrimSpace(detail.Summary)
+	}
+	if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {
+		return strings.TrimSpace(task.Result.Error)
+	}
+	if s != nil && s.pm != nil {
+		workerID := strings.TrimSpace(task.WorkerID)
+		if workerID == "" && task.Result != nil {
+			workerID = strings.TrimSpace(task.Result.WorkerID)
+		}
+		if workerID != "" {
+			if data, err := os.ReadFile(pool.WorkerStatePath(s.pm.StateDir(), workerID, pool.WorkerErrorFile)); err == nil {
+				if msg := strings.TrimSpace(string(data)); msg != "" {
+					return msg
+				}
+			}
+			if s.hostAPI != nil {
+				if transcript, err := s.hostAPI.GetWorkerTranscript(context.Background(), workerID); err == nil {
+					for i := len(transcript) - 1; i >= 0; i-- {
+						if strings.TrimSpace(transcript[i].TaskID) != task.ID {
+							continue
+						}
+						if msg := strings.TrimSpace(transcript[i].Activity.Summary); msg != "" {
+							return msg
+						}
+					}
+				}
+			}
+		}
+	}
+	return "task failed"
+}
+
+func (s *Scheduler) authFailureRule() FailurePolicyRule {
+	if s == nil {
+		return FailurePolicyRule{Action: authActionFail}
+	}
+	rule, ok := s.failurePolicy[string(FailureAuth)]
+	if !ok || strings.TrimSpace(rule.Action) == "" {
+		return FailurePolicyRule{Action: authActionFail}
+	}
+	return rule
+}
+
+func (s *Scheduler) failedTaskRetryRoute(task pool.Task) *pool.RetryRouteHint {
+	if task.RetryRoute != nil {
+		return clonePoolRetryRouteHint(task.RetryRoute)
+	}
+	workerID := strings.TrimSpace(task.WorkerID)
+	if workerID == "" && task.Result != nil {
+		workerID = strings.TrimSpace(task.Result.WorkerID)
+	}
+	if workerID == "" || s == nil || s.pm == nil {
+		return nil
+	}
+	worker, ok := s.pm.Worker(workerID)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(worker.Provider) == "" {
+		return nil
+	}
+	return &pool.RetryRouteHint{
+		Provider: worker.Provider,
+		Model:    worker.Model,
+		Adapter:  worker.Adapter,
+	}
+}
+
+func clonePoolRetryRouteHint(route *pool.RetryRouteHint) *pool.RetryRouteHint {
+	if route == nil {
+		return nil
+	}
+	cp := *route
+	return &cp
+}
+
+func retryRoutePoolKey(task pool.Task) (PoolKey, bool) {
+	if task.RetryRoute == nil || strings.TrimSpace(task.RetryRoute.Provider) == "" {
+		return PoolKey{}, false
+	}
+	return PoolKey{
+		Provider: task.RetryRoute.Provider,
+		Model:    task.RetryRoute.Model,
+		Adapter:  task.RetryRoute.Adapter,
+	}, true
+}
+
+func (s *Scheduler) authRetryAllowed(task pool.Task, rule FailurePolicyRule) bool {
+	if rule.Max <= 0 {
+		return false
+	}
+	return task.RetryCount < rule.Max
+}
+
+func (s *Scheduler) applyAuthRouteCooldown(route *pool.RetryRouteHint, cooldown string) error {
+	if route == nil || s == nil || s.router == nil || s.router.health == nil {
+		return nil
+	}
+	cooldown = strings.TrimSpace(cooldown)
+	if cooldown == "" {
+		cooldown = "60s"
+	}
+	dur, err := time.ParseDuration(cooldown)
+	if err != nil {
+		return err
+	}
+	if dur <= 0 {
+		return nil
+	}
+	return s.router.health.SetCooldown(route.Provider+"/"+route.Model, s.currentTime().Add(dur))
+}
+
+func (s *Scheduler) recordAuthRetryHistory(planID, taskID, summary string) error {
+	if s == nil || s.plans == nil || strings.TrimSpace(planID) == "" {
+		return nil
+	}
+	bundle, err := s.plans.Get(planID)
+	if err != nil {
+		return err
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryManualRetried,
+		TaskID:  taskID,
+		Summary: strings.TrimSpace(summary),
+	})
+	return s.plans.UpdateExecution(planID, bundle.Execution)
+}
+
+func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (bool, error) {
+	if task == nil || strings.TrimSpace(task.PlanID) == "" {
+		return false, nil
+	}
+	rule := s.authFailureRule()
+	action := strings.TrimSpace(rule.Action)
+	summary := s.taskFailureSummary(*task)
+	switch action {
+	case authActionRetrySameProvider, authActionRecycleWorkerRetrySameProvider:
+		if !s.authRetryAllowed(*task, rule) {
+			return false, nil
+		}
+		retryRoute := s.failedTaskRetryRoute(*task)
+		requireFreshWorker := action == authActionRecycleWorkerRetrySameProvider
+		if bundle.Plan.Lineage != "" {
+			if err := s.git.DiscardChild(bundle.Plan.Lineage, task.ID); err != nil {
+				return true, err
+			}
+			s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+			requireFreshWorker = true
+		} else if requireFreshWorker {
+			if err := s.pm.KillWorker(task.WorkerID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return true, err
+			}
+		}
+		if err := s.pm.ReviveFailedTaskWithRoute(task.ID, requireFreshWorker, retryRoute); err != nil {
+			return true, err
+		}
+		if err := s.recordAuthRetryHistory(task.PlanID, task.ID, "Retrying task on the same provider after auth failure: "+summary); err != nil {
+			return true, err
+		}
+		if revivedTask, ok := s.pm.Task(task.ID); ok && requireFreshWorker {
+			if err := s.spawnWorkerForTask(*revivedTask); err != nil {
+				return true, err
+			}
+		}
+		return true, s.syncPlanExecution(task.PlanID)
+	case authActionTryNextProvider:
+		if err := s.applyAuthRouteCooldown(s.failedTaskRetryRoute(*task), rule.Cooldown); err != nil {
+			return true, err
+		}
+		if bundle.Plan.Lineage != "" {
+			if err := s.git.DiscardChild(bundle.Plan.Lineage, task.ID); err != nil {
+				return true, err
+			}
+			s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+		} else if err := s.pm.KillWorker(task.WorkerID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return true, err
+		}
+		if err := s.pm.ReviveFailedTaskWithRoute(task.ID, true, nil); err != nil {
+			return true, err
+		}
+		if err := s.recordAuthRetryHistory(task.PlanID, task.ID, "Retrying task on the next provider after auth failure: "+summary); err != nil {
+			return true, err
+		}
+		if revivedTask, ok := s.pm.Task(task.ID); ok {
+			if err := s.spawnWorkerForTask(*revivedTask); err != nil {
+				return true, err
+			}
+		}
+		return true, s.syncPlanExecution(task.PlanID)
+	default:
+		return false, nil
 	}
 }
 
@@ -418,7 +648,17 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 		return err
 	}
 	if bundle.Plan.Lineage == "" {
+		if class == FailureAuth {
+			if handled, err := s.retryAuthFailedTask(task, bundle); handled || err != nil {
+				return err
+			}
+		}
 		return s.syncPlanExecution(task.PlanID)
+	}
+	if class == FailureAuth {
+		if handled, err := s.retryAuthFailedTask(task, bundle); handled || err != nil {
+			return err
+		}
 	}
 	if class == FailureConflict && s.shouldRetryConflict(*task) {
 		failedWorkerID := strings.TrimSpace(task.WorkerID)
@@ -763,40 +1003,50 @@ func (s *Scheduler) recoverFailedTasksOnStartup() error {
 			continue
 		}
 
-		reported := ""
-		if task.Result != nil {
-			reported = task.Result.Error
-		}
-		if class := ClassifyFailure(reported, nil, KitchenSignals{}); class != FailureConflict || !s.shouldRetryConflict(task) {
+		class := s.taskFailureClass(&task)
+		if class != FailureConflict && class != FailureAuth {
 			continue
 		}
-
-		bundle, err := s.plans.Get(task.PlanID)
-		if err != nil {
-			s.logf("startup: load failed task plan %s/%s: %v", task.PlanID, task.ID, err)
+		if class == FailureConflict && !s.shouldRetryConflict(task) {
 			continue
 		}
-		if err := s.pm.ReviveFailedTask(task.ID, true); err != nil {
-			s.logf("startup: revive failed task %s: %v", task.ID, err)
+		if class == FailureAuth && strings.TrimSpace(s.authFailureRule().Action) == authActionFail {
 			continue
 		}
-		if lineage := strings.TrimSpace(bundle.Plan.Lineage); lineage != "" {
-			if err := s.git.DiscardChild(lineage, task.ID); err != nil {
-				s.logf("startup: discard child worktree for failed task %s: %v", task.ID, err)
+		if class == FailureConflict {
+			bundle, err := s.plans.Get(task.PlanID)
+			if err != nil {
+				s.logf("startup: load failed task plan %s/%s: %v", task.PlanID, task.ID, err)
 				continue
 			}
-			s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
-		}
+			if err := s.pm.ReviveFailedTask(task.ID, true); err != nil {
+				s.logf("startup: revive failed task %s: %v", task.ID, err)
+				continue
+			}
+			if lineage := strings.TrimSpace(bundle.Plan.Lineage); lineage != "" {
+				if err := s.git.DiscardChild(lineage, task.ID); err != nil {
+					s.logf("startup: discard child worktree for failed task %s: %v", task.ID, err)
+					continue
+				}
+				s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+			}
 
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-			Type:    planHistoryConflictRetried,
-			TaskID:  task.ID,
-			Summary: "Retrying task from current lineage head after startup recovery.",
-		})
-		if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
-			s.logf("startup: record conflict retry history for %s: %v", task.ID, err)
+			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+				Type:    planHistoryConflictRetried,
+				TaskID:  task.ID,
+				Summary: "Retrying task from current lineage head after startup recovery.",
+			})
+			if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+				s.logf("startup: record conflict retry history for %s: %v", task.ID, err)
+			}
+			s.logf("startup: retrying %s-failed task %s (attempt %d)", class, task.ID, task.RetryCount+1)
+			continue
 		}
-		s.logf("startup: retrying conflict-failed task %s (attempt %d)", task.ID, task.RetryCount+1)
+		if err := s.onTaskFailed(task.ID, class); err != nil {
+			s.logf("startup: recover failed task %s: %v", task.ID, err)
+			continue
+		}
+		s.logf("startup: retrying %s-failed task %s (attempt %d)", class, task.ID, task.RetryCount+1)
 	}
 	return nil
 }
@@ -1005,6 +1255,9 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 func (s *Scheduler) routeKeysForTask(task pool.Task) []PoolKey {
 	if s == nil || s.router == nil {
 		return nil
+	}
+	if retryKey, ok := retryRoutePoolKey(task); ok {
+		return []PoolKey{retryKey}
 	}
 	if task.Role == plannerTaskRole && task.PlanID != "" {
 		if seat := councilSeatForTask(task); seat != "" {

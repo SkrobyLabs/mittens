@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,19 @@ const (
 
 	teamActivityScannerMaxToken = 1 << 20
 )
+
+var failureSecretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)([^\s]+)`),
+	regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,"']+)`),
+	regexp.MustCompile(`(?i)\b(sk-[a-z0-9_-]+)\b`),
+}
+
+type taskFailureReport struct {
+	Error        string
+	FailureClass string
+	Detail       json.RawMessage
+	StopWorker   bool
+}
 
 // workerAgentState tracks the latest live activity for heartbeat reporting.
 // The worker agent is the main orchestrator that drives the AI adapter as a subprocess.
@@ -429,7 +443,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			}
 			logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
 			writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
-			reportFailWithRetries(client, workerID, task.ID, reportMsg)
+			reportFailWithRetries(client, workerID, task.ID, taskFailureReport{Error: reportMsg})
 			if err := ad.ClearSession(); err != nil {
 				logWarn("worker: clear session: %v", err)
 			}
@@ -437,13 +451,13 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		}
 
 		logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
-		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(err.Error()))
-		reportMsg, stopWorker := classifyTaskFailure(err)
-		reportFailWithRetries(client, workerID, task.ID, reportMsg)
+		report := classifyTaskFailure(err)
+		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(report.Error))
+		reportFailWithRetries(client, workerID, task.ID, report)
 		if err := ad.ClearSession(); err != nil {
 			logWarn("worker: clear session: %v", err)
 		}
-		return stopWorker
+		return report.StopWorker
 	} else {
 		// Write result.txt atomically.
 		writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
@@ -608,9 +622,9 @@ func reportCompleteWithRetries(client *kitchenClient, workerID, taskID string) {
 	logWarn("worker: failed to report completion for task %s after retries", taskID)
 }
 
-func reportFailWithRetries(client *kitchenClient, workerID, taskID, errMsg string) {
+func reportFailWithRetries(client *kitchenClient, workerID, taskID string, report taskFailureReport) {
 	for i := 0; i < workerAgentReportRetries; i++ {
-		if err := client.ReportFail(workerID, taskID, errMsg); err != nil {
+		if err := client.ReportFail(workerID, taskID, report); err != nil {
 			logWarn("worker: report fail attempt %d: %v", i+1, err)
 			time.Sleep(workerAgentReportBackoff)
 			continue
@@ -632,16 +646,36 @@ func reportReviewWithRetries(client *kitchenClient, workerID, taskID, verdict, f
 	logWarn("worker: failed to report review for task %s after retries", taskID)
 }
 
-func classifyTaskFailure(err error) (reportMsg string, stopWorker bool) {
+func classifyTaskFailure(err error) taskFailureReport {
 	if err == nil {
-		return "task execution failed", false
+		detail := mustMarshalFailureDetail(pool.FailureDetail{
+			Summary: "task execution failed",
+		})
+		return taskFailureReport{
+			Error:  "task execution failed",
+			Detail: detail,
+		}
 	}
 
-	raw := strings.TrimSpace(err.Error())
-	if requiresAuthReset(raw) {
-		return "authentication failure: token expired or refresh token reused; run codex logout and sign in again on the host, then restart the worker", true
+	raw := redactFailureMessage(strings.TrimSpace(err.Error()))
+	report := taskFailureReport{
+		Error: sanitizeFailureMessage(raw),
 	}
-	return sanitizeFailureMessage(raw), false
+	detail := pool.FailureDetail{
+		Summary: report.Error,
+	}
+	if authMode, stopWorker := authFailureMode(raw); authMode != "" {
+		detail.AuthMode = authMode
+		detail.Signals.AuthFailure = true
+		report.FailureClass = "auth"
+		report.StopWorker = stopWorker
+		if stopWorker {
+			report.Error = "authentication failure: token expired or refresh token reused; run codex logout and sign in again on the host, then restart the worker"
+			detail.Summary = report.Error
+		}
+	}
+	report.Detail = mustMarshalFailureDetail(detail)
+	return report
 }
 
 func requiresAuthReset(msg string) bool {
@@ -658,6 +692,60 @@ func requiresAuthReset(msg string) bool {
 		}
 	}
 	return false
+}
+
+func authFailureMode(msg string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	if lower == "" {
+		return "", false
+	}
+	if requiresAuthReset(lower) {
+		return "hard", true
+	}
+	for _, needle := range []string{
+		"authentication_error",
+		"failed to authenticate",
+		"invalid authentication credentials",
+		"invalid api key",
+		"api_key_invalid",
+		"unauthorized",
+		"unauthenticated",
+		"forbidden",
+		"permission_denied",
+		"auth error",
+		"authentication failure",
+	} {
+		if strings.Contains(lower, needle) {
+			return "soft", false
+		}
+	}
+	return "", false
+}
+
+func mustMarshalFailureDetail(detail pool.FailureDetail) json.RawMessage {
+	data, err := json.Marshal(detail)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func redactFailureMessage(msg string) string {
+	redacted := strings.TrimSpace(msg)
+	if redacted == "" {
+		return ""
+	}
+	for _, pattern := range failureSecretPatterns {
+		switch pattern.String() {
+		case `(?i)(authorization:\s*bearer\s+)([^\s]+)`:
+			redacted = pattern.ReplaceAllString(redacted, "${1}[REDACTED]")
+		case `(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,"']+)`:
+			redacted = pattern.ReplaceAllString(redacted, "${1}=[REDACTED]")
+		default:
+			redacted = pattern.ReplaceAllString(redacted, "[REDACTED]")
+		}
+	}
+	return redacted
 }
 
 // parseDurationEnv reads an env var as seconds and returns a time.Duration.

@@ -331,7 +331,7 @@ func TestLeaderClient_ReportFail(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 
-	err := client.ReportFail("w-1", "t-1", "broke")
+	err := client.ReportFail("w-1", "t-1", taskFailureReport{Error: "broke"})
 	if err != nil {
 		t.Fatalf("fail: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestLeaderClient_ReportFailSanitizesLargeErrors(t *testing.T) {
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 
 	longErr := "line1\n\n" + strings.Repeat("x", 700)
-	if err := client.ReportFail("w-1", "t-1", longErr); err != nil {
+	if err := client.ReportFail("w-1", "t-1", taskFailureReport{Error: longErr}); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 
@@ -840,7 +840,7 @@ func TestReportFailWithRetries_Success(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
 
-	reportFailWithRetries(client, "w-1", "t-1", "boom")
+	reportFailWithRetries(client, "w-1", "t-1", taskFailureReport{Error: "boom"})
 
 	m.mu.Lock()
 	if len(m.failed) != 1 || m.failed[0] != "t-1" {

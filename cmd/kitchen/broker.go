@@ -316,7 +316,7 @@ func (b *WorkerBroker) handleFail(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if err := b.pm.FailTask(req.WorkerID, req.TaskID, req.Error); err != nil {
+	if err := b.pm.FailTaskDetailed(req.WorkerID, req.TaskID, req.Error, req.FailureClass, req.Detail); err != nil {
 		http.Error(w, err.Error(), errorCode(err))
 		return
 	}

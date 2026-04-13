@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -115,29 +116,30 @@ type AssignmentSummary struct {
 
 // Task represents a unit of work dispatched to a worker.
 type Task struct {
-	ID                 string         `json:"id"`
-	PipelineID         string         `json:"pipelineId,omitempty"`
-	PlanID             string         `json:"planId,omitempty"`
-	StageIndex         int            `json:"stageIndex,omitempty"`
-	Prompt             string         `json:"prompt"`
-	Complexity         string         `json:"complexity,omitempty"`
-	Role               string         `json:"role,omitempty"`
-	Priority           int            `json:"priority"`
-	DependsOn          []string       `json:"dependsOn,omitempty"`
-	TimeoutMinutes     int            `json:"timeoutMinutes,omitempty"`
-	Status             string         `json:"status"`
-	WorkerID           string         `json:"workerId,omitempty"`
-	ReviewerID         string         `json:"reviewerId,omitempty"`
-	RetryCount         int            `json:"retryCount,omitempty"`
-	RequireFreshWorker bool           `json:"requireFreshWorker,omitempty"`
-	ReviewCycles       int            `json:"reviewCycles"`
-	MaxReviews         int            `json:"maxReviews"`
-	Result             *TaskResult    `json:"result,omitempty"`
-	Handover           *TaskHandover  `json:"handover,omitempty"`
-	Reviews            []ReviewRecord `json:"reviews,omitempty"`
-	CreatedAt          time.Time      `json:"createdAt"`
-	DispatchedAt       *time.Time     `json:"dispatchedAt,omitempty"`
-	CompletedAt        *time.Time     `json:"completedAt,omitempty"`
+	ID                 string          `json:"id"`
+	PipelineID         string          `json:"pipelineId,omitempty"`
+	PlanID             string          `json:"planId,omitempty"`
+	StageIndex         int             `json:"stageIndex,omitempty"`
+	Prompt             string          `json:"prompt"`
+	Complexity         string          `json:"complexity,omitempty"`
+	Role               string          `json:"role,omitempty"`
+	Priority           int             `json:"priority"`
+	DependsOn          []string        `json:"dependsOn,omitempty"`
+	TimeoutMinutes     int             `json:"timeoutMinutes,omitempty"`
+	Status             string          `json:"status"`
+	WorkerID           string          `json:"workerId,omitempty"`
+	ReviewerID         string          `json:"reviewerId,omitempty"`
+	RetryCount         int             `json:"retryCount,omitempty"`
+	RequireFreshWorker bool            `json:"requireFreshWorker,omitempty"`
+	RetryRoute         *RetryRouteHint `json:"retryRoute,omitempty"`
+	ReviewCycles       int             `json:"reviewCycles"`
+	MaxReviews         int             `json:"maxReviews"`
+	Result             *TaskResult     `json:"result,omitempty"`
+	Handover           *TaskHandover   `json:"handover,omitempty"`
+	Reviews            []ReviewRecord  `json:"reviews,omitempty"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	DispatchedAt       *time.Time      `json:"dispatchedAt,omitempty"`
+	CompletedAt        *time.Time      `json:"completedAt,omitempty"`
 }
 
 // TaskSummary is a lightweight projection of Task for status views.
@@ -206,6 +208,32 @@ type WorkerSpec struct {
 	Environment   map[string]string `json:"environment,omitempty"`
 }
 
+// RetryRouteHint pins a retried task to one concrete route key so scheduler
+// dispatch does not drift onto a fallback provider.
+type RetryRouteHint struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Adapter  string `json:"adapter,omitempty"`
+}
+
+// FailureSignals are the normalized machine-readable hints attached to a failed
+// task. They are persisted in the pool WAL so scheduler recovery can make the
+// same classification decisions after restart.
+type FailureSignals struct {
+	HeartbeatTimeout bool `json:"heartbeatTimeout,omitempty"`
+	OOMKilled        bool `json:"oomKilled,omitempty"`
+	MergeConflict    bool `json:"mergeConflict,omitempty"`
+	AuthFailure      bool `json:"authFailure,omitempty"`
+	ExitCode         int  `json:"exitCode,omitempty"`
+}
+
+// FailureDetail stores a redacted, durable view of a task failure.
+type FailureDetail struct {
+	Summary  string         `json:"summary,omitempty"`
+	AuthMode string         `json:"authMode,omitempty"`
+	Signals  FailureSignals `json:"signals,omitempty"`
+}
+
 // ConflictInfo carries the details of a merge conflict recorded when a task
 // failed during lineage merge-back. It is attached to TaskResult.Conflict so
 // that operators can create a targeted conflict-resolution task.
@@ -216,14 +244,16 @@ type ConflictInfo struct {
 
 // TaskResult contains the outcome of a completed or failed task.
 type TaskResult struct {
-	TaskID       string        `json:"taskId"`
-	WorkerID     string        `json:"workerId"`
-	State        string        `json:"state"`
-	Summary      string        `json:"summary,omitempty"`
-	FilesChanged []string      `json:"filesChanged,omitempty"`
-	GitDiff      string        `json:"gitDiff,omitempty"`
-	Error        string        `json:"error,omitempty"`
-	Conflict     *ConflictInfo `json:"conflict,omitempty"`
+	TaskID       string          `json:"taskId"`
+	WorkerID     string          `json:"workerId"`
+	State        string          `json:"state"`
+	Summary      string          `json:"summary,omitempty"`
+	FilesChanged []string        `json:"filesChanged,omitempty"`
+	GitDiff      string          `json:"gitDiff,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	FailureClass string          `json:"failureClass,omitempty"`
+	Detail       json.RawMessage `json:"detail,omitempty"`
+	Conflict     *ConflictInfo   `json:"conflict,omitempty"`
 }
 
 // TaskHandover carries structured context from one task to the next.
