@@ -402,6 +402,7 @@ type kitchenTUILoadedMsg struct {
 	plans                 []PlanRecord
 	questions             []pool.Question
 	detail                *PlanDetail
+	selectedTaskRowKey    string
 	selectedTaskRuntimeID string
 	taskLogTaskID         string
 	taskLog               []pool.WorkerActivityRecord
@@ -447,6 +448,7 @@ type kitchenTUIPlanItem struct {
 type kitchenTUITaskItem struct {
 	ID          string
 	RuntimeID   string
+	RowKey      string
 	Kind        string
 	Title       string
 	State       string
@@ -533,9 +535,11 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case kitchenTUILoadedMsg:
 		m.loading = false
+		currentSelectedTaskRowKey := ""
 		currentSelectedTaskRuntimeID := ""
 		if m.leftMode == kitchenTUILeftTasks {
 			if task := m.selectedTaskItem(); task != nil {
+				currentSelectedTaskRowKey = taskRowKey(*task)
 				currentSelectedTaskRuntimeID = strings.TrimSpace(task.RuntimeID)
 			}
 		}
@@ -553,13 +557,24 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncPlanSelection()
 		m.detail = msg.detail
 		m.tasks = buildTaskItems(m.detail, m.status)
-		selectionRuntimeID := currentSelectedTaskRuntimeID
-		if selectionRuntimeID == "" {
-			selectionRuntimeID = msg.selectedTaskRuntimeID
+		selectionRowKey := currentSelectedTaskRowKey
+		if selectionRowKey == "" {
+			selectionRowKey = strings.TrimSpace(msg.selectedTaskRowKey)
 		}
-		if idx := findTaskIndexByRuntimeID(m.tasks, selectionRuntimeID); idx >= 0 {
+		if idx := findTaskIndexByRowKey(m.tasks, selectionRowKey); idx >= 0 {
 			m.selectedTask = idx
-		} else if m.selectedTask >= len(m.tasks) {
+		} else {
+			selectionRuntimeID := currentSelectedTaskRuntimeID
+			if selectionRuntimeID == "" {
+				selectionRuntimeID = msg.selectedTaskRuntimeID
+			}
+			if idx := findTaskIndexByRuntimeID(m.tasks, selectionRuntimeID); idx >= 0 {
+				m.selectedTask = idx
+			} else if m.selectedTask >= len(m.tasks) {
+				m.selectedTask = max(0, len(m.tasks)-1)
+			}
+		}
+		if m.selectedTask >= len(m.tasks) {
 			m.selectedTask = max(0, len(m.tasks)-1)
 		}
 		if m.leftMode == kitchenTUILeftTasks && m.taskPaneMode == kitchenTUITaskPaneLogs && runtimeIDMatchesSelectedTask(m.tasks, m.selectedTask, msg.taskLogTaskID) {
@@ -1285,6 +1300,26 @@ func (m kitchenTUIModel) selectedTaskItem() *kitchenTUITaskItem {
 	return &m.tasks[m.selectedTask]
 }
 
+func taskRowKey(task kitchenTUITaskItem) string {
+	if rowKey := strings.TrimSpace(task.RowKey); rowKey != "" {
+		return rowKey
+	}
+	return strings.TrimSpace(task.RuntimeID)
+}
+
+func findTaskIndexByRowKey(tasks []kitchenTUITaskItem, rowKey string) int {
+	rowKey = strings.TrimSpace(rowKey)
+	if rowKey == "" {
+		return -1
+	}
+	for i, task := range tasks {
+		if taskRowKey(task) == rowKey {
+			return i
+		}
+	}
+	return -1
+}
+
 func findTaskIndexByRuntimeID(tasks []kitchenTUITaskItem, runtimeID string) int {
 	runtimeID = strings.TrimSpace(runtimeID)
 	if runtimeID == "" {
@@ -1503,10 +1538,12 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 	selectedPlanID := m.selectedPlanID()
 	selectedTaskLogID := ""
 	selectedTaskOutputID := ""
+	selectedTaskRowKey := ""
 	selectedTaskRuntimeID := ""
 	currentTaskOutput := m.taskOutput
 	if m.leftMode == kitchenTUILeftTasks {
 		if task := m.selectedTaskItem(); task != nil {
+			selectedTaskRowKey = taskRowKey(*task)
 			selectedTaskRuntimeID = strings.TrimSpace(task.RuntimeID)
 		}
 	}
@@ -1607,6 +1644,7 @@ func (m kitchenTUIModel) loadCmd() tea.Cmd {
 			plans:                 plans,
 			questions:             questions,
 			detail:                detail,
+			selectedTaskRowKey:    selectedTaskRowKey,
 			selectedTaskRuntimeID: selectedTaskRuntimeID,
 			taskLogTaskID:         selectedTaskLogID,
 			taskLog:               taskLog,
@@ -2290,31 +2328,180 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 		if cycle.ReviewTaskID != "" {
 			items = append(items, buildCycleTaskItem("reviewer", cycle.ReviewTaskID, "Review cycle "+fmt.Sprint(cycle.Index), cycle.ReviewTaskState, taskSummaryByID[cycle.ReviewTaskID]))
 		}
-		if cycle.ImplReviewTaskID != "" {
+	}
+	roundCount, reviewCyclesByRound := planExecutionRounds(*detail)
+	if roundCount == 0 {
+		roundCount = 1
+	}
+	for round := 1; round <= roundCount; round++ {
+		for _, task := range detail.Plan.Tasks {
+			items = append(items, buildImplementationTaskItem(*detail, task, round, taskSummaryByID))
+		}
+		for _, cycle := range reviewCyclesByRound[round] {
 			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, "Implementation review "+fmt.Sprint(max(1, cycle.Index)), cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
 		}
 	}
-	for _, task := range detail.Plan.Tasks {
-		runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
-		state := planTaskRuntimeState(*detail, task.ID)
-		summary := taskSummaryByID[runtimeID]
-		if strings.TrimSpace(summary.Status) != "" {
-			state = summary.Status
-		}
-		items = append(items, kitchenTUITaskItem{
-			ID:          task.ID,
-			RuntimeID:   runtimeID,
-			Kind:        "implementation",
-			Title:       firstNonEmpty(task.Title, task.ID),
-			State:       state,
-			WorkerID:    summary.WorkerID,
-			Complexity:  string(task.Complexity),
-			Prompt:      task.Prompt,
-			Summary:     summarizeTaskHistory(detail.History, runtimeID),
-			HasConflict: summary.HasConflict,
-		})
-	}
 	return items
+}
+
+type executionRoundInfo struct {
+	ReviewRequested       bool
+	MaxExplicitReviewTurn int
+	MaxTerminalReviewTurn int
+}
+
+type reviewCycleIndex struct {
+	turns  []int
+	byTurn map[int]PlanCycleProgress
+}
+
+func planExecutionRounds(detail PlanDetail) (int, map[int][]PlanCycleProgress) {
+	roundCount := 1
+	currentRound := 1
+	reviewSeenInRound := false
+	rounds := map[int]*executionRoundInfo{
+		1: {},
+	}
+
+	for _, entry := range detail.History {
+		switch strings.TrimSpace(entry.Type) {
+		case planHistoryImplReviewRequested:
+			rounds[currentRound].ReviewRequested = true
+			reviewSeenInRound = true
+		case planHistoryReviewCouncilTurnCompleted:
+			turn := reviewTurnForHistoryEntry(detail.Plan.PlanID, entry)
+			if turn > rounds[currentRound].MaxExplicitReviewTurn {
+				rounds[currentRound].MaxExplicitReviewTurn = turn
+			}
+			if turn > 0 {
+				reviewSeenInRound = true
+			}
+		case planHistoryImplReviewPassed, planHistoryImplReviewFailed:
+			turn := reviewTurnForHistoryEntry(detail.Plan.PlanID, entry)
+			if turn > rounds[currentRound].MaxExplicitReviewTurn {
+				rounds[currentRound].MaxExplicitReviewTurn = turn
+			}
+			if turn > rounds[currentRound].MaxTerminalReviewTurn {
+				rounds[currentRound].MaxTerminalReviewTurn = turn
+			}
+			if turn > 0 {
+				reviewSeenInRound = true
+			}
+		case planHistoryManualRetried, planHistoryConflictRetried:
+			if reviewSeenInRound && isImplementationTaskRuntimeID(detail.Plan.PlanID, entry.TaskID) {
+				currentRound++
+				if currentRound > roundCount {
+					roundCount = currentRound
+				}
+				if _, ok := rounds[currentRound]; !ok {
+					rounds[currentRound] = &executionRoundInfo{}
+				}
+				reviewSeenInRound = false
+			}
+		}
+	}
+
+	reviews := reviewCyclesByTurn(detail.Progress.Cycles)
+	grouped := make(map[int][]PlanCycleProgress)
+	if len(reviews.turns) == 0 {
+		return roundCount, grouped
+	}
+
+	reviewRounds := make([]int, 0, roundCount)
+	for round := 1; round <= roundCount; round++ {
+		info, ok := rounds[round]
+		if !ok {
+			info = &executionRoundInfo{}
+			rounds[round] = info
+		}
+		if info.ReviewRequested || info.MaxExplicitReviewTurn > 0 {
+			reviewRounds = append(reviewRounds, round)
+		}
+	}
+	if len(reviewRounds) == 0 {
+		reviewRounds = append(reviewRounds, 1)
+	}
+
+	nextTurn := 0
+	for idx, round := range reviewRounds {
+		info := rounds[round]
+		for nextTurn < len(reviews.turns) && reviews.turns[nextTurn] <= info.MaxExplicitReviewTurn {
+			turn := reviews.turns[nextTurn]
+			grouped[round] = append(grouped[round], reviews.byTurn[turn])
+			nextTurn++
+		}
+		if idx == len(reviewRounds)-1 {
+			for nextTurn < len(reviews.turns) {
+				turn := reviews.turns[nextTurn]
+				grouped[round] = append(grouped[round], reviews.byTurn[turn])
+				nextTurn++
+			}
+			continue
+		}
+		remainingRounds := len(reviewRounds) - idx - 1
+		if info.MaxTerminalReviewTurn == 0 && nextTurn < len(reviews.turns) && len(reviews.turns)-nextTurn > remainingRounds {
+			turn := reviews.turns[nextTurn]
+			grouped[round] = append(grouped[round], reviews.byTurn[turn])
+			nextTurn++
+		}
+	}
+
+	return roundCount, grouped
+}
+
+func reviewCyclesByTurn(cycles []PlanCycleProgress) reviewCycleIndex {
+	index := reviewCycleIndex{byTurn: make(map[int]PlanCycleProgress)}
+	for _, cycle := range cycles {
+		if strings.TrimSpace(cycle.ImplReviewTaskID) == "" {
+			continue
+		}
+		turn := max(1, cycle.Index)
+		index.turns = append(index.turns, turn)
+		index.byTurn[turn] = cycle
+	}
+	sort.Ints(index.turns)
+	return index
+}
+
+func reviewTurnForHistoryEntry(planID string, entry PlanHistoryEntry) int {
+	if entry.Cycle > 0 {
+		return entry.Cycle
+	}
+	return reviewCouncilTurnNumberFromTaskID(planID, entry.TaskID)
+}
+
+func isImplementationTaskRuntimeID(planID, taskID string) bool {
+	planID = strings.TrimSpace(planID)
+	taskID = strings.TrimSpace(taskID)
+	if planID == "" || taskID == "" {
+		return false
+	}
+	if !strings.HasPrefix(taskID, planID+"-") {
+		return false
+	}
+	return councilTurnNumberFromTaskID(planID, taskID) == 0 && reviewCouncilTurnNumberFromTaskID(planID, taskID) == 0
+}
+
+func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, taskSummaryByID map[string]pool.TaskSummary) kitchenTUITaskItem {
+	runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
+	state := planTaskRuntimeState(detail, task.ID)
+	summary := taskSummaryByID[runtimeID]
+	if strings.TrimSpace(summary.Status) != "" {
+		state = summary.Status
+	}
+	return kitchenTUITaskItem{
+		ID:          task.ID,
+		RuntimeID:   runtimeID,
+		RowKey:      fmt.Sprintf("%s#round-%d", runtimeID, max(1, round)),
+		Kind:        "implementation",
+		Title:       firstNonEmpty(task.Title, task.ID),
+		State:       state,
+		WorkerID:    summary.WorkerID,
+		Complexity:  string(task.Complexity),
+		Prompt:      task.Prompt,
+		Summary:     summarizeTaskHistory(detail.History, runtimeID),
+		HasConflict: summary.HasConflict,
+	}
 }
 
 func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskSummary) kitchenTUITaskItem {
@@ -2324,6 +2511,7 @@ func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskS
 	return kitchenTUITaskItem{
 		ID:        runtimeID,
 		RuntimeID: runtimeID,
+		RowKey:    runtimeID,
 		Kind:      kind,
 		Title:     title,
 		State:     state,

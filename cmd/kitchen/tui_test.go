@@ -1744,6 +1744,141 @@ func TestBuildTaskItemsIncludesImplementationReviewCycle(t *testing.T) {
 	}
 }
 
+func TestBuildTaskItemsOrdersPlanningImplementationAndReviewPhases(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID: "plan_phase_order",
+			Tasks: []PlanTask{
+				{ID: "task-b", Title: "Task B", Complexity: ComplexityMedium},
+				{ID: "task-a", Title: "Task A", Complexity: ComplexityLow},
+			},
+		},
+		Progress: PlanProgress{
+			Cycles: []PlanCycleProgress{
+				{
+					Index:            1,
+					PlannerTaskID:    "plan_phase_order-council-1",
+					PlannerTaskState: pool.TaskCompleted,
+				},
+				{
+					Index:               1,
+					ImplReviewTaskID:    "plan_phase_order-impl-review-1",
+					ImplReviewTaskState: pool.TaskQueued,
+				},
+			},
+		},
+		History: []PlanHistoryEntry{{
+			Type: planHistoryImplReviewRequested,
+		}},
+	}
+
+	items := buildTaskItems(detail, tuiStatusSnapshot{})
+	if len(items) != 4 {
+		t.Fatalf("items = %+v, want planner, two implementation tasks, and implementation review", items)
+	}
+
+	gotKinds := []string{items[0].Kind, items[1].Kind, items[2].Kind, items[3].Kind}
+	wantKinds := []string{"planner", "implementation", "implementation", "implementation-review"}
+	if strings.Join(gotKinds, ",") != strings.Join(wantKinds, ",") {
+		t.Fatalf("kinds = %v, want %v", gotKinds, wantKinds)
+	}
+
+	gotRuntimeIDs := []string{items[1].RuntimeID, items[2].RuntimeID, items[3].RuntimeID}
+	wantRuntimeIDs := []string{
+		planTaskRuntimeID("plan_phase_order", "task-b"),
+		planTaskRuntimeID("plan_phase_order", "task-a"),
+		"plan_phase_order-impl-review-1",
+	}
+	if strings.Join(gotRuntimeIDs, ",") != strings.Join(wantRuntimeIDs, ",") {
+		t.Fatalf("runtimeIDs = %v, want %v", gotRuntimeIDs, wantRuntimeIDs)
+	}
+}
+
+func TestBuildTaskItemsInterleavesRepeatedImplementationAndReviewRounds(t *testing.T) {
+	planID := "plan_rounds"
+	taskOneRuntimeID := planTaskRuntimeID(planID, "task-1")
+	taskTwoRuntimeID := planTaskRuntimeID(planID, "task-2")
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID: planID,
+			Tasks: []PlanTask{
+				{ID: "task-1", Title: "Task 1", Complexity: ComplexityMedium},
+				{ID: "task-2", Title: "Task 2", Complexity: ComplexityLow},
+			},
+		},
+		Progress: PlanProgress{
+			Cycles: []PlanCycleProgress{
+				{
+					Index:               1,
+					ImplReviewTaskID:    reviewCouncilTaskID(planID, 1),
+					ImplReviewTaskState: pool.TaskFailed,
+				},
+				{
+					Index:               2,
+					ImplReviewTaskID:    reviewCouncilTaskID(planID, 2),
+					ImplReviewTaskState: pool.TaskQueued,
+				},
+			},
+		},
+		History: []PlanHistoryEntry{
+			{Type: planHistoryImplReviewRequested},
+			{Type: planHistoryImplReviewFailed, Cycle: 1, TaskID: reviewCouncilTaskID(planID, 1)},
+			{Type: planHistoryManualRetried, TaskID: taskOneRuntimeID},
+			{Type: planHistoryImplReviewRequested},
+			{Type: planHistoryReviewCouncilStarted},
+		},
+	}
+
+	items := buildTaskItems(detail, tuiStatusSnapshot{})
+	if len(items) != 6 {
+		t.Fatalf("items = %+v, want two implementation blocks and two implementation reviews", items)
+	}
+
+	gotKinds := []string{
+		items[0].Kind,
+		items[1].Kind,
+		items[2].Kind,
+		items[3].Kind,
+		items[4].Kind,
+		items[5].Kind,
+	}
+	wantKinds := []string{
+		"implementation",
+		"implementation",
+		"implementation-review",
+		"implementation",
+		"implementation",
+		"implementation-review",
+	}
+	if strings.Join(gotKinds, ",") != strings.Join(wantKinds, ",") {
+		t.Fatalf("kinds = %v, want %v", gotKinds, wantKinds)
+	}
+
+	gotRuntimeIDs := []string{
+		items[0].RuntimeID,
+		items[1].RuntimeID,
+		items[2].RuntimeID,
+		items[3].RuntimeID,
+		items[4].RuntimeID,
+		items[5].RuntimeID,
+	}
+	wantRuntimeIDs := []string{
+		taskOneRuntimeID,
+		taskTwoRuntimeID,
+		reviewCouncilTaskID(planID, 1),
+		taskOneRuntimeID,
+		taskTwoRuntimeID,
+		reviewCouncilTaskID(planID, 2),
+	}
+	if strings.Join(gotRuntimeIDs, ",") != strings.Join(wantRuntimeIDs, ",") {
+		t.Fatalf("runtimeIDs = %v, want %v", gotRuntimeIDs, wantRuntimeIDs)
+	}
+
+	if items[0].RowKey == items[3].RowKey {
+		t.Fatalf("row keys = %q and %q, want round-specific task row identity", items[0].RowKey, items[3].RowKey)
+	}
+}
+
 // TestKitchenTUIRenderPlansPaneBadge verifies that plans with pending questions show a
 // [N?] badge and plans without questions do not.
 func TestKitchenTUIRenderPlansPaneBadge(t *testing.T) {
