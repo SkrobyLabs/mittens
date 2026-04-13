@@ -419,7 +419,9 @@ func TestKitchenCancelActivePlanCancelsRuntimeTasks(t *testing.T) {
 	}
 }
 
-func TestKitchenValidatePlanRejectsConflictingActiveLineage(t *testing.T) {
+func TestKitchenValidatePlanAllowsConflictingLineage(t *testing.T) {
+	// Structural validation no longer checks lineage occupancy —
+	// that check moved to the activation path (activatePlanImpl).
 	k := newTestKitchen(t)
 	if err := k.lineageMgr.ActivatePlan("parser-errors", "plan_existing"); err != nil {
 		t.Fatalf("ActivatePlan: %v", err)
@@ -437,8 +439,8 @@ func TestKitchenValidatePlanRejectsConflictingActiveLineage(t *testing.T) {
 			},
 		},
 	})
-	if err == nil {
-		t.Fatal("expected active lineage conflict")
+	if err != nil {
+		t.Fatalf("ValidatePlan should not check lineage occupancy: %v", err)
 	}
 }
 
@@ -519,6 +521,559 @@ func TestKitchenQuestionAnswerAndUnhelpfulFlow(t *testing.T) {
 	}
 	if bundle.Affinity.LastQuestionID != questionID {
 		t.Fatalf("last question = %q, want %q", bundle.Affinity.LastQuestionID, questionID)
+	}
+}
+
+// --------------- DependsOn tests ---------------
+
+func TestValidatePlanDependsOnRejectsSelfDependency(t *testing.T) {
+	err := validatePlanDependsOn(PlanRecord{
+		PlanID:    "plan_abc",
+		DependsOn: []string{"plan_abc"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot depend on itself") {
+		t.Fatalf("expected self-dependency error, got: %v", err)
+	}
+}
+
+func TestValidatePlanDependsOnRejectsDuplicates(t *testing.T) {
+	err := validatePlanDependsOn(PlanRecord{
+		PlanID:    "plan_abc",
+		DependsOn: []string{"plan_dep1", "plan_dep1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected duplicate error, got: %v", err)
+	}
+}
+
+func TestValidatePlanDependsOnRejectsEmpty(t *testing.T) {
+	err := validatePlanDependsOn(PlanRecord{
+		PlanID:    "plan_abc",
+		DependsOn: []string{""},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("expected empty dep error, got: %v", err)
+	}
+}
+
+func TestValidatePlanDependsOnAcceptsValid(t *testing.T) {
+	err := validatePlanDependsOn(PlanRecord{
+		PlanID:    "plan_abc",
+		DependsOn: []string{"plan_dep1", "plan_dep2"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestApproveWithUnmetDepsYieldsWaiting(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create an unmerged dependency plan.
+	depPlanID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep",
+			Lineage: "dep-lineage",
+			Title:   "Dependency plan",
+			State:   planStateActive,
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "Work", Prompt: "do work", Complexity: ComplexityLow},
+			},
+		},
+		Execution: ExecutionRecord{State: planStateActive},
+	})
+	if err != nil {
+		t.Fatalf("Create dep plan: %v", err)
+	}
+
+	// Submit the dependent plan.
+	bundle, err := k.SubmitIdea("Dependent work", "dependent-lineage", false, false, depPlanID)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Dependent work",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "Implement", Prompt: "Implement dependent work.",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	// Approve — dependency is not merged, should enter waiting state.
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateWaitingOnDependency {
+		t.Fatalf("state = %q, want %q", got.Execution.State, planStateWaitingOnDependency)
+	}
+	if !got.Execution.Approved {
+		t.Fatal("expected Approved=true")
+	}
+	if got.Execution.ApprovedAt == nil {
+		t.Fatal("expected ApprovedAt to be set")
+	}
+	if got.Execution.ActivatedAt != nil {
+		t.Fatal("expected ActivatedAt to be nil")
+	}
+	// Must not have enqueued implementation tasks.
+	runtimeID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, ok := k.pm.Task(runtimeID); ok {
+		t.Fatalf("implementation task %s should not exist yet", runtimeID)
+	}
+	// Must not have seized the lineage.
+	if activePlan, _ := k.lineageMgr.ActivePlan(got.Plan.Lineage); activePlan == bundle.Plan.PlanID {
+		t.Fatal("waiting plan should not seize lineage")
+	}
+}
+
+func TestApproveWithSatisfiedDepsActivatesNormally(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create a merged dependency plan.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_merged",
+			Lineage: "dep-lineage",
+			Title:   "Dependency plan",
+			State:   planStateMerged,
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "Work", Prompt: "do work", Complexity: ComplexityLow},
+			},
+		},
+		Execution: ExecutionRecord{State: planStateMerged},
+	})
+	if err != nil {
+		t.Fatalf("Create dep plan: %v", err)
+	}
+
+	// Submit the dependent plan.
+	bundle, err := k.SubmitIdea("Dependent work", "dependent-lineage-2", false, false, "plan_dep_merged")
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Dependent work",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "Implement", Prompt: "Implement dependent work.",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateActive {
+		t.Fatalf("state = %q, want %q", got.Execution.State, planStateActive)
+	}
+	if got.Execution.ActivatedAt == nil {
+		t.Fatal("expected ActivatedAt to be set")
+	}
+	// Implementation task should be enqueued.
+	runtimeID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, ok := k.pm.Task(runtimeID); !ok {
+		t.Fatalf("implementation task %s not found", runtimeID)
+	}
+}
+
+func TestWaitingPlanAutoActivatesAfterDependencyMerge(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create the dependency plan (not yet merged).
+	depPlanID := "plan_dep_later"
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  depPlanID,
+			Lineage: "dep-lineage-3",
+			Title:   "Dependency plan",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "Work", Prompt: "do work", Complexity: ComplexityLow},
+			},
+		},
+		Execution: ExecutionRecord{State: planStateCompleted},
+	})
+	if err != nil {
+		t.Fatalf("Create dep plan: %v", err)
+	}
+
+	// Submit and approve the dependent plan — should enter waiting.
+	bundle, err := k.SubmitIdea("Later dependent work", "dependent-lineage-3", false, false, depPlanID)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Later dependent work",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "Implement", Prompt: "Implement.",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateWaitingOnDependency {
+		t.Fatalf("state = %q, want %q", got.Execution.State, planStateWaitingOnDependency)
+	}
+
+	// Now mark the dependency as merged.
+	depBundle, _ := k.planStore.Get(depPlanID)
+	depBundle.Plan.State = planStateMerged
+	depBundle.Execution.State = planStateMerged
+	if err := k.planStore.UpdatePlan(depBundle.Plan); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	if err := k.planStore.UpdateExecution(depPlanID, depBundle.Execution); err != nil {
+		t.Fatalf("UpdateExecution: %v", err)
+	}
+
+	// Trigger waiting plan recovery (simulates post-merge scan).
+	k.activateWaitingPlans()
+
+	got, err = k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan after activation: %v", err)
+	}
+	if got.Execution.State != planStateActive {
+		t.Fatalf("state after activation = %q, want %q", got.Execution.State, planStateActive)
+	}
+	if got.Execution.ActivatedAt == nil {
+		t.Fatal("expected ActivatedAt to be set after activation")
+	}
+}
+
+func TestWaitingPlanWithBusyLineageStaysWaitingWithoutError(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create merged dependency.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_busylineage",
+			Lineage: "dep-lineage-4",
+			Title:   "Dependency",
+			State:   planStateMerged,
+			Tasks:   []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateMerged},
+	})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+
+	// Occupy the lineage with another plan.
+	if err := k.lineageMgr.ActivatePlan("dependent-lineage-4", "plan_blocker"); err != nil {
+		t.Fatalf("ActivatePlan(blocker): %v", err)
+	}
+
+	// Create a waiting plan on the same lineage.
+	waitingPlanID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:    "plan_waiting_busy",
+			Lineage:   "dependent-lineage-4",
+			Title:     "Waiting plan",
+			DependsOn: []string{"plan_dep_busylineage"},
+			State:     planStateWaitingOnDependency,
+			Tasks:     []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{
+			State:    planStateWaitingOnDependency,
+			Approved: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create waiting plan: %v", err)
+	}
+
+	// Trigger recovery — should silently stay waiting (lineage busy).
+	k.activateWaitingPlans()
+
+	got, err := k.GetPlan(waitingPlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateWaitingOnDependency {
+		t.Fatalf("state = %q, want %q (lineage busy)", got.Execution.State, planStateWaitingOnDependency)
+	}
+}
+
+func TestStartupRecoveryReattemptsWaitingPlans(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create merged dependency.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_startup",
+			Lineage: "dep-startup",
+			Title:   "Dependency",
+			State:   planStateMerged,
+			Tasks:   []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateMerged},
+	})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+
+	// Create a waiting plan.
+	waitingPlanID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:    "plan_waiting_startup",
+			Lineage:   "startup-lineage",
+			Title:     "Startup waiting plan",
+			DependsOn: []string{"plan_dep_startup"},
+			State:     planStateWaitingOnDependency,
+			Tasks:     []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{
+			State:    planStateWaitingOnDependency,
+			Approved: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create waiting plan: %v", err)
+	}
+
+	// Simulate scheduler startup recovery via activatePlan callback.
+	gitMgr, _ := k.gitManager()
+	s := NewScheduler(k.pm, &schedulerHostAPI{}, k.router, gitMgr, k.planStore, k.lineageMgr, k.cfg.Concurrency, "kitchen-test")
+	s.activatePlan = k.ApprovePlan
+	s.recoverWaitingPlansOnStartup()
+
+	got, err := k.GetPlan(waitingPlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateActive {
+		t.Fatalf("state = %q, want %q after startup recovery", got.Execution.State, planStateActive)
+	}
+}
+
+func TestReplanPreservesDependsOn(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create merged dependency.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_replan",
+			Lineage: "dep-replan",
+			Title:   "Dependency",
+			State:   planStateMerged,
+			Tasks:   []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateMerged},
+	})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+
+	// Submit plan with dependency.
+	bundle, err := k.SubmitIdea("Replan with deps", "replan-dep-lineage", false, false, "plan_dep_replan")
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Replan with deps",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "W", Prompt: "w",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	// Replan — should preserve DependsOn.
+	newPlanID, err := k.Replan(bundle.Plan.PlanID, "needs revision")
+	if err != nil {
+		t.Fatalf("Replan: %v", err)
+	}
+
+	// The replan path for plans with tasks creates a new plan copying the old one.
+	// Since the old plan had tasks, the new plan should inherit DependsOn.
+	newBundle, err := k.GetPlan(newPlanID)
+	if err != nil {
+		t.Fatalf("GetPlan(new): %v", err)
+	}
+	if len(newBundle.Plan.DependsOn) != 1 || newBundle.Plan.DependsOn[0] != "plan_dep_replan" {
+		t.Fatalf("DependsOn = %+v, want [plan_dep_replan]", newBundle.Plan.DependsOn)
+	}
+}
+
+func TestApproveAPIReturnsWaitingState(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create unmerged dependency.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_api",
+			Lineage: "dep-api",
+			Title:   "Dependency",
+			State:   planStateActive,
+			Tasks:   []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateActive},
+	})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+
+	bundle, err := k.SubmitIdea("API waiting", "api-dep-lineage", false, false, "plan_dep_api")
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "API waiting",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "W", Prompt: "w",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+	// Re-read to verify the API would return the correct state.
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateWaitingOnDependency {
+		t.Fatalf("state = %q, want %q", got.Execution.State, planStateWaitingOnDependency)
+	}
+}
+
+func TestPlanProgressRecognizesWaitingState(t *testing.T) {
+	k := newTestKitchen(t)
+
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:    "plan_progress_waiting",
+			Lineage:   "progress-lineage",
+			Title:     "Waiting plan",
+			DependsOn: []string{"plan_nonexistent"},
+			State:     planStateWaitingOnDependency,
+			Tasks:     []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{
+			State:    planStateWaitingOnDependency,
+			Approved: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	bundle, _ := k.GetPlan("plan_progress_waiting")
+	progress, err := k.planProgress(bundle)
+	if err != nil {
+		t.Fatalf("planProgress: %v", err)
+	}
+	if progress.Phase != planStateWaitingOnDependency {
+		t.Fatalf("phase = %q, want %q", progress.Phase, planStateWaitingOnDependency)
+	}
+	if len(progress.DependsOn) != 1 || progress.DependsOn[0] != "plan_nonexistent" {
+		t.Fatalf("DependsOn = %+v, want [plan_nonexistent]", progress.DependsOn)
+	}
+
+	// Verify it appears in open plans.
+	open, err := k.OpenPlanProgress()
+	if err != nil {
+		t.Fatalf("OpenPlanProgress: %v", err)
+	}
+	found := false
+	for _, p := range open {
+		if p.PlanID == "plan_progress_waiting" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("waiting plan should appear in open plan progress")
+	}
+}
+
+func TestSubmitIdeaWithDependsOnPersists(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Test deps persist", "deps-persist", false, false, "plan_a", "plan_b")
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if len(got.Plan.DependsOn) != 2 || got.Plan.DependsOn[0] != "plan_a" || got.Plan.DependsOn[1] != "plan_b" {
+		t.Fatalf("DependsOn = %+v, want [plan_a, plan_b]", got.Plan.DependsOn)
+	}
+}
+
+func TestApproveWaitingPlanIdempotent(t *testing.T) {
+	k := newTestKitchen(t)
+
+	// Create unmerged dependency.
+	_, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_idem",
+			Lineage: "dep-idem",
+			Title:   "Dependency",
+			State:   planStateActive,
+			Tasks:   []PlanTask{{ID: "t1", Title: "W", Prompt: "w", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateActive},
+	})
+	if err != nil {
+		t.Fatalf("Create dep: %v", err)
+	}
+
+	bundle, err := k.SubmitIdea("Idempotent approve", "idem-lineage", false, false, "plan_dep_idem")
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, adapter.PlanArtifact{
+		Title: "Idempotent approve",
+		Tasks: []adapter.PlanArtifactTask{{
+			ID: "t1", Title: "W", Prompt: "w",
+			Complexity: string(ComplexityMedium), ReviewComplexity: string(ComplexityMedium),
+		}},
+	})
+
+	// First approve -> waiting.
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan(1): %v", err)
+	}
+	first, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan(first): %v", err)
+	}
+	// Second approve (re-entry) -> still waiting (deps still unmet), no error.
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan(2): %v", err)
+	}
+	got, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got.Execution.State != planStateWaitingOnDependency {
+		t.Fatalf("state = %q, want %q", got.Execution.State, planStateWaitingOnDependency)
+	}
+	if !got.Plan.UpdatedAt.Equal(first.Plan.UpdatedAt) {
+		t.Fatalf("plan UpdatedAt changed on idempotent re-approve: first=%s second=%s", first.Plan.UpdatedAt, got.Plan.UpdatedAt)
+	}
+	if !got.Execution.UpdatedAt.Equal(first.Execution.UpdatedAt) {
+		t.Fatalf("execution UpdatedAt changed on idempotent re-approve: first=%s second=%s", first.Execution.UpdatedAt, got.Execution.UpdatedAt)
 	}
 }
 

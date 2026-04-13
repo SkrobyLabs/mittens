@@ -56,6 +56,10 @@ func kitchenCapabilities() map[string]any {
 						"type":    "string",
 						"default": "current",
 					},
+					"dependsOn": map[string]any{
+						"type":     "string[]",
+						"repeated": true,
+					},
 					"auto": map[string]any{
 						"type":    "bool",
 						"default": false,
@@ -194,7 +198,7 @@ func kitchenCapabilities() map[string]any {
 				},
 			},
 			"historyPersistence": true,
-			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "active", "planning_failed", "completed", "merged", "closed", "rejected"},
+			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "waiting_on_dependency", "active", "planning_failed", "implementation_review_failed", "completed", "merged", "closed", "rejected"},
 		},
 		"git": map[string]any{
 			"lineageMerge":      true,

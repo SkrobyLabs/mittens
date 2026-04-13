@@ -128,16 +128,17 @@ func apiErrorStatus(err error) int {
 
 func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Idea       string `json:"idea"`
-		Lineage    string `json:"lineage"`
-		Auto       bool   `json:"auto"`
-		ImplReview bool   `json:"implReview"`
-		AnchorRef  string `json:"anchorRef"`
+		Idea       string   `json:"idea"`
+		Lineage    string   `json:"lineage"`
+		Auto       bool     `json:"auto"`
+		ImplReview bool     `json:"implReview"`
+		AnchorRef  string   `json:"anchorRef"`
+		DependsOn  []string `json:"dependsOn"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
 	}
-	bundle, err := k.SubmitIdeaAt(req.Idea, req.Lineage, req.Auto, req.ImplReview, req.AnchorRef)
+	bundle, err := k.SubmitIdeaAt(req.Idea, req.Lineage, req.Auto, req.ImplReview, req.AnchorRef, req.DependsOn...)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
@@ -355,11 +356,18 @@ func (k *Kitchen) handleReplanPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (k *Kitchen) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
-	if err := k.ApprovePlan(r.PathValue("id")); err != nil {
+	planID := r.PathValue("id")
+	if err := k.ApprovePlan(planID); err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
-	writeAPIJSON(w, http.StatusOK, map[string]string{"status": planStateActive})
+	// Re-read the plan to return the actual resulting state, which may
+	// be "active" or "waiting_on_dependency".
+	resultState := planStateActive
+	if bundle, err := k.planStore.Get(planID); err == nil {
+		resultState = bundle.Execution.State
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"status": resultState})
 }
 
 func (k *Kitchen) handleInvalidateAffinity(w http.ResponseWriter, r *http.Request) {

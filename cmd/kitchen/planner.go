@@ -24,16 +24,17 @@ const (
 	planStateMerged                     = "merged"
 	planStateClosed                     = "closed"
 	planStateRejected                   = "rejected"
+	planStateWaitingOnDependency        = "waiting_on_dependency"
 
 	planReviewStatusPassed = "passed"
 	planReviewStatusFailed = "failed"
 )
 
-func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool) (*StoredPlan, error) {
-	return k.SubmitIdeaAt(idea, lineage, auto, implReview, "")
+func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool, dependsOn ...string) (*StoredPlan, error) {
+	return k.SubmitIdeaAt(idea, lineage, auto, implReview, "", dependsOn...)
 }
 
-func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, anchorRef string) (*StoredPlan, error) {
+func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, anchorRef string, dependsOn ...string) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
@@ -57,14 +58,26 @@ func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implRevie
 	planID := generatePlanID(title)
 	planningTaskID := councilTaskID(planID, 1)
 
+	// Normalize and deduplicate plan-level dependencies.
+	var cleanDeps []string
+	seen := make(map[string]bool)
+	for _, dep := range dependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep != "" && !seen[dep] {
+			seen[dep] = true
+			cleanDeps = append(cleanDeps, dep)
+		}
+	}
+
 	plan := PlanRecord{
-		PlanID:  planID,
-		Source:  "operator",
-		Anchor:  anchor,
-		Lineage: lineage,
-		Title:   title,
-		Summary: idea,
-		State:   planStatePlanning,
+		PlanID:    planID,
+		Source:    "operator",
+		Anchor:    anchor,
+		Lineage:   lineage,
+		Title:     title,
+		Summary:   idea,
+		DependsOn: cleanDeps,
+		State:     planStatePlanning,
 	}
 
 	execution := ExecutionRecord{
@@ -178,14 +191,28 @@ func validatePlanRecord(plan PlanRecord, lineageMgr *LineageManager) error {
 		return err
 	}
 
-	if lineageMgr != nil {
-		activePlan, err := lineageMgr.ActivePlan(plan.Lineage)
-		switch {
-		case err == nil && activePlan != "" && activePlan != plan.PlanID:
-			return fmt.Errorf("lineage %s already has active plan %s", plan.Lineage, activePlan)
-		case err != nil && !os.IsNotExist(err):
-			return err
+	if err := validatePlanDependsOn(plan); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePlanDependsOn rejects empty/whitespace dependency IDs,
+// self-dependency, and duplicates in PlanRecord.DependsOn.
+func validatePlanDependsOn(plan PlanRecord) error {
+	seen := make(map[string]bool, len(plan.DependsOn))
+	for _, dep := range plan.DependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			return fmt.Errorf("plan dependency ID must not be empty")
 		}
+		if dep == plan.PlanID {
+			return fmt.Errorf("plan %s cannot depend on itself", plan.PlanID)
+		}
+		if seen[dep] {
+			return fmt.Errorf("duplicate plan dependency %q", dep)
+		}
+		seen[dep] = true
 	}
 	return nil
 }
@@ -198,29 +225,71 @@ func (k *Kitchen) ApprovePlan(planID string) error {
 	if err != nil {
 		return err
 	}
-	if bundle.Execution.State == planStateRejected {
+
+	// Hard errors: states that cannot transition to approval.
+	switch bundle.Execution.State {
+	case planStateRejected:
 		return fmt.Errorf("plan %s has been rejected", planID)
-	}
-	if bundle.Execution.State == planStatePlanning {
+	case planStatePlanning:
 		return fmt.Errorf("plan %s is still planning", planID)
-	}
-	if bundle.Execution.State == planStateReviewing {
+	case planStateReviewing:
 		return fmt.Errorf("plan %s is still under review", planID)
-	}
-	if bundle.Execution.State == planStatePlanningFailed {
+	case planStatePlanningFailed:
 		return fmt.Errorf("plan %s planning failed", planID)
+	case planStateActive:
+		return nil // already active, idempotent
 	}
-	if bundle.Execution.State == planStateActive {
-		return nil
-	}
+
 	if pending := pendingQuestionsForPlan(k.pm, planID); len(pending) > 0 {
 		return fmt.Errorf("plan %s has %d pending questions", planID, len(pending))
 	}
 	if err := k.ValidatePlan(bundle.Plan); err != nil {
 		return err
 	}
+
+	// Mark as approved if not already.
+	now := time.Now().UTC()
+	if !bundle.Execution.Approved {
+		bundle.Execution.Approved = true
+		bundle.Execution.ApprovedAt = &now
+	}
+
+	depsMet, _ := k.planDependenciesMet(bundle.Plan)
+	if !depsMet {
+		if bundle.Execution.State == planStateWaitingOnDependency && bundle.Execution.Approved && bundle.Execution.ApprovedAt != nil {
+			return nil
+		}
+		bundle.Plan.State = planStateWaitingOnDependency
+		bundle.Execution.State = planStateWaitingOnDependency
+		bundle.Execution.Branch = lineageBranchName(bundle.Plan.Lineage)
+		bundle.Execution.Anchor = bundle.Plan.Anchor
+		if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+			return err
+		}
+		if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+			return err
+		}
+		k.sendNotify(pool.Notification{Type: "plan_waiting_on_dependency", ID: planID, Message: bundle.Plan.Title})
+		return nil
+	}
+
+	return k.activatePlanImpl(bundle)
+}
+
+// activatePlanImpl performs the actual runtime activation of a plan:
+// claims lineage, enqueues tasks, and transitions to active state.
+// Called from ApprovePlan (when deps are met) and from recovery paths.
+func (k *Kitchen) activatePlanImpl(bundle StoredPlan) error {
+	planID := bundle.Plan.PlanID
+
+	// Claim lineage. Waiting plans stay queued for a later retry if the
+	// lineage is still busy; fresh approvals surface the activation error.
 	if k.lineageMgr != nil {
 		if err := k.lineageMgr.ActivatePlan(bundle.Plan.Lineage, planID); err != nil {
+			if bundle.Execution.State == planStateWaitingOnDependency {
+				// Lineage busy — stay waiting, no error spam.
+				return nil
+			}
 			return err
 		}
 	}
@@ -273,6 +342,60 @@ func (k *Kitchen) ApprovePlan(planID string) error {
 	}
 	k.sendNotify(pool.Notification{Type: "plan_approved", ID: planID, Message: bundle.Plan.Title})
 	return nil
+}
+
+// planDependenciesMet returns true if all plans in DependsOn are merged.
+// Missing dependency plan IDs are returned so callers can surface them.
+func (k *Kitchen) planDependenciesMet(plan PlanRecord) (bool, []string) {
+	if len(plan.DependsOn) == 0 {
+		return true, nil
+	}
+	var missing []string
+	for _, depID := range plan.DependsOn {
+		depID = strings.TrimSpace(depID)
+		if depID == "" {
+			continue
+		}
+		dep, err := k.planStore.Get(depID)
+		if err != nil {
+			missing = append(missing, depID)
+			continue
+		}
+		if dep.Plan.State != planStateMerged {
+			return false, missing
+		}
+	}
+	return len(missing) == 0, missing
+}
+
+// activateWaitingPlans scans all waiting_on_dependency plans and attempts
+// activation for those whose dependencies are now met. Called after merge
+// and on startup.
+func (k *Kitchen) activateWaitingPlans() {
+	if k == nil || k.planStore == nil {
+		return
+	}
+	plans, err := k.planStore.List()
+	if err != nil {
+		return
+	}
+	for _, plan := range plans {
+		if plan.State != planStateWaitingOnDependency {
+			continue
+		}
+		if depsMet, _ := k.planDependenciesMet(plan); !depsMet {
+			continue
+		}
+		bundle, err := k.planStore.Get(plan.PlanID)
+		if err != nil {
+			continue
+		}
+		if err := k.activatePlanImpl(bundle); err != nil {
+			// Best-effort recovery — activation will be retried on
+			// the next merge or scheduler tick.
+			_ = err
+		}
+	}
 }
 
 func (k *Kitchen) RejectPlan(planID string) error {
@@ -886,7 +1009,7 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 		newPlan.Summary += "Replan requested: " + reason
 	}
 	if len(newPlan.Tasks) == 0 {
-		replanned, err := k.SubmitIdea(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested)
+		replanned, err := k.SubmitIdeaAt(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested, preferredAnchorRef(newPlan.Anchor), bundle.Plan.DependsOn...)
 		if err != nil {
 			return "", err
 		}
@@ -1204,6 +1327,13 @@ func (k *Kitchen) baseBranchForLineage(lineage string) string {
 		return anchor.Branch
 	}
 	return "main"
+}
+
+func preferredAnchorRef(anchor PlanAnchor) string {
+	if strings.TrimSpace(anchor.Commit) != "" {
+		return strings.TrimSpace(anchor.Commit)
+	}
+	return strings.TrimSpace(anchor.Branch)
 }
 
 func (k *Kitchen) currentAnchor() (PlanAnchor, error) {

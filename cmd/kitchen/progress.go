@@ -28,6 +28,7 @@ type PlanProgress struct {
 	Title                       string              `json:"title,omitempty"`
 	State                       string              `json:"state,omitempty"`
 	Phase                       string              `json:"phase,omitempty"`
+	DependsOn                   []string            `json:"dependsOn,omitempty"`
 	ImplReviewRequested         bool                `json:"implReviewRequested,omitempty"`
 	ImplReviewStatus            string              `json:"implReviewStatus,omitempty"`
 	ImplReviewFindings          []string            `json:"implReviewFindings,omitempty"`
@@ -178,6 +179,7 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 		Lineage:                     bundle.Plan.Lineage,
 		Title:                       bundle.Plan.Title,
 		State:                       bundle.Execution.State,
+		DependsOn:                   append([]string(nil), bundle.Plan.DependsOn...),
 		ImplReviewRequested:         bundle.Execution.ImplReviewRequested,
 		ImplReviewStatus:            bundle.Execution.ImplReviewStatus,
 		ImplReviewFindings:          append([]string(nil), bundle.Execution.ImplReviewFindings...),
@@ -373,6 +375,8 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 		return "awaiting_approval"
 	case planStateActive:
 		return "executing"
+	case planStateWaitingOnDependency:
+		return "waiting_on_dependency"
 	case "":
 		return bundle.Plan.State
 	default:

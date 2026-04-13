@@ -25,6 +25,7 @@ type fakeKitchenTUIBackend struct {
 	submittedIdea             string
 	submittedImplReview       bool
 	submittedAnchorRef        string
+	submittedDependsOn        []string
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
@@ -61,10 +62,11 @@ func (b *fakeKitchenTUIBackend) TaskOutput(taskID string) (string, error) {
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
 }
-func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
+func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
 	b.submittedIdea = idea
 	b.submittedImplReview = implReview
 	b.submittedAnchorRef = anchorRef
+	b.submittedDependsOn = append([]string(nil), dependsOn...)
 	if strings.TrimSpace(b.submitPlanID) == "" {
 		return "plan_submitted", nil
 	}
@@ -336,6 +338,93 @@ func TestKitchenTUISubmitParsesAnchorPrefix(t *testing.T) {
 	}
 }
 
+func TestKitchenTUISubmitDependencySelectionTogglesPlans(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:     kitchenTUILeftTasks,
+		inputMode:    kitchenTUIInputSubmit,
+		input:        textInputWithValue("[ref=main] Add typed parser errors"),
+		selectedPlan: 0,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_alpha", Title: "Alpha", Lineage: "alpha"}},
+			{Record: PlanRecord{PlanID: "plan_beta", Title: "Beta", Lineage: "beta"}},
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	got := updated.(kitchenTUIModel)
+	if !got.submitSelecting {
+		t.Fatal("submitSelecting = false, want true")
+	}
+	if got.leftMode != kitchenTUILeftPlans {
+		t.Fatalf("leftMode = %q, want plans", got.leftMode)
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = updated.(kitchenTUIModel)
+	if strings.Join(got.submitDependsOn, ",") != "plan_alpha" {
+		t.Fatalf("submitDependsOn = %+v, want [plan_alpha]", got.submitDependsOn)
+	}
+
+	updated, cmd := got.Update(tea.KeyMsg{Type: tea.KeyDown})
+	got = updated.(kitchenTUIModel)
+	if cmd == nil {
+		t.Fatal("expected reload command when moving dependency selection")
+	}
+	if got.selectedPlan != 1 {
+		t.Fatalf("selectedPlan = %d, want 1", got.selectedPlan)
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = updated.(kitchenTUIModel)
+	if strings.Join(got.submitDependsOn, ",") != "plan_alpha,plan_beta" {
+		t.Fatalf("submitDependsOn = %+v, want both plans selected", got.submitDependsOn)
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	got = updated.(kitchenTUIModel)
+	if got.submitSelecting {
+		t.Fatal("submitSelecting = true, want false after leaving dependency selection")
+	}
+	if got.leftMode != kitchenTUILeftTasks {
+		t.Fatalf("leftMode = %q, want tasks restored", got.leftMode)
+	}
+	if got.inputMode != kitchenTUIInputSubmit {
+		t.Fatalf("inputMode = %q, want submit", got.inputMode)
+	}
+}
+
+func TestKitchenTUISubmitPassesSelectedDependencies(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{submitPlanID: "plan_new"}
+	model := kitchenTUIModel{
+		backend:          backend,
+		inputMode:        kitchenTUIInputSubmit,
+		submitImplReview: false,
+		submitDependsOn:  []string{"plan_alpha", "plan_beta"},
+	}
+	model.input = textInputWithValue("[ref=main] Add typed parser errors")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if strings.Join(backend.submittedDependsOn, ",") != "plan_alpha,plan_beta" {
+		t.Fatalf("submittedDependsOn = %+v, want both dependencies", backend.submittedDependsOn)
+	}
+}
+
 func TestKitchenTUIOpenSubmitInputPrefillsCurrentAnchorRef(t *testing.T) {
 	repo := initGitRepo(t)
 	model := kitchenTUIModel{
@@ -559,6 +648,32 @@ func TestRenderPlanDetailLinesLabelsAdoptedPriorPlanCouncilTurn(t *testing.T) {
 	}
 	if strings.Contains(joined, "no change (auto-converge eligible)") {
 		t.Fatalf("detail output should not use generic no-change label for adopted plan:\n%s", joined)
+	}
+}
+
+func TestRenderPlanDetailLinesShowsBlockingPlanDependencies(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID:  "plan_waiting",
+			Title:   "Waiting plan",
+			Summary: "Blocked on upstream plans.",
+			Lineage: "dep-lineage",
+			State:   planStateWaitingOnDependency,
+		},
+		Execution: ExecutionRecord{
+			State: planStateWaitingOnDependency,
+		},
+		Progress: PlanProgress{
+			PlanID:    "plan_waiting",
+			Phase:     planStateWaitingOnDependency,
+			DependsOn: []string{"plan_alpha", "plan_beta"},
+		},
+	}
+	model := kitchenTUIModel{detail: detail}
+
+	joined := strings.Join(model.renderPlanDetailLines(80), "\n")
+	if !strings.Contains(joined, "Depends on: plan_alpha, plan_beta") {
+		t.Fatalf("detail output missing dependency list:\n%s", joined)
 	}
 }
 

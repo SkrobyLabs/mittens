@@ -29,7 +29,7 @@ type kitchenTUIBackend interface {
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
-	SubmitIdea(idea string, implReview bool, anchorRef string) (string, error)
+	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error)
 	ExtendCouncil(planID string, turns int) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
@@ -82,8 +82,8 @@ func (b *kitchenAPIBackend) TaskOutput(taskID string) (string, error) {
 	return b.client.TaskOutput(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
-func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
-	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef)
+func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
+	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef, dependsOn...)
 	if err != nil {
 		return "", err
 	}
@@ -244,10 +244,10 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 	return questions, err
 }
 
-func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string) (string, error) {
+func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, anchorRef)
+		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, anchorRef, dependsOn...)
 		if err != nil {
 			return err
 		}
@@ -473,6 +473,9 @@ type kitchenTUIModel struct {
 	input             textinput.Model
 	inputMode         kitchenTUIInputMode
 	submitImplReview  bool
+	submitDependsOn   []string
+	submitSelecting   bool
+	submitPrevLeft    kitchenTUILeftMode
 	flash             string
 	flashUntil        time.Time
 	errText           string
@@ -931,6 +934,40 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.inputMode == kitchenTUIInputSubmit && m.submitSelecting {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "D":
+			m.finishSubmitDependencySelection()
+			return m, nil
+		case "up", "k":
+			if m.selectedPlan > 0 {
+				m.selectedPlan--
+				m.pendingSelectedID = m.selectedPlanID()
+				m.selectedTask = 0
+				(&m).resetCurrentRightPaneOffset()
+				return m, m.loadCmd()
+			}
+			return m, nil
+		case "down", "j":
+			if m.selectedPlan < len(m.plans)-1 {
+				m.selectedPlan++
+				m.pendingSelectedID = m.selectedPlanID()
+				m.selectedTask = 0
+				(&m).resetCurrentRightPaneOffset()
+				return m, m.loadCmd()
+			}
+			return m, nil
+		case "enter", " ":
+			if plan := m.selectedPlanItem(); plan != nil {
+				m.toggleSubmitDependency(plan.Record.PlanID)
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		m.closeInput()
@@ -938,6 +975,11 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.inputMode == kitchenTUIInputSubmit {
 			m.submitImplReview = !m.submitImplReview
+			return m, nil
+		}
+	case "D":
+		if m.inputMode == kitchenTUIInputSubmit {
+			m.beginSubmitDependencySelection()
 			return m, nil
 		}
 	case "enter":
@@ -950,9 +992,10 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			implReview := m.submitImplReview
+			dependsOn := append([]string(nil), m.submitDependsOn...)
 			m.closeInput()
 			return m, m.actionCmd(func() (string, string, error) {
-				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef)
+				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef, dependsOn)
 				if err != nil {
 					return "", "", err
 				}
@@ -1063,6 +1106,9 @@ func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholde
 
 func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitImplReview = true
+	m.submitDependsOn = nil
+	m.submitSelecting = false
+	m.submitPrevLeft = m.leftMode
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
 	if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
 		m.input.SetValue("[ref=" + ref + "] ")
@@ -1071,10 +1117,68 @@ func (m *kitchenTUIModel) openSubmitInput() {
 }
 
 func (m *kitchenTUIModel) closeInput() {
+	if m.inputMode == kitchenTUIInputSubmit {
+		m.finishSubmitDependencySelection()
+		m.submitDependsOn = nil
+	}
 	m.inputMode = kitchenTUIInputNone
 	m.submitImplReview = false
 	m.input.Blur()
 	m.input.SetValue("")
+}
+
+func (m *kitchenTUIModel) beginSubmitDependencySelection() {
+	if m == nil || m.inputMode != kitchenTUIInputSubmit {
+		return
+	}
+	m.submitPrevLeft = m.leftMode
+	m.submitSelecting = true
+	m.leftMode = kitchenTUILeftPlans
+	m.taskPaneMode = kitchenTUITaskPaneDetail
+	m.input.Blur()
+	m.errText = ""
+}
+
+func (m *kitchenTUIModel) finishSubmitDependencySelection() {
+	if m == nil || !m.submitSelecting {
+		return
+	}
+	m.submitSelecting = false
+	if m.submitPrevLeft != "" {
+		m.leftMode = m.submitPrevLeft
+	}
+	m.input.Focus()
+}
+
+func (m *kitchenTUIModel) toggleSubmitDependency(planID string) {
+	if m == nil {
+		return
+	}
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return
+	}
+	for i, depID := range m.submitDependsOn {
+		if depID == planID {
+			m.submitDependsOn = append(m.submitDependsOn[:i], m.submitDependsOn[i+1:]...)
+			return
+		}
+	}
+	m.submitDependsOn = append(m.submitDependsOn, planID)
+	sort.Strings(m.submitDependsOn)
+}
+
+func (m kitchenTUIModel) submitDependencySelected(planID string) bool {
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return false
+	}
+	for _, depID := range m.submitDependsOn {
+		if depID == planID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m kitchenTUIModel) selectedQuestionItem() *pool.Question {
@@ -1253,7 +1357,7 @@ func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
 		return false
 	}
 	switch planDisplayState(*plan) {
-	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged:
+	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged, planStateWaitingOnDependency:
 		return false
 	default:
 		return true
@@ -1288,11 +1392,15 @@ func (m kitchenTUIModel) footerActions() []string {
 	if m.inputMode != kitchenTUIInputNone {
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
+			if m.submitSelecting {
+				return []string{"↑/↓ choose plan", "enter toggle dep", "D done", "esc done", "ctrl+c quit"}
+			}
 			mode := "off"
 			if m.submitImplReview {
 				mode = "on"
 			}
-			return []string{"enter submit", "tab impl-review:" + mode, "esc cancel", "ctrl+c quit"}
+			deps := fmt.Sprintf("%d", len(m.submitDependsOn))
+			return []string{"enter submit", "tab impl-review:" + mode, "D deps:" + deps, "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputAnswer:
@@ -1543,7 +1651,11 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 			badge = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(badgeText)
 		}
 		primary := truncate(fmt.Sprintf("%s %s %s", marker, state, plan.Record.Title), innerWidth-badgeWidth) + badge
-		secondary := truncate(fmt.Sprintf("    lineage: %s  plan: %s", firstNonEmpty(plan.Record.Lineage, "-"), plan.Record.PlanID), innerWidth)
+		secondary := fmt.Sprintf("    lineage: %s  plan: %s", firstNonEmpty(plan.Record.Lineage, "-"), plan.Record.PlanID)
+		if m.submitDependencySelected(plan.Record.PlanID) {
+			secondary += " [dep]"
+		}
+		secondary = truncate(secondary, innerWidth)
 		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
@@ -1835,6 +1947,9 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		fmt.Sprintf("Completed tasks: %s", joinOrDash(detail.Progress.CompletedTaskIDs)),
 		fmt.Sprintf("Failed tasks: %s", joinOrDash(detail.Progress.FailedTaskIDs)),
 	)
+	if len(detail.Progress.DependsOn) > 0 {
+		lines = append(lines, fmt.Sprintf("Depends on: %s", strings.Join(detail.Progress.DependsOn, ", ")))
+	}
 	if detail.Progress.ImplReviewRequested {
 		lines = append(lines, fmt.Sprintf("Implementation review: %s", firstNonEmpty(detail.Progress.ImplReviewStatus, "pending")))
 		if len(detail.Progress.ImplReviewFindings) > 0 {
@@ -2035,12 +2150,28 @@ func (m kitchenTUIModel) renderInputBar() string {
 		if m.submitImplReview {
 			label += " · impl review on"
 		}
+		if len(m.submitDependsOn) > 0 {
+			label += fmt.Sprintf(" · deps %d", len(m.submitDependsOn))
+		}
+		if m.submitSelecting {
+			label += " · selecting dependencies"
+		}
 	case kitchenTUIInputReplan:
 		label = "Replan"
 	case kitchenTUIInputAnswer:
 		label = "Answer"
 	}
-	return paneBox(m.width, 3, label+"\n"+m.input.View())
+	body := m.input.View()
+	height := 3
+	if m.inputMode == kitchenTUIInputSubmit {
+		depsLine := "Depends on: -"
+		if len(m.submitDependsOn) > 0 {
+			depsLine = "Depends on: " + strings.Join(m.submitDependsOn, ", ")
+		}
+		body += "\n" + truncate(depsLine, max(20, m.width-6))
+		height = 4
+	}
+	return paneBox(m.width, height, label+"\n"+body)
 }
 
 func (m kitchenTUIModel) renderFooter() string {
@@ -2605,6 +2736,8 @@ func compactState(state string) string {
 		return "done"
 	case planStateMerged:
 		return "merged"
+	case planStateWaitingOnDependency:
+		return "wait-dep"
 	case pool.TaskQueued:
 		return "queued"
 	case pool.TaskDispatched:

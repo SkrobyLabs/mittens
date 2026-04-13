@@ -72,6 +72,7 @@ func newRootCommand() *cobra.Command {
 	var submitImplReview bool
 	var submitFile string
 	var submitAnchorRef string
+	var submitDependsOn []string
 	var plansCompleted bool
 	var historyCycle int
 	var historyJSON bool
@@ -109,7 +110,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	submitCmd := &cobra.Command{
-		Use:   "submit [--lineage LINEAGE] [--anchor-ref REF] [--auto] [--file PATH|-] [IDEA]",
+		Use:   "submit [--lineage LINEAGE] [--anchor-ref REF] [--auto] [--depends-on PLAN_ID] [--file PATH|-] [IDEA]",
 		Short: "Submit an idea for planning",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -120,7 +121,7 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef)
+				resp, err := client.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef, submitDependsOn...)
 				if err != nil {
 					return err
 				}
@@ -133,7 +134,7 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef)
+			bundle, err := k.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef, submitDependsOn...)
 			if err != nil {
 				return err
 			}
@@ -151,6 +152,7 @@ func newRootCommand() *cobra.Command {
 	submitCmd.Flags().BoolVar(&submitAuto, "auto", false, "auto-approve the generated plan")
 	submitCmd.Flags().StringVar(&submitFile, "file", "", "read the idea body from a file path or '-' for stdin")
 	submitCmd.Flags().BoolVar(&submitImplReview, "impl-review", false, "request a post-implementation adversarial review")
+	submitCmd.Flags().StringSliceVar(&submitDependsOn, "depends-on", nil, "plan IDs this plan depends on (repeatable)")
 
 	plansCmd := &cobra.Command{
 		Use:   "plans",
@@ -315,7 +317,11 @@ func newRootCommand() *cobra.Command {
 			if err := k.ApprovePlan(args[0]); err != nil {
 				return err
 			}
-			return writeJSON(cmd.OutOrStdout(), map[string]string{"status": planStateActive})
+			bundle, err := k.GetPlan(args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), map[string]string{"status": bundle.Execution.State})
 		},
 	}
 

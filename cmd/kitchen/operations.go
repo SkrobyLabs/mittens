@@ -117,6 +117,10 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 		k.sendNotify(pool.Notification{Type: "plan_merged", ID: activePlanID, Message: lineage})
 	}
 
+	// After a merge clears the lineage, scan all waiting plans whose
+	// dependencies may now be satisfied.
+	k.activateWaitingPlans()
+
 	resp := map[string]any{
 		"status":     "merged",
 		"baseBranch": baseBranch,

@@ -89,6 +89,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
 		s.logf("scheduler review council recovery: %v", err)
 	}
+	s.recoverWaitingPlansOnStartup()
 	if err := s.enforceTaskTimeouts(); err != nil {
 		s.logf("scheduler timeouts: %v", err)
 	}
@@ -736,7 +737,8 @@ func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 		if err != nil {
 			continue
 		}
-		if bundle.Execution.State == planStateReviewing || bundle.Execution.State == planStateImplementationReview {
+		switch bundle.Execution.State {
+		case planStateReviewing, planStateImplementationReview, planStateWaitingOnDependency:
 			continue
 		}
 		if err := s.syncPlanExecution(planID); err != nil {
@@ -851,6 +853,27 @@ func (s *Scheduler) recoverOrphanedPlansOnStartup() error {
 		}
 	}
 	return nil
+}
+
+// recoverWaitingPlansOnStartup attempts activation of any
+// waiting_on_dependency plans whose dependencies may have been
+// merged while the scheduler was down.
+func (s *Scheduler) recoverWaitingPlansOnStartup() {
+	if s == nil || s.activatePlan == nil || s.plans == nil {
+		return
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return
+	}
+	for _, plan := range plans {
+		if plan.State != planStateWaitingOnDependency {
+			continue
+		}
+		if err := s.activatePlan(plan.PlanID); err != nil {
+			s.logf("recover waiting plan %s: %v", plan.PlanID, err)
+		}
+	}
 }
 
 // reapOrphanPlanTasks cancels any non-terminal task whose referenced plan

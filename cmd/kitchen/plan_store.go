@@ -96,6 +96,7 @@ type PlanRecord struct {
 	Summary   string        `json:"summary,omitempty"`
 	Ownership PlanOwnership `json:"ownership,omitempty"`
 	Tasks     []PlanTask    `json:"tasks,omitempty"`
+	DependsOn []string      `json:"dependsOn,omitempty"`
 	State     string        `json:"state,omitempty"`
 	CreatedAt time.Time     `json:"createdAt"`
 	UpdatedAt time.Time     `json:"updatedAt"`

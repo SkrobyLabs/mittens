@@ -85,11 +85,11 @@ func (c *kitchenAPIClient) request(method, path string, body any, dst any) error
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
-func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, implReview bool) (map[string]any, error) {
-	return c.SubmitIdeaAt(idea, lineage, auto, implReview, "")
+func (c *kitchenAPIClient) SubmitIdea(idea, lineage string, auto, implReview bool, dependsOn ...string) (map[string]any, error) {
+	return c.SubmitIdeaAt(idea, lineage, auto, implReview, "", dependsOn...)
 }
 
-func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview bool, anchorRef string) (map[string]any, error) {
+func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview bool, anchorRef string, dependsOn ...string) (map[string]any, error) {
 	req := map[string]any{
 		"idea":       idea,
 		"lineage":    lineage,
@@ -98,6 +98,9 @@ func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview b
 	}
 	if strings.TrimSpace(anchorRef) != "" {
 		req["anchorRef"] = strings.TrimSpace(anchorRef)
+	}
+	if len(dependsOn) > 0 {
+		req["dependsOn"] = dependsOn
 	}
 	var resp map[string]any
 	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)

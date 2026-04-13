@@ -109,6 +109,70 @@ func TestKitchenAPISubmitIdeaPersistsExplicitAnchorRef(t *testing.T) {
 	}
 }
 
+func TestKitchenAPISubmitIdeaPersistsDependencies(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/ideas", map[string]any{
+		"idea":      "Add typed parser errors",
+		"dependsOn": []string{"plan_alpha", "plan_beta"},
+	})
+	var created map[string]any
+	decodeResponse(t, resp, &created)
+	planID, _ := created["planId"].(string)
+	if planID == "" {
+		t.Fatal("expected planId")
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if strings.Join(bundle.Plan.DependsOn, ",") != "plan_alpha,plan_beta" {
+		t.Fatalf("dependsOn = %+v, want [plan_alpha plan_beta]", bundle.Plan.DependsOn)
+	}
+}
+
+func TestKitchenAPIApproveReturnsWaitingOnDependency(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	if _, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_dep_api_waiting",
+			Lineage: "dep-lineage",
+			Title:   "Dependency",
+			State:   planStateActive,
+			Tasks:   []PlanTask{{ID: "t1", Title: "Work", Prompt: "do work", Complexity: ComplexityLow}},
+		},
+		Execution: ExecutionRecord{State: planStateActive},
+	}); err != nil {
+		t.Fatalf("Create dependency plan: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/ideas", map[string]any{
+		"idea":      "Add typed parser errors",
+		"dependsOn": []string{"plan_dep_api_waiting"},
+	})
+	var created map[string]any
+	decodeResponse(t, resp, &created)
+	planID, _ := created["planId"].(string)
+	if planID == "" {
+		t.Fatal("expected planId")
+	}
+
+	completePlanningTask(t, k, planID, basicPlannedArtifact("Add typed parser errors"))
+
+	resp = apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/approve", map[string]any{})
+	var approved map[string]string
+	decodeResponse(t, resp, &approved)
+	if approved["status"] != planStateWaitingOnDependency {
+		t.Fatalf("approve status = %q, want %q", approved["status"], planStateWaitingOnDependency)
+	}
+}
+
 func TestKitchenAPIStatusEndpoint(t *testing.T) {
 	k := newTestKitchen(t)
 	server := httptest.NewServer(k.NewAPIHandler(""))
