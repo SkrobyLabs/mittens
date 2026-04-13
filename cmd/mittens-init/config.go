@@ -59,7 +59,8 @@ type config struct {
 	FirewallExtra   []string
 	ImagePasteKey   string
 	MCP             string
-	CredStagingDirs []string // "staging_path:target_dir" entries
+	CredStagingDirs  []string // "staging_path:target_dir" entries
+	ExtensionPrompts []initcfg.ExtensionPrompt
 
 	// X11 clipboard
 	X11ClipboardImage      string
@@ -127,7 +128,8 @@ func loadConfig() *config {
 		FirewallExtra:   jcfg.FirewallExtra,
 		ImagePasteKey:   jcfg.ImagePasteKey,
 		MCP:             jcfg.MCP,
-		CredStagingDirs: jcfg.CredStagingDirs,
+		CredStagingDirs:  jcfg.CredStagingDirs,
+		ExtensionPrompts: jcfg.ExtensionPrompts,
 
 		X11ClipboardImage:      jcfg.X11ClipboardImage,
 		X11ClipboardMaxAgeSecs: jcfg.X11ClipboardMaxAgeSecs,

@@ -35,9 +35,22 @@ type ContainerConfig struct {
 	// staging mount to a writable ~/target_dir so CLIs like az/aws can write.
 	CredStagingDirs []string `json:"credStagingDirs,omitempty"`
 
+	// Extension prompts: short hints and optional longer guides injected
+	// into the AI project file (e.g. CLAUDE.md) at container startup.
+	ExtensionPrompts []ExtensionPrompt `json:"extensionPrompts,omitempty"`
+
 	// X11 clipboard (macOS clipboard bridge, Codex).
 	X11ClipboardImage      string `json:"x11ClipboardImage,omitempty"`
 	X11ClipboardMaxAgeSecs int    `json:"x11ClipboardMaxAgeSecs,omitempty"`
+}
+
+// ExtensionPrompt carries an extension's AI-facing instructions.
+// Short is always injected into the project file. Guide is written to a
+// separate file and referenced from the short text.
+type ExtensionPrompt struct {
+	Name  string `json:"name"`
+	Short string `json:"short"`
+	Guide string `json:"guide,omitempty"`
 }
 
 // AIConfig describes the AI CLI binary, its config directory layout, and

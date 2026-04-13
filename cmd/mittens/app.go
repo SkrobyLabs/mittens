@@ -1329,6 +1329,18 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		initCfg.FirewallExtra = firewallDomains
 	}
 
+	// Extension prompts: collect from enabled extensions.
+	for _, ext := range a.Extensions {
+		if !ext.Enabled || ext.Prompt == "" {
+			continue
+		}
+		initCfg.ExtensionPrompts = append(initCfg.ExtensionPrompts, initcfg.ExtensionPrompt{
+			Name:  ext.Name,
+			Short: ext.Prompt,
+			Guide: ext.PromptFile,
+		})
+	}
+
 	// Security hardening: apply unless a resolver (e.g. docker dind) already requested --privileged.
 	isPrivileged := false
 	for _, arg := range resolverArgs {

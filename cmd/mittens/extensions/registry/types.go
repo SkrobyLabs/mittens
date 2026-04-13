@@ -26,13 +26,15 @@ type Extension struct {
 	Build        *BuildConfig      `yaml:"build"`
 	Capabilities []string          `yaml:"capabilities"`
 	DefaultOn    bool              `yaml:"default_on"`
+	Prompt       string            `yaml:"prompt"`
 
 	// Runtime state (not from YAML)
 	Enabled bool     `yaml:"-"`
 	Args    []string `yaml:"-"` // csv values or enum choice
 	RawArg  string   `yaml:"-"` // first arg as string (for templates)
 	AllMode bool     `yaml:"-"` // --ext-all was used
-	Source  string   `yaml:"-" json:"source,omitempty"` // "built-in" or "user"
+	Source     string `yaml:"-" json:"source,omitempty"` // "built-in" or "user"
+	PromptFile string `yaml:"-"` // content loaded from prompt.md (convention)
 }
 
 // ExtensionFlag describes a CLI flag contributed by an extension.

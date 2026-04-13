@@ -70,6 +70,9 @@ func runPhase2(cfg *config) error {
 	// Inform AI about firewall.
 	appendFirewallInfo(cfg)
 
+	// Inject extension prompts.
+	appendExtensionPrompts(cfg)
+
 	// Inject notification hooks.
 	setupNotificationHooks(cfg)
 
@@ -527,4 +530,40 @@ func applyJQAssignment(obj map[string]interface{}, expr string) {
 		}
 	}
 	current[keys[len(keys)-1]] = value
+}
+
+// appendExtensionPrompts writes extension-contributed AI instructions.
+// Short prompts are appended directly to the project file (e.g. CLAUDE.md).
+// Longer guides are written to separate files and referenced from the short text.
+func appendExtensionPrompts(cfg *config) {
+	if len(cfg.ExtensionPrompts) == 0 {
+		return
+	}
+
+	guidesDir := cfg.AIHome + "/.mittens/guides"
+	os.MkdirAll(guidesDir, 0755)
+
+	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
+	f, err := os.OpenFile(projectFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintln(f)
+	fmt.Fprintln(f, "# Extension Guides")
+
+	for _, p := range cfg.ExtensionPrompts {
+		if p.Short == "" {
+			continue
+		}
+		fmt.Fprintf(f, "- **%s**: %s", p.Name, p.Short)
+		if p.Guide != "" {
+			guidePath := guidesDir + "/" + p.Name + ".md"
+			if err := os.WriteFile(guidePath, []byte(p.Guide), 0644); err == nil {
+				fmt.Fprintf(f, " See `%s` for detailed usage.", guidePath)
+			}
+		}
+		fmt.Fprintln(f)
+	}
 }
