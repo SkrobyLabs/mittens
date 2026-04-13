@@ -2,6 +2,7 @@ package pool
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -273,6 +274,126 @@ func TestWALAppendAssignsSequence(t *testing.T) {
 	}
 	if out2.Sequence != 2 {
 		t.Errorf("returned seq = %d, want 2", out2.Sequence)
+	}
+}
+
+func TestOpenWALTruncatesTrailingCorruptionAndReportsStats(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trailing-corrupt.wal")
+
+	wal, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := wal.Append(Event{Timestamp: time.Now(), Type: EventPoolCreated}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
+		t.Fatalf("append garbage open: %v", err)
+	} else {
+		if _, err := f.Write([]byte(`{"broken":`)); err != nil {
+			_ = f.Close()
+			t.Fatalf("append garbage write: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("append garbage close: %v", err)
+		}
+	}
+
+	wal2, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer wal2.Close()
+
+	if wal2.CorruptLines != 1 {
+		t.Fatalf("CorruptLines = %d, want 1", wal2.CorruptLines)
+	}
+	if wal2.TruncatedBytes == 0 {
+		t.Fatal("expected trailing corruption to be truncated")
+	}
+	if wal2.Seq() != 1 {
+		t.Fatalf("Seq = %d, want 1 after reopening the single valid event", wal2.Seq())
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	if bytes.Contains(raw, []byte(`{"broken":`)) {
+		t.Fatalf("expected truncated WAL to exclude trailing garbage: %q", raw)
+	}
+
+	appended, err := wal2.Append(Event{Timestamp: time.Now(), Type: EventWorkerReady, WorkerID: "w-1"})
+	if err != nil {
+		t.Fatalf("append after truncation: %v", err)
+	}
+	if appended.Sequence != 2 {
+		t.Fatalf("appended sequence = %d, want 2", appended.Sequence)
+	}
+
+	var replayed []Event
+	if err := wal2.Replay(func(e Event) error {
+		replayed = append(replayed, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(replayed) != 2 {
+		t.Fatalf("replayed %d events, want 2", len(replayed))
+	}
+}
+
+func TestOpenWALKeepsMidFileCorruptionButTracksStats(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mid-corrupt.wal")
+
+	first, err := json.Marshal(Event{Timestamp: time.Now(), Type: EventPoolCreated, Sequence: 1})
+	if err != nil {
+		t.Fatalf("marshal first: %v", err)
+	}
+	second, err := json.Marshal(Event{Timestamp: time.Now(), Type: EventWorkerReady, WorkerID: "w-1", Sequence: 2})
+	if err != nil {
+		t.Fatalf("marshal second: %v", err)
+	}
+	content := append([]byte{}, first...)
+	content = append(content, '\n')
+	content = append(content, []byte("{not-json}\n")...)
+	content = append(content, second...)
+	content = append(content, '\n')
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write wal: %v", err)
+	}
+
+	wal, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer wal.Close()
+
+	if wal.CorruptLines != 1 {
+		t.Fatalf("CorruptLines = %d, want 1", wal.CorruptLines)
+	}
+	if wal.TruncatedBytes != 0 {
+		t.Fatalf("TruncatedBytes = %d, want 0", wal.TruncatedBytes)
+	}
+	if wal.Seq() != 2 {
+		t.Fatalf("Seq = %d, want 2", wal.Seq())
+	}
+
+	var replayed []Event
+	if err := wal.Replay(func(e Event) error {
+		replayed = append(replayed, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(replayed) != 2 {
+		t.Fatalf("replayed %d events, want 2", len(replayed))
 	}
 }
 

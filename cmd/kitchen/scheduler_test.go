@@ -1702,6 +1702,200 @@ func TestSchedulerOnTaskFailedConflictRevivesTaskForFreshRetry(t *testing.T) {
 	}
 }
 
+func TestRecoverFailedTasksOnStartup_RevivesConflictTaskAndDiscardsWorktree(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planID := "plan_startup_conflict_retry"
+	taskID := planTaskRuntimeID(planID, "t1")
+	store := NewPlanStore(project.PlansDir)
+	_, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "parser-errors",
+			Title:   "Startup conflict retry",
+			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+			Tasks:   []PlanTask{{ID: "t1", Title: "Task 1", Prompt: "task 1", Complexity: ComplexityMedium}},
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:         planStateActive,
+			ActiveTaskIDs: []string{taskID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-startup-conflict-retry"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", strings.TrimSpace(head)); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktreePath, err := gitMgr.CreateChildWorktree("parser-errors", taskID)
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("stat worktree before recovery: %v", err)
+	}
+
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.failurePolicy["conflict"] = FailurePolicyRule{Action: "retry_merge", Max: 2}
+
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "task 1",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.FailTask("w-1", taskID, "merge conflicts: shared.txt"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	if err := s.recoverFailedTasksOnStartup(); err != nil {
+		t.Fatalf("recoverFailedTasksOnStartup: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+	if task.RetryCount != 1 {
+		t.Fatalf("retryCount = %d, want 1", task.RetryCount)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected retried task to require a fresh worker")
+	}
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected conflicting worktree to be removed, stat err = %v", err)
+	}
+	worker, ok := pm.Worker("w-1")
+	if !ok || worker.Status != pool.WorkerDead {
+		t.Fatalf("worker state = %+v, want dead after startup retry cleanup", worker)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	last := bundle.Execution.History[len(bundle.Execution.History)-1]
+	if last.Type != planHistoryConflictRetried {
+		t.Fatalf("history type = %q, want %q", last.Type, planHistoryConflictRetried)
+	}
+}
+
+func TestRecoverOrphanedPlansOnStartup_MarksActivePlanPlanningFailed(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_orphaned_active",
+			Lineage: "orphaned-active",
+			Title:   "Orphaned active plan",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State: planStateActive,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-orphaned-plan"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	notifications := make(chan pool.Notification, 1)
+	s.notify = func(n pool.Notification) {
+		notifications <- n
+	}
+
+	if err := s.recoverOrphanedPlansOnStartup(); err != nil {
+		t.Fatalf("recoverOrphanedPlansOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStatePlanningFailed {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStatePlanningFailed)
+	}
+	if bundle.Execution.State != planStatePlanningFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStatePlanningFailed)
+	}
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set")
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 0 || len(bundle.Execution.CompletedTaskIDs) != 0 || len(bundle.Execution.FailedTaskIDs) != 0 {
+		t.Fatalf("expected task IDs to be cleared, got active=%v completed=%v failed=%v", bundle.Execution.ActiveTaskIDs, bundle.Execution.CompletedTaskIDs, bundle.Execution.FailedTaskIDs)
+	}
+	last := bundle.Execution.History[len(bundle.Execution.History)-1]
+	if last.Type != planHistoryPlanningFailed {
+		t.Fatalf("history type = %q, want %q", last.Type, planHistoryPlanningFailed)
+	}
+	select {
+	case n := <-notifications:
+		if n.Type != "plan_failed" {
+			t.Fatalf("notification type = %q, want plan_failed", n.Type)
+		}
+		if n.ID != planID {
+			t.Fatalf("notification id = %q, want %q", n.ID, planID)
+		}
+	default:
+		t.Fatal("expected plan_failed notification")
+	}
+}
+
 func TestSchedulerEnforceTaskTimeoutsSkipsPlannerTask(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

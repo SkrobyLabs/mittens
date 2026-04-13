@@ -66,6 +66,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 	stopReaper := pool.StartReaperWithReservations(s.pm, s.reapInterval, s.reapTimeout, s.reservedWorkerIDs)
 	defer stopReaper()
 
+	if err := s.reconcile(); err != nil {
+		s.logf("scheduler reconcile: %v", err)
+	}
+	if err := s.recoverFailedTasksOnStartup(); err != nil {
+		s.logf("scheduler failed task recovery: %v", err)
+	}
 	// One-shot reconciliation of plan execution state against the
 	// pool's task map. Catches plans left with stale activeTaskIDs
 	// because a completion handler errored out before syncPlanExecution
@@ -74,8 +80,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	if err := s.reconcilePlanExecutionOnStartup(); err != nil {
 		s.logf("scheduler startup sync: %v", err)
 	}
-	if err := s.reconcile(); err != nil {
-		s.logf("scheduler reconcile: %v", err)
+	if err := s.recoverOrphanedPlansOnStartup(); err != nil {
+		s.logf("scheduler orphaned plan recovery: %v", err)
 	}
 	if err := s.recoverCouncilPlansOnStartup(); err != nil {
 		s.logf("scheduler council recovery: %v", err)
@@ -740,6 +746,113 @@ func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 	return nil
 }
 
+func (s *Scheduler) recoverFailedTasksOnStartup() error {
+	if s == nil || s.pm == nil || s.plans == nil || s.git == nil {
+		return nil
+	}
+	for _, task := range s.pm.Tasks() {
+		if task.Status != pool.TaskFailed {
+			continue
+		}
+		if strings.TrimSpace(task.PlanID) == "" {
+			continue
+		}
+		if task.Role == plannerTaskRole || isReviewCouncilTask(task) {
+			continue
+		}
+
+		reported := ""
+		if task.Result != nil {
+			reported = task.Result.Error
+		}
+		if class := ClassifyFailure(reported, nil, KitchenSignals{}); class != FailureConflict || !s.shouldRetryConflict(task) {
+			continue
+		}
+
+		bundle, err := s.plans.Get(task.PlanID)
+		if err != nil {
+			s.logf("startup: load failed task plan %s/%s: %v", task.PlanID, task.ID, err)
+			continue
+		}
+		if err := s.pm.ReviveFailedTask(task.ID, true); err != nil {
+			s.logf("startup: revive failed task %s: %v", task.ID, err)
+			continue
+		}
+		if lineage := strings.TrimSpace(bundle.Plan.Lineage); lineage != "" {
+			if err := s.git.DiscardChild(lineage, task.ID); err != nil {
+				s.logf("startup: discard child worktree for failed task %s: %v", task.ID, err)
+				continue
+			}
+			s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+		}
+
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryConflictRetried,
+			TaskID:  task.ID,
+			Summary: "Retrying task from current lineage head after startup recovery.",
+		})
+		if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+			s.logf("startup: record conflict retry history for %s: %v", task.ID, err)
+		}
+		s.logf("startup: retrying conflict-failed task %s (attempt %d)", task.ID, task.RetryCount+1)
+	}
+	return nil
+}
+
+func (s *Scheduler) recoverOrphanedPlansOnStartup() error {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return nil
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return err
+	}
+	tasks := s.pm.Tasks()
+	for _, plan := range plans {
+		if plan.State != planStateActive {
+			continue
+		}
+		bundle, err := s.plans.Get(plan.PlanID)
+		if err != nil {
+			s.logf("startup: load active plan %s: %v", plan.PlanID, err)
+			continue
+		}
+		active, completed, failed := summarizePlanTasks(tasks, plan.PlanID)
+		if len(active) != 0 || len(completed) != 0 || len(failed) != 0 {
+			continue
+		}
+
+		now := s.currentTime().UTC()
+		bundle.Plan.State = planStatePlanningFailed
+		bundle.Execution.State = planStatePlanningFailed
+		bundle.Execution.ActiveTaskIDs = nil
+		bundle.Execution.CompletedTaskIDs = nil
+		bundle.Execution.FailedTaskIDs = nil
+		bundle.Execution.CompletedAt = &now
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryPlanningFailed,
+			Summary: "Plan left orphaned after crash - re-submit to retry.",
+		})
+		if err := s.plans.UpdateExecution(plan.PlanID, bundle.Execution); err != nil {
+			s.logf("startup: persist orphaned plan execution %s: %v", plan.PlanID, err)
+			continue
+		}
+		if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+			s.logf("startup: mark orphaned plan %s failed: %v", plan.PlanID, err)
+			continue
+		}
+		s.logf("startup: marking orphaned plan %s as planning_failed (no tasks in pool)", plan.PlanID)
+		if s.notify != nil {
+			title := bundle.Plan.Title
+			if title == "" {
+				title = plan.PlanID
+			}
+			s.notify(pool.Notification{Type: "plan_failed", ID: plan.PlanID, Message: title})
+		}
+	}
+	return nil
+}
+
 // reapOrphanPlanTasks cancels any non-terminal task whose referenced plan
 // has been removed from disk. Without this, the scheduler would repeatedly
 // try to load the missing plan on every reconcile tick and spam errors.
@@ -1034,10 +1147,10 @@ func (s *Scheduler) markPlanningFailed(task pool.Task, message string) error {
 		TaskID:   task.ID,
 		Findings: []string{strings.TrimSpace(message)},
 	})
-	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
 		return err
 	}
-	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
 		return err
 	}
 	if s.notify != nil {
