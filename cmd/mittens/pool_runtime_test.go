@@ -180,6 +180,105 @@ esac
 	}
 }
 
+func TestSpawnWorkerContainerBuildsKitchenWorkerRuntimeWithBrokerSocket(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "test-api-key")
+
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", filepath.Join(tmp, ".mittens"))
+
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brokerDir := filepath.Join(tmp, "broker")
+	if err := os.MkdirAll(brokerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brokerSock := filepath.Join(brokerDir, "broker.sock")
+	if err := os.WriteFile(brokerSock, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(dockerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runArgsPath := filepath.Join(tmp, "docker-run-args.txt")
+	dockerPath := filepath.Join(dockerDir, "docker")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  ps)
+    exit 0
+    ;;
+  run)
+    printf '%%s\n' "$@" > '%s'
+    printf 'container-sock123\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, runArgsPath)
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", dockerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	app := &App{
+		Provider:          ClaudeProvider(),
+		Workspace:         workspace,
+		WorkspaceMountSrc: workspace,
+		ImageName:         "mittens-test",
+		ImageTag:          "latest",
+		NoBuild:           true,
+		brokerSock:        brokerSock,
+		brokerToken:       "broker-token",
+		poolSession:       "kitchen-workspace-sock",
+		poolStateDir:      filepath.Join(tmp, "pool-state"),
+	}
+	if err := os.MkdirAll(app.poolStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := app.spawnWorkerContainer(pool.WorkerSpec{
+		ID:            "w-sock",
+		Role:          "implementer",
+		Provider:      "claude",
+		WorkspacePath: workspace,
+		Environment: map[string]string{
+			"MITTENS_SESSION_ID":   "kitchen-workspace-sock",
+			"MITTENS_KITCHEN_ADDR": "http://127.0.0.1:3900",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runArgsData, err := os.ReadFile(runArgsPath)
+	if err != nil {
+		t.Fatalf("read docker run args: %v", err)
+	}
+	runArgs := strings.Split(strings.TrimSpace(string(runArgsData)), "\n")
+
+	if !argPairExists(runArgs, "-v", brokerDir+":/tmp/mittens-broker") {
+		t.Fatalf("docker run args missing broker socket dir mount: %v", runArgs)
+	}
+
+	cfg := extractInitConfig(t, runArgs)
+	if cfg.Broker.Sock != "/tmp/mittens-broker/broker.sock" {
+		t.Fatalf("init config broker sock = %q, want %q", cfg.Broker.Sock, "/tmp/mittens-broker/broker.sock")
+	}
+	if cfg.Broker.Port != 0 {
+		t.Fatalf("init config broker port = %d, want 0 for socket mode", cfg.Broker.Port)
+	}
+	if cfg.Broker.Token != "broker-token" {
+		t.Fatalf("init config broker token = %q, want %q", cfg.Broker.Token, "broker-token")
+	}
+}
+
 func TestSpawnWorkerContainerMountsCommonGitDirForLinkedWorktree(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

@@ -441,7 +441,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			case expectsReviewCouncilTurn:
 				reportMsg = fmt.Sprintf("invalid review council artifact (after %d attempts): %v", attempts, err)
 			}
-			logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
+			logWarn("worker: %s task %s failed: %s", workerID, task.ID, redactFailureMessage(err.Error()))
 			writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(reportMsg))
 			reportFailWithRetries(client, workerID, task.ID, taskFailureReport{Error: reportMsg})
 			if err := ad.ClearSession(); err != nil {
@@ -450,7 +450,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			return false
 		}
 
-		logWarn("worker: %s task %s failed: %v", workerID, task.ID, err)
+		logWarn("worker: %s task %s failed: %s", workerID, task.ID, redactFailureMessage(err.Error()))
 		report := classifyTaskFailure(err)
 		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(report.Error))
 		reportFailWithRetries(client, workerID, task.ID, report)

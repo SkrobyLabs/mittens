@@ -233,6 +233,15 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 	if len(resolvedExtraDirs) > 0 {
 		workerCfg.ExtraDirs = resolvedExtraDirs
 	}
+	if a.brokerSock != "" {
+		sockDir := filepath.Dir(a.brokerSock)
+		containerSockDir := "/tmp/mittens-broker"
+		containerSockPath := filepath.Join(containerSockDir, filepath.Base(a.brokerSock))
+		args = append(args, "-v", sockDir+":"+containerSockDir)
+		workerCfg.Broker.Sock = containerSockPath
+		workerCfg.Broker.Port = 0
+		workerCfg.Broker.Token = a.brokerToken
+	}
 	cfgFile, err := os.CreateTemp("", "mittens-worker-*.json")
 	if err != nil {
 		return "", "", fmt.Errorf("create worker config temp file: %w", err)
@@ -311,9 +320,13 @@ func (a *App) buildWorkerInitConfig(provider *Provider, containerName, workspace
 		ContainerName: containerName,
 		HostWorkspace: workspacePath,
 		Broker: initcfg.BrokerConfig{
-			Port:  a.brokerPort,
 			Token: a.brokerToken,
 		},
+	}
+	if a.brokerSock != "" {
+		cfg.Broker.Sock = filepath.Join("/tmp/mittens-broker", filepath.Base(a.brokerSock))
+	} else if a.brokerPort > 0 {
+		cfg.Broker.Port = a.brokerPort
 	}
 	if len(firewallDomains) > 0 {
 		cfg.FirewallExtra = firewallDomains

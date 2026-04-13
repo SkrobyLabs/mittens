@@ -129,6 +129,32 @@ func TestExecuteForCouncilTurn_MidRetryAdapterErrorStopsImmediately(t *testing.T
 	}
 }
 
+func TestExecuteForCouncilTurn_ExitCodeIncludesOutput(t *testing.T) {
+	ad := &retryTestAdapter{
+		results: []Result{{
+			Output:   `Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}`,
+			ExitCode: 1,
+		}},
+	}
+
+	artifact, result, err := ExecuteForCouncilTurn(context.Background(), ad, "prompt", "ctx", func(string) {})
+	if artifact != nil {
+		t.Fatalf("artifact = %+v, want nil", artifact)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("result.ExitCode = %d, want 1", result.ExitCode)
+	}
+	if err == nil {
+		t.Fatal("expected exit-code error")
+	}
+	if !strings.Contains(err.Error(), "Invalid authentication credentials") {
+		t.Fatalf("err = %v, want adapter output preserved", err)
+	}
+	if got := ExtractionAttempts(err); got != 0 {
+		t.Fatalf("ExtractionAttempts(err) = %d, want 0", got)
+	}
+}
+
 func TestExecuteForReviewCouncilTurn_RetriesAndSucceeds(t *testing.T) {
 	ad := &retryTestAdapter{
 		results: []Result{
@@ -195,6 +221,9 @@ func TestExecuteForReviewVerdict_ExitCodeDoesNotRetry(t *testing.T) {
 	_, _, _, _, err := ExecuteForReviewVerdict(context.Background(), ad, "prompt", "ctx", func(string) {})
 	if err == nil {
 		t.Fatal("expected exit-code error")
+	}
+	if !strings.Contains(err.Error(), "bad exit") {
+		t.Fatalf("err = %v, want adapter output preserved", err)
 	}
 	if len(ad.prompts) != 1 {
 		t.Fatalf("calls = %d, want 1", len(ad.prompts))

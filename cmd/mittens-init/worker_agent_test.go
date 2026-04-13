@@ -29,6 +29,8 @@ type mockLeaderServer struct {
 	completed       []string
 	failed          []string
 	failedErrors    []string
+	failedClasses   []string
+	failedDetails   []pool.FailureDetail
 	reviewed        []reviewPayload
 	task            *pool.Task // task to return on poll (consumed once)
 	recycle         bool
@@ -104,13 +106,22 @@ func newMockLeaderServer(t *testing.T) *mockLeaderServer {
 	})
 	mux.HandleFunc("POST /fail", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TaskID string `json:"taskId"`
-			Error  string `json:"error"`
+			TaskID       string          `json:"taskId"`
+			Error        string          `json:"error"`
+			FailureClass string          `json:"failureClass"`
+			Detail       json.RawMessage `json:"detail"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		m.mu.Lock()
 		m.failed = append(m.failed, req.TaskID)
 		m.failedErrors = append(m.failedErrors, req.Error)
+		m.failedClasses = append(m.failedClasses, req.FailureClass)
+		var detail pool.FailureDetail
+		if len(req.Detail) > 0 && json.Unmarshal(req.Detail, &detail) == nil {
+			m.failedDetails = append(m.failedDetails, detail)
+		} else {
+			m.failedDetails = append(m.failedDetails, pool.FailureDetail{})
+		}
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
@@ -1222,6 +1233,44 @@ func TestExecuteTask_AuthErrorStopsWorkerAndReportsResetMessage(t *testing.T) {
 	}
 	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "run codex logout") {
 		t.Fatalf("failedErrors = %v, want host logout guidance", m.failedErrors)
+	}
+}
+
+func TestExecuteTask_CouncilExitCodeAuthOutputReportsStructuredAuthFailure(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{result: adapter.Result{
+		Output:   `Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}`,
+		ExitCode: 1,
+	}}
+	task := &pool.Task{
+		ID:     "t-plan",
+		Role:   "planner",
+		Prompt: "Plan this change.\n<council_turn>{}</council_turn>",
+		Status: pool.TaskDispatched,
+	}
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+	if len(m.failed) != 1 || m.failed[0] != "t-plan" {
+		t.Fatalf("failed = %v, want [t-plan]", m.failed)
+	}
+	if len(m.failedClasses) != 1 || m.failedClasses[0] != "auth" {
+		t.Fatalf("failedClasses = %v, want [auth]", m.failedClasses)
+	}
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "Invalid authentication credentials") {
+		t.Fatalf("failedErrors = %v, want auth message", m.failedErrors)
+	}
+	if len(m.failedDetails) != 1 || !m.failedDetails[0].Signals.AuthFailure {
+		t.Fatalf("failedDetails = %+v, want authFailure signal", m.failedDetails)
+	}
+	if got := m.failedDetails[0].AuthMode; got != "soft" {
+		t.Fatalf("auth mode = %q, want soft", got)
 	}
 }
 

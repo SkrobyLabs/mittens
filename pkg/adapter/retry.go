@@ -44,7 +44,7 @@ func ExecuteForCouncilTurn(ctx context.Context, ad Adapter, prompt, priorContext
 			return nil, result, err
 		}
 		if result.ExitCode != 0 {
-			return nil, result, fmt.Errorf("adapter exited with code %d", result.ExitCode)
+			return nil, result, adapterExitError(result)
 		}
 
 		artifact, err := ExtractCouncilTurnArtifact(result.Output)
@@ -75,7 +75,7 @@ func ExecuteForReviewCouncilTurn(ctx context.Context, ad Adapter, prompt, priorC
 			return nil, result, err
 		}
 		if result.ExitCode != 0 {
-			return nil, result, fmt.Errorf("adapter exited with code %d", result.ExitCode)
+			return nil, result, adapterExitError(result)
 		}
 
 		artifact, err := ExtractReviewCouncilTurnArtifact(result.Output)
@@ -106,7 +106,7 @@ func ExecuteForReviewVerdict(ctx context.Context, ad Adapter, prompt, priorConte
 			return "", "", "", result, err
 		}
 		if result.ExitCode != 0 {
-			return "", "", "", result, fmt.Errorf("adapter exited with code %d", result.ExitCode)
+			return "", "", "", result, adapterExitError(result)
 		}
 
 		verdict, feedback, severity, err = extractReviewVerdictOrError(result.Output)
@@ -132,6 +132,16 @@ func extractReviewVerdictOrError(output string) (verdict, feedback, severity str
 		return "", "", "", fmt.Errorf("review verdict not found")
 	}
 	return verdict, feedback, severity, nil
+}
+
+func adapterExitError(result Result) error {
+	if result.ExitCode == 0 {
+		return nil
+	}
+	if msg := strings.TrimSpace(result.Output); msg != "" {
+		return fmt.Errorf("adapter exited with code %d: %s", result.ExitCode, msg)
+	}
+	return fmt.Errorf("adapter exited with code %d", result.ExitCode)
 }
 
 func buildExtractionRetryPrompt(prompt, output string, err error) string {
