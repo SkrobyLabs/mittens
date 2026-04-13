@@ -898,6 +898,10 @@ func (k *Kitchen) FixLineageConflicts(lineage string) (string, error) {
 		return "", fmt.Errorf("merge from %s into %s is already clean", lineage, baseBranch)
 	}
 
+	return k.enqueueLineageFixMergeTask(activePlanID, bundle, lineage, baseBranch, conflictFiles)
+}
+
+func (k *Kitchen) enqueueLineageFixMergeTask(activePlanID string, bundle StoredPlan, lineage, baseBranch string, conflictFiles []string) (string, error) {
 	fixTaskID := "fix-merge-" + time.Now().UTC().Format("20060102T150405")
 	runtimeTaskID := planTaskRuntimeID(activePlanID, fixTaskID)
 	prompt := buildLineageFixMergePrompt(baseBranch, lineage, conflictFiles, bundle.Plan.Title)
@@ -937,6 +941,7 @@ func (k *Kitchen) FixLineageConflicts(lineage string) (string, error) {
 	// active (the fix task is a new pending work item), and append
 	// history so the TUI reflects the new state immediately rather
 	// than waiting for the scheduler's next syncPlanExecution pass.
+	var err error
 	bundle, err = k.planStore.Get(activePlanID)
 	if err != nil {
 		return "", err

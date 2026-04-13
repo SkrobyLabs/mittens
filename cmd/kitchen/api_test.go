@@ -661,7 +661,7 @@ func TestKitchenAPIProviderAndLineageEndpoints(t *testing.T) {
 	}
 }
 
-func TestKitchenAPIReapplyLineageReturnsConflictPayload(t *testing.T) {
+func TestKitchenAPIReapplyLineageQueuesFixTaskOnConflict(t *testing.T) {
 	k := newTestKitchen(t)
 	server := httptest.NewServer(k.NewAPIHandler(""))
 	defer server.Close()
@@ -718,12 +718,16 @@ func TestKitchenAPIReapplyLineageReturnsConflictPayload(t *testing.T) {
 	resp := apiRequest(t, server, http.MethodPost, "/v1/lineages/parser-errors/reapply", nil)
 	var payload map[string]any
 	decodeResponse(t, resp, &payload)
-	if payload["status"] != "conflicts" {
-		t.Fatalf("reapply payload = %+v, want status=conflicts", payload)
+	if payload["status"] != "fix-merge-queued" {
+		t.Fatalf("reapply payload = %+v, want status=fix-merge-queued", payload)
 	}
 	conflicts, ok := payload["conflicts"].([]any)
 	if !ok || len(conflicts) != 1 || conflicts[0] != "shared.txt" {
 		t.Fatalf("reapply conflicts = %#v, want [shared.txt]", payload["conflicts"])
+	}
+	newTaskID, _ := payload["newTaskId"].(string)
+	if strings.TrimSpace(newTaskID) == "" {
+		t.Fatalf("reapply payload missing newTaskId: %+v", payload)
 	}
 }
 

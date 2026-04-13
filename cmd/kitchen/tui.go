@@ -3222,6 +3222,16 @@ func summarizeReapply(resp map[string]any) string {
 	switch strings.TrimSpace(status) {
 	case "up-to-date":
 		return fmt.Sprintf("reapply: up-to-date on %s", baseBranch)
+	case "fix-merge-queued":
+		newTaskID, _ := resp["newTaskId"].(string)
+		summary := fmt.Sprintf("reapply: fix-merge queued on %s", baseBranch)
+		if strings.TrimSpace(newTaskID) != "" {
+			summary += " task=" + newTaskID
+		}
+		if len(conflicts) > 0 {
+			summary += " files=" + strings.Join(conflicts, ", ")
+		}
+		return summary
 	case "conflicts":
 		summary := fmt.Sprintf("reapply: conflicts on %s", baseBranch)
 		if len(conflicts) > 0 {

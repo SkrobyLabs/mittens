@@ -165,10 +165,26 @@ func (k *Kitchen) ReapplyLineage(lineage string) (map[string]any, error) {
 		return nil, err
 	}
 	if !clean {
+		if activePlanID == "" {
+			return map[string]any{
+				"status":     "conflicts",
+				"conflicts":  conflicts,
+				"baseBranch": baseBranch,
+			}, nil
+		}
+		bundle, err := k.planStore.Get(activePlanID)
+		if err != nil {
+			return nil, err
+		}
+		newTaskID, err := k.enqueueLineageFixMergeTask(activePlanID, bundle, lineage, baseBranch, conflicts)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{
-			"status":     "conflicts",
+			"status":     "fix-merge-queued",
 			"conflicts":  conflicts,
 			"baseBranch": baseBranch,
+			"newTaskId":  newTaskID,
 		}, nil
 	}
 

@@ -2607,6 +2607,9 @@ func TestSummarizeReapply(t *testing.T) {
 	if got := summarizeReapply(map[string]any{"status": "up-to-date", "baseBranch": "main"}); got != "reapply: up-to-date on main" {
 		t.Fatalf("up-to-date summary = %q", got)
 	}
+	if got := summarizeReapply(map[string]any{"status": "fix-merge-queued", "baseBranch": "main", "newTaskId": "plan_fix-fix-merge-123", "conflicts": []string{"a.go", "b.go"}}); got != "reapply: fix-merge queued on main task=plan_fix-fix-merge-123 files=a.go, b.go" {
+		t.Fatalf("fix-merge queued summary = %q", got)
+	}
 	if got := summarizeReapply(map[string]any{"status": "conflicts", "baseBranch": "main", "conflicts": []string{"a.go", "b.go"}}); got != "reapply: conflicts on main files=a.go, b.go" {
 		t.Fatalf("conflicts summary = %q", got)
 	}

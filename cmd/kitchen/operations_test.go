@@ -493,6 +493,98 @@ func TestKitchenReapplyLineageBlocksActiveTasks(t *testing.T) {
 	}
 }
 
+func TestKitchenReapplyLineageQueuesFixTaskOnConflicts(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	poolStateDir := filepath.Join(k.project.PoolsDir, defaultPoolStateName)
+	workerStateDir := pool.WorkerStateDir(poolStateDir, "w-1")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch(bundle.Plan.Lineage, bundle.Plan.Anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	writeFile(t, filepath.Join(k.repoPath, "shared.txt"), "main change\n")
+	mustRunGit(t, k.repoPath, "add", "shared.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "main change")
+
+	mustRunGit(t, k.repoPath, "checkout", lineageBranchName(bundle.Plan.Lineage))
+	writeFile(t, filepath.Join(k.repoPath, "shared.txt"), "lineage change\n")
+	mustRunGit(t, k.repoPath, "add", "shared.txt")
+	mustRunGit(t, k.repoPath, "commit", "-m", "lineage change")
+	mustRunGit(t, k.repoPath, "checkout", "main")
+
+	resp, err := k.ReapplyLineage(bundle.Plan.Lineage)
+	if err != nil {
+		t.Fatalf("ReapplyLineage: %v", err)
+	}
+	if resp["status"] != "fix-merge-queued" {
+		t.Fatalf("reapply response = %+v, want status=fix-merge-queued", resp)
+	}
+	newTaskID, _ := resp["newTaskId"].(string)
+	if strings.TrimSpace(newTaskID) == "" {
+		t.Fatalf("reapply response missing newTaskId: %+v", resp)
+	}
+	conflicts, ok := resp["conflicts"].([]string)
+	if !ok || len(conflicts) != 1 || conflicts[0] != "shared.txt" {
+		t.Fatalf("reapply conflicts = %#v, want [shared.txt]", resp["conflicts"])
+	}
+
+	gotPlan, err := k.GetPlan(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if gotPlan.Plan.State != planStateActive || gotPlan.Execution.State != planStateActive {
+		t.Fatalf("plan/execution state = %q/%q, want active/active", gotPlan.Plan.State, gotPlan.Execution.State)
+	}
+	if !containsString(gotPlan.Execution.ActiveTaskIDs, newTaskID) {
+		t.Fatalf("active task IDs = %+v, want %s", gotPlan.Execution.ActiveTaskIDs, newTaskID)
+	}
+	found := false
+	for _, task := range gotPlan.Plan.Tasks {
+		if task.ID == strings.TrimPrefix(newTaskID, bundle.Plan.PlanID+"-") {
+			found = true
+			if task.Title == "" || task.Outputs == nil || len(task.Outputs.Files) != 1 || task.Outputs.Files[0] != "shared.txt" {
+				t.Fatalf("queued fix task = %+v", task)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("plan tasks missing queued fix task for %s", newTaskID)
+	}
+}
+
 func TestKitchenCleanWorktreesRemovesOnlyOrphans(t *testing.T) {
 	k := newTestKitchen(t)
 
