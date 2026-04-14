@@ -35,9 +35,9 @@
 //
 // ## Model Names  (source: packages/core/src/config/models.ts)
 //
-// Default model: gemini-2.5-pro
+// Default model: gemini-3-flash-preview
 //
-//	Stable:   gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
+//	Stable:   gemini-2.5-flash, gemini-2.5-flash-lite
 //	Preview:  gemini-3-pro-preview, gemini-3-flash-preview
 //	Aliases:  auto, pro, flash, flash-lite  (resolved server-side)
 //	Env:      GEMINI_MODEL overrides the --model flag
@@ -138,12 +138,12 @@ func (g *geminiAdapter) newCmd(ctx context.Context, name string, args ...string)
 }
 
 // normalizeGeminiModel ensures the model string has the "gemini-" prefix and
-// falls back to the upstream default (gemini-2.5-pro) when empty.
+// falls back to the Kitchen default (gemini-3-flash-preview) when empty.
 // Short aliases recognised by the CLI (auto/pro/flash/flash-lite) are passed
 // through unchanged.
 func normalizeGeminiModel(model string) string {
 	if model == "" {
-		return "gemini-2.5-pro"
+		return "gemini-3-flash-preview"
 	}
 	// Pass through known short aliases and any string that already looks like a
 	// full model name.

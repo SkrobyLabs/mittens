@@ -547,11 +547,8 @@ func TestKitchenEndToEndRuntimeMuxRoutesPlannerAndImplementationToDifferentProvi
 	})
 	k := newTestKitchenWithHostAPI(t, hostAPI)
 	cfg := DefaultKitchenConfig()
-	cfg.Routing[ComplexityLow] = RoutingRule{
-		Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-	}
-	cfg.Routing[ComplexityMedium] = RoutingRule{
-		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer: []string{"openai"},
 	}
 	k.cfg = cfg
 	k.router = NewComplexityRouter(cfg, k.health, PoolKey{Provider: "claude"}, PoolKey{Provider: "codex"})

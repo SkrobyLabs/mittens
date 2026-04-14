@@ -158,17 +158,10 @@ func TestSchedulerScheduleSpawnsAndDispatchesTask(t *testing.T) {
 
 func TestSchedulerWorkerSpecForTaskUsesRoleAwareRouting(t *testing.T) {
 	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-			},
-		},
-		RoleRouting: map[string]map[Complexity]RoutingRule{
-			"reviewer": {
-				ComplexityMedium: {
-					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-				},
-			},
+		ProviderModels: DefaultKitchenConfig().ProviderModels,
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {Prefer: []string{"anthropic"}},
+			"reviewer":         {Prefer: []string{"openai"}},
 		},
 	}, nil)
 
@@ -188,17 +181,12 @@ func TestSchedulerWorkerSpecForTaskUsesRoleAwareRouting(t *testing.T) {
 
 func TestSchedulerWorkerSpecForTaskUsesCouncilSeatRouting(t *testing.T) {
 	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-			},
+		ProviderModels: DefaultKitchenConfig().ProviderModels,
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {Prefer: []string{"anthropic"}},
 		},
-		CouncilSeats: map[string]CouncilSeatRoutingConfig{
-			"B": {
-				Default: RoutingRule{
-					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-				},
-			},
+		CouncilSeatProviders: map[string]ProviderPolicy{
+			"B": {Prefer: []string{"openai"}},
 		},
 	}, nil)
 
@@ -262,8 +250,9 @@ func TestWorkerCanRunCouncilTaskRejectsNonResidentIdleWorkerWhenRouteMismatches(
 		pm:    pm,
 		plans: store,
 		router: NewComplexityRouter(KitchenConfig{
-			Routing: map[Complexity]RoutingRule{
-				ComplexityMedium: {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
+			ProviderModels: DefaultKitchenConfig().ProviderModels,
+			RoleProviders: map[string]ProviderPolicy{
+				defaultRoutingRole: {Prefer: []string{"anthropic"}},
 			},
 		}, nil),
 	}
@@ -1132,10 +1121,9 @@ func TestSchedulerDoesNotDispatchTaskToIdleWorkerFromWrongProvider(t *testing.T)
 	}
 	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
 	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-			},
+		ProviderModels: DefaultKitchenConfig().ProviderModels,
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {Prefer: []string{"openai"}},
 		},
 		Concurrency: DefaultKitchenConfig().Concurrency,
 	}, nil,

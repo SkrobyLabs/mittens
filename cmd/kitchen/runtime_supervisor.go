@@ -40,67 +40,29 @@ func supervisedPoolStateDir(project ProjectPaths) string {
 func configuredServeProviders(cfg KitchenConfig) ([]string, error) {
 	seen := make(map[string]bool)
 	var providers []string
-	if err := collectServeProviders(seen, &providers, "routing", cfg.Routing); err != nil {
-		return nil, err
-	}
-	for role, rule := range cfg.RoleDefaults {
+	for role, policy := range cfg.RoleProviders {
 		role = normalizeRoutingRole(role)
-		if err := collectServeProvidersForRule(seen, &providers, "roleDefaults."+role, rule); err != nil {
+		if err := collectServeProvidersForPolicy(seen, &providers, "roleProviders."+role, policy); err != nil {
 			return nil, err
 		}
 	}
-	for role, routing := range cfg.RoleRouting {
-		role = normalizeRoutingRole(role)
-		if err := collectServeProviders(seen, &providers, "roleRouting."+role, routing); err != nil {
-			return nil, err
-		}
-	}
-	for seat, seatCfg := range cfg.CouncilSeats {
+	for seat, policy := range cfg.CouncilSeatProviders {
 		seat = normalizeCouncilSeat(seat)
 		if seat == "" {
 			continue
 		}
-		if len(seatCfg.Default.Prefer) > 0 {
-			if err := collectServeProvidersForRule(seen, &providers, "councilSeats."+seat+".default", seatCfg.Default); err != nil {
-				return nil, err
-			}
-		}
-		if err := collectServeProviders(seen, &providers, "councilSeats."+seat+".routing", seatCfg.Routing); err != nil {
+		if err := collectServeProvidersForPolicy(seen, &providers, "councilSeatProviders."+seat, policy); err != nil {
 			return nil, err
 		}
 	}
 	return providers, nil
 }
 
-func collectServeProviders(seen map[string]bool, providers *[]string, scope string, routing map[Complexity]RoutingRule) error {
-	for _, complexity := range allComplexities {
-		rule, ok := routing[complexity]
-		if !ok {
-			continue
-		}
-		keys := append([]PoolKey(nil), rule.Prefer...)
-		keys = append(keys, rule.Fallback...)
-		for _, key := range keys {
-			provider, err := normalizeServeProvider(key.Provider)
-			if err != nil {
-				return fmt.Errorf("%s.%s provider %q: %w", scope, complexity, key.Provider, err)
-			}
-			if !seen[provider] {
-				seen[provider] = true
-				*providers = append(*providers, provider)
-			}
-		}
-	}
-	return nil
-}
-
-func collectServeProvidersForRule(seen map[string]bool, providers *[]string, scope string, rule RoutingRule) error {
-	keys := append([]PoolKey(nil), rule.Prefer...)
-	keys = append(keys, rule.Fallback...)
-	for _, key := range keys {
-		provider, err := normalizeServeProvider(key.Provider)
+func collectServeProvidersForPolicy(seen map[string]bool, providers *[]string, scope string, policy ProviderPolicy) error {
+	for idx, providerName := range append(append([]string(nil), policy.Prefer...), policy.Fallback...) {
+		provider, err := normalizeServeProvider(providerName)
 		if err != nil {
-			return fmt.Errorf("%s provider %q: %w", scope, key.Provider, err)
+			return fmt.Errorf("%s entry %d provider %q: %w", scope, idx, providerName, err)
 		}
 		if !seen[provider] {
 			seen[provider] = true

@@ -80,7 +80,7 @@ func TestGeminiAdapter_ModelNormalization(t *testing.T) {
 	}{
 		{"flash", "flash"},
 		{"gemini-2.0-flash", "gemini-2.0-flash"},
-		{"", "gemini-2.5-pro"},
+		{"", "gemini-3-flash-preview"},
 		{"2.0-flash", "gemini-2.0-flash"},
 		{"gemini-pro", "gemini-pro"},
 	}

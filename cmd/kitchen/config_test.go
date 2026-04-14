@@ -13,23 +13,23 @@ func TestLoadKitchenConfigMissingReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadKitchenConfig: %v", err)
 	}
-	if got := cfg.Concurrency.MaxWorkersTotal; got != 12 {
-		t.Fatalf("MaxWorkersTotal = %d, want 12", got)
-	}
 	for _, complexity := range allComplexities {
-		rule := cfg.Routing[complexity]
-		if got := rule.Prefer[0]; got.Provider != "anthropic" || got.Model != "sonnet" {
-			t.Fatalf("%s prefer = %+v, want anthropic/sonnet", complexity, got)
+		if got := cfg.ProviderModels["anthropic"][complexity]; got != "sonnet" {
+			t.Fatalf("anthropic.%s = %q, want sonnet", complexity, got)
 		}
-		if len(rule.Fallback) != 2 {
-			t.Fatalf("%s fallback = %+v, want two entries", complexity, rule.Fallback)
+		if got := cfg.ProviderModels["openai"][complexity]; got != "gpt-5.4" {
+			t.Fatalf("openai.%s = %q, want gpt-5.4", complexity, got)
 		}
-		if got := rule.Fallback[0]; got.Provider != "openai" || got.Model != "gpt-5.4" {
-			t.Fatalf("%s fallback[0] = %+v, want openai/gpt-5.4", complexity, got)
+		if got := cfg.ProviderModels["gemini"][complexity]; got != "gemini-3-flash-preview" {
+			t.Fatalf("gemini.%s = %q, want gemini-3-flash-preview", complexity, got)
 		}
-		if got := rule.Fallback[1]; got.Provider != "gemini" || got.Model != "gemini-3-flash-preview" {
-			t.Fatalf("%s fallback[1] = %+v, want gemini/gemini-3-flash-preview", complexity, got)
-		}
+	}
+	defaultPolicy := cfg.RoleProviders[defaultRoutingRole]
+	if len(defaultPolicy.Prefer) != 1 || defaultPolicy.Prefer[0] != "anthropic" {
+		t.Fatalf("default prefer = %+v, want anthropic", defaultPolicy.Prefer)
+	}
+	if len(defaultPolicy.Fallback) != 2 || defaultPolicy.Fallback[0] != "openai" || defaultPolicy.Fallback[1] != "gemini" {
+		t.Fatalf("default fallback = %+v, want openai then gemini", defaultPolicy.Fallback)
 	}
 	if got := cfg.Snapshots.PlanHistoryLimit; got != defaultPlanProgressHistoryLimit {
 		t.Fatalf("PlanHistoryLimit = %d, want %d", got, defaultPlanProgressHistoryLimit)
@@ -40,27 +40,35 @@ func TestLoadKitchenConfigParsesOverrides(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	data := []byte(`
-routing:
-  trivial:
-    prefer:
-      - provider: openai
-        model: codex-spark
-  low:
-    prefer:
-      - provider: anthropic
-        model: sonnet
-  medium:
-    prefer:
-      - provider: anthropic
-        model: sonnet
-  high:
-    prefer:
-      - provider: anthropic
-        model: opus
-  critical:
-    prefer:
-      - provider: anthropic
-        model: opus
+providerModels:
+  anthropic:
+    trivial: haiku
+    low: sonnet
+    medium: sonnet
+    high: opus
+    critical: opus
+  openai:
+    trivial: gpt-5.4-mini
+    low: gpt-5.4
+    medium: gpt-5.4
+    high: gpt-5.4
+    critical: gpt-5.4
+  gemini:
+    trivial: gemini-3-flash-preview
+    low: gemini-3-flash-preview
+    medium: gemini-3-flash-preview
+    high: gemini-3-flash-preview
+    critical: gemini-3-flash-preview
+roleProviders:
+  default:
+    prefer: [openai]
+    fallback: [anthropic, gemini]
+  reviewer:
+    prefer: [anthropic]
+    fallback: [openai]
+councilSeatProviders:
+  b:
+    prefer: [gemini]
 concurrency:
   maxActiveLineages: 2
   maxPlanningWorkers: 1
@@ -74,17 +82,6 @@ failure_policy:
     cooldown: 30s
 snapshots:
   planHistoryLimit: 5
-roleRouting:
-  reviewer:
-    high:
-      prefer:
-        - provider: openai
-          model: gpt-5.4
-roleDefaults:
-  implementer:
-    prefer:
-      - provider: anthropic
-        model: opus
 `)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
@@ -94,8 +91,8 @@ roleDefaults:
 	if err != nil {
 		t.Fatalf("LoadKitchenConfig: %v", err)
 	}
-	if got := cfg.Routing[ComplexityTrivial].Prefer[0].Provider; got != "openai" {
-		t.Fatalf("provider = %q, want openai", got)
+	if got := cfg.ProviderModels["anthropic"][ComplexityTrivial]; got != "haiku" {
+		t.Fatalf("anthropic.trivial = %q, want haiku", got)
 	}
 	if got := cfg.Concurrency.MaxWorkersTotal; got != 3 {
 		t.Fatalf("MaxWorkersTotal = %d, want 3", got)
@@ -106,11 +103,30 @@ roleDefaults:
 	if got := cfg.Snapshots.PlanHistoryLimit; got != 5 {
 		t.Fatalf("PlanHistoryLimit = %d, want 5", got)
 	}
-	if got := cfg.RoleRouting["reviewer"][ComplexityHigh].Prefer[0].Provider; got != "openai" {
-		t.Fatalf("reviewer high provider = %q, want openai", got)
+	if got := cfg.RoleProviders["reviewer"].Fallback[0]; got != "openai" {
+		t.Fatalf("reviewer fallback[0] = %q, want openai", got)
 	}
-	if got := cfg.RoleDefaults["implementer"].Prefer[0].Model; got != "opus" {
-		t.Fatalf("implementer default model = %q, want opus", got)
+	if got := cfg.CouncilSeatProviders["B"].Prefer[0]; got != "gemini" {
+		t.Fatalf("seat B prefer[0] = %q, want gemini", got)
+	}
+}
+
+func TestLoadKitchenConfigRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+routing:
+  medium:
+    prefer:
+      - provider: anthropic
+        model: sonnet
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadKitchenConfig(path); err == nil || !strings.Contains(err.Error(), "field routing not found") {
+		t.Fatalf("LoadKitchenConfig err = %v, want strict unknown field failure", err)
 	}
 }
 
@@ -122,115 +138,115 @@ func TestKitchenConfigValidateRejectsNegativeSnapshotHistoryLimit(t *testing.T) 
 	}
 }
 
-func TestEffectiveRoutingForRoleFallsBackToDefault(t *testing.T) {
-	cfg := DefaultKitchenConfig()
-	cfg.RoleDefaults["reviewer"] = RoutingRule{
-		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-	}
-	cfg.RoleRouting["reviewer"] = map[Complexity]RoutingRule{
-		ComplexityHigh: {
-			Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
-		},
+func TestLoadKitchenConfigPreservesDefaultMaxIdleWhenOmitted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+providerModels:
+  anthropic:
+    trivial: sonnet
+    low: sonnet
+    medium: sonnet
+    high: sonnet
+    critical: sonnet
+roleProviders:
+  default:
+    prefer: [anthropic]
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	routing := effectiveRoutingForRole(cfg, "reviewer")
-	if got := routing[ComplexityLow].Prefer[0].Provider; got != "openai" {
-		t.Fatalf("reviewer low provider = %q, want role default openai", got)
+	cfg, err := LoadKitchenConfig(path)
+	if err != nil {
+		t.Fatalf("LoadKitchenConfig: %v", err)
 	}
-	if got := routing[ComplexityHigh].Prefer[0].Provider; got != "anthropic" {
-		t.Fatalf("reviewer high provider = %q, want anthropic override", got)
+	if got := cfg.Concurrency.MaxIdlePerPool; got != DefaultKitchenConfig().Concurrency.MaxIdlePerPool {
+		t.Fatalf("MaxIdlePerPool = %d, want default %d when omitted", got, DefaultKitchenConfig().Concurrency.MaxIdlePerPool)
 	}
 }
 
-func TestSetRoleDefaultAndOverrides(t *testing.T) {
+func TestEffectiveProviderPolicyForRoleFallsBackToDefault(t *testing.T) {
 	cfg := DefaultKitchenConfig()
-	setRoleDefault(&cfg, "reviewer", RoutingRule{
-		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-	})
-	setRoleComplexityOverrides(&cfg, "reviewer", map[Complexity]RoutingRule{
-		ComplexityHigh: {
-			Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
-		},
-	})
-	if got := cfg.RoleDefaults["reviewer"].Prefer[0].Provider; got != "openai" {
-		t.Fatalf("reviewer default provider = %q, want openai", got)
-	}
-	if len(cfg.RoleRouting["reviewer"]) != 1 {
-		t.Fatalf("reviewer overrides = %+v, want exactly one override", cfg.RoleRouting["reviewer"])
-	}
-	if got := cfg.RoleRouting["reviewer"][ComplexityHigh].Prefer[0].Provider; got != "anthropic" {
-		t.Fatalf("reviewer high provider = %q, want anthropic", got)
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
 	}
 
-	clearRoutingForRole(&cfg, "reviewer")
-	if _, ok := cfg.RoleDefaults["reviewer"]; ok {
-		t.Fatalf("reviewer default = %+v, want cleared default", cfg.RoleDefaults["reviewer"])
+	reviewer := effectiveProviderPolicyForRole(cfg, "reviewer")
+	if got := reviewer.Prefer[0]; got != "openai" {
+		t.Fatalf("reviewer prefer[0] = %q, want openai", got)
 	}
-	if _, ok := cfg.RoleRouting["reviewer"]; ok {
-		t.Fatalf("reviewer overrides = %+v, want cleared overrides", cfg.RoleRouting["reviewer"])
+	implementer := effectiveProviderPolicyForRole(cfg, "implementer")
+	if got := implementer.Prefer[0]; got != "anthropic" {
+		t.Fatalf("implementer prefer[0] = %q, want anthropic", got)
 	}
 }
 
-func TestEffectiveRoutingForCouncilSeatFallsBackToPlannerAndOverrides(t *testing.T) {
+func TestSetRoleProviderPolicyAndClear(t *testing.T) {
 	cfg := DefaultKitchenConfig()
-	cfg.RoleDefaults[plannerTaskRole] = RoutingRule{
-		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-	}
-	cfg.CouncilSeats["B"] = CouncilSeatRoutingConfig{
-		Default: RoutingRule{
-			Prefer: []PoolKey{{Provider: "google", Model: "gemini-2.5-pro"}},
-		},
-		Routing: map[Complexity]RoutingRule{
-			ComplexityTrivial: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}},
-			},
-		},
+	setRoleProviderPolicy(&cfg, "reviewer", ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	})
+	if got := cfg.RoleProviders["reviewer"].Prefer[0]; got != "openai" {
+		t.Fatalf("reviewer prefer[0] = %q, want openai", got)
 	}
 
-	seatA := effectiveRoutingForCouncilSeat(cfg, "A")
-	if got := seatA[ComplexityMedium].Prefer[0].Provider; got != "openai" {
-		t.Fatalf("seat A provider = %q, want planner fallback openai", got)
+	clearProviderPolicyForRole(&cfg, "reviewer")
+	if _, ok := cfg.RoleProviders["reviewer"]; ok {
+		t.Fatalf("reviewer policy = %+v, want cleared", cfg.RoleProviders["reviewer"])
 	}
-	seatB := effectiveRoutingForCouncilSeat(cfg, "B")
-	if got := seatB[ComplexityMedium].Prefer[0].Provider; got != "google" {
-		t.Fatalf("seat B medium provider = %q, want seat default google", got)
+}
+
+func TestEffectiveProviderPolicyForCouncilSeatFallsBackToPlannerAndOverrides(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
 	}
-	if got := seatB[ComplexityTrivial].Prefer[0].Provider; got != "anthropic" {
-		t.Fatalf("seat B trivial provider = %q, want anthropic override", got)
+	cfg.CouncilSeatProviders["B"] = ProviderPolicy{
+		Prefer: []string{"gemini"},
+	}
+
+	seatA := effectiveProviderPolicyForCouncilSeat(cfg, "A")
+	if got := seatA.Prefer[0]; got != "openai" {
+		t.Fatalf("seat A prefer[0] = %q, want planner openai", got)
+	}
+	seatB := effectiveProviderPolicyForCouncilSeat(cfg, "B")
+	if got := seatB.Prefer[0]; got != "gemini" {
+		t.Fatalf("seat B prefer[0] = %q, want seat override gemini", got)
+	}
+	if got := seatB.Fallback[0]; got != "anthropic" {
+		t.Fatalf("seat B fallback[0] = %q, want inherited anthropic", got)
 	}
 }
 
 func TestKitchenConfigValidateRejectsInvalidCouncilSeatKey(t *testing.T) {
 	cfg := DefaultKitchenConfig()
-	cfg.CouncilSeats["C"] = CouncilSeatRoutingConfig{
-		Default: RoutingRule{
-			Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-		},
+	cfg.CouncilSeatProviders["C"] = ProviderPolicy{
+		Prefer: []string{"openai"},
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "councilSeats.C") {
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "councilSeatProviders.C") {
 		t.Fatalf("Validate err = %v, want invalid council seat failure", err)
 	}
 }
 
-func TestKitchenConfigValidateRejectsDefaultRoleRouting(t *testing.T) {
+func TestKitchenConfigValidateRejectsMissingDefaultRolePolicy(t *testing.T) {
 	cfg := DefaultKitchenConfig()
-	cfg.RoleRouting[defaultRoutingRole] = map[Complexity]RoutingRule{
-		ComplexityLow: {
-			Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-		},
-	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "roleRouting.default") {
-		t.Fatalf("Validate err = %v, want reserved default role routing failure", err)
+	delete(cfg.RoleProviders, defaultRoutingRole)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "roleProviders.default.prefer") {
+		t.Fatalf("Validate err = %v, want missing default role provider failure", err)
 	}
 }
 
-func TestKitchenConfigValidateRejectsDefaultRoleDefault(t *testing.T) {
+func TestKitchenConfigValidateRejectsNonCanonicalProviderNames(t *testing.T) {
 	cfg := DefaultKitchenConfig()
-	cfg.RoleDefaults[defaultRoutingRole] = RoutingRule{
-		Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer: []string{"codex"},
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "roleDefaults.default") {
-		t.Fatalf("Validate err = %v, want reserved default role default failure", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canonical provider names") {
+		t.Fatalf("Validate err = %v, want canonical provider name failure", err)
 	}
 }
 

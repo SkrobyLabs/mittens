@@ -9,34 +9,37 @@ import (
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
-// logRoutingOverrides prints a line to stderr for each complexity whose routing
-// differs from the defaults, e.g. "kitchen: routing override: low → claude/haiku".
+// logRoutingOverrides prints a line to stderr for each provider-model or
+// role/seat provider-policy override relative to the defaults.
 func logRoutingOverrides(defaultCfg, cfg KitchenConfig) {
-	for _, c := range allComplexities {
-		def := defaultCfg.Routing[c]
-		got := cfg.Routing[c]
-		if routingRuleChanged(def, got) && len(got.Prefer) > 0 {
-			key := got.Prefer[0]
-			fmt.Fprintf(os.Stderr, "kitchen: routing override: %s → %s/%s\n", c, key.Provider, key.Model)
+	for provider, models := range cfg.ProviderModels {
+		for _, complexity := range allComplexities {
+			got := strings.TrimSpace(models[complexity])
+			def := strings.TrimSpace(defaultCfg.ProviderModels[provider][complexity])
+			if got != "" && got != def {
+				fmt.Fprintf(os.Stderr, "kitchen: provider model override: %s.%s → %s\n", provider, complexity, got)
+			}
 		}
 	}
-}
-
-func routingRuleChanged(a, b RoutingRule) bool {
-	if len(a.Prefer) != len(b.Prefer) || len(a.Fallback) != len(b.Fallback) {
-		return true
-	}
-	for i := range a.Prefer {
-		if a.Prefer[i] != b.Prefer[i] {
-			return true
+	for role, policy := range cfg.RoleProviders {
+		role = normalizeRoutingRole(role)
+		def := effectiveProviderPolicyForRole(defaultCfg, role)
+		if role == defaultRoutingRole {
+			def = defaultCfg.RoleProviders[defaultRoutingRole]
+		}
+		if !providerPolicyEqual(def, policy) {
+			fmt.Fprintf(os.Stderr, "kitchen: role provider override: %s → %s\n", role, providerPolicySummary(policy))
 		}
 	}
-	for i := range a.Fallback {
-		if a.Fallback[i] != b.Fallback[i] {
-			return true
+	for seat, policy := range cfg.CouncilSeatProviders {
+		def := ProviderPolicy{}
+		if existing, ok := defaultCfg.CouncilSeatProviders[seat]; ok {
+			def = existing
+		}
+		if !providerPolicyEqual(def, policy) {
+			fmt.Fprintf(os.Stderr, "kitchen: council seat override: %s → %s\n", seat, providerPolicySummary(effectiveProviderPolicyForCouncilSeat(cfg, seat)))
 		}
 	}
-	return false
 }
 
 const defaultPoolStateName = "default"
@@ -60,23 +63,15 @@ func openKitchenWithOptions(repoPath string, opts kitchenOpenOptions) (*Kitchen,
 		return nil, nil, err
 	}
 
-	defaultCfg := DefaultKitchenConfig()
 	configPath, err := KitchenConfigPath()
 	if err != nil {
 		return nil, nil, err
 	}
-	userCfg, err := LoadKitchenConfigFile(configPath)
+	cfg, err := LoadKitchenConfig(configPath)
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg := defaultCfg
-	if userCfg != nil {
-		cfg = MergeKitchenConfig(defaultCfg, *userCfg)
-		logRoutingOverrides(defaultCfg, cfg)
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, nil, err
-	}
+	logRoutingOverrides(DefaultKitchenConfig(), cfg)
 
 	repoRoot, err := resolveRepoRoot(repoPath)
 	if err != nil {

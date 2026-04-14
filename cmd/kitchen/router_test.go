@@ -15,20 +15,12 @@ func TestComplexityRouterResolveFiltersUnavailablePools(t *testing.T) {
 		t.Fatalf("MarkAuthFailure: %v", err)
 	}
 
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "sonnet"},
-					{Provider: "openai", Model: "codex"},
-				},
-				Fallback: []PoolKey{
-					{Provider: "anthropic", Model: "opus"},
-				},
-			},
-		},
-	}, health)
+	cfg := DefaultKitchenConfig()
+	cfg.ProviderModels["anthropic"][ComplexityMedium] = "sonnet"
+	cfg.ProviderModels["openai"][ComplexityMedium] = "codex"
+	cfg.ProviderModels["anthropic"][ComplexityHigh] = "opus"
 
+	router := NewComplexityRouter(cfg, health)
 	got := router.Resolve(ComplexityMedium)
 	if len(got) != 2 {
 		t.Fatalf("len(resolve) = %d, want 2", len(got))
@@ -36,68 +28,47 @@ func TestComplexityRouterResolveFiltersUnavailablePools(t *testing.T) {
 	if got[0].Provider != "openai" || got[0].Model != "codex" {
 		t.Fatalf("first pool = %+v, want openai/codex", got[0])
 	}
-	if got[1].Provider != "anthropic" || got[1].Model != "opus" {
-		t.Fatalf("second pool = %+v, want anthropic/opus", got[1])
+	if got[1].Provider != "gemini" {
+		t.Fatalf("second pool = %+v, want gemini fallback", got[1])
 	}
 }
 
 func TestComplexityRouterResolveForRolePrefersRoleOverrideAndFallsBackToDefault(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityLow: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-			},
-			ComplexityHigh: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
-			},
-		},
-		RoleDefaults: map[string]RoutingRule{
-			"reviewer": {
-				Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-			},
-		},
-		RoleRouting: map[string]map[Complexity]RoutingRule{
-			"reviewer": {
-				ComplexityHigh: {
-					Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}},
-				},
-			},
-		},
-	}, nil)
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	router := NewComplexityRouter(cfg, nil)
 
 	low := router.ResolveForRole("reviewer", ComplexityLow)
-	if len(low) != 1 || low[0].Provider != "openai" {
-		t.Fatalf("reviewer low routing = %+v, want role default openai route", low)
+	if len(low) != 2 || low[0].Provider != "openai" {
+		t.Fatalf("reviewer low routing = %+v, want openai then anthropic", low)
 	}
-	high := router.ResolveForRole("reviewer", ComplexityHigh)
-	if len(high) != 1 || high[0].Provider != "anthropic" {
-		t.Fatalf("reviewer high routing = %+v, want anthropic complexity override", high)
+	implementer := router.ResolveForRole("implementer", ComplexityHigh)
+	if len(implementer) == 0 || implementer[0].Provider != "anthropic" {
+		t.Fatalf("implementer routing = %+v, want inherited anthropic", implementer)
 	}
 }
 
 func TestComplexityRouterResolveCouncilSeatUsesSeatRoutingWithPlannerFallback(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-			},
-		},
-		CouncilSeats: map[string]CouncilSeatRoutingConfig{
-			"B": {
-				Default: RoutingRule{
-					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-				},
-			},
-		},
-	}, nil)
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	cfg.CouncilSeatProviders["B"] = ProviderPolicy{
+		Prefer: []string{"gemini"},
+	}
+	router := NewComplexityRouter(cfg, nil)
 
 	seatA := router.ResolveCouncilSeat("A", ComplexityMedium)
-	if len(seatA) != 1 || seatA[0].Provider != "anthropic" {
-		t.Fatalf("seat A routing = %+v, want planner fallback anthropic", seatA)
+	if len(seatA) == 0 || seatA[0].Provider != "openai" {
+		t.Fatalf("seat A routing = %+v, want planner fallback openai", seatA)
 	}
 	seatB := router.ResolveCouncilSeat("B", ComplexityMedium)
-	if len(seatB) != 1 || seatB[0].Provider != "openai" {
-		t.Fatalf("seat B routing = %+v, want seat-specific openai", seatB)
+	if len(seatB) == 0 || seatB[0].Provider != "gemini" {
+		t.Fatalf("seat B routing = %+v, want seat-specific gemini", seatB)
 	}
 }
 
@@ -113,15 +84,11 @@ func TestComplexityRouterEscalate(t *testing.T) {
 }
 
 func TestComplexityRouterResolveFallsBackToHostPoolWhenConfiguredPoolsMismatch(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "sonnet"},
-				},
-			},
-		},
-	}, nil, PoolKey{Provider: "codex", Model: "gpt-5.4"})
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer: []string{"anthropic"},
+	}
+	router := NewComplexityRouter(cfg, nil, PoolKey{Provider: "codex", Model: "gpt-5.4"})
 
 	got := router.Resolve(ComplexityMedium)
 	if len(got) != 1 {
@@ -133,38 +100,28 @@ func TestComplexityRouterResolveFallsBackToHostPoolWhenConfiguredPoolsMismatch(t
 }
 
 func TestComplexityRouterResolveKeepsMatchingConfiguredProviderAheadOfFallback(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "codex", Model: "gpt-5.4"},
-					{Provider: "anthropic", Model: "sonnet"},
-				},
-			},
-		},
-	}, nil, PoolKey{Provider: "codex", Model: "gpt-5.4"})
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer:   []string{"openai", "anthropic"},
+		Fallback: nil,
+	}
+	router := NewComplexityRouter(cfg, nil, PoolKey{Provider: "codex", Model: "gpt-5.4"})
 
 	got := router.Resolve(ComplexityMedium)
 	if len(got) != 2 {
 		t.Fatalf("len(resolve) = %d, want 2", len(got))
 	}
-	if got[0].Provider != "codex" || got[0].Model != "gpt-5.4" {
-		t.Fatalf("first pool = %+v, want codex/gpt-5.4", got[0])
+	if got[0].Provider != "openai" || got[0].Model != "gpt-5.4" {
+		t.Fatalf("first pool = %+v, want openai/gpt-5.4", got[0])
 	}
 }
 
 func TestComplexityRouterResolveFiltersToConfiguredSupportedProvidersAcrossMultipleHostPools(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "sonnet"},
-					{Provider: "openai", Model: "gpt-5.4"},
-					{Provider: "google", Model: "gemini-2.5-pro"},
-				},
-			},
-		},
-	}, nil,
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer: []string{"anthropic", "openai", "gemini"},
+	}
+	router := NewComplexityRouter(cfg, nil,
 		PoolKey{Provider: "claude"},
 		PoolKey{Provider: "codex"},
 	)
@@ -179,15 +136,11 @@ func TestComplexityRouterResolveFiltersToConfiguredSupportedProvidersAcrossMulti
 }
 
 func TestComplexityRouterResolveDoesNotFallbackToArbitraryProviderWhenMultipleHostPoolsMismatch(t *testing.T) {
-	router := NewComplexityRouter(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "sonnet"},
-				},
-			},
-		},
-	}, nil,
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer: []string{"anthropic"},
+	}
+	router := NewComplexityRouter(cfg, nil,
 		PoolKey{Provider: "codex"},
 		PoolKey{Provider: "gemini"},
 	)

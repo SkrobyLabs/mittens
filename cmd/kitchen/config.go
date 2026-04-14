@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -36,14 +38,9 @@ type PoolKey struct {
 	Adapter  string `json:"adapter,omitempty" yaml:"adapter,omitempty"`
 }
 
-type RoutingRule struct {
-	Prefer   []PoolKey `json:"prefer,omitempty" yaml:"prefer,omitempty"`
-	Fallback []PoolKey `json:"fallback,omitempty" yaml:"fallback,omitempty"`
-}
-
-type CouncilSeatRoutingConfig struct {
-	Default RoutingRule                `json:"default,omitempty" yaml:"default,omitempty"`
-	Routing map[Complexity]RoutingRule `json:"routing,omitempty" yaml:"routing,omitempty"`
+type ProviderPolicy struct {
+	Prefer   []string `json:"prefer,omitempty" yaml:"prefer,omitempty"`
+	Fallback []string `json:"fallback,omitempty" yaml:"fallback,omitempty"`
 }
 
 const defaultRoutingRole = "default"
@@ -69,13 +66,12 @@ type SnapshotConfig struct {
 }
 
 type KitchenConfig struct {
-	Routing       map[Complexity]RoutingRule            `json:"routing" yaml:"routing"`
-	RoleDefaults  map[string]RoutingRule                `json:"roleDefaults,omitempty" yaml:"roleDefaults,omitempty"`
-	RoleRouting   map[string]map[Complexity]RoutingRule `json:"roleRouting,omitempty" yaml:"roleRouting,omitempty"`
-	CouncilSeats  map[string]CouncilSeatRoutingConfig   `json:"councilSeats,omitempty" yaml:"councilSeats,omitempty"`
-	Concurrency   ConcurrencyConfig                     `json:"concurrency" yaml:"concurrency"`
-	FailurePolicy map[string]FailurePolicyRule          `json:"failure_policy" yaml:"failure_policy"`
-	Snapshots     SnapshotConfig                        `json:"snapshots" yaml:"snapshots"`
+	ProviderModels      map[string]map[Complexity]string `json:"providerModels" yaml:"providerModels"`
+	RoleProviders       map[string]ProviderPolicy        `json:"roleProviders,omitempty" yaml:"roleProviders,omitempty"`
+	CouncilSeatProviders map[string]ProviderPolicy       `json:"councilSeatProviders,omitempty" yaml:"councilSeatProviders,omitempty"`
+	Concurrency         ConcurrencyConfig                `json:"concurrency" yaml:"concurrency"`
+	FailurePolicy       map[string]FailurePolicyRule     `json:"failure_policy" yaml:"failure_policy"`
+	Snapshots           SnapshotConfig                   `json:"snapshots" yaml:"snapshots"`
 }
 
 type KitchenPaths struct {
@@ -95,24 +91,19 @@ type ProjectPaths struct {
 }
 
 func DefaultKitchenConfig() KitchenConfig {
-	defaultRule := RoutingRule{
-		Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}},
-		Fallback: []PoolKey{
-			{Provider: "openai", Model: "gpt-5.4"},
-			{Provider: "gemini", Model: "gemini-3-flash-preview"},
-		},
-	}
 	return KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityTrivial:  cloneRoutingRule(defaultRule),
-			ComplexityLow:      cloneRoutingRule(defaultRule),
-			ComplexityMedium:   cloneRoutingRule(defaultRule),
-			ComplexityHigh:     cloneRoutingRule(defaultRule),
-			ComplexityCritical: cloneRoutingRule(defaultRule),
+		ProviderModels: map[string]map[Complexity]string{
+			"anthropic": defaultProviderModelMap("sonnet"),
+			"openai":    defaultProviderModelMap("gpt-5.4"),
+			"gemini":    defaultProviderModelMap("gemini-3-flash-preview"),
 		},
-		RoleDefaults: map[string]RoutingRule{},
-		RoleRouting:  map[string]map[Complexity]RoutingRule{},
-		CouncilSeats: map[string]CouncilSeatRoutingConfig{},
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {
+				Prefer:   []string{"anthropic"},
+				Fallback: []string{"openai", "gemini"},
+			},
+		},
+		CouncilSeatProviders: map[string]ProviderPolicy{},
 		Concurrency: ConcurrencyConfig{
 			MaxActiveLineages:         5,
 			MaxPlanningWorkers:        2,
@@ -136,6 +127,14 @@ func DefaultKitchenConfig() KitchenConfig {
 	}
 }
 
+func defaultProviderModelMap(model string) map[Complexity]string {
+	m := make(map[Complexity]string, len(allComplexities))
+	for _, complexity := range allComplexities {
+		m[complexity] = model
+	}
+	return m
+}
+
 func configurableKitchenRoles() []string {
 	return []string{
 		defaultRoutingRole,
@@ -147,89 +146,12 @@ func configurableKitchenRoles() []string {
 	}
 }
 
-func effectiveRoutingForRole(cfg KitchenConfig, role string) map[Complexity]RoutingRule {
-	role = normalizeRoutingRole(role)
-	routing := cloneRoutingMap(cfg.Routing)
-	if role == defaultRoutingRole {
-		return routing
-	}
-	if rule, ok := roleDefaultRule(cfg, role); ok {
-		for _, complexity := range allComplexities {
-			routing[complexity] = cloneRoutingRule(rule)
-		}
-	}
-	roleRules := cfg.RoleRouting[role]
-	for complexity, rule := range roleRules {
-		if len(rule.Prefer) > 0 {
-			routing[complexity] = cloneRoutingRule(rule)
-		}
-	}
-	return routing
-}
-
-func effectiveRoutingForCouncilSeat(cfg KitchenConfig, seat string) map[Complexity]RoutingRule {
-	seat = normalizeCouncilSeat(seat)
-	routing := effectiveRoutingForRole(cfg, plannerTaskRole)
-	if seat == "" {
-		return routing
-	}
-	seatCfg, ok := cfg.CouncilSeats[seat]
-	if !ok {
-		return routing
-	}
-	if len(seatCfg.Default.Prefer) > 0 {
-		for _, complexity := range allComplexities {
-			routing[complexity] = cloneRoutingRule(seatCfg.Default)
-		}
-	}
-	for complexity, rule := range seatCfg.Routing {
-		if len(rule.Prefer) > 0 {
-			routing[complexity] = cloneRoutingRule(rule)
-		}
-	}
-	return routing
-}
-
 func normalizeRoutingRole(role string) string {
 	role = strings.TrimSpace(role)
 	if role == "" {
 		return defaultRoutingRole
 	}
 	return role
-}
-
-func cloneRoutingMap(src map[Complexity]RoutingRule) map[Complexity]RoutingRule {
-	out := make(map[Complexity]RoutingRule, len(src))
-	for complexity, rule := range src {
-		out[complexity] = cloneRoutingRule(rule)
-	}
-	return out
-}
-
-func cloneRoutingRule(rule RoutingRule) RoutingRule {
-	return RoutingRule{
-		Prefer:   append([]PoolKey(nil), rule.Prefer...),
-		Fallback: append([]PoolKey(nil), rule.Fallback...),
-	}
-}
-
-func cloneCouncilSeatRoutingConfig(cfg CouncilSeatRoutingConfig) CouncilSeatRoutingConfig {
-	return CouncilSeatRoutingConfig{
-		Default: cloneRoutingRule(cfg.Default),
-		Routing: cloneRoutingMap(cfg.Routing),
-	}
-}
-
-func roleDefaultRule(cfg KitchenConfig, role string) (RoutingRule, bool) {
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return RoutingRule{}, false
-	}
-	rule, ok := cfg.RoleDefaults[role]
-	if !ok || len(rule.Prefer) == 0 {
-		return RoutingRule{}, false
-	}
-	return cloneRoutingRule(rule), true
 }
 
 func normalizeCouncilSeat(seat string) string {
@@ -242,267 +164,353 @@ func normalizeCouncilSeat(seat string) string {
 	}
 }
 
-func councilSeatRoutingConfig(cfg KitchenConfig, seat string) (CouncilSeatRoutingConfig, bool) {
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return CouncilSeatRoutingConfig{}, false
+func normalizeConfigProviderName(name string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "anthropic", "claude":
+		return "anthropic", nil
+	case "openai", "codex":
+		return "openai", nil
+	case "gemini", "google":
+		return "gemini", nil
+	case "":
+		return "", fmt.Errorf("provider must not be empty")
+	default:
+		return "", fmt.Errorf("unknown provider %q (available: anthropic, openai, gemini)", name)
 	}
-	seatCfg, ok := cfg.CouncilSeats[seat]
-	if !ok {
-		return CouncilSeatRoutingConfig{}, false
-	}
-	return cloneCouncilSeatRoutingConfig(seatCfg), true
 }
 
-func setCouncilSeatRoutingConfig(cfg *KitchenConfig, seat string, seatCfg CouncilSeatRoutingConfig) {
-	if cfg == nil {
-		return
+func cloneProviderPolicy(policy ProviderPolicy) ProviderPolicy {
+	return ProviderPolicy{
+		Prefer:   append([]string(nil), policy.Prefer...),
+		Fallback: append([]string(nil), policy.Fallback...),
 	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	if cfg.CouncilSeats == nil {
-		cfg.CouncilSeats = make(map[string]CouncilSeatRoutingConfig)
-	}
-	if len(seatCfg.Default.Prefer) == 0 && len(seatCfg.Routing) == 0 {
-		delete(cfg.CouncilSeats, seat)
-		return
-	}
-	cfg.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
 }
 
-func clearCouncilSeatRoutingConfig(cfg *KitchenConfig, seat string) {
-	if cfg == nil || cfg.CouncilSeats == nil {
-		return
+func cloneProviderModels(src map[string]map[Complexity]string) map[string]map[Complexity]string {
+	out := make(map[string]map[Complexity]string, len(src))
+	for provider, models := range src {
+		modelCopy := make(map[Complexity]string, len(models))
+		for complexity, model := range models {
+			modelCopy[complexity] = model
+		}
+		out[provider] = modelCopy
 	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	delete(cfg.CouncilSeats, seat)
+	return out
 }
 
-func councilSeatHasRoutingOverride(cfg KitchenConfig, seat string) bool {
-	seatCfg, ok := councilSeatRoutingConfig(cfg, seat)
-	if !ok {
+func cloneKitchenConfig(cfg KitchenConfig) KitchenConfig {
+	clone := cfg
+	clone.ProviderModels = cloneProviderModels(cfg.ProviderModels)
+	clone.RoleProviders = make(map[string]ProviderPolicy, len(cfg.RoleProviders))
+	for role, policy := range cfg.RoleProviders {
+		clone.RoleProviders[role] = cloneProviderPolicy(policy)
+	}
+	clone.CouncilSeatProviders = make(map[string]ProviderPolicy, len(cfg.CouncilSeatProviders))
+	for seat, policy := range cfg.CouncilSeatProviders {
+		clone.CouncilSeatProviders[seat] = cloneProviderPolicy(policy)
+	}
+	clone.FailurePolicy = make(map[string]FailurePolicyRule, len(cfg.FailurePolicy))
+	for class, rule := range cfg.FailurePolicy {
+		clone.FailurePolicy[class] = rule
+	}
+	return clone
+}
+
+func providerPolicyEqual(a, b ProviderPolicy) bool {
+	return slices.Equal(a.Prefer, b.Prefer) && slices.Equal(a.Fallback, b.Fallback)
+}
+
+func providerModelsEqual(a, b map[Complexity]string) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	return len(seatCfg.Default.Prefer) > 0 || len(seatCfg.Routing) > 0
-}
-
-func setRoutingForRole(cfg *KitchenConfig, role string, routing map[Complexity]RoutingRule) {
-	if cfg == nil {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		cfg.Routing = cloneRoutingMap(routing)
-		return
-	}
-	if cfg.RoleRouting == nil {
-		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
-	}
-	if cfg.RoleDefaults == nil {
-		cfg.RoleDefaults = make(map[string]RoutingRule)
-	}
-	overrides := make(map[Complexity]RoutingRule)
-	for _, complexity := range allComplexities {
-		rule, ok := routing[complexity]
-		if !ok || len(rule.Prefer) == 0 {
-			continue
-		}
-		if routingRuleEqual(rule, cfg.Routing[complexity]) {
-			continue
-		}
-		overrides[complexity] = cloneRoutingRule(rule)
-	}
-	if len(overrides) == 0 {
-		delete(cfg.RoleRouting, role)
-		return
-	}
-	cfg.RoleRouting[role] = overrides
-}
-
-func setRoutingComplexity(cfg *KitchenConfig, complexity Complexity, rule RoutingRule) {
-	if cfg == nil || !isValidComplexity(complexity) || len(rule.Prefer) == 0 {
-		return
-	}
-	if cfg.Routing == nil {
-		cfg.Routing = make(map[Complexity]RoutingRule)
-	}
-	cfg.Routing[complexity] = cloneRoutingRule(rule)
-}
-
-func setRoleDefault(cfg *KitchenConfig, role string, rule RoutingRule) {
-	if cfg == nil {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return
-	}
-	if cfg.RoleDefaults == nil {
-		cfg.RoleDefaults = make(map[string]RoutingRule)
-	}
-	if len(rule.Prefer) == 0 {
-		delete(cfg.RoleDefaults, role)
-		return
-	}
-	cfg.RoleDefaults[role] = cloneRoutingRule(rule)
-}
-
-func setRoleComplexityOverrides(cfg *KitchenConfig, role string, overrides map[Complexity]RoutingRule) {
-	if cfg == nil {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return
-	}
-	if cfg.RoleRouting == nil {
-		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
-	}
-	if len(overrides) == 0 {
-		delete(cfg.RoleRouting, role)
-		return
-	}
-	cfg.RoleRouting[role] = cloneRoutingMap(overrides)
-}
-
-func setRoleComplexityOverride(cfg *KitchenConfig, role string, complexity Complexity, rule RoutingRule) {
-	if cfg == nil || len(rule.Prefer) == 0 || !isValidComplexity(complexity) {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return
-	}
-	if cfg.RoleRouting == nil {
-		cfg.RoleRouting = make(map[string]map[Complexity]RoutingRule)
-	}
-	if cfg.RoleRouting[role] == nil {
-		cfg.RoleRouting[role] = make(map[Complexity]RoutingRule)
-	}
-	cfg.RoleRouting[role][complexity] = cloneRoutingRule(rule)
-}
-
-func clearRoleComplexityOverride(cfg *KitchenConfig, role string, complexity Complexity) {
-	if cfg == nil || cfg.RoleRouting == nil || !isValidComplexity(complexity) {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return
-	}
-	if cfg.RoleRouting[role] != nil {
-		delete(cfg.RoleRouting[role], complexity)
-		if len(cfg.RoleRouting[role]) == 0 {
-			delete(cfg.RoleRouting, role)
-		}
-	}
-}
-
-func clearRoutingForRole(cfg *KitchenConfig, role string) {
-	if cfg == nil {
-		return
-	}
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return
-	}
-	if cfg.RoleRouting != nil {
-		delete(cfg.RoleRouting, role)
-	}
-	if cfg.RoleDefaults != nil {
-		delete(cfg.RoleDefaults, role)
-	}
-}
-
-func roleHasRoutingOverride(cfg KitchenConfig, role string) bool {
-	role = normalizeRoutingRole(role)
-	if role == defaultRoutingRole {
-		return true
-	}
-	return len(cfg.RoleRouting[role]) > 0 || len(cfg.RoleDefaults[role].Prefer) > 0
-}
-
-func setCouncilSeatDefault(cfg *KitchenConfig, seat string, rule RoutingRule) {
-	if cfg == nil {
-		return
-	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	seatCfg, _ := councilSeatRoutingConfig(*cfg, seat)
-	seatCfg.Default = cloneRoutingRule(rule)
-	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
-}
-
-func clearCouncilSeatDefault(cfg *KitchenConfig, seat string) {
-	if cfg == nil {
-		return
-	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	seatCfg, ok := councilSeatRoutingConfig(*cfg, seat)
-	if !ok {
-		return
-	}
-	seatCfg.Default = RoutingRule{}
-	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
-}
-
-func setCouncilSeatComplexityOverride(cfg *KitchenConfig, seat string, complexity Complexity, rule RoutingRule) {
-	if cfg == nil || len(rule.Prefer) == 0 || !isValidComplexity(complexity) {
-		return
-	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	seatCfg, _ := councilSeatRoutingConfig(*cfg, seat)
-	if seatCfg.Routing == nil {
-		seatCfg.Routing = make(map[Complexity]RoutingRule)
-	}
-	seatCfg.Routing[complexity] = cloneRoutingRule(rule)
-	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
-}
-
-func clearCouncilSeatComplexityOverride(cfg *KitchenConfig, seat string, complexity Complexity) {
-	if cfg == nil || !isValidComplexity(complexity) {
-		return
-	}
-	seat = normalizeCouncilSeat(seat)
-	if seat == "" {
-		return
-	}
-	seatCfg, ok := councilSeatRoutingConfig(*cfg, seat)
-	if !ok || seatCfg.Routing == nil {
-		return
-	}
-	delete(seatCfg.Routing, complexity)
-	setCouncilSeatRoutingConfig(cfg, seat, seatCfg)
-}
-
-func routingRuleEqual(a, b RoutingRule) bool {
-	if len(a.Prefer) != len(b.Prefer) || len(a.Fallback) != len(b.Fallback) {
-		return false
-	}
-	for i := range a.Prefer {
-		if a.Prefer[i] != b.Prefer[i] {
-			return false
-		}
-	}
-	for i := range a.Fallback {
-		if a.Fallback[i] != b.Fallback[i] {
+	for complexity, model := range a {
+		if b[complexity] != model {
 			return false
 		}
 	}
 	return true
+}
+
+func modelForProviderComplexity(cfg KitchenConfig, provider string, complexity Complexity) (string, bool) {
+	provider, err := normalizeConfigProviderName(provider)
+	if err != nil {
+		return "", false
+	}
+	models := cfg.ProviderModels[provider]
+	model, ok := models[complexity]
+	if !ok || strings.TrimSpace(model) == "" {
+		return "", false
+	}
+	return model, true
+}
+
+func roleProviderPolicy(cfg KitchenConfig, role string) (ProviderPolicy, bool) {
+	role = normalizeRoutingRole(role)
+	policy, ok := cfg.RoleProviders[role]
+	if !ok || len(policy.Prefer) == 0 {
+		return ProviderPolicy{}, false
+	}
+	return cloneProviderPolicy(policy), true
+}
+
+func effectiveProviderPolicyForRole(cfg KitchenConfig, role string) ProviderPolicy {
+	role = normalizeRoutingRole(role)
+	if policy, ok := roleProviderPolicy(cfg, role); ok {
+		return policy
+	}
+	if role != defaultRoutingRole {
+		if policy, ok := roleProviderPolicy(cfg, defaultRoutingRole); ok {
+			return policy
+		}
+	}
+	return ProviderPolicy{}
+}
+
+func councilSeatProviderPolicy(cfg KitchenConfig, seat string) (ProviderPolicy, bool) {
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return ProviderPolicy{}, false
+	}
+	policy, ok := cfg.CouncilSeatProviders[seat]
+	if !ok || (len(policy.Prefer) == 0 && len(policy.Fallback) == 0) {
+		return ProviderPolicy{}, false
+	}
+	return cloneProviderPolicy(policy), true
+}
+
+func effectiveProviderPolicyForCouncilSeat(cfg KitchenConfig, seat string) ProviderPolicy {
+	policy := effectiveProviderPolicyForRole(cfg, plannerTaskRole)
+	seatPolicy, ok := councilSeatProviderPolicy(cfg, seat)
+	if !ok {
+		return policy
+	}
+	if len(seatPolicy.Prefer) > 0 {
+		policy.Prefer = append([]string(nil), seatPolicy.Prefer...)
+	}
+	if len(seatPolicy.Fallback) > 0 {
+		policy.Fallback = append([]string(nil), seatPolicy.Fallback...)
+	}
+	return policy
+}
+
+func setProviderModel(cfg *KitchenConfig, provider string, complexity Complexity, model string) error {
+	if cfg == nil {
+		return nil
+	}
+	provider, err := normalizeConfigProviderName(provider)
+	if err != nil {
+		return err
+	}
+	if !isValidComplexity(complexity) {
+		return fmt.Errorf("invalid complexity %q", complexity)
+	}
+	if cfg.ProviderModels == nil {
+		cfg.ProviderModels = make(map[string]map[Complexity]string)
+	}
+	if cfg.ProviderModels[provider] == nil {
+		cfg.ProviderModels[provider] = make(map[Complexity]string)
+	}
+	cfg.ProviderModels[provider][complexity] = strings.TrimSpace(model)
+	return nil
+}
+
+func setRoleProviderPolicy(cfg *KitchenConfig, role string, policy ProviderPolicy) {
+	if cfg == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	policy = cloneProviderPolicy(policy)
+	if cfg.RoleProviders == nil {
+		cfg.RoleProviders = make(map[string]ProviderPolicy)
+	}
+	if role != defaultRoutingRole && len(policy.Prefer) == 0 {
+		delete(cfg.RoleProviders, role)
+		return
+	}
+	cfg.RoleProviders[role] = policy
+}
+
+func clearProviderPolicyForRole(cfg *KitchenConfig, role string) {
+	if cfg == nil || cfg.RoleProviders == nil {
+		return
+	}
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return
+	}
+	delete(cfg.RoleProviders, role)
+}
+
+func roleHasProviderOverride(cfg KitchenConfig, role string) bool {
+	role = normalizeRoutingRole(role)
+	if role == defaultRoutingRole {
+		return true
+	}
+	policy, ok := cfg.RoleProviders[role]
+	return ok && len(policy.Prefer) > 0
+}
+
+func setCouncilSeatProviderPolicy(cfg *KitchenConfig, seat string, policy ProviderPolicy) {
+	if cfg == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	if cfg.CouncilSeatProviders == nil {
+		cfg.CouncilSeatProviders = make(map[string]ProviderPolicy)
+	}
+	policy = cloneProviderPolicy(policy)
+	if len(policy.Prefer) == 0 && len(policy.Fallback) == 0 {
+		delete(cfg.CouncilSeatProviders, seat)
+		return
+	}
+	cfg.CouncilSeatProviders[seat] = policy
+}
+
+func clearCouncilSeatProviderPolicy(cfg *KitchenConfig, seat string) {
+	if cfg == nil || cfg.CouncilSeatProviders == nil {
+		return
+	}
+	seat = normalizeCouncilSeat(seat)
+	if seat == "" {
+		return
+	}
+	delete(cfg.CouncilSeatProviders, seat)
+}
+
+func councilSeatHasProviderOverride(cfg KitchenConfig, seat string) bool {
+	seat = normalizeCouncilSeat(seat)
+	policy, ok := cfg.CouncilSeatProviders[seat]
+	return ok && (len(policy.Prefer) > 0 || len(policy.Fallback) > 0)
+}
+
+func canonicalizeProviderPolicy(policy ProviderPolicy) (ProviderPolicy, error) {
+	canonical := ProviderPolicy{}
+	appendUnique := func(dst *[]string, src []string) error {
+		for _, provider := range src {
+			normalized, err := normalizeConfigProviderName(provider)
+			if err != nil {
+				return err
+			}
+			if !slices.Contains(*dst, normalized) {
+				*dst = append(*dst, normalized)
+			}
+		}
+		return nil
+	}
+	if err := appendUnique(&canonical.Prefer, policy.Prefer); err != nil {
+		return ProviderPolicy{}, err
+	}
+	if err := appendUnique(&canonical.Fallback, policy.Fallback); err != nil {
+		return ProviderPolicy{}, err
+	}
+	return canonical, nil
+}
+
+func canonicalizeKitchenConfig(cfg *KitchenConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.ProviderModels == nil {
+		cfg.ProviderModels = make(map[string]map[Complexity]string)
+	}
+	normalizedModels := make(map[string]map[Complexity]string, len(cfg.ProviderModels))
+	for provider, models := range cfg.ProviderModels {
+		canonicalProvider, err := normalizeConfigProviderName(provider)
+		if err != nil {
+			return fmt.Errorf("providerModels.%s: %w", provider, err)
+		}
+		modelCopy := make(map[Complexity]string, len(models))
+		for complexity, model := range models {
+			modelCopy[complexity] = strings.TrimSpace(model)
+		}
+		if existing, ok := normalizedModels[canonicalProvider]; ok {
+			if !providerModelsEqual(existing, modelCopy) {
+				return fmt.Errorf("providerModels.%s conflicts with another alias of %s", provider, canonicalProvider)
+			}
+			continue
+		}
+		normalizedModels[canonicalProvider] = modelCopy
+	}
+	cfg.ProviderModels = normalizedModels
+
+	if cfg.RoleProviders == nil {
+		cfg.RoleProviders = make(map[string]ProviderPolicy)
+	}
+	normalizedRoles := make(map[string]ProviderPolicy, len(cfg.RoleProviders))
+	for role, policy := range cfg.RoleProviders {
+		role = normalizeRoutingRole(role)
+		canonicalPolicy, err := canonicalizeProviderPolicy(policy)
+		if err != nil {
+			return fmt.Errorf("roleProviders.%s: %w", role, err)
+		}
+		normalizedRoles[role] = canonicalPolicy
+	}
+	cfg.RoleProviders = normalizedRoles
+
+	if cfg.CouncilSeatProviders == nil {
+		cfg.CouncilSeatProviders = make(map[string]ProviderPolicy)
+	}
+	normalizedSeats := make(map[string]ProviderPolicy, len(cfg.CouncilSeatProviders))
+	for seat, policy := range cfg.CouncilSeatProviders {
+		normalizedSeat := normalizeCouncilSeat(seat)
+		if normalizedSeat == "" {
+			normalizedSeat = seat
+		}
+		canonicalPolicy, err := canonicalizeProviderPolicy(policy)
+		if err != nil {
+			return fmt.Errorf("councilSeatProviders.%s: %w", seat, err)
+		}
+		normalizedSeats[normalizedSeat] = canonicalPolicy
+	}
+	cfg.CouncilSeatProviders = normalizedSeats
+	pruneKitchenConfig(cfg)
+	return nil
+}
+
+func pruneKitchenConfig(cfg *KitchenConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.RoleProviders == nil {
+		cfg.RoleProviders = make(map[string]ProviderPolicy)
+	}
+	defaultPolicy, ok := cfg.RoleProviders[defaultRoutingRole]
+	if !ok || len(defaultPolicy.Prefer) == 0 {
+		cfg.RoleProviders[defaultRoutingRole] = DefaultKitchenConfig().RoleProviders[defaultRoutingRole]
+		defaultPolicy = cfg.RoleProviders[defaultRoutingRole]
+	}
+	for role, policy := range cfg.RoleProviders {
+		role = normalizeRoutingRole(role)
+		if role == defaultRoutingRole {
+			cfg.RoleProviders[role] = cloneProviderPolicy(policy)
+			continue
+		}
+		if len(policy.Prefer) == 0 || providerPolicyEqual(policy, defaultPolicy) {
+			delete(cfg.RoleProviders, role)
+		}
+	}
+	if cfg.CouncilSeatProviders == nil {
+		cfg.CouncilSeatProviders = make(map[string]ProviderPolicy)
+	}
+	plannerPolicy := effectiveProviderPolicyForRole(*cfg, plannerTaskRole)
+	for seat, policy := range cfg.CouncilSeatProviders {
+		trimmed := cloneProviderPolicy(policy)
+		if slices.Equal(trimmed.Prefer, plannerPolicy.Prefer) {
+			trimmed.Prefer = nil
+		}
+		if slices.Equal(trimmed.Fallback, plannerPolicy.Fallback) {
+			trimmed.Fallback = nil
+		}
+		if len(trimmed.Prefer) == 0 && len(trimmed.Fallback) == 0 {
+			delete(cfg.CouncilSeatProviders, seat)
+			continue
+		}
+		cfg.CouncilSeatProviders[seat] = trimmed
+	}
 }
 
 func DefaultKitchenHome() (string, error) {
@@ -573,6 +581,19 @@ func KitchenConfigPath() (string, error) {
 	return filepath.Join(home, "config.yaml"), nil
 }
 
+func decodeKitchenConfig(data []byte) (*KitchenConfig, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	var cfg KitchenConfig
+	if err := decoder.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := canonicalizeKitchenConfig(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 // LoadKitchenConfigFile reads the user config at path without merging defaults.
 // Returns nil (not an error) when the file does not exist.
 func LoadKitchenConfigFile(path string) (*KitchenConfig, error) {
@@ -583,78 +604,31 @@ func LoadKitchenConfigFile(path string) (*KitchenConfig, error) {
 		}
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	var cfg KitchenConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	return &cfg, nil
+	return decodeKitchenConfig(data)
 }
 
 // MergeKitchenConfig applies user overrides on top of base.
-// Routing rules are merged per complexity key; keys absent in user retain base values.
-// Concurrency limits are overridden only when the user value is positive.
-// Failure policy rules are merged per class; snapshot limit overridden when positive.
 func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
-	merged := base
+	merged := cloneKitchenConfig(base)
 
-	// Deep-copy routing map before mutating.
-	merged.Routing = cloneRoutingMap(base.Routing)
-	for c, rule := range user.Routing {
-		if len(rule.Prefer) > 0 {
-			merged.Routing[c] = cloneRoutingRule(rule)
+	for provider, models := range user.ProviderModels {
+		if merged.ProviderModels[provider] == nil {
+			merged.ProviderModels[provider] = make(map[Complexity]string)
 		}
-	}
-
-	merged.RoleDefaults = make(map[string]RoutingRule, len(base.RoleDefaults))
-	for role, rule := range base.RoleDefaults {
-		merged.RoleDefaults[role] = cloneRoutingRule(rule)
-	}
-	for role, rule := range user.RoleDefaults {
-		role = normalizeRoutingRole(role)
-		if role == defaultRoutingRole {
-			continue
-		}
-		if len(rule.Prefer) > 0 {
-			merged.RoleDefaults[role] = cloneRoutingRule(rule)
-		}
-	}
-
-	merged.RoleRouting = make(map[string]map[Complexity]RoutingRule, len(base.RoleRouting))
-	for role, routes := range base.RoleRouting {
-		merged.RoleRouting[role] = cloneRoutingMap(routes)
-	}
-	for role, routes := range user.RoleRouting {
-		role = normalizeRoutingRole(role)
-		if role == defaultRoutingRole {
-			continue
-		}
-		if merged.RoleRouting[role] == nil {
-			merged.RoleRouting[role] = make(map[Complexity]RoutingRule)
-		}
-		for complexity, rule := range routes {
-			if len(rule.Prefer) > 0 {
-				merged.RoleRouting[role][complexity] = cloneRoutingRule(rule)
+		for complexity, model := range models {
+			if strings.TrimSpace(model) != "" {
+				merged.ProviderModels[provider][complexity] = strings.TrimSpace(model)
 			}
 		}
 	}
 
-	merged.CouncilSeats = make(map[string]CouncilSeatRoutingConfig, len(base.CouncilSeats))
-	for seat, seatCfg := range base.CouncilSeats {
-		seat = normalizeCouncilSeat(seat)
-		if seat == "" {
-			continue
-		}
-		merged.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
+	for role, policy := range user.RoleProviders {
+		merged.RoleProviders[normalizeRoutingRole(role)] = cloneProviderPolicy(policy)
 	}
-	for seat, seatCfg := range user.CouncilSeats {
-		seat = normalizeCouncilSeat(seat)
-		if seat == "" {
-			continue
-		}
-		merged.CouncilSeats[seat] = cloneCouncilSeatRoutingConfig(seatCfg)
+	for seat, policy := range user.CouncilSeatProviders {
+		merged.CouncilSeatProviders[normalizeCouncilSeat(seat)] = cloneProviderPolicy(policy)
 	}
 
-	// Concurrency: apply positive user values.
 	if user.Concurrency.MaxActiveLineages > 0 {
 		merged.Concurrency.MaxActiveLineages = user.Concurrency.MaxActiveLineages
 	}
@@ -670,29 +644,22 @@ func MergeKitchenConfig(base KitchenConfig, user KitchenConfig) KitchenConfig {
 	if user.Concurrency.MaxWorkersPerLineage > 0 {
 		merged.Concurrency.MaxWorkersPerLineage = user.Concurrency.MaxWorkersPerLineage
 	}
-	if user.Concurrency.MaxIdlePerPool > 0 {
+	if user.Concurrency.MaxIdlePerPool >= 0 {
 		merged.Concurrency.MaxIdlePerPool = user.Concurrency.MaxIdlePerPool
 	}
 	if user.Concurrency.CouncilSeatIdleTTLSeconds > 0 {
 		merged.Concurrency.CouncilSeatIdleTTLSeconds = user.Concurrency.CouncilSeatIdleTTLSeconds
 	}
 
-	// Failure policy: deep-copy then merge per class.
-	merged.FailurePolicy = make(map[string]FailurePolicyRule, len(base.FailurePolicy))
-	for k, v := range base.FailurePolicy {
-		merged.FailurePolicy[k] = v
-	}
 	for class, rule := range user.FailurePolicy {
 		if strings.TrimSpace(rule.Action) != "" {
 			merged.FailurePolicy[class] = rule
 		}
 	}
-
-	// Snapshots: override positive values only.
 	if user.Snapshots.PlanHistoryLimit > 0 {
 		merged.Snapshots.PlanHistoryLimit = user.Snapshots.PlanHistoryLimit
 	}
-
+	pruneKitchenConfig(&merged)
 	return merged
 }
 
@@ -705,7 +672,6 @@ func LoadKitchenConfig(path string) (KitchenConfig, error) {
 		}
 		path = defaultPaths.ConfigPath
 	}
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -713,9 +679,13 @@ func LoadKitchenConfig(path string) (KitchenConfig, error) {
 		}
 		return KitchenConfig{}, fmt.Errorf("read config: %w", err)
 	}
-
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return KitchenConfig{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := canonicalizeKitchenConfig(&cfg); err != nil {
+		return KitchenConfig{}, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return KitchenConfig{}, err
@@ -724,84 +694,55 @@ func LoadKitchenConfig(path string) (KitchenConfig, error) {
 }
 
 func (c KitchenConfig) Validate() error {
-	for _, complexity := range allComplexities {
-		rule, ok := c.Routing[complexity]
-		if !ok || len(rule.Prefer) == 0 {
-			return fmt.Errorf("routing.%s.prefer must not be empty", complexity)
-		}
-		entries := append([]PoolKey{}, rule.Prefer...)
-		entries = append(entries, rule.Fallback...)
-		for i, key := range entries {
-			if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
-				return fmt.Errorf("routing.%s entry %d must include provider and model", complexity, i)
-			}
-		}
+	if len(c.ProviderModels) == 0 {
+		return fmt.Errorf("providerModels must not be empty")
 	}
-	for role, routes := range c.RoleRouting {
-		role = normalizeRoutingRole(role)
-		if role == defaultRoutingRole {
-			return fmt.Errorf("roleRouting.%s is reserved; use routing for default settings", defaultRoutingRole)
+	for provider, models := range c.ProviderModels {
+		canonicalProvider, err := normalizeConfigProviderName(provider)
+		if err != nil {
+			return fmt.Errorf("providerModels.%s: %w", provider, err)
 		}
-		for complexity, rule := range routes {
+		if canonicalProvider != provider {
+			return fmt.Errorf("providerModels.%s must use canonical provider names", provider)
+		}
+		for complexity, model := range models {
 			if !isValidComplexity(complexity) {
-				return fmt.Errorf("roleRouting.%s.%s is not a valid complexity", role, complexity)
+				return fmt.Errorf("providerModels.%s.%s is not a valid complexity", provider, complexity)
 			}
-			if len(rule.Prefer) == 0 {
-				return fmt.Errorf("roleRouting.%s.%s.prefer must not be empty", role, complexity)
+			if strings.TrimSpace(model) == "" {
+				return fmt.Errorf("providerModels.%s.%s must not be empty", provider, complexity)
 			}
-			entries := append([]PoolKey{}, rule.Prefer...)
-			entries = append(entries, rule.Fallback...)
-			for i, key := range entries {
-				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
-					return fmt.Errorf("roleRouting.%s.%s entry %d must include provider and model", role, complexity, i)
-				}
+		}
+		for _, complexity := range allComplexities {
+			if strings.TrimSpace(models[complexity]) == "" {
+				return fmt.Errorf("providerModels.%s.%s must not be empty", provider, complexity)
 			}
 		}
 	}
-	for role, rule := range c.RoleDefaults {
+
+	defaultPolicy, ok := c.RoleProviders[defaultRoutingRole]
+	if !ok || len(defaultPolicy.Prefer) == 0 {
+		return fmt.Errorf("roleProviders.%s.prefer must not be empty", defaultRoutingRole)
+	}
+	for role, policy := range c.RoleProviders {
 		role = normalizeRoutingRole(role)
-		if role == defaultRoutingRole {
-			return fmt.Errorf("roleDefaults.%s is reserved; use routing for default settings", defaultRoutingRole)
+		if role != defaultRoutingRole && len(policy.Prefer) == 0 {
+			return fmt.Errorf("roleProviders.%s.prefer must not be empty", role)
 		}
-		entries := append([]PoolKey{}, rule.Prefer...)
-		entries = append(entries, rule.Fallback...)
-		if len(rule.Prefer) == 0 {
-			return fmt.Errorf("roleDefaults.%s.prefer must not be empty", role)
-		}
-		for i, key := range entries {
-			if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
-				return fmt.Errorf("roleDefaults.%s entry %d must include provider and model", role, i)
-			}
+		if err := validateProviderPolicy("roleProviders."+role, policy, c.ProviderModels, role == defaultRoutingRole); err != nil {
+			return err
 		}
 	}
-	for seat, seatCfg := range c.CouncilSeats {
+	for seat, policy := range c.CouncilSeatProviders {
 		normalized := normalizeCouncilSeat(seat)
 		if normalized == "" {
-			return fmt.Errorf("councilSeats.%s is not a valid seat; expected A or B", seat)
+			return fmt.Errorf("councilSeatProviders.%s is not a valid seat; expected A or B", seat)
 		}
-		if len(seatCfg.Default.Prefer) > 0 {
-			entries := append([]PoolKey{}, seatCfg.Default.Prefer...)
-			entries = append(entries, seatCfg.Default.Fallback...)
-			for i, key := range entries {
-				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
-					return fmt.Errorf("councilSeats.%s.default entry %d must include provider and model", normalized, i)
-				}
-			}
+		if err := validateProviderPolicy("councilSeatProviders."+normalized, policy, c.ProviderModels, false); err != nil {
+			return err
 		}
-		for complexity, rule := range seatCfg.Routing {
-			if !isValidComplexity(complexity) {
-				return fmt.Errorf("councilSeats.%s.routing.%s is not a valid complexity", normalized, complexity)
-			}
-			if len(rule.Prefer) == 0 {
-				return fmt.Errorf("councilSeats.%s.routing.%s.prefer must not be empty", normalized, complexity)
-			}
-			entries := append([]PoolKey{}, rule.Prefer...)
-			entries = append(entries, rule.Fallback...)
-			for i, key := range entries {
-				if strings.TrimSpace(key.Provider) == "" || strings.TrimSpace(key.Model) == "" {
-					return fmt.Errorf("councilSeats.%s.routing.%s entry %d must include provider and model", normalized, complexity, i)
-				}
-			}
+		if len(policy.Prefer) == 0 && len(policy.Fallback) == 0 {
+			return fmt.Errorf("councilSeatProviders.%s must not be empty", normalized)
 		}
 	}
 
@@ -830,9 +771,43 @@ func (c KitchenConfig) Validate() error {
 	return nil
 }
 
+func validateProviderPolicy(scope string, policy ProviderPolicy, models map[string]map[Complexity]string, requirePrefer bool) error {
+	if requirePrefer && len(policy.Prefer) == 0 {
+		return fmt.Errorf("%s.prefer must not be empty", scope)
+	}
+	seen := make(map[string]bool)
+	for idx, provider := range append(append([]string(nil), policy.Prefer...), policy.Fallback...) {
+		canonicalProvider, err := normalizeConfigProviderName(provider)
+		if err != nil {
+			return fmt.Errorf("%s entry %d: %w", scope, idx, err)
+		}
+		if canonicalProvider != provider {
+			return fmt.Errorf("%s entry %d must use canonical provider names", scope, idx)
+		}
+		if seen[canonicalProvider] {
+			return fmt.Errorf("%s entry %d duplicates provider %q", scope, idx, canonicalProvider)
+		}
+		seen[canonicalProvider] = true
+		if _, ok := models[canonicalProvider]; !ok {
+			return fmt.Errorf("%s entry %d references provider %q with no providerModels entry", scope, idx, canonicalProvider)
+		}
+	}
+	return nil
+}
+
 // SaveKitchenConfigFile marshals cfg as YAML and writes it atomically.
 func SaveKitchenConfigFile(path string, cfg *KitchenConfig) error {
-	data, err := yaml.Marshal(cfg)
+	if cfg == nil {
+		return fmt.Errorf("config must not be nil")
+	}
+	canonical := cloneKitchenConfig(*cfg)
+	if err := canonicalizeKitchenConfig(&canonical); err != nil {
+		return err
+	}
+	if err := canonical.Validate(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(&canonical)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}

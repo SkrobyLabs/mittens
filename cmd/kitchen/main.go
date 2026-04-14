@@ -1107,7 +1107,7 @@ func newRootCommand() *cobra.Command {
 
 	configureCmd := &cobra.Command{
 		Use:   "configure",
-		Short: "Configure provider and model routing",
+		Short: "Configure complexity models and provider policy",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConfigure()
 		},

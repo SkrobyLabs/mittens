@@ -113,53 +113,21 @@ func TestWaitForSupervisedDaemonReadyFailsWhenProcessExits(t *testing.T) {
 
 func TestConfiguredServeProvidersDeduplicatesAndNormalizesRoutingProviders(t *testing.T) {
 	providers, err := configuredServeProviders(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityTrivial: {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "haiku"},
-				},
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {
+				Prefer:   []string{"anthropic"},
+				Fallback: []string{"openai", "claude"},
 			},
-			ComplexityMedium: {
-				Prefer: []PoolKey{
-					{Provider: "openai", Model: "gpt-5.4"},
-				},
-				Fallback: []PoolKey{
-					{Provider: "claude", Model: "opus"},
-				},
-			},
-			ComplexityHigh: {
-				Prefer: []PoolKey{
-					{Provider: "google", Model: "gemini-2.5-pro"},
-				},
-			},
-		},
-		RoleRouting: map[string]map[Complexity]RoutingRule{
 			"reviewer": {
-				ComplexityCritical: {
-					Prefer: []PoolKey{
-						{Provider: "codex", Model: "gpt-5.4"},
-					},
-					Fallback: []PoolKey{
-						{Provider: "gemini", Model: "gemini-2.5-pro"},
-					},
-				},
+				Prefer:   []string{"codex"},
+				Fallback: []string{"gemini"},
 			},
-		},
-		RoleDefaults: map[string]RoutingRule{
 			"implementer": {
-				Prefer: []PoolKey{
-					{Provider: "anthropic", Model: "opus"},
-				},
+				Prefer: []string{"anthropic"},
 			},
 		},
-		CouncilSeats: map[string]CouncilSeatRoutingConfig{
-			"B": {
-				Default: RoutingRule{
-					Prefer: []PoolKey{
-						{Provider: "google", Model: "gemini-2.5-pro"},
-					},
-				},
-			},
+		CouncilSeatProviders: map[string]ProviderPolicy{
+			"B": {Prefer: []string{"google"}},
 		},
 	})
 	if err != nil {
@@ -178,19 +146,11 @@ func TestConfiguredServeProvidersDeduplicatesAndNormalizesRoutingProviders(t *te
 
 func TestConfiguredServeProvidersIncludesCouncilSeatOnlyProviders(t *testing.T) {
 	providers, err := configuredServeProviders(KitchenConfig{
-		Routing: map[Complexity]RoutingRule{
-			ComplexityTrivial:  {Prefer: []PoolKey{{Provider: "anthropic", Model: "haiku"}}},
-			ComplexityLow:      {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
-			ComplexityMedium:   {Prefer: []PoolKey{{Provider: "anthropic", Model: "sonnet"}}},
-			ComplexityHigh:     {Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}}},
-			ComplexityCritical: {Prefer: []PoolKey{{Provider: "anthropic", Model: "opus"}}},
+		RoleProviders: map[string]ProviderPolicy{
+			defaultRoutingRole: {Prefer: []string{"anthropic"}},
 		},
-		CouncilSeats: map[string]CouncilSeatRoutingConfig{
-			"B": {
-				Default: RoutingRule{
-					Prefer: []PoolKey{{Provider: "openai", Model: "gpt-5.4"}},
-				},
-			},
+		CouncilSeatProviders: map[string]ProviderPolicy{
+			"B": {Prefer: []string{"openai"}},
 		},
 	})
 	if err != nil {

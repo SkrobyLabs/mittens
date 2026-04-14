@@ -7,34 +7,21 @@ import (
 )
 
 type ComplexityRouter struct {
-	table     map[string]map[Complexity][]PoolKey
-	fallback  map[string]map[Complexity][]PoolKey
+	cfg       KitchenConfig
 	health    *ProviderHealth
 	hostPools []PoolKey
 }
 
 func NewComplexityRouter(cfg KitchenConfig, health *ProviderHealth, hostPool ...PoolKey) *ComplexityRouter {
 	r := &ComplexityRouter{
-		table:    make(map[string]map[Complexity][]PoolKey),
-		fallback: make(map[string]map[Complexity][]PoolKey),
-		health:   health,
+		cfg:    cloneKitchenConfig(cfg),
+		health: health,
 	}
 	for _, pool := range hostPool {
 		if strings.TrimSpace(pool.Provider) == "" {
 			continue
 		}
 		r.hostPools = append(r.hostPools, pool)
-	}
-	r.setRoleRouting(defaultRoutingRole, cfg.Routing)
-	for role := range cfg.RoleRouting {
-		role = normalizeRoutingRole(role)
-		if role == defaultRoutingRole {
-			continue
-		}
-		r.setRoleRouting(role, effectiveRoutingForRole(cfg, role))
-	}
-	for _, seat := range []string{"A", "B"} {
-		r.setRoleRouting(councilSeatRoutingRole(seat), effectiveRoutingForCouncilSeat(cfg, seat))
 	}
 	return r
 }
@@ -47,17 +34,23 @@ func (r *ComplexityRouter) ResolveForRole(role string, c Complexity) []PoolKey {
 	if r == nil {
 		return nil
 	}
-	role = normalizeRoutingRole(role)
+	policy := effectiveProviderPolicyForRole(r.cfg, role)
+	return r.resolvePolicy(policy, c)
+}
 
-	table := r.table[role]
-	fallback := r.fallback[role]
-	if len(table) == 0 && len(fallback) == 0 && role != defaultRoutingRole {
-		table = r.table[defaultRoutingRole]
-		fallback = r.fallback[defaultRoutingRole]
+func (r *ComplexityRouter) ResolveCouncilSeat(seat string, c Complexity) []PoolKey {
+	if r == nil {
+		return nil
 	}
+	policy := effectiveProviderPolicyForCouncilSeat(r.cfg, seat)
+	return r.resolvePolicy(policy, c)
+}
 
-	ordered := append([]PoolKey(nil), table[c]...)
-	ordered = append(ordered, fallback[c]...)
+func (r *ComplexityRouter) resolvePolicy(policy ProviderPolicy, c Complexity) []PoolKey {
+	if len(policy.Prefer) == 0 {
+		return nil
+	}
+	ordered := r.poolKeysForPolicy(policy, c)
 	healthy := ordered
 	if r.health != nil {
 		now := time.Now().UTC()
@@ -91,22 +84,25 @@ func (r *ComplexityRouter) ResolveForRole(role string, c Complexity) []PoolKey {
 	return nil
 }
 
-func (r *ComplexityRouter) ResolveCouncilSeat(seat string, c Complexity) []PoolKey {
-	return r.ResolveForRole(councilSeatRoutingRole(seat), c)
-}
-
-func (r *ComplexityRouter) setRoleRouting(role string, routing map[Complexity]RoutingRule) {
-	role = normalizeRoutingRole(role)
-	if r.table[role] == nil {
-		r.table[role] = make(map[Complexity][]PoolKey, len(routing))
+func (r *ComplexityRouter) poolKeysForPolicy(policy ProviderPolicy, c Complexity) []PoolKey {
+	keys := make([]PoolKey, 0, len(policy.Prefer)+len(policy.Fallback))
+	appendProvider := func(provider string) {
+		model, ok := modelForProviderComplexity(r.cfg, provider, c)
+		if !ok {
+			return
+		}
+		keys = append(keys, PoolKey{
+			Provider: provider,
+			Model:    model,
+		})
 	}
-	if r.fallback[role] == nil {
-		r.fallback[role] = make(map[Complexity][]PoolKey, len(routing))
+	for _, provider := range policy.Prefer {
+		appendProvider(provider)
 	}
-	for complexity, rule := range routing {
-		r.table[role][complexity] = append([]PoolKey(nil), rule.Prefer...)
-		r.fallback[role][complexity] = append([]PoolKey(nil), rule.Fallback...)
+	for _, provider := range policy.Fallback {
+		appendProvider(provider)
 	}
+	return keys
 }
 
 func councilSeatRoutingRole(seat string) string {
