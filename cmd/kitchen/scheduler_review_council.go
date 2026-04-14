@@ -64,11 +64,20 @@ func (s *Scheduler) workerCanRunReviewCouncilTask(worker pool.Worker, task pool.
 	if reserved, ok := s.reservedReviewCouncilWorkerIDs()[worker.ID]; ok && reserved != bundle.Plan.PlanID+":"+seat.Seat {
 		return false, true
 	}
-	if targetWorkerID != "" {
-		if worker.ID != targetWorkerID {
-			return false, true
-		}
-		return workerMatchesAnyRouteKey(worker, keys), true
+	// Review turns must run in a dedicated review workspace. Reusing arbitrary
+	// idle workers risks diffing the root repo or a stale non-review checkout,
+	// so only the previously reserved seat worker may be reused.
+	if targetWorkerID == "" {
+		return false, true
+	}
+	if worker.ID != targetWorkerID {
+		return false, true
+	}
+	if strings.TrimSpace(worker.Role) != task.Role {
+		return false, true
+	}
+	if len(keys) == 0 {
+		return true, true
 	}
 	return workerMatchesAnyRouteKey(worker, keys), true
 }

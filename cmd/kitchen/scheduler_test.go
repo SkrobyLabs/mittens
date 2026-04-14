@@ -287,6 +287,104 @@ func TestWorkerCanRunCouncilTaskAllowsLegacyWorkerWithUnknownModelByProvider(t *
 	}
 }
 
+func TestScheduleReviewCouncilDoesNotReuseIdlePlannerWorker(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_review_spawn",
+			Lineage: "feat-review-spawn",
+			Title:   "Review spawn guard",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			PlanID:                "plan_review_spawn",
+			State:                 planStateImplementationReview,
+			ReviewCouncilMaxTurns: 4,
+			ReviewCouncilSeats:    newReviewCouncilSeats(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-spawn"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "planner-1",
+		Role:     plannerTaskRole,
+		Provider: "anthropic",
+		Model:    "sonnet",
+	}); err != nil {
+		t.Fatalf("SpawnWorker planner: %v", err)
+	}
+	if err := pm.RegisterWorker("planner-1", "container-planner-1"); err != nil {
+		t.Fatalf("RegisterWorker planner: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn review): %v", err)
+	}
+
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1 fresh reviewer worker", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != "reviewer" {
+		t.Fatalf("spawn role = %q, want reviewer", host.spawnSpecs[0].Role)
+	}
+	if host.spawnSpecs[0].WorkspacePath == "" {
+		t.Fatal("expected review spawn to have dedicated workspacePath")
+	}
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want queued before spawned reviewer is ready", task.Status)
+	}
+	if task.WorkerID != "" {
+		t.Fatalf("review task workerID = %q, want no planner reuse", task.WorkerID)
+	}
+
+	planner, ok := pm.Worker("planner-1")
+	if !ok {
+		t.Fatal("planner-1 missing")
+	}
+	if planner.CurrentTaskID != "" {
+		t.Fatalf("planner current task = %q, want idle", planner.CurrentTaskID)
+	}
+}
+
 func TestSchedulerOnTaskCompletedMergesAndKillsWorker(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
