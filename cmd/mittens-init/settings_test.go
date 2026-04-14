@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -141,5 +142,86 @@ func TestCredExpiresAt(t *testing.T) {
 				t.Errorf("credExpiresAt(%s) = %d, want %d", tt.json, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSetupNotificationHooksStripsInheritedNotifyHooksWhenNoNotify(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config{
+		AIDir:            dir,
+		AISettingsFile:   "settings.json",
+		AISettingsFormat: "json",
+		AIStopHookEvent:  "Stop",
+		NoNotify:         true,
+		BrokerPort:       "12345",
+	}
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "hooks": {
+    "Notification": [{
+      "hooks": [
+        {"type":"command","command":"MSG=$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"$MSG\""},
+        {"type":"command","command":"echo keep-notification"}
+      ]
+    }],
+    "Stop": [{
+      "hooks": [
+        {"type":"command","command":"/usr/local/bin/notify.sh stop"},
+        {"type":"command","command":"echo keep-stop"}
+      ]
+    }]
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	setupNotificationHooks(cfg)
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+	if !json.Valid(data) {
+		t.Fatal("expected valid json output")
+	}
+	if strings.Contains(text, "/usr/local/bin/notify.sh") {
+		t.Fatalf("settings still contain notify hook: %s", text)
+	}
+	if !strings.Contains(text, "keep-notification") || !strings.Contains(text, "keep-stop") {
+		t.Fatalf("settings should preserve unrelated hooks: %s", text)
+	}
+}
+
+func TestSetupNotificationHooksStripsInheritedNotifyHooksWithoutBroker(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config{
+		AIDir:            dir,
+		AISettingsFile:   "settings.json",
+		AISettingsFormat: "json",
+		AIStopHookEvent:  "Stop",
+	}
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "hooks": {
+    "Notification": [{
+      "hooks": [{"type":"command","command":"MSG=$(jq -r '.message // \"needs attention\"'); /usr/local/bin/notify.sh notification \"$MSG\""}]
+    }],
+    "Stop": [{
+      "hooks": [{"type":"command","command":"/usr/local/bin/notify.sh stop"}]
+    }]
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	setupNotificationHooks(cfg)
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(data), "/usr/local/bin/notify.sh") {
+		t.Fatalf("settings still contain notify hook: %s", string(data))
 	}
 }

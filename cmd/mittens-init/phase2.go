@@ -397,7 +397,7 @@ func appendFirewallInfo(cfg *config) {
 }
 
 func setupNotificationHooks(cfg *config) {
-	if !cfg.hasBroker() || cfg.NoNotify || cfg.AISettingsFormat != "json" {
+	if cfg.AISettingsFormat != "json" {
 		return
 	}
 
@@ -405,6 +405,12 @@ func setupNotificationHooks(cfg *config) {
 	ensureJSONFile(settingsFile)
 
 	settings := readJSONFile(settingsFile)
+	stripNotificationHooks(settings)
+
+	if !cfg.hasBroker() || cfg.NoNotify {
+		writeJSONFile(settingsFile, settings)
+		return
+	}
 
 	notifyCmd := `MSG=$(jq -r '.message // "needs attention"'); /usr/local/bin/notify.sh notification "$MSG"`
 
@@ -440,6 +446,60 @@ func setupNotificationHooks(cfg *config) {
 
 	settings["hooks"] = hooks
 	writeJSONFile(settingsFile, settings)
+}
+
+func stripNotificationHooks(settings map[string]interface{}) {
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		return
+	}
+	for event, rawEntries := range hooks {
+		entries, ok := rawEntries.([]interface{})
+		if !ok {
+			continue
+		}
+		var keptEntries []interface{}
+		for _, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]interface{})
+			if !ok {
+				keptEntries = append(keptEntries, rawEntry)
+				continue
+			}
+			rawHookList, ok := entry["hooks"].([]interface{})
+			if !ok {
+				keptEntries = append(keptEntries, rawEntry)
+				continue
+			}
+			var keptHookList []interface{}
+			for _, rawHook := range rawHookList {
+				hook, ok := rawHook.(map[string]interface{})
+				if !ok {
+					keptHookList = append(keptHookList, rawHook)
+					continue
+				}
+				command, _ := hook["command"].(string)
+				if strings.Contains(strings.TrimSpace(command), "/usr/local/bin/notify.sh") {
+					continue
+				}
+				keptHookList = append(keptHookList, rawHook)
+			}
+			if len(keptHookList) == 0 {
+				continue
+			}
+			entry["hooks"] = keptHookList
+			keptEntries = append(keptEntries, entry)
+		}
+		if len(keptEntries) == 0 {
+			delete(hooks, event)
+			continue
+		}
+		hooks[event] = keptEntries
+	}
+	if len(hooks) == 0 {
+		delete(settings, "hooks")
+		return
+	}
+	settings["hooks"] = hooks
 }
 
 func execArgs(defaultBinary string) error {
