@@ -1382,6 +1382,9 @@ func TestKitchenTUIPromoteResearchCallsBackend(t *testing.T) {
 	if backend.promotedLineage != "oauth-direct-forward" {
 		t.Fatalf("promotedLineage = %q, want oauth-direct-forward", backend.promotedLineage)
 	}
+	if !backend.promotedImplReview {
+		t.Fatal("expected promoted impl review to default to true")
+	}
 	if action.selectedPlanID != "plan_promoted_new" {
 		t.Fatalf("selectedPlanID = %q, want promoted plan id", action.selectedPlanID)
 	}

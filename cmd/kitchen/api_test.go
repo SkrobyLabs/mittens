@@ -347,6 +347,45 @@ func TestKitchenAPIImplReviewRequest(t *testing.T) {
 	}
 }
 
+func TestKitchenAPIPromoteResearchDefaultsImplReviewOn(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	researchBundle, err := k.SubmitResearch("Investigate provider override flow")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+	researchPlanID := researchBundle.Plan.PlanID
+	researchBundle.Execution.State = planStateResearchComplete
+	researchBundle.Execution.ResearchOutput = "Research says promotion should carry impl review by default."
+	researchBundle.Plan.State = planStateResearchComplete
+	if err := k.planStore.UpdatePlan(researchBundle.Plan); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	if err := k.planStore.UpdateExecution(researchPlanID, researchBundle.Execution); err != nil {
+		t.Fatalf("UpdateExecution: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/plans/"+researchPlanID+"/promote", map[string]any{
+		"lineage": "provider-overrides",
+	})
+	var created map[string]any
+	decodeResponse(t, resp, &created)
+
+	planID, _ := created["planId"].(string)
+	if strings.TrimSpace(planID) == "" {
+		t.Fatalf("expected promoted planId in %+v", created)
+	}
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if !bundle.Execution.ImplReviewRequested {
+		t.Fatalf("execution = %+v, want impl review requested by default on promotion", bundle.Execution)
+	}
+}
+
 func TestKitchenAPIActivePlanCancel(t *testing.T) {
 	k := newTestKitchen(t)
 	server := httptest.NewServer(k.NewAPIHandler(""))

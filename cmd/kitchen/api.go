@@ -179,12 +179,16 @@ func (k *Kitchen) handlePromoteResearch(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Lineage    string `json:"lineage"`
 		Auto       bool   `json:"auto"`
-		ImplReview bool   `json:"implReview"`
+		ImplReview *bool  `json:"implReview"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
 	}
-	bundle, err := k.PromoteResearch(r.PathValue("id"), req.Lineage, req.Auto, req.ImplReview)
+	implReview := true
+	if req.ImplReview != nil {
+		implReview = *req.ImplReview
+	}
+	bundle, err := k.PromoteResearch(r.PathValue("id"), req.Lineage, req.Auto, implReview)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return

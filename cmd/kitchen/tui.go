@@ -1216,7 +1216,7 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			lineage := value
 			m.closeInput()
 			return m, m.actionCmd(func() (string, string, error) {
-				newPlanID, err := m.backend.PromoteResearch(planID, lineage, false, false)
+				newPlanID, err := m.backend.PromoteResearch(planID, lineage, false, true)
 				if err != nil {
 					return "", "", err
 				}

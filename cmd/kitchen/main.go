@@ -87,6 +87,7 @@ func newRootCommand() *cobra.Command {
 	var promoteLineage string
 	var promoteAuto bool
 	var promoteImplReview bool
+	var promoteNoImplReview bool
 	var serveAddr string
 	var serveToken string
 	var serveProvider string
@@ -1072,10 +1073,17 @@ func newRootCommand() *cobra.Command {
 		Short: "Promote completed research into an implementation plan",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			implReview := true
+			if cmd.Flags().Changed("impl-review") {
+				implReview = promoteImplReview
+			}
+			if cmd.Flags().Changed("no-impl-review") && promoteNoImplReview {
+				implReview = false
+			}
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.PromoteResearch(args[0], promoteLineage, promoteAuto, promoteImplReview)
+				resp, err := client.PromoteResearch(args[0], promoteLineage, promoteAuto, implReview)
 				if err != nil {
 					return err
 				}
@@ -1088,7 +1096,7 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.PromoteResearch(args[0], promoteLineage, promoteAuto, promoteImplReview)
+			bundle, err := k.PromoteResearch(args[0], promoteLineage, promoteAuto, implReview)
 			if err != nil {
 				return err
 			}
@@ -1103,7 +1111,8 @@ func newRootCommand() *cobra.Command {
 	}
 	promoteCmd.Flags().StringVar(&promoteLineage, "lineage", "", "lineage for the implementation plan")
 	promoteCmd.Flags().BoolVar(&promoteAuto, "auto", false, "auto-approve the generated plan")
-	promoteCmd.Flags().BoolVar(&promoteImplReview, "impl-review", false, "request a post-implementation adversarial review")
+	promoteCmd.Flags().BoolVar(&promoteImplReview, "impl-review", true, "request a post-implementation adversarial review (default true)")
+	promoteCmd.Flags().BoolVar(&promoteNoImplReview, "no-impl-review", false, "skip post-implementation adversarial review")
 
 	configureCmd := &cobra.Command{
 		Use:   "configure",
