@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -2665,12 +2666,12 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 	if task == nil {
 		return []string{"No selected task."}
 	}
-	rawHeader := task.Title + " · activity log"
+	rawHeader := sanitizeInlineTerminalText(task.Title) + " · activity log"
 	rawHeader = ansi.Truncate(rawHeader, max(1, innerWidth-2), "…")
 	lines := []string{
 		paneTitle(rawHeader, true),
-		fmt.Sprintf("Task ID: %s", task.ID),
-		fmt.Sprintf("Runtime ID: %s", task.RuntimeID),
+		fmt.Sprintf("Task ID: %s", sanitizeInlineTerminalText(task.ID)),
+		fmt.Sprintf("Runtime ID: %s", sanitizeInlineTerminalText(task.RuntimeID)),
 		"",
 	}
 	if len(m.taskLog) == 0 {
@@ -2685,12 +2686,13 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 			record.Activity.Phase,
 			record.Activity.Name,
 		}, " "))), " ")
+		label = sanitizeInlineTerminalText(label)
 		if label == "" {
 			label = "activity"
 		}
 		line := fmt.Sprintf("%s  %s", ts, label)
-		if strings.TrimSpace(record.Activity.Summary) != "" {
-			line += "  " + strings.TrimSpace(record.Activity.Summary)
+		if summary := sanitizeInlineTerminalText(record.Activity.Summary); summary != "" {
+			line += "  " + summary
 		}
 		lines = append(lines, line)
 	}
@@ -3354,16 +3356,18 @@ func windowAndWrapLines(lines []string, width, height, offset int) (string, int)
 	}
 	wrapped := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			wrapped = append(wrapped, "")
-			continue
-		}
-		if ansi.StringWidth(line) <= width {
-			wrapped = append(wrapped, line)
-			continue
-		}
-		for _, item := range wrapText(line, width) {
-			wrapped = append(wrapped, truncate(item, width))
+		for _, chunk := range splitRenderedLines(line) {
+			if strings.TrimSpace(chunk) == "" {
+				wrapped = append(wrapped, "")
+				continue
+			}
+			if ansi.StringWidth(chunk) <= width {
+				wrapped = append(wrapped, chunk)
+				continue
+			}
+			for _, item := range wrapText(chunk, width) {
+				wrapped = append(wrapped, truncate(item, width))
+			}
 		}
 	}
 	total := len(wrapped)
@@ -3389,6 +3393,27 @@ func windowAndWrapLines(lines []string, width, height, offset int) (string, int)
 		view = append(view, "")
 	}
 	return strings.Join(view, "\n"), total
+}
+
+func splitRenderedLines(line string) []string {
+	line = strings.ReplaceAll(line, "\r\n", "\n")
+	line = strings.ReplaceAll(line, "\r", "\n")
+	return strings.Split(line, "\n")
+}
+
+func sanitizeInlineTerminalText(s string) string {
+	s = ansi.Strip(s)
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case unicode.IsControl(r):
+			return -1
+		default:
+			return r
+		}
+	}, s)
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
 func wrapText(s string, width int) []string {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -2097,6 +2098,43 @@ func TestRenderTaskLogLinesTruncatesHeaderForNarrowPane(t *testing.T) {
 	}
 }
 
+func TestRenderTaskLogLinesSanitizesControlSequences(t *testing.T) {
+	model := kitchenTUIModel{
+		tasks: []kitchenTUITaskItem{{
+			Title:     "Planner\ncycle\x1b[2K 1",
+			ID:        "t1\r\n",
+			RuntimeID: "plan_a-t1\t",
+		}},
+		taskLog: []pool.WorkerActivityRecord{{
+			RecordedAt: time.Date(2026, time.April, 14, 12, 34, 56, 0, time.UTC),
+			Activity: pool.WorkerActivity{
+				Kind:    "status",
+				Phase:   "completed",
+				Name:    "response",
+				Summary: "line 1\r\n\x1b[2Jline 2\tline 3",
+			},
+		}},
+	}
+
+	lines := model.renderTaskLogLines(80)
+	if len(lines) < 5 {
+		t.Fatalf("lines = %+v, want task log rows", lines)
+	}
+	if got := ansi.Strip(lines[0]); strings.Contains(got, "\n") || strings.Contains(got, "\r") {
+		t.Fatalf("header = %q, want sanitized single line", got)
+	}
+	if got := ansi.Strip(lines[0]); !strings.Contains(got, "Planner cycle 1 · activity log") {
+		t.Fatalf("header = %q, want sanitized title", got)
+	}
+	last := lines[len(lines)-1]
+	if strings.Contains(last, "\x1b") || strings.Contains(last, "\n") || strings.Contains(last, "\r") {
+		t.Fatalf("log line = %q, want control characters removed", last)
+	}
+	if !strings.Contains(last, "status completed response  line 1 line 2 line 3") {
+		t.Fatalf("log line = %q, want flattened summary", last)
+	}
+}
+
 func TestWindowAndWrapLinesKeepsStyledHeaderOnSingleLine(t *testing.T) {
 	header := paneTitle("Planner cycle 1 · activity log", true)
 	rendered, total := windowAndWrapLines([]string{header}, ansi.StringWidth(header), 2, 0)
@@ -2112,6 +2150,20 @@ func TestWindowAndWrapLinesKeepsStyledHeaderOnSingleLine(t *testing.T) {
 	}
 	if rows[1] != "" {
 		t.Fatalf("second row = %q, want empty padding row", rows[1])
+	}
+}
+
+func TestWindowAndWrapLinesCountsEmbeddedNewlines(t *testing.T) {
+	rendered, total := windowAndWrapLines([]string{"one\ntwo", "three"}, 10, 3, 0)
+	if total != 3 {
+		t.Fatalf("total = %d, want 3 split rows", total)
+	}
+	rows := strings.Split(rendered, "\n")
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v, want 3", rows)
+	}
+	if rows[0] != "one" || rows[1] != "two" || rows[2] != "three" {
+		t.Fatalf("rows = %+v, want embedded newline split into separate rows", rows)
 	}
 }
 
