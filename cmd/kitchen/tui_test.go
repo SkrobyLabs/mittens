@@ -2402,7 +2402,7 @@ func TestRenderTasksPaneUsesWholeTaskRows(t *testing.T) {
 		},
 	}
 
-	rendered := ansi.Strip(model.renderTasksPane(80, 7))
+	rendered := ansi.Strip(model.renderTasksPane(80, 9))
 	if strings.Contains(rendered, "Implementation review 1") || strings.Contains(rendered, "review_council_plan_a_t1") {
 		t.Fatalf("rendered pane = %q, want clipped tasks omitted entirely instead of partial trailing row", rendered)
 	}
@@ -2423,7 +2423,7 @@ func TestRenderTasksPaneKeepsSelectedTaskVisible(t *testing.T) {
 		},
 	}
 
-	rendered := ansi.Strip(model.renderTasksPane(80, 7))
+	rendered := ansi.Strip(model.renderTasksPane(80, 9))
 	if !strings.Contains(rendered, "Implementation review 1") || !strings.Contains(rendered, "review_council_plan_a_t1") {
 		t.Fatalf("rendered pane = %q, want selected trailing task visible", rendered)
 	}

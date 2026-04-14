@@ -1781,11 +1781,12 @@ func (m kitchenTUIModel) renderLeftPane(width, height int) string {
 }
 
 func (m kitchenTUIModel) renderPlansPane(width, height int) string {
+	innerWidth, innerHeight := paneContentSize(width, height)
 	title := paneTitle("Plans", true)
 	if len(m.plans) == 0 {
 		return paneBox(width, height, title+"\n\nNo plans.")
 	}
-	innerWidth := max(20, width-6)
+	listLineBudget := max(1, innerHeight-1)
 	lines := make([]string, 0, len(m.plans)*2)
 	for i, plan := range m.plans {
 		state := padRight(compactState(planDisplayState(plan)), 6)
@@ -1805,20 +1806,20 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 		secondary = truncate(secondary, innerWidth)
 		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, primary, secondary)...)
 	}
-	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+	return paneBox(width, height, title+"\n"+fitListLines(lines, listLineBudget))
 }
 
 func (m kitchenTUIModel) renderTasksPane(width, height int) string {
+	innerWidth, innerHeight := paneContentSize(width, height)
 	titleText := "Tasks"
 	if plan := m.selectedPlanItem(); plan != nil {
-		titleText = "Tasks · " + truncate(plan.Record.Title, max(10, width-18))
+		titleText = "Tasks · " + truncate(plan.Record.Title, max(1, innerWidth-10))
 	}
 	title := paneTitle(titleText, true)
 	if len(m.tasks) == 0 {
 		return paneBox(width, height, title+"\n\nSelected plan has no task list.")
 	}
-	innerWidth := max(20, width-6)
-	visibleLineBudget := max(1, height-1)
+	visibleLineBudget := max(1, innerHeight-1)
 	visibleItems := max(1, visibleLineBudget/2)
 	start, end := selectableItemWindow(len(m.tasks), m.selectedTask, visibleItems)
 	lines := make([]string, 0, (end-start)*2)
@@ -1833,9 +1834,10 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 }
 
 func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
+	innerWidth, innerHeight := paneContentSize(width, height)
 	titleText := "Questions"
 	if plan := m.selectedPlanItem(); plan != nil {
-		titleText = "Questions · " + truncate(plan.Record.Title, max(10, width-20))
+		titleText = "Questions · " + truncate(plan.Record.Title, max(1, innerWidth-14))
 	}
 	title := paneTitle(titleText, true)
 
@@ -1857,7 +1859,7 @@ func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
 		return paneBox(width, height, title+"\n\nNo pending questions.")
 	}
 
-	innerWidth := max(20, width-6)
+	listLineBudget := max(1, innerHeight-1)
 	lines := make([]string, 0, len(filtered)*2)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	for i, q := range filtered {
@@ -1872,7 +1874,7 @@ func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
 		secondary := truncate(fmt.Sprintf("    id: %s  task: %s", q.ID, q.TaskID), innerWidth)
 		lines = append(lines, renderSelectableRow(selected, primary, secondary)...)
 	}
-	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+	return paneBox(width, height, title+"\n"+fitListLines(lines, listLineBudget))
 }
 
 func (m kitchenTUIModel) renderDetailPane(width, height int) string {
@@ -2574,6 +2576,12 @@ func paneBox(width, height int, body string) string {
 		Width(width).
 		Height(height).
 		Render(body)
+}
+
+func paneContentSize(width, height int) (innerWidth, innerHeight int) {
+	innerWidth = max(1, width-4)
+	innerHeight = max(1, height-2)
+	return innerWidth, innerHeight
 }
 
 func buildPlanItems(plans []PlanRecord, snapshot tuiStatusSnapshot) []kitchenTUIPlanItem {
