@@ -1139,7 +1139,7 @@ func (s *Scheduler) reapOrphanPlanTasks() {
 			continue
 		}
 		switch t.Status {
-		case pool.TaskCompleted, pool.TaskAccepted, pool.TaskFailed, pool.TaskCanceled:
+		case pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled:
 			continue
 		}
 		gone, known := missing[t.PlanID]
@@ -1315,7 +1315,7 @@ func taskReadyForDispatch(pm *pool.PoolManager, task pool.Task) bool {
 		if !ok {
 			return false
 		}
-		if dep.Status != pool.TaskCompleted && dep.Status != pool.TaskAccepted {
+		if dep.Status != pool.TaskCompleted {
 			return false
 		}
 	}
@@ -1526,9 +1526,9 @@ func summarizePlanTasks(tasks []pool.Task, planID string) (active []string, comp
 			continue
 		}
 		switch task.Status {
-		case pool.TaskCompleted, pool.TaskAccepted:
+		case pool.TaskCompleted:
 			completed = append(completed, task.ID)
-		case pool.TaskFailed, pool.TaskRejected, pool.TaskEscalated:
+		case pool.TaskFailed:
 			failed = append(failed, task.ID)
 		case pool.TaskCanceled:
 			// canceled tasks are terminal but not successful; do not count them as completed.

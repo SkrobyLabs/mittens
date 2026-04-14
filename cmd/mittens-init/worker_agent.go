@@ -389,14 +389,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 	writeTaskFile(state.teamDir, task, priorContext)
 
 	prompt := task.Prompt
-	if task.Status == pool.TaskReviewing {
-		implementerSummary := ""
-		if task.Result != nil {
-			implementerSummary = task.Result.Summary
-		}
-		prompt = adapter.BuildReviewPrompt(task.Prompt, implementerSummary, priorContext)
-		priorContext = ""
-	} else if task.Role == "planner" {
+	if task.Role == "planner" {
 		priorContext = ""
 	}
 
@@ -409,9 +402,6 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		err                   error
 		councilArtifact       *adapter.CouncilTurnArtifact
 		reviewCouncilArtifact *adapter.ReviewCouncilTurnArtifact
-		verdict               string
-		feedback              string
-		severity              string
 	)
 	switch {
 	case expectsCouncilTurn:
@@ -422,10 +412,6 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		reviewCouncilArtifact, result, err = adapter.ExecuteForReviewCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
 			logInfo("adapter retry: %s", msg)
 		})
-	case task.Status == pool.TaskReviewing:
-		verdict, feedback, severity, result, err = adapter.ExecuteForReviewVerdict(ctx, ad, prompt, priorContext, func(msg string) {
-			logInfo("adapter retry: %s", msg)
-		})
 	default:
 		result, err = ad.Execute(ctx, prompt, priorContext)
 	}
@@ -434,7 +420,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
 		}
 		if attempts := adapter.ExtractionAttempts(err); attempts > 0 {
-			reportMsg := fmt.Sprintf("invalid review verdict (after %d attempts): %v", attempts, err)
+			reportMsg := fmt.Sprintf("invalid plan artifact (after %d attempts): %v", attempts, err)
 			switch {
 			case expectsCouncilTurn:
 				reportMsg = fmt.Sprintf("invalid plan artifact (after %d attempts): %v", attempts, err)
@@ -476,13 +462,9 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 			}
 		}
 
-		if task.Status == pool.TaskReviewing {
-			reportReviewWithRetries(client, workerID, task.ID, verdict, feedback, severity)
-		} else {
-			// Signal-only completion — data is on filesystem.
-			_ = reviewCouncilArtifact
-			reportCompleteWithRetries(client, workerID, task.ID)
-		}
+		// Signal-only completion — data is on filesystem.
+		_ = reviewCouncilArtifact
+		reportCompleteWithRetries(client, workerID, task.ID)
 		logInfo("worker: %s completed task %s", workerID, task.ID)
 	}
 
@@ -632,18 +614,6 @@ func reportFailWithRetries(client *kitchenClient, workerID, taskID string, repor
 		return
 	}
 	logWarn("worker: failed to report failure for task %s after retries", taskID)
-}
-
-func reportReviewWithRetries(client *kitchenClient, workerID, taskID, verdict, feedback, severity string) {
-	for i := 0; i < workerAgentReportRetries; i++ {
-		if err := client.ReportReview(workerID, taskID, verdict, feedback, severity); err != nil {
-			logWarn("worker: report review attempt %d: %v", i+1, err)
-			time.Sleep(workerAgentReportBackoff)
-			continue
-		}
-		return
-	}
-	logWarn("worker: failed to report review for task %s after retries", taskID)
 }
 
 func classifyTaskFailure(err error) taskFailureReport {

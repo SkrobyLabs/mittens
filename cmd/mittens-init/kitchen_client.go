@@ -203,27 +203,6 @@ func sanitizeFailureMessage(errMsg string) string {
 	return string(runes[:maxFailureMessageLen-3]) + "..."
 }
 
-// ReportReview submits a reviewer verdict to Kitchen.
-func (c *kitchenClient) ReportReview(workerID, taskID, verdict, feedback, severity string) error {
-	payload := map[string]string{
-		"workerId": workerID,
-		"taskId":   taskID,
-		"verdict":  verdict,
-		"feedback": feedback,
-		"severity": severity,
-	}
-	resp, err := c.postJSON("/report_review", payload)
-	if err != nil {
-		return fmt.Errorf("report_review: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("report_review: HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
 // AskQuestion sends a blocking question to Kitchen.
 func (c *kitchenClient) AskQuestion(workerID string, q pool.Question) (string, error) {
 	payload := map[string]any{

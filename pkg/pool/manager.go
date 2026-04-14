@@ -19,7 +19,7 @@ import (
 // (i.e. the task is no longer being worked on by a worker).
 func isTerminalStatus(status string) bool {
 	switch status {
-	case TaskCompleted, TaskFailed, TaskCanceled, TaskAccepted, TaskRejected, TaskEscalated:
+	case TaskCompleted, TaskFailed, TaskCanceled:
 		return true
 	}
 	return false
@@ -500,11 +500,6 @@ func (pm *PoolManager) enqueueTaskLocked(spec TaskSpec) (string, error) {
 		}
 	}
 
-	maxReviews := spec.MaxReviews
-	if maxReviews == 0 {
-		maxReviews = 3
-	}
-
 	e := Event{
 		Timestamp: time.Now(),
 		Type:      EventTaskCreated,
@@ -516,7 +511,6 @@ func (pm *PoolManager) enqueueTaskLocked(spec TaskSpec) (string, error) {
 			DependsOn:          spec.DependsOn,
 			TimeoutMinutes:     spec.TimeoutMinutes,
 			Role:               spec.Role,
-			MaxReviews:         maxReviews,
 			PipelineID:         spec.PipelineID,
 			PlanID:             spec.PlanID,
 			StageIndex:         spec.StageIndex,
@@ -582,7 +576,7 @@ func (pm *PoolManager) DispatchNext(workerID string) (*Task, error) {
 
 	isDepSatisfied := func(depID string) bool {
 		t := pm.tasks[depID]
-		return t != nil && (t.Status == TaskCompleted || t.Status == TaskAccepted)
+		return t != nil && t.Status == TaskCompleted
 	}
 
 	tid, ok := pm.queue.Pop(isDepSatisfied)
@@ -608,8 +602,8 @@ func (pm *PoolManager) DispatchNext(workerID string) (*Task, error) {
 
 // CancelTask marks a task canceled and releases any queue slot or assigned workers.
 // If a host API is configured, actively running workers are killed so old work does
-// not continue after cancellation. Completed, accepted, failed, and already-canceled
-// tasks are left unchanged.
+// not continue after cancellation. Completed, failed, and already-canceled tasks
+// are left unchanged.
 func (pm *PoolManager) CancelTask(taskID string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -619,19 +613,14 @@ func (pm *PoolManager) CancelTask(taskID string) error {
 		return fmt.Errorf("cancel task: task %q not found", taskID)
 	}
 	switch t.Status {
-	case TaskCompleted, TaskAccepted, TaskFailed, TaskCanceled:
+	case TaskCompleted, TaskFailed, TaskCanceled:
 		return nil
 	}
 
 	assignedWorkerID := t.WorkerID
-	reviewerID := t.ReviewerID
 	assignedWorkerActive := false
-	reviewerActive := false
 	if w := pm.workers[assignedWorkerID]; w != nil && w.CurrentTaskID == taskID {
 		assignedWorkerActive = true
-	}
-	if w := pm.workers[reviewerID]; w != nil && w.CurrentTaskID == taskID {
-		reviewerActive = true
 	}
 	wasQueued := t.Status == TaskQueued
 
@@ -648,12 +637,7 @@ func (pm *PoolManager) CancelTask(taskID string) error {
 		pm.queue.Remove(taskID)
 	}
 
-	if reviewerID != "" {
-		if err := pm.releaseCanceledWorkerLocked(reviewerID, taskID, reviewerActive); err != nil {
-			return fmt.Errorf("cancel task reviewer cleanup: %w", err)
-		}
-	}
-	if assignedWorkerID != "" && assignedWorkerID != reviewerID {
+	if assignedWorkerID != "" {
 		if err := pm.releaseCanceledWorkerLocked(assignedWorkerID, taskID, assignedWorkerActive); err != nil {
 			return fmt.Errorf("cancel task worker cleanup: %w", err)
 		}
@@ -672,7 +656,7 @@ func (pm *PoolManager) PollTask(workerID string) *Task {
 		return nil
 	}
 	t := pm.tasks[w.CurrentTaskID]
-	if t == nil || (t.Status != TaskDispatched && t.Status != TaskReviewing) {
+	if t == nil || t.Status != TaskDispatched {
 		return nil
 	}
 	cp := *t
@@ -1422,36 +1406,24 @@ func (pm *PoolManager) ResolveModel(role string) ModelConfig {
 
 // --- internal helpers ---
 
-// requeueWorkerTasksLocked requeues active tasks assigned to (or being reviewed
-// by) the given worker. Tasks in terminal states are skipped. Must be called
-// with pm.mu held.
+// requeueWorkerTasksLocked requeues active tasks assigned to the given worker.
+// Tasks in terminal states are skipped. Must be called with pm.mu held.
 func (pm *PoolManager) requeueWorkerTasksLocked(workerID string) {
 	for _, t := range pm.tasks {
 		if isTerminalStatus(t.Status) {
 			continue
 		}
 
-		pushToQueue := false
-		switch {
-		case t.Status == TaskDispatched && t.WorkerID == workerID:
-			pushToQueue = true
-		case t.Status == TaskReviewing && t.ReviewerID == workerID:
-			// Reviewing tasks don't need queue insertion — they'll be
-			// re-dispatched for review by the leader's scheduling loop.
-		default:
+		if t.Status != TaskDispatched || t.WorkerID != workerID {
 			continue
 		}
 
-		evType := EventTaskRequeued
-		if t.Status == TaskReviewing {
-			evType = EventReviewAborted
-		}
 		e := Event{
 			Timestamp: time.Now(),
-			Type:      evType,
+			Type:      EventTaskRequeued,
 			TaskID:    t.ID,
 		}
-		// Save queue metadata before Apply clears WorkerID/ReviewerID.
+		// Save queue metadata before Apply clears WorkerID.
 		priority, deps := t.Priority, t.DependsOn
 		if _, err := pm.wal.Append(e); err != nil {
 			log.Printf("requeue worker task: WAL append failed for task %s: %v", t.ID, err)
@@ -1459,10 +1431,7 @@ func (pm *PoolManager) requeueWorkerTasksLocked(workerID string) {
 		}
 		Apply(pm, e)
 		pm.sendNotify(Notification{Type: "task_requeued", ID: t.ID})
-
-		if pushToQueue {
-			pm.queue.Push(t.ID, priority, deps)
-		}
+		pm.queue.Push(t.ID, priority, deps)
 	}
 }
 
@@ -1521,8 +1490,8 @@ func (pm *PoolManager) removeWaiterLocked(taskID string, ch chan Notification) {
 	}
 }
 
-// WaitForTask blocks until the given task reaches a terminal state (completed,
-// failed, canceled, accepted, rejected, escalated) or the context is canceled.
+// WaitForTask blocks until the given task reaches a terminal state
+// (completed, failed, canceled) or the context is canceled.
 // Returns a snapshot of the task including its result. Uses a loop with a
 // 5-second poll safety net so that missed notifications cannot cause permanent
 // blocking. Callers should invoke this from a separate goroutine (e.g. a

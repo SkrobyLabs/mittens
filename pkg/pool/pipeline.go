@@ -18,7 +18,7 @@ func NewPipelineExecutor(pm *PoolManager) *PipelineExecutor {
 }
 
 // OnTaskEvent is called when a task changes state. It drives pipeline
-// stage advancement, failure handling, and escalation.
+// stage advancement and failure handling.
 func (pe *PipelineExecutor) OnTaskEvent(taskID, newState string) {
 	task, ok := pe.pm.Task(taskID)
 	if !ok || task.PipelineID == "" {
@@ -36,27 +36,8 @@ func (pe *PipelineExecutor) OnTaskEvent(taskID, newState string) {
 	switch newState {
 	case TaskCompleted:
 		pe.advanceStage(pipe, task)
-	case TaskAccepted:
-		pe.advanceStage(pipe, task)
 	case TaskFailed:
 		pe.handleFailure(pipe, task)
-	case TaskEscalated:
-		pe.pm.mu.Lock()
-		e := Event{
-			Timestamp: time.Now(),
-			Type:      EventPipelineBlocked,
-			TaskID:    pipe.ID,
-			Data:      marshalData(PipelineBlockedData{PipelineID: pipe.ID, StageIndex: task.StageIndex}),
-		}
-		if _, err := pe.pm.wal.Append(e); err == nil {
-			Apply(pe.pm, e)
-		}
-		pe.pm.mu.Unlock()
-		pe.pm.sendNotify(Notification{
-			Type:    "pipeline_blocked",
-			ID:      pipe.ID,
-			Message: fmt.Sprintf("task %s escalated", taskID),
-		})
 	}
 }
 
@@ -273,7 +254,7 @@ func (pe *PipelineExecutor) allStageDone(pipe *Pipeline, stageIdx int) bool {
 	}
 	for _, t := range tasks {
 		switch t.Status {
-		case TaskCompleted, TaskAccepted, TaskCanceled:
+		case TaskCompleted, TaskCanceled:
 			continue
 		default:
 			return false
@@ -364,7 +345,7 @@ func (pe *PipelineExecutor) AdvanceStage(pipeID string) error {
 		}
 		allDone := true
 		for _, t := range tasks {
-			if t.Status != TaskCompleted && t.Status != TaskAccepted && t.Status != TaskCanceled {
+			if t.Status != TaskCompleted && t.Status != TaskCanceled {
 				allDone = false
 				break
 			}

@@ -95,45 +95,6 @@ func ExecuteForReviewCouncilTurn(ctx context.Context, ad Adapter, prompt, priorC
 	return nil, Result{}, fmt.Errorf("unreachable extraction retry state")
 }
 
-func ExecuteForReviewVerdict(ctx context.Context, ad Adapter, prompt, priorContext string, log func(string)) (verdict, feedback, severity string, result Result, err error) {
-	totalAttempts := extractionRetryBudget + 1
-	currentPrompt := prompt
-	currentPriorContext := priorContext
-
-	for attempt := 1; attempt <= totalAttempts; attempt++ {
-		result, err = ad.Execute(ctx, currentPrompt, currentPriorContext)
-		if err != nil {
-			return "", "", "", result, err
-		}
-		if result.ExitCode != 0 {
-			return "", "", "", result, adapterExitError(result)
-		}
-
-		verdict, feedback, severity, err = extractReviewVerdictOrError(result.Output)
-		if err == nil {
-			return verdict, feedback, severity, result, nil
-		}
-		if attempt == totalAttempts {
-			return "", "", "", result, &extractionError{attempts: attempt, err: err}
-		}
-
-		nextAttempt := attempt + 1
-		log(fmt.Sprintf("attempt %d/%d: %v (input_tokens=%d output_tokens=%d)", nextAttempt, totalAttempts, err, result.InputTokens, result.OutputTokens))
-		currentPrompt = buildExtractionRetryPrompt(prompt, result.Output, err)
-		currentPriorContext = ""
-	}
-
-	return "", "", "", Result{}, fmt.Errorf("unreachable extraction retry state")
-}
-
-func extractReviewVerdictOrError(output string) (verdict, feedback, severity string, err error) {
-	verdict, feedback, severity = ExtractReviewVerdict(output)
-	if verdict == "" {
-		return "", "", "", fmt.Errorf("review verdict not found")
-	}
-	return verdict, feedback, severity, nil
-}
-
 func adapterExitError(result Result) error {
 	if result.ExitCode == 0 {
 		return nil

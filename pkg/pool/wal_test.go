@@ -422,7 +422,7 @@ func TestWALRoundTripAllEventTypes(t *testing.T) {
 		{Timestamp: now, Type: EventTaskCreated, TaskID: "t-1",
 			Data: marshalData(TaskCreatedData{
 				Prompt: "implement feature X", Priority: 5, DependsOn: []string{"t-0"},
-				Role: "implementer", MaxReviews: 2, PipelineID: "p-1", StageIndex: 1,
+				Role: "implementer", PipelineID: "p-1", StageIndex: 1,
 			})},
 		{Timestamp: now, Type: EventTaskDispatched, TaskID: "t-1", WorkerID: "w-1",
 			Data: marshalData(TaskDispatchedData{WorkerID: "w-1"})},
@@ -434,16 +434,6 @@ func TestWALRoundTripAllEventTypes(t *testing.T) {
 			Data: marshalData(TaskFailedData{Error: "timeout"})},
 		{Timestamp: now, Type: EventTaskCanceled, TaskID: "t-3"},
 		{Timestamp: now, Type: EventTaskRequeued, TaskID: "t-2"},
-		{Timestamp: now, Type: EventReviewDispatched, TaskID: "t-1",
-			Data: marshalData(ReviewDispatchedData{ReviewerID: "w-2"})},
-		{Timestamp: now, Type: EventReviewCompleted, TaskID: "t-1",
-			Data: marshalData(ReviewCompletedData{
-				ReviewerID: "w-2", Verdict: ReviewPass, Feedback: "looks good", Severity: SeverityMinor,
-			})},
-		{Timestamp: now, Type: EventTaskAccepted, TaskID: "t-1"},
-		{Timestamp: now, Type: EventTaskRejected, TaskID: "t-4"},
-		{Timestamp: now, Type: EventTaskEscalated, TaskID: "t-5",
-			Data: marshalData(EscalationData{Action: EscalationRetry})},
 		{Timestamp: now, Type: EventPipelineCreated, TaskID: "p-1",
 			Data: marshalData(PipelineCreatedData{Pipeline: Pipeline{
 				ID: "p-1", Goal: "build feature", Status: PipelineRunning,
@@ -539,7 +529,7 @@ func TestEventMarshalRoundTrip(t *testing.T) {
 			evType: EventTaskCreated,
 			data: TaskCreatedData{
 				Prompt: "build a REST API", Priority: 10, DependsOn: []string{"t-0", "t-1"},
-				Role: "implementer", MaxReviews: 3, PipelineID: "p-5", StageIndex: 2,
+				Role: "implementer", PipelineID: "p-5", StageIndex: 2,
 			},
 			validate: func(t *testing.T, raw json.RawMessage) {
 				var d TaskCreatedData
@@ -550,7 +540,6 @@ func TestEventMarshalRoundTrip(t *testing.T) {
 					t.Errorf("DependsOn = %v, want [t-0 t-1]", d.DependsOn)
 				}
 				assertEqual(t, "Role", d.Role, "implementer")
-				assertEqualInt(t, "MaxReviews", d.MaxReviews, 3)
 				assertEqual(t, "PipelineID", d.PipelineID, "p-5")
 				assertEqualInt(t, "StageIndex", d.StageIndex, 2)
 			},
@@ -590,29 +579,6 @@ func TestEventMarshalRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:   "ReviewDispatchedData",
-			evType: EventReviewDispatched,
-			data:   ReviewDispatchedData{ReviewerID: "w-rev"},
-			validate: func(t *testing.T, raw json.RawMessage) {
-				var d ReviewDispatchedData
-				mustUnmarshal(t, raw, &d)
-				assertEqual(t, "ReviewerID", d.ReviewerID, "w-rev")
-			},
-		},
-		{
-			name:   "ReviewCompletedData",
-			evType: EventReviewCompleted,
-			data:   ReviewCompletedData{ReviewerID: "w-rev", Verdict: ReviewFail, Feedback: "missing tests", Severity: SeverityMajor},
-			validate: func(t *testing.T, raw json.RawMessage) {
-				var d ReviewCompletedData
-				mustUnmarshal(t, raw, &d)
-				assertEqual(t, "ReviewerID", d.ReviewerID, "w-rev")
-				assertEqual(t, "Verdict", d.Verdict, ReviewFail)
-				assertEqual(t, "Feedback", d.Feedback, "missing tests")
-				assertEqual(t, "Severity", d.Severity, SeverityMajor)
-			},
-		},
-		{
 			name:   "WorkerQuestionData",
 			evType: EventWorkerQuestion,
 			data: WorkerQuestionData{
@@ -643,16 +609,6 @@ func TestEventMarshalRoundTrip(t *testing.T) {
 				assertEqual(t, "QuestionID", d.QuestionID, "q-7")
 				assertEqual(t, "Answer", d.Answer, "chi")
 				assertEqual(t, "AnsweredBy", d.AnsweredBy, "leader")
-			},
-		},
-		{
-			name:   "EscalationData",
-			evType: EventTaskEscalated,
-			data:   EscalationData{Action: EscalationAbort},
-			validate: func(t *testing.T, raw json.RawMessage) {
-				var d EscalationData
-				mustUnmarshal(t, raw, &d)
-				assertEqual(t, "Action", d.Action, EscalationAbort)
 			},
 		},
 		{
@@ -782,7 +738,7 @@ func TestWALRoundTripDataPreserved(t *testing.T) {
 
 	taskData := TaskCreatedData{
 		Prompt: "build auth module", Priority: 7, DependsOn: []string{"t-0"},
-		Role: "implementer", MaxReviews: 2, PipelineID: "p-3", StageIndex: 1,
+		Role: "implementer", PipelineID: "p-3", StageIndex: 1,
 	}
 	wal.Append(Event{
 		Timestamp: time.Now(), Type: EventTaskCreated, TaskID: "t-1",
@@ -831,7 +787,6 @@ func TestWALRoundTripDataPreserved(t *testing.T) {
 	assertEqual(t, "Prompt", tc.Prompt, "build auth module")
 	assertEqualInt(t, "Priority", tc.Priority, 7)
 	assertEqual(t, "Role", tc.Role, "implementer")
-	assertEqualInt(t, "MaxReviews", tc.MaxReviews, 2)
 	assertEqual(t, "PipelineID", tc.PipelineID, "p-3")
 	assertEqualInt(t, "StageIndex", tc.StageIndex, 1)
 	if len(tc.DependsOn) != 1 || tc.DependsOn[0] != "t-0" {
@@ -881,8 +836,6 @@ func TestWALEventsWithoutData(t *testing.T) {
 		{Timestamp: time.Now(), Type: EventWorkerDead, WorkerID: "w-1"},
 		{Timestamp: time.Now(), Type: EventTaskCanceled, TaskID: "t-1"},
 		{Timestamp: time.Now(), Type: EventTaskRequeued, TaskID: "t-1"},
-		{Timestamp: time.Now(), Type: EventTaskAccepted, TaskID: "t-1"},
-		{Timestamp: time.Now(), Type: EventTaskRejected, TaskID: "t-1"},
 		{Timestamp: time.Now(), Type: EventPipelineCompleted, TaskID: "p-1"},
 	}
 

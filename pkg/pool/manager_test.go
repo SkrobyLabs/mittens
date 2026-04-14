@@ -719,50 +719,6 @@ func TestCancelTaskQueuedRemovesFromDispatchQueue(t *testing.T) {
 	}
 }
 
-func TestCancelTaskReviewingReleasesReviewer(t *testing.T) {
-	pm := newTestPoolManager(t)
-	if _, err := pm.SpawnWorker(WorkerSpec{ID: "impl-1", Role: "implementer"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pm.SpawnWorker(WorkerSpec{ID: "rev-1", Role: "reviewer"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := pm.RegisterWorker("impl-1", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := pm.RegisterWorker("rev-1", ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pm.EnqueueTask(TaskSpec{ID: "t-1", Prompt: "x", Priority: 1, MaxReviews: 3}); err != nil {
-		t.Fatal(err)
-	}
-	if err := pm.DispatchTask("t-1", "impl-1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := completeTestTask(pm, "impl-1", "t-1", TaskResult{Summary: "done"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := pm.DispatchReview("t-1", "rev-1"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := pm.CancelTask("t-1"); err != nil {
-		t.Fatal(err)
-	}
-
-	task, _ := pm.Task("t-1")
-	if task.Status != TaskCanceled {
-		t.Fatalf("task status = %q, want canceled", task.Status)
-	}
-	reviewer, _ := pm.Worker("rev-1")
-	if reviewer.Status != WorkerIdle {
-		t.Fatalf("reviewer status = %q, want idle", reviewer.Status)
-	}
-	if reviewer.CurrentTaskID != "" {
-		t.Fatalf("reviewer currentTaskID = %q, want empty", reviewer.CurrentTaskID)
-	}
-}
-
 func TestCancelTaskKillsActiveWorkerWhenHostAPIPresent(t *testing.T) {
 	dir := t.TempDir()
 	wal, err := OpenWAL(filepath.Join(dir, "test.wal"))
@@ -1492,13 +1448,13 @@ func TestSpawnWorkerPropagatesSessionID(t *testing.T) {
 // --- isTerminalStatus tests ---
 
 func TestIsTerminalStatus(t *testing.T) {
-	terminal := []string{TaskCompleted, TaskFailed, TaskCanceled, TaskAccepted, TaskRejected, TaskEscalated}
+	terminal := []string{TaskCompleted, TaskFailed, TaskCanceled}
 	for _, s := range terminal {
 		if !isTerminalStatus(s) {
 			t.Errorf("isTerminalStatus(%q) = false, want true", s)
 		}
 	}
-	active := []string{TaskQueued, TaskDispatched, TaskReviewing}
+	active := []string{TaskQueued, TaskDispatched}
 	for _, s := range active {
 		if isTerminalStatus(s) {
 			t.Errorf("isTerminalStatus(%q) = true, want false", s)
@@ -1749,101 +1705,5 @@ func TestWaitForTask_ContextCancellation(t *testing.T) {
 	pm.mu.RUnlock()
 	if len(waiters) != 0 {
 		t.Errorf("waiter leak: %d waiters remaining after cancel", len(waiters))
-	}
-}
-
-func TestReviewerDeath_TaskReturnsToCompleted(t *testing.T) {
-	pm := newTestPoolManager(t)
-
-	// Spawn implementer + reviewer.
-	pm.SpawnWorker(WorkerSpec{ID: "w-impl", Role: "implementer"})
-	pm.RegisterWorker("w-impl", "")
-	pm.SpawnWorker(WorkerSpec{ID: "w-rev", Role: "reviewer"})
-	pm.RegisterWorker("w-rev", "")
-
-	// Create, dispatch, and complete task.
-	pm.EnqueueTask(TaskSpec{ID: "t-1", Prompt: "build feature", Priority: 1, MaxReviews: 3})
-	pm.DispatchTask("t-1", "w-impl")
-	completeTestTask(pm, "w-impl", "t-1", TaskResult{Summary: "done"}, nil)
-
-	// Drain completion notification.
-	<-pm.Notify()
-
-	// Dispatch review.
-	if err := pm.DispatchReview("t-1", "w-rev"); err != nil {
-		t.Fatalf("DispatchReview: %v", err)
-	}
-	task, _ := pm.Task("t-1")
-	if task.Status != TaskReviewing {
-		t.Fatalf("status = %q, want reviewing", task.Status)
-	}
-
-	// Reviewer dies mid-review.
-	pm.MarkDead("w-rev")
-
-	// Task should revert to completed (not queued).
-	task, _ = pm.Task("t-1")
-	if task.Status != TaskCompleted {
-		t.Errorf("status = %q, want completed (review aborted)", task.Status)
-	}
-	if task.ReviewerID != "" {
-		t.Errorf("reviewerID = %q, want empty", task.ReviewerID)
-	}
-
-	// Spawn a new reviewer and verify re-review works.
-	pm.SpawnWorker(WorkerSpec{ID: "w-rev2", Role: "reviewer"})
-	pm.RegisterWorker("w-rev2", "")
-
-	if err := pm.DispatchReview("t-1", "w-rev2"); err != nil {
-		t.Fatalf("second DispatchReview: %v", err)
-	}
-	task, _ = pm.Task("t-1")
-	if task.Status != TaskReviewing {
-		t.Errorf("status = %q, want reviewing after re-dispatch", task.Status)
-	}
-	if task.ReviewerID != "w-rev2" {
-		t.Errorf("reviewerID = %q, want w-rev2", task.ReviewerID)
-	}
-}
-
-func TestWaitForTaskReviewPass(t *testing.T) {
-	pm := newTestPoolManager(t)
-	pm.SpawnWorker(WorkerSpec{ID: "w-1", Role: "implementer"})
-	pm.RegisterWorker("w-1", "")
-	pm.SpawnWorker(WorkerSpec{ID: "w-2", Role: "reviewer"})
-	pm.RegisterWorker("w-2", "")
-
-	pm.EnqueueTask(TaskSpec{ID: "t-1", Prompt: "implement it"})
-	pm.DispatchTask("t-1", "w-1")
-	completeTestTask(pm, "w-1", "t-1", TaskResult{Summary: "done"}, nil)
-
-	// Drain completion notification.
-	<-pm.Notify()
-
-	// Now dispatch review — task goes to "reviewing" state.
-	pm.DispatchReview("t-1", "w-2")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	var waitTask *Task
-	var waitErr error
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		waitTask, waitErr = pm.WaitForTask(ctx, "t-1")
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	pm.ReportReview("t-1", ReviewPass, "looks good", "")
-
-	wg.Wait()
-	if waitErr != nil {
-		t.Fatalf("WaitForTask error: %v", waitErr)
-	}
-	if waitTask.Status != TaskAccepted {
-		t.Errorf("status = %q, want accepted", waitTask.Status)
 	}
 }

@@ -15,7 +15,7 @@ func TestStatusConstantsAreDistinct(t *testing.T) {
 		seen[s] = true
 	}
 
-	taskStatuses := []string{TaskQueued, TaskDispatched, TaskCompleted, TaskFailed, TaskCanceled, TaskReviewing, TaskAccepted, TaskRejected, TaskEscalated}
+	taskStatuses := []string{TaskQueued, TaskDispatched, TaskCompleted, TaskFailed, TaskCanceled}
 	seen = map[string]bool{}
 	for _, s := range taskStatuses {
 		if s == "" {
@@ -45,16 +45,5 @@ func TestSeverityConstants(t *testing.T) {
 			t.Errorf("duplicate severity: %q", s)
 		}
 		seen[s] = true
-	}
-}
-
-func TestEscalationConstants(t *testing.T) {
-	acts := []string{EscalationAccept, EscalationRetry, EscalationAbort}
-	seen := map[string]bool{}
-	for _, a := range acts {
-		if seen[a] {
-			t.Errorf("duplicate escalation action: %q", a)
-		}
-		seen[a] = true
 	}
 }

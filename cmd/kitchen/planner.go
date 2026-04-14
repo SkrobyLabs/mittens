@@ -554,7 +554,7 @@ func (k *Kitchen) CancelPlan(planID string) error {
 		for _, task := range k.pm.Tasks() {
 			if task.PlanID == planID {
 				switch task.Status {
-				case pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled, pool.TaskAccepted, pool.TaskRejected, pool.TaskEscalated:
+				case pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled:
 					continue
 				default:
 					taskIDs = append(taskIDs, task.ID)

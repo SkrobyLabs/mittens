@@ -23,10 +23,6 @@ const (
 	TaskCompleted  = "completed"
 	TaskFailed     = "failed"
 	TaskCanceled   = "canceled"
-	TaskReviewing  = "reviewing"
-	TaskAccepted   = "accepted"
-	TaskRejected   = "rejected"
-	TaskEscalated  = "escalated"
 )
 
 // Pipeline status constants.
@@ -48,13 +44,6 @@ const (
 	SeverityMinor    = "minor"
 	SeverityMajor    = "major"
 	SeverityCritical = "critical"
-)
-
-// Escalation action constants.
-const (
-	EscalationAccept = "accept"
-	EscalationRetry  = "retry"
-	EscalationAbort  = "abort"
 )
 
 // FanMode describes how tasks within a pipeline stage relate.
@@ -120,15 +109,11 @@ type Task struct {
 	TimeoutMinutes     int             `json:"timeoutMinutes,omitempty"`
 	Status             string          `json:"status"`
 	WorkerID           string          `json:"workerId,omitempty"`
-	ReviewerID         string          `json:"reviewerId,omitempty"`
 	RetryCount         int             `json:"retryCount,omitempty"`
 	RequireFreshWorker bool            `json:"requireFreshWorker,omitempty"`
 	RetryRoute         *RetryRouteHint `json:"retryRoute,omitempty"`
-	ReviewCycles       int             `json:"reviewCycles"`
-	MaxReviews         int             `json:"maxReviews"`
 	Result             *TaskResult     `json:"result,omitempty"`
 	Handover           *TaskHandover   `json:"handover,omitempty"`
-	Reviews            []ReviewRecord  `json:"reviews,omitempty"`
 	CreatedAt          time.Time       `json:"createdAt"`
 	DispatchedAt       *time.Time      `json:"dispatchedAt,omitempty"`
 	CompletedAt        *time.Time      `json:"completedAt,omitempty"`
@@ -144,7 +129,6 @@ type TaskSummary struct {
 	WorkerID     string     `json:"workerId,omitempty"`
 	RetryCount   int        `json:"retryCount,omitempty"`
 	DependsOn    []string   `json:"dependsOn,omitempty"`
-	ReviewCycles int        `json:"reviewCycles"`
 	HasHandover  bool       `json:"hasHandover,omitempty"`
 	HasConflict  bool       `json:"hasConflict,omitempty"`
 	CreatedAt    time.Time  `json:"createdAt"`
@@ -162,7 +146,6 @@ func (t *Task) Summary() TaskSummary {
 		WorkerID:     t.WorkerID,
 		RetryCount:   t.RetryCount,
 		DependsOn:    t.DependsOn,
-		ReviewCycles: t.ReviewCycles,
 		HasHandover:  t.Handover != nil,
 		HasConflict:  t.Result != nil && t.Result.Conflict != nil,
 		CreatedAt:    t.CreatedAt,
@@ -183,7 +166,6 @@ type TaskSpec struct {
 	Priority           int      `json:"priority"`
 	DependsOn          []string `json:"dependsOn,omitempty"`
 	TimeoutMinutes     int      `json:"timeoutMinutes,omitempty"`
-	MaxReviews         int      `json:"maxReviews,omitempty"`
 	RequireFreshWorker bool     `json:"requireFreshWorker,omitempty"`
 }
 
@@ -263,15 +245,6 @@ type FileChange struct {
 	Path   string `json:"path"`
 	Action string `json:"action"`
 	What   string `json:"what"`
-}
-
-// ReviewRecord stores the result of one review cycle.
-type ReviewRecord struct {
-	ReviewerID string    `json:"reviewerId"`
-	Verdict    string    `json:"verdict"`
-	Feedback   string    `json:"feedback,omitempty"`
-	Severity   string    `json:"severity,omitempty"`
-	ReviewedAt time.Time `json:"reviewedAt"`
 }
 
 // ModelConfig describes the AI provider settings for a worker role.

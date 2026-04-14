@@ -300,7 +300,7 @@ func (k *Kitchen) activeWorktreeTaskSet() map[string]bool {
 
 func kitchenTaskNeedsWorktree(status string) bool {
 	switch status {
-	case pool.TaskQueued, pool.TaskDispatched, pool.TaskReviewing:
+	case pool.TaskQueued, pool.TaskDispatched:
 		return true
 	default:
 		return false
@@ -318,7 +318,7 @@ func (k *Kitchen) blockingTasksForPlan(planID string) []string {
 			continue
 		}
 		switch task.Status {
-		case pool.TaskCompleted, pool.TaskAccepted:
+		case pool.TaskCompleted:
 			continue
 		default:
 			blocked = append(blocked, fmt.Sprintf("%s=%s", task.ID, task.Status))
@@ -347,7 +347,7 @@ func (k *Kitchen) markPlanMerged(planID string) error {
 				continue
 			}
 			switch task.Status {
-			case pool.TaskCompleted, pool.TaskAccepted:
+			case pool.TaskCompleted:
 				completed = append(completed, task.ID)
 			default:
 				failed = append(failed, task.ID)

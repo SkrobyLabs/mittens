@@ -45,39 +45,6 @@ func TestRequeueOrphanedTasks_NoOrphans(t *testing.T) {
 	}
 }
 
-func TestRequeueOrphanedTasks_ReviewingOnDeadReviewer(t *testing.T) {
-	pm := newTestPoolManager(t)
-	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
-	pm.RegisterWorker("w-1", "")
-	pm.SpawnWorker(WorkerSpec{ID: "w-2"})
-	pm.RegisterWorker("w-2", "")
-
-	pm.EnqueueTask(TaskSpec{ID: "t-1", Prompt: "do it"})
-	pm.DispatchTask("t-1", "w-1")
-	completeTestTask(pm, "w-1", "t-1", TaskResult{Summary: "done"}, nil)
-
-	// Simulate review dispatch via direct WAL event.
-	pm.mu.Lock()
-	e := Event{Type: EventReviewDispatched, TaskID: "t-1", Data: marshalData(ReviewDispatchedData{ReviewerID: "w-2"})}
-	pm.wal.Append(e)
-	Apply(pm, e)
-	pm.mu.Unlock()
-
-	// Kill the reviewer — MarkDead aborts review inline.
-	pm.MarkDead("w-2")
-
-	// RequeueOrphanedTasks finds nothing because MarkDead already handled it.
-	requeued := RequeueOrphanedTasks(pm)
-	if requeued != 0 {
-		t.Errorf("requeued = %d, want 0 (already handled by MarkDead)", requeued)
-	}
-
-	task, _ := pm.Task("t-1")
-	if task.Status != TaskCompleted {
-		t.Errorf("task status = %q, want completed (review aborted, not re-queued for implementation)", task.Status)
-	}
-}
-
 func TestRequeueOrphanedTasks_MissingWorker(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})

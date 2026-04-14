@@ -1453,7 +1453,7 @@ func (m kitchenTUIModel) canCancelSelectedTask() bool {
 		return false
 	}
 	switch strings.TrimSpace(task.State) {
-	case "", "planned", pool.TaskCompleted, pool.TaskAccepted, pool.TaskFailed, pool.TaskCanceled, pool.TaskRejected, pool.TaskEscalated:
+	case "", "planned", pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled:
 		return false
 	default:
 		return true
@@ -2376,7 +2376,7 @@ func shouldUsePlanLevelImplementationReviewFallback(detail *PlanDetail, task kit
 		return true
 	}
 	switch strings.TrimSpace(task.State) {
-	case pool.TaskQueued, pool.TaskDispatched, pool.TaskReviewing, "active", "planned":
+	case pool.TaskQueued, pool.TaskDispatched, "active", "planned":
 		return true
 	}
 	return turn > detail.Execution.ReviewCouncilTurnsCompleted
@@ -2399,7 +2399,7 @@ func summarizeImplementationReviewStatus(detail *PlanDetail, task kitchenTUITask
 			return "failed"
 		case planStateImplementationReview:
 			switch strings.TrimSpace(task.State) {
-			case pool.TaskDispatched, pool.TaskReviewing, "active":
+			case pool.TaskDispatched, "active":
 				return "reviewing"
 			default:
 				return "pending"
@@ -2408,11 +2408,11 @@ func summarizeImplementationReviewStatus(detail *PlanDetail, task kitchenTUITask
 	}
 
 	switch strings.TrimSpace(task.State) {
-	case pool.TaskCompleted, pool.TaskAccepted:
+	case pool.TaskCompleted:
 		return "approved"
 	case pool.TaskFailed:
 		return "failed"
-	case pool.TaskDispatched, pool.TaskReviewing, "active":
+	case pool.TaskDispatched, "active":
 		return "reviewing"
 	default:
 		return "pending"

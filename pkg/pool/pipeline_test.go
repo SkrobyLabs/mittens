@@ -465,31 +465,6 @@ func TestPipelineFailure(t *testing.T) {
 	}
 }
 
-func TestPipelineEscalation(t *testing.T) {
-	pm := newTestPoolManager(t)
-	spawnIdleWorker(pm, "w-1")
-	executor := NewPipelineExecutor(pm)
-
-	pipe := twoStagePipeline(FanOut, FanIn, true)
-	pipeID, _ := pm.SubmitPipeline(pipe)
-	drainNotify(pm)
-
-	s0Tasks := pm.PipelineStageTasks(pipeID, 0)
-	pm.DispatchTask(s0Tasks[0].ID, "w-1")
-
-	// Simulate escalation by directly setting status (normally via review cycle).
-	pm.mu.Lock()
-	pm.tasks[s0Tasks[0].ID].Status = TaskEscalated
-	pm.mu.Unlock()
-
-	executor.OnTaskEvent(s0Tasks[0].ID, TaskEscalated)
-
-	p, _ := pm.GetPipeline(pipeID)
-	if p.Status != PipelineBlocked {
-		t.Errorf("status = %q, want blocked on escalation", p.Status)
-	}
-}
-
 func TestFullPipeline_Lifecycle(t *testing.T) {
 	pm := newTestPoolManager(t)
 	spawnIdleWorker(pm, "w-1")
@@ -797,33 +772,6 @@ func TestGoalTemplate_ExpandedInAllStages(t *testing.T) {
 	}
 	if !strings.Contains(s1Tasks[0].Prompt, "deploy service X") {
 		t.Errorf("s1 prompt missing goal: %q", s1Tasks[0].Prompt)
-	}
-}
-
-func TestTaskAccepted_AdvancesStage(t *testing.T) {
-	pm := newTestPoolManager(t)
-	spawnIdleWorker(pm, "w-1")
-	executor := NewPipelineExecutor(pm)
-
-	pipe := twoStagePipeline(FanOut, FanIn, true)
-	pipeID, _ := pm.SubmitPipeline(pipe)
-	drainNotify(pm)
-
-	s0Tasks := pm.PipelineStageTasks(pipeID, 0)
-	pm.DispatchTask(s0Tasks[0].ID, "w-1")
-	completeTaskDirect(pm, "w-1", s0Tasks[0].ID, nil)
-	drainNotify(pm)
-
-	// Simulate review acceptance by directly setting status.
-	pm.mu.Lock()
-	pm.tasks[s0Tasks[0].ID].Status = TaskAccepted
-	pm.mu.Unlock()
-
-	executor.OnTaskEvent(s0Tasks[0].ID, TaskAccepted)
-
-	s1Tasks := pm.PipelineStageTasks(pipeID, 1)
-	if len(s1Tasks) != 1 {
-		t.Fatalf("stage 1 tasks = %d, want 1 (accepted should advance)", len(s1Tasks))
 	}
 }
 

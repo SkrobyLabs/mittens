@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// RequeueOrphanedTasks finds dispatched tasks on dead workers and re-enqueues them.
-// Tasks in TaskReviewing on dead reviewers are reset to TaskQueued for re-dispatch.
-// Returns the count of re-queued tasks.
+// RequeueOrphanedTasks finds dispatched tasks on dead workers and re-enqueues
+// them. Returns the count of re-queued tasks.
 func RequeueOrphanedTasks(pm *PoolManager) int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -30,24 +29,6 @@ func RequeueOrphanedTasks(pm *PoolManager) int {
 				}
 				Apply(pm, e)
 				pm.queue.Push(t.ID, t.Priority, t.DependsOn)
-				requeued++
-			}
-
-		case TaskReviewing:
-			w := pm.workers[t.ReviewerID]
-			if w == nil || w.Status == WorkerDead {
-				e := Event{
-					Timestamp: time.Now(),
-					Type:      EventReviewAborted,
-					TaskID:    t.ID,
-				}
-				if _, err := pm.wal.Append(e); err != nil {
-					log.Printf("recovery: WAL append failed for task %s requeue: %v", t.ID, err)
-					continue
-				}
-				Apply(pm, e)
-				// Don't push to queue — task is already completed,
-				// it just needs to be re-dispatched for review.
 				requeued++
 			}
 		}

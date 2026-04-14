@@ -28,14 +28,6 @@ const (
 	EventTaskRequeued   = "task_requeued"
 	EventTaskDeleted    = "task_deleted"
 
-	// Review lifecycle.
-	EventReviewDispatched = "review_dispatched"
-	EventReviewCompleted  = "review_completed"
-	EventReviewAborted    = "review_aborted"
-	EventTaskAccepted     = "task_accepted"
-	EventTaskRejected     = "task_rejected"
-	EventTaskEscalated    = "task_escalated"
-
 	// Question lifecycle.
 	EventWorkerQuestion   = "worker_question"
 	EventQuestionAnswered = "question_answered"
@@ -80,7 +72,6 @@ type TaskCreatedData struct {
 	DependsOn          []string `json:"dependsOn,omitempty"`
 	TimeoutMinutes     int      `json:"timeoutMinutes,omitempty"`
 	Role               string   `json:"role,omitempty"`
-	MaxReviews         int      `json:"maxReviews,omitempty"`
 	PipelineID         string   `json:"pipelineId,omitempty"`
 	PlanID             string   `json:"planId,omitempty"`
 	StageIndex         int      `json:"stageIndex,omitempty"`
@@ -112,17 +103,6 @@ type TaskFailedData struct {
 	Detail       json.RawMessage `json:"detail,omitempty"`
 }
 
-type ReviewDispatchedData struct {
-	ReviewerID string `json:"reviewerId"`
-}
-
-type ReviewCompletedData struct {
-	ReviewerID string `json:"reviewerId"`
-	Verdict    string `json:"verdict"`
-	Feedback   string `json:"feedback,omitempty"`
-	Severity   string `json:"severity,omitempty"`
-}
-
 type WorkerQuestionData struct {
 	QuestionID string   `json:"questionId"`
 	Question   string   `json:"question"`
@@ -136,10 +116,6 @@ type QuestionAnsweredData struct {
 	QuestionID string `json:"questionId"`
 	Answer     string `json:"answer"`
 	AnsweredBy string `json:"answeredBy,omitempty"`
-}
-
-type EscalationData struct {
-	Action string `json:"action"`
 }
 
 type PipelineCreatedData struct {
@@ -268,7 +244,6 @@ func Apply(pm *PoolManager, e Event) error {
 			Priority:           d.Priority,
 			DependsOn:          d.DependsOn,
 			TimeoutMinutes:     d.TimeoutMinutes,
-			MaxReviews:         d.MaxReviews,
 			RequireFreshWorker: d.RequireFreshWorker,
 			Status:             TaskQueued,
 			CreatedAt:          e.Timestamp,
@@ -371,7 +346,6 @@ func Apply(pm *PoolManager, e Event) error {
 			}
 			t.Status = TaskQueued
 			t.WorkerID = ""
-			t.ReviewerID = ""
 			t.RequireFreshWorker = d.RequireFreshWorker
 			t.RetryRoute = cloneRetryRouteHint(d.RetryRoute)
 			t.DispatchedAt = nil
@@ -397,89 +371,6 @@ func Apply(pm *PoolManager, e Event) error {
 				}
 			}
 			delete(pm.questions, qid)
-		}
-
-	case EventReviewAborted:
-		t := pm.tasks[e.TaskID]
-		if t != nil {
-			t.Status = TaskCompleted
-			t.ReviewerID = ""
-		}
-
-	case EventReviewDispatched:
-		var d ReviewDispatchedData
-		if e.Data != nil {
-			json.Unmarshal(e.Data, &d)
-		}
-		t := pm.tasks[e.TaskID]
-		if t != nil {
-			t.Status = TaskReviewing
-			t.ReviewerID = d.ReviewerID
-		}
-
-	case EventReviewCompleted:
-		var d ReviewCompletedData
-		if e.Data != nil {
-			json.Unmarshal(e.Data, &d)
-		}
-		t := pm.tasks[e.TaskID]
-		if t != nil {
-			t.Reviews = append(t.Reviews, ReviewRecord{
-				ReviewerID: d.ReviewerID,
-				Verdict:    d.Verdict,
-				Feedback:   d.Feedback,
-				Severity:   d.Severity,
-				ReviewedAt: e.Timestamp,
-			})
-			t.ReviewCycles++
-		}
-
-	case EventTaskAccepted:
-		t := pm.tasks[e.TaskID]
-		if t != nil {
-			t.Status = TaskAccepted
-		}
-		// Mark reviewer idle.
-		if t != nil && t.ReviewerID != "" {
-			w := pm.workers[t.ReviewerID]
-			if w != nil {
-				if w.Status != WorkerDead {
-					w.Status = WorkerIdle
-				}
-				clearWorkerLiveState(w)
-			}
-		}
-
-	case EventTaskRejected:
-		t := pm.tasks[e.TaskID]
-		// Mark reviewer idle before clearing ReviewerID.
-		if t != nil && t.ReviewerID != "" {
-			w := pm.workers[t.ReviewerID]
-			if w != nil {
-				if w.Status != WorkerDead {
-					w.Status = WorkerIdle
-				}
-				clearWorkerLiveState(w)
-			}
-		}
-		if t != nil {
-			t.Status = TaskRejected
-			t.ReviewerID = ""
-		}
-
-	case EventTaskEscalated:
-		t := pm.tasks[e.TaskID]
-		if t != nil {
-			t.Status = TaskEscalated
-		}
-		if t != nil && t.ReviewerID != "" {
-			w := pm.workers[t.ReviewerID]
-			if w != nil {
-				if w.Status != WorkerDead {
-					w.Status = WorkerIdle
-				}
-				clearWorkerLiveState(w)
-			}
 		}
 
 	case EventWorkerQuestion:

@@ -189,41 +189,6 @@ func TestApplyTaskCanceledReleasesAssignedWorker(t *testing.T) {
 	}
 }
 
-func TestApplyReviewLifecycle(t *testing.T) {
-	pm := newTestPM()
-	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-impl"})
-	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-rev"})
-	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskCreated, TaskID: "t-1", Data: marshalData(TaskCreatedData{Prompt: "x"})})
-	pm.tasks["t-1"].Status = TaskCompleted // simulate completion
-
-	Apply(pm, Event{
-		Timestamp: time.Now(), Type: EventReviewDispatched, TaskID: "t-1",
-		Data: marshalData(ReviewDispatchedData{ReviewerID: "w-rev"}),
-	})
-	if pm.tasks["t-1"].Status != TaskReviewing {
-		t.Errorf("status = %q, want reviewing", pm.tasks["t-1"].Status)
-	}
-	if pm.tasks["t-1"].ReviewerID != "w-rev" {
-		t.Errorf("reviewerId = %q, want w-rev", pm.tasks["t-1"].ReviewerID)
-	}
-
-	Apply(pm, Event{
-		Timestamp: time.Now(), Type: EventReviewCompleted, TaskID: "t-1",
-		Data: marshalData(ReviewCompletedData{ReviewerID: "w-rev", Verdict: ReviewPass}),
-	})
-	if len(pm.tasks["t-1"].Reviews) != 1 {
-		t.Fatalf("reviews = %d, want 1", len(pm.tasks["t-1"].Reviews))
-	}
-	if pm.tasks["t-1"].ReviewCycles != 1 {
-		t.Errorf("reviewCycles = %d, want 1", pm.tasks["t-1"].ReviewCycles)
-	}
-
-	Apply(pm, Event{Timestamp: time.Now(), Type: EventTaskAccepted, TaskID: "t-1"})
-	if pm.tasks["t-1"].Status != TaskAccepted {
-		t.Errorf("status = %q, want accepted", pm.tasks["t-1"].Status)
-	}
-}
-
 func TestApplyQuestionLifecycle(t *testing.T) {
 	pm := newTestPM()
 	Apply(pm, Event{Timestamp: time.Now(), Type: EventWorkerSpawned, WorkerID: "w-1"})
