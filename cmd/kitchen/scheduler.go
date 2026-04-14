@@ -1368,7 +1368,15 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
 	switch bundle.Execution.State {
-	case planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateImplementationReviewFailed:
+	case planStatePlanning,
+		planStateReviewing,
+		planStateImplementationReview,
+		planStatePlanningFailed,
+		planStateImplementationReviewFailed,
+		planStateMerged,
+		planStateClosed,
+		planStateRejected,
+		planStateWaitingOnDependency:
 		return s.plans.UpdateExecution(planID, bundle.Execution)
 	}
 
