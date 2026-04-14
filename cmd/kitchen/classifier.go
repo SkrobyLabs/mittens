@@ -42,12 +42,6 @@ func ClassifyFailure(reported string, detail json.RawMessage, signals KitchenSig
 				signals.ExitCode = decoded.Signals.ExitCode
 			}
 		}
-		if decoded == (pool.FailureDetail{}) {
-			var legacy KitchenSignals
-			if json.Unmarshal(detail, &legacy) == nil {
-				signals = legacy
-			}
-		}
 	}
 
 	switch {

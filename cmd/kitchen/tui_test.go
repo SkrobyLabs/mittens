@@ -1082,7 +1082,7 @@ func TestKitchenTUIFooterShowsAgainForCompletedTask(t *testing.T) {
 func TestKitchenTUICancelShortcutRequiresShiftForPlans(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{}
 	model := kitchenTUIModel{
-		backend: backend,
+		backend:  backend,
 		leftMode: kitchenTUILeftPlans,
 		plans: []kitchenTUIPlanItem{{
 			Record: PlanRecord{PlanID: "plan_cancel", Title: "Cancelable", State: planStateActive},
@@ -1119,7 +1119,7 @@ func TestKitchenTUICancelShortcutRequiresShiftForPlans(t *testing.T) {
 func TestKitchenTUICancelShortcutRequiresShiftForTasks(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{}
 	model := kitchenTUIModel{
-		backend: backend,
+		backend:  backend,
 		leftMode: kitchenTUILeftTasks,
 		tasks: []kitchenTUITaskItem{{
 			ID:        "t1",
@@ -1638,43 +1638,6 @@ func TestRenderTaskDetailLinesIncludesImplementationReviewTLDRForPendingReview(t
 	}
 }
 
-func TestRenderTaskDetailLinesUsesLegacyImplementationReviewFallback(t *testing.T) {
-	planID := "plan_review_legacy"
-	model := kitchenTUIModel{
-		leftMode: kitchenTUILeftTasks,
-		detail: &PlanDetail{
-			Plan: PlanRecord{PlanID: planID},
-			Execution: ExecutionRecord{
-				State: planStateImplementationReviewFailed,
-			},
-			Progress: PlanProgress{
-				ImplReviewRequested: true,
-				ImplReviewStatus:    planReviewStatusFailed,
-				ImplReviewFindings:  []string{"adapter exited with code 1"},
-			},
-		},
-		tasks: []kitchenTUITaskItem{{
-			ID:        planTaskRuntimeID(planID, "impl-review-1"),
-			RuntimeID: planTaskRuntimeID(planID, "impl-review-1"),
-			Kind:      "implementation-review",
-			Title:     "Legacy implementation review",
-			State:     pool.TaskFailed,
-		}},
-	}
-
-	lines := model.renderTaskDetailLines(80)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Status: failed") {
-		t.Fatalf("detail lines missing failed legacy status:\n%s", joined)
-	}
-	if !strings.Contains(joined, "Findings: 1") {
-		t.Fatalf("detail lines missing legacy fallback findings count:\n%s", joined)
-	}
-	if !strings.Contains(joined, "adapter exited with code 1") {
-		t.Fatalf("detail lines missing legacy fallback summary:\n%s", joined)
-	}
-}
-
 func TestRenderTaskDetailLinesUsesSelectedImplementationReviewTurn(t *testing.T) {
 	planID := "plan_review_turns"
 	model := kitchenTUIModel{
@@ -2183,7 +2146,7 @@ func TestBuildTaskItemsIncludesImplementationReviewCycle(t *testing.T) {
 		Progress: PlanProgress{
 			Cycles: []PlanCycleProgress{{
 				Index:               1,
-				ImplReviewTaskID:    "plan_impl_review-impl-review-1",
+				ImplReviewTaskID:    reviewCouncilTaskID("plan_impl_review", 1),
 				ImplReviewTaskState: pool.TaskQueued,
 			}},
 		},
@@ -2196,7 +2159,7 @@ func TestBuildTaskItemsIncludesImplementationReviewCycle(t *testing.T) {
 			Tasks            []pool.TaskSummary `json:"tasks"`
 		}{
 			Tasks: []pool.TaskSummary{{
-				ID:     "plan_impl_review-impl-review-1",
+				ID:     reviewCouncilTaskID("plan_impl_review", 1),
 				Status: pool.TaskQueued,
 			}},
 		},
@@ -2209,7 +2172,7 @@ func TestBuildTaskItemsIncludesImplementationReviewCycle(t *testing.T) {
 	if items[0].Kind != "implementation-review" {
 		t.Fatalf("kind = %q, want implementation-review", items[0].Kind)
 	}
-	if items[0].RuntimeID != "plan_impl_review-impl-review-1" {
+	if items[0].RuntimeID != reviewCouncilTaskID("plan_impl_review", 1) {
 		t.Fatalf("runtimeID = %q, want impl review runtime id", items[0].RuntimeID)
 	}
 }
@@ -2232,7 +2195,7 @@ func TestBuildTaskItemsOrdersPlanningImplementationAndReviewPhases(t *testing.T)
 				},
 				{
 					Index:               1,
-					ImplReviewTaskID:    "plan_phase_order-impl-review-1",
+					ImplReviewTaskID:    reviewCouncilTaskID("plan_phase_order", 1),
 					ImplReviewTaskState: pool.TaskQueued,
 				},
 			},
@@ -2257,7 +2220,7 @@ func TestBuildTaskItemsOrdersPlanningImplementationAndReviewPhases(t *testing.T)
 	wantRuntimeIDs := []string{
 		planTaskRuntimeID("plan_phase_order", "task-b"),
 		planTaskRuntimeID("plan_phase_order", "task-a"),
-		"plan_phase_order-impl-review-1",
+		reviewCouncilTaskID("plan_phase_order", 1),
 	}
 	if strings.Join(gotRuntimeIDs, ",") != strings.Join(wantRuntimeIDs, ",") {
 		t.Fatalf("runtimeIDs = %v, want %v", gotRuntimeIDs, wantRuntimeIDs)

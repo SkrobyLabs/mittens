@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
 func TestClassifyFailure(t *testing.T) {
@@ -40,7 +42,9 @@ func TestClassifyFailure(t *testing.T) {
 }
 
 func TestClassifyFailureDetailPayload(t *testing.T) {
-	detail, err := json.Marshal(KitchenSignals{MergeConflict: true})
+	detail, err := json.Marshal(pool.FailureDetail{
+		Signals: pool.FailureSignals{MergeConflict: true},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1411,11 +1411,6 @@ func (pm *PoolManager) MaxWorkers() int {
 	return pm.cfg.MaxWorkers
 }
 
-// PlanStore returns the configured PlanStore, or nil if not configured.
-func (pm *PoolManager) PlanStore() *PlanStore {
-	return pm.cfg.PlanStore
-}
-
 // ResolveModel returns the ModelConfig for the given role via the router.
 // Returns zero-value ModelConfig if no router is configured.
 func (pm *PoolManager) ResolveModel(role string) ModelConfig {

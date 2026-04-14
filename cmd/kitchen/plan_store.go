@@ -54,26 +54,6 @@ type PlanDependency struct {
 	Consumes []string `json:"consumes,omitempty"`
 }
 
-func (d *PlanDependency) UnmarshalJSON(data []byte) error {
-	var taskID string
-	if err := json.Unmarshal(data, &taskID); err == nil {
-		d.Task = strings.TrimSpace(taskID)
-		d.Type = ""
-		d.Consumes = nil
-		return nil
-	}
-
-	type alias PlanDependency
-	var raw alias
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	d.Task = strings.TrimSpace(raw.Task)
-	d.Type = strings.TrimSpace(raw.Type)
-	d.Consumes = append([]string(nil), raw.Consumes...)
-	return nil
-}
-
 type PlanTask struct {
 	ID               string               `json:"id"`
 	Title            string               `json:"title,omitempty"`

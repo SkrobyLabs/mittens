@@ -1,9 +1,6 @@
 package main
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 func TestPlanStoreCreateGetAndList(t *testing.T) {
 	store := NewPlanStore(t.TempDir())
@@ -107,29 +104,5 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 	}
 	if got.Affinity.LastWorkerID != "w-impl-1" {
 		t.Fatalf("affinity = %+v, want last worker set", got.Affinity)
-	}
-}
-
-func TestPlanDependencyUnmarshalSupportsLegacyStrings(t *testing.T) {
-	var task PlanTask
-	if err := json.Unmarshal([]byte(`{
-		"id":"t2",
-		"prompt":"update callers",
-		"complexity":"medium",
-		"dependencies":["t1",{"task":"t0","type":"ordering","consumes":["plan.md"]}]
-	}`), &task); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if len(task.Dependencies) != 2 {
-		t.Fatalf("dependencies = %+v, want 2 entries", task.Dependencies)
-	}
-	if task.Dependencies[0].Task != "t1" {
-		t.Fatalf("dependencies[0] = %+v, want legacy string task t1", task.Dependencies[0])
-	}
-	if task.Dependencies[1].Task != "t0" || task.Dependencies[1].Type != "ordering" {
-		t.Fatalf("dependencies[1] = %+v, want typed dependency", task.Dependencies[1])
-	}
-	if len(task.Dependencies[1].Consumes) != 1 || task.Dependencies[1].Consumes[0] != "plan.md" {
-		t.Fatalf("dependencies[1].Consumes = %+v, want plan.md", task.Dependencies[1].Consumes)
 	}
 }

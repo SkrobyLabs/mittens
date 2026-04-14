@@ -1558,7 +1558,7 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 	}
 
-		actions := []string{"n submit"}
+	actions := []string{"n submit"}
 	if m.leftMode == kitchenTUILeftTasks {
 		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canCancelSelectedTask() {
@@ -2442,18 +2442,7 @@ func firstPlanReviewFinding(findings []string) string {
 }
 
 func implementationReviewTurnForTask(planID, runtimeID string) int {
-	if turn := reviewCouncilTurnNumberFromTaskID(planID, runtimeID); turn > 0 {
-		return turn
-	}
-	prefix := planTaskRuntimeID(planID, "impl-review-")
-	if !strings.HasPrefix(strings.TrimSpace(runtimeID), prefix) {
-		return 0
-	}
-	var turn int
-	if _, err := fmt.Sscanf(strings.TrimSpace(runtimeID), prefix+"%d", &turn); err == nil && turn > 0 {
-		return turn
-	}
-	return 0
+	return reviewCouncilTurnNumberFromTaskID(planID, runtimeID)
 }
 
 func findReviewCouncilTurn(turns []ReviewCouncilTurnRecord, turn int) *ReviewCouncilTurnRecord {

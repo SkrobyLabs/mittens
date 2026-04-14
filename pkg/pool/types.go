@@ -37,14 +37,6 @@ const (
 	PipelineBlocked   = "blocked"
 )
 
-// Plan status constants.
-const (
-	PlanPending   = "pending"
-	PlanActive    = "active"
-	PlanCompleted = "completed"
-	PlanOrphaned  = "orphaned"
-)
-
 // Review verdict constants.
 const (
 	ReviewPass = "pass"
@@ -342,25 +334,12 @@ type Notification struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Plan represents a persistent execution plan.
-type Plan struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	Owner       string    `json:"owner,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ClaimedAt   time.Time `json:"claimedAt,omitempty"`
-	CompletedAt time.Time `json:"completedAt,omitempty"`
-	TaskIDs     []string  `json:"taskIds,omitempty"`
-}
-
 // PoolConfig holds configuration for a PoolManager instance.
 type PoolConfig struct {
 	SessionID  string                                   `json:"sessionId"`
 	MaxWorkers int                                      `json:"maxWorkers"`
 	StateDir   string                                   `json:"stateDir"`
 	Router     interface{ Resolve(string) ModelConfig } `json:"-"`
-	PlanStore  *PlanStore                               `json:"-"`
 }
 
 // ContainerInfo describes a session container discovered via Docker.
