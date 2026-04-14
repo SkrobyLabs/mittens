@@ -855,9 +855,18 @@ func TestBroker_OAuthCallbackIntercept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /open: status = %d", resp.StatusCode)
+
+	// OAuth URLs now return 200 with a JSON body containing the callbackID.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /open (OAuth): status = %d, body = %q", resp.StatusCode, body)
+	}
+	var openResp struct {
+		CallbackID string `json:"callbackID"`
+	}
+	if err := json.Unmarshal(body, &openResp); err != nil || openResp.CallbackID == "" {
+		t.Fatalf("POST /open: expected JSON {callbackID}, got %q (err: %v)", body, err)
 	}
 
 	// OnOpen should have been called with the original URL.
@@ -865,47 +874,62 @@ func TestBroker_OAuthCallbackIntercept(t *testing.T) {
 		t.Errorf("OnOpen URL = %q, want %q", openedURL, oauthURL)
 	}
 
+	// Start awaiting the callback in a goroutine — this blocks until the browser hits the port.
+	type awaitResult struct {
+		body string
+		code int
+		err  error
+	}
+	awaitCh := make(chan awaitResult, 1)
+	awaitClient := &http.Client{Timeout: 10 * time.Second}
+	go func() {
+		r, awaitErr := awaitClient.Get(base + "/await-callback/" + openResp.CallbackID)
+		if awaitErr != nil {
+			awaitCh <- awaitResult{err: awaitErr}
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		awaitCh <- awaitResult{body: string(b), code: r.StatusCode}
+	}()
+
 	// Simulate browser redirect hitting the intercepted callback port.
 	callbackReq := fmt.Sprintf("http://127.0.0.1:%d/callback?code=TESTCODE&state=teststate", callbackPort)
 	resp, err = client.Get(callbackReq)
 	if err != nil {
 		t.Fatalf("browser callback: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	closePage, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("browser callback: status = %d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "Login successful") {
-		t.Errorf("success page missing expected text, got %q", body)
+	if !strings.Contains(string(closePage), "Login complete") {
+		t.Errorf("close page missing expected text, got %q", closePage)
 	}
 
-	// GET /login-callback should return the captured URL.
-	resp, err = client.Get(base + "/login-callback")
-	if err != nil {
-		t.Fatal(err)
+	// The await-callback goroutine should now have the URL.
+	result := <-awaitCh
+	if result.err != nil {
+		t.Fatalf("GET /await-callback: %v", result.err)
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /login-callback: status = %d", resp.StatusCode)
+	if result.code != http.StatusOK {
+		t.Fatalf("GET /await-callback: status = %d", result.code)
 	}
-
 	want := fmt.Sprintf("http://localhost:%d/callback?code=TESTCODE&state=teststate", callbackPort)
-	if string(body) != want {
-		t.Errorf("login-callback = %q, want %q", body, want)
+	if result.body != want {
+		t.Errorf("await-callback = %q, want %q", result.body, want)
 	}
 
-	// Second GET should return 204 (consumed).
-	resp, err = client.Get(base + "/login-callback")
+	// A second call with the same ID should return 404 (consumed and deleted).
+	resp, err = client.Get(base + "/await-callback/" + openResp.CallbackID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("second GET /login-callback: status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("second GET /await-callback: status = %d, want 404", resp.StatusCode)
 	}
 }
 
@@ -922,14 +946,14 @@ func TestBroker_LoginCallbackEmpty(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	waitForTCPBroker(t, client, base)
 
-	// No pending callback — should return 204.
+	// /login-callback is now a stub — always returns 204.
 	resp, err := client.Get(base + "/login-callback")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("GET /login-callback with no pending: status = %d, want 204", resp.StatusCode)
+		t.Errorf("GET /login-callback: status = %d, want 204", resp.StatusCode)
 	}
 }
 
@@ -949,29 +973,173 @@ func TestBroker_OpenNonOAuthStillWorks(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	waitForTCPBroker(t, client, base)
 
-	// POST a regular (non-OAuth) URL — should not trigger interception.
+	// POST a regular (non-OAuth) URL — should return 204 with no callbackID.
 	regularURL := "https://docs.anthropic.com/en/docs"
 	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(regularURL))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("POST /open regular URL: status = %d", resp.StatusCode)
 	}
+	if len(body) > 0 {
+		t.Errorf("POST /open regular URL: unexpected body %q", body)
+	}
 	if openedURL != regularURL {
 		t.Errorf("OnOpen = %q, want %q", openedURL, regularURL)
 	}
+}
 
-	// /login-callback should still be empty.
-	resp, err = client.Get(base + "/login-callback")
+func TestBroker_AwaitCallbackUnknownID(t *testing.T) {
+	b := NewHostBroker("", "", nil)
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	resp, err := client.Get(base + "/await-callback/nonexistent-id")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("login-callback after regular URL: status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /await-callback/nonexistent: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestBroker_ConcurrentOAuth(t *testing.T) {
+	// Two OAuth flows initiated concurrently — each container gets only its own callback.
+
+	// Find two free ports for the simulated callbacks.
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port1 := ln1.Addr().(*net.TCPAddr).Port
+	ln1.Close()
+
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port2 := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+
+	b := NewHostBroker("", "", nil)
+	brokerPort, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", brokerPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	makeOAuthURL := func(cbPort int) string {
+		return fmt.Sprintf(
+			"https://claude.ai/oauth/authorize?client_id=test&redirect_uri=%s&state=s%d",
+			url.QueryEscape(fmt.Sprintf("http://localhost:%d/callback", cbPort)), cbPort,
+		)
+	}
+
+	// POST both OAuth URLs and collect their callback IDs.
+	getCallbackID := func(oauthURL string) string {
+		req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(oauthURL))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /open: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /open: status = %d, body = %q", resp.StatusCode, body)
+		}
+		var r struct {
+			CallbackID string `json:"callbackID"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil || r.CallbackID == "" {
+			t.Fatalf("POST /open: bad JSON %q: %v", body, err)
+		}
+		return r.CallbackID
+	}
+
+	id1 := getCallbackID(makeOAuthURL(port1))
+	id2 := getCallbackID(makeOAuthURL(port2))
+
+	if id1 == id2 {
+		t.Fatal("two OAuth flows got the same callbackID")
+	}
+
+	awaitClient := &http.Client{Timeout: 10 * time.Second}
+
+	type awaitResult struct {
+		body string
+		code int
+		err  error
+	}
+
+	await := func(id string) chan awaitResult {
+		ch := make(chan awaitResult, 1)
+		go func() {
+			resp, err := awaitClient.Get(base + "/await-callback/" + id)
+			if err != nil {
+				ch <- awaitResult{err: err}
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			ch <- awaitResult{body: string(body), code: resp.StatusCode}
+		}()
+		return ch
+	}
+
+	ch1 := await(id1)
+	ch2 := await(id2)
+
+	// Simulate browser callbacks in reverse order to prove isolation.
+	cb2 := fmt.Sprintf("http://127.0.0.1:%d/callback?code=CODE2&state=s%d", port2, port2)
+	resp, err := client.Get(cb2)
+	if err != nil {
+		t.Fatalf("browser callback 2: %v", err)
+	}
+	resp.Body.Close()
+
+	cb1 := fmt.Sprintf("http://127.0.0.1:%d/callback?code=CODE1&state=s%d", port1, port1)
+	resp, err = client.Get(cb1)
+	if err != nil {
+		t.Fatalf("browser callback 1: %v", err)
+	}
+	resp.Body.Close()
+
+	r1 := <-ch1
+	r2 := <-ch2
+
+	if r1.err != nil {
+		t.Fatalf("await id1: %v", r1.err)
+	}
+	if r2.err != nil {
+		t.Fatalf("await id2: %v", r2.err)
+	}
+
+	want1 := fmt.Sprintf("http://localhost:%d/callback?code=CODE1&state=s%d", port1, port1)
+	want2 := fmt.Sprintf("http://localhost:%d/callback?code=CODE2&state=s%d", port2, port2)
+
+	if r1.body != want1 {
+		t.Errorf("container1 got %q, want %q", r1.body, want1)
+	}
+	if r2.body != want2 {
+		t.Errorf("container2 got %q, want %q", r2.body, want2)
 	}
 }
 

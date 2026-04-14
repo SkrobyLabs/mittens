@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// oauthCallbackResponse is the JSON body returned by POST /open for OAuth URLs.
+type oauthCallbackResponse struct {
+	CallbackID string `json:"callbackID"`
+}
+
 // runOpenURL implements the xdg-open shim — forwards URLs to the host broker.
 // For OAuth flows, it polls for the intercepted callback and replays it.
 func runOpenURL() int {
@@ -29,30 +34,28 @@ func runOpenURL() int {
 	}
 
 	// Send URL to host broker for opening.
-	_, _ = bc.post("/open", "", url)
+	respBody, _, err := bc.postWithBody("/open", "", url)
+	if err != nil {
+		return 0
+	}
 
-	// If this is an OAuth URL with a localhost callback, poll for the
-	// intercepted callback and replay it to the AI CLI's local server.
-	if strings.Contains(url, "redirect_uri=") &&
-		(strings.Contains(url, "localhost") || strings.Contains(url, "127.0.0.1")) {
-		go func() {
-			for i := 0; i < 120; i++ {
-				time.Sleep(time.Second)
-				body, code, err := bc.get("/login-callback")
-				if err != nil || code != http.StatusOK || body == "" {
-					continue
-				}
+	// If the host broker returned a callbackID, this is an OAuth URL.
+	// Block on /await-callback/{id} instead of polling /login-callback.
+	if strings.Contains(respBody, "callbackID") {
+		var cb oauthCallbackResponse
+		if jsonErr := json.Unmarshal([]byte(respBody), &cb); jsonErr == nil && cb.CallbackID != "" {
+			// Block for up to 125 seconds (broker timeout is 2 minutes; 125s
+			// gives enough headroom for transport latency).
+			body, code, awaitErr := bc.getWithTimeout("/await-callback/"+cb.CallbackID, 125*time.Second)
+			if awaitErr == nil && code == http.StatusOK && body != "" {
 				// Replay to the AI CLI's callback server inside the container.
 				client := &http.Client{Timeout: 5 * time.Second}
-				resp, err := client.Get(body)
-				if err == nil {
+				resp, replayErr := client.Get(body)
+				if replayErr == nil {
 					resp.Body.Close()
 				}
-				return
 			}
-		}()
-		// Wait for the background goroutine.
-		time.Sleep(121 * time.Second)
+		}
 	}
 
 	return 0

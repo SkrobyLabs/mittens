@@ -71,6 +71,29 @@ func (b *brokerClient) get(path string) (string, int, error) {
 	return string(body), resp.StatusCode, nil
 }
 
+// getWithTimeout performs a GET request with a custom timeout, returning the
+// response body as a string. Use for long-poll endpoints like /await-callback/.
+func (b *brokerClient) getWithTimeout(path string, timeout time.Duration) (string, int, error) {
+	req, err := http.NewRequest(http.MethodGet, b.baseURL+path, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	if b.token != "" {
+		req.Header.Set("X-Mittens-Token", b.token)
+	}
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: b.httpClient.Transport,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), resp.StatusCode, nil
+}
+
 // post sends a POST request with the given content type and body.
 func (b *brokerClient) post(path, contentType, body string) (int, error) {
 	_, code, err := b.postWithBody(path, contentType, body)
