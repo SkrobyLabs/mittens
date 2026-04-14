@@ -34,9 +34,11 @@ type PlanProgress struct {
 	ImplReviewRequested          bool                `json:"implReviewRequested,omitempty"`
 	ImplReviewStatus             string              `json:"implReviewStatus,omitempty"`
 	ImplReviewFindings           []string            `json:"implReviewFindings,omitempty"`
+	ImplReviewFollowups          []string            `json:"implReviewFollowups,omitempty"`
 	AutoRemediationActive        bool                `json:"autoRemediationActive,omitempty"`
 	AutoRemediationAttempt       int                 `json:"autoRemediationAttempt,omitempty"`
 	AutoRemediationTaskID        string              `json:"autoRemediationTaskId,omitempty"`
+	ReviewRemediationMode        string              `json:"reviewRemediationMode,omitempty"`
 	AutoRemediationSourceVerdict string              `json:"autoRemediationSourceVerdict,omitempty"`
 	AutoRemediationFindings      []string            `json:"autoRemediationFindings,omitempty"`
 	ReviewCouncilCycle           int                 `json:"reviewCouncilCycle,omitempty"`
@@ -191,9 +193,11 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 		ImplReviewRequested:    bundle.Execution.ImplReviewRequested,
 		ImplReviewStatus:       bundle.Execution.ImplReviewStatus,
 		ImplReviewFindings:     append([]string(nil), bundle.Execution.ImplReviewFindings...),
+		ImplReviewFollowups:    append([]string(nil), bundle.Execution.ImplReviewFollowups...),
 		AutoRemediationActive:  bundle.Execution.AutoRemediationActive,
 		AutoRemediationAttempt: bundle.Execution.AutoRemediationAttempt,
 		AutoRemediationTaskID:  bundle.Execution.AutoRemediationTaskID,
+		ReviewRemediationMode:  reviewRemediationMode(bundle.Execution.AutoRemediationSource),
 		AutoRemediationSourceVerdict: strings.TrimSpace(func() string {
 			if bundle.Execution.AutoRemediationSource == nil {
 				return ""
@@ -432,6 +436,9 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 		return "awaiting_approval"
 	case planStateActive:
 		if bundle.Execution.AutoRemediationActive {
+			if reviewRemediationMode(bundle.Execution.AutoRemediationSource) == reviewRemediationModeManual {
+				return "remediating_review_findings"
+			}
 			return "auto_remediating_implementation_review"
 		}
 		return "executing"

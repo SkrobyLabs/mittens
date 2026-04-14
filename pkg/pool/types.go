@@ -41,10 +41,45 @@ const (
 
 // Review severity constants.
 const (
+	SeverityNit      = "nit"
 	SeverityMinor    = "minor"
 	SeverityMajor    = "major"
 	SeverityCritical = "critical"
 )
+
+func NormalizeReviewSeverity(severity string) string {
+	return strings.ToLower(strings.TrimSpace(severity))
+}
+
+func IsKnownReviewSeverity(severity string) bool {
+	switch NormalizeReviewSeverity(severity) {
+	case SeverityNit, SeverityMinor, SeverityMajor, SeverityCritical:
+		return true
+	default:
+		return false
+	}
+}
+
+func ReviewSeverityRank(severity string) int {
+	switch NormalizeReviewSeverity(severity) {
+	case SeverityNit:
+		return 1
+	case SeverityMinor:
+		return 2
+	case SeverityMajor:
+		return 3
+	case SeverityCritical:
+		return 4
+	default:
+		return 0
+	}
+}
+
+func ReviewSeverityAtLeast(severity, threshold string) bool {
+	severityRank := ReviewSeverityRank(severity)
+	thresholdRank := ReviewSeverityRank(threshold)
+	return severityRank > 0 && thresholdRank > 0 && severityRank >= thresholdRank
+}
 
 // FanMode describes how tasks within a pipeline stage relate.
 type FanMode string

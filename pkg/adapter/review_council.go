@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
 type ReviewFinding struct {
@@ -53,12 +55,12 @@ func validateReviewCouncilTurnArtifact(artifact *ReviewCouncilTurnArtifact) erro
 		item.Category = strings.TrimSpace(item.Category)
 		item.Description = strings.TrimSpace(item.Description)
 		item.Suggestion = strings.TrimSpace(item.Suggestion)
-		item.Severity = strings.TrimSpace(item.Severity)
+		item.Severity = pool.NormalizeReviewSeverity(item.Severity)
 	}
 	for i := range artifact.Disagreements {
 		item := &artifact.Disagreements[i]
 		item.ID = strings.TrimSpace(item.ID)
-		item.Severity = strings.TrimSpace(item.Severity)
+		item.Severity = pool.NormalizeReviewSeverity(item.Severity)
 		item.Category = strings.TrimSpace(item.Category)
 		item.Title = strings.TrimSpace(item.Title)
 		item.Impact = strings.TrimSpace(item.Impact)
@@ -99,8 +101,8 @@ func validateReviewCouncilTurnArtifact(artifact *ReviewCouncilTurnArtifact) erro
 		if item.Description == "" {
 			return fmt.Errorf("review finding %s description must not be empty", item.ID)
 		}
-		if item.Severity == "" {
-			return fmt.Errorf("review finding %s severity must not be empty", item.ID)
+		if !pool.IsKnownReviewSeverity(item.Severity) {
+			return fmt.Errorf("review finding %s severity must be one of nit|minor|major|critical", item.ID)
 		}
 		if item.Line < 0 {
 			return fmt.Errorf("review finding %s line must be >= 0", item.ID)
@@ -110,8 +112,8 @@ func validateReviewCouncilTurnArtifact(artifact *ReviewCouncilTurnArtifact) erro
 		if item.ID == "" {
 			return fmt.Errorf("review council disagreement id must not be empty")
 		}
-		if item.Severity == "" {
-			return fmt.Errorf("review council disagreement %s severity must not be empty", item.ID)
+		if !pool.IsKnownReviewSeverity(item.Severity) {
+			return fmt.Errorf("review council disagreement %s severity must be one of nit|minor|major|critical", item.ID)
 		}
 		if item.Category == "" {
 			return fmt.Errorf("review council disagreement %s category must not be empty", item.ID)
@@ -152,13 +154,13 @@ At the end of your response, output a review council turn block with valid JSON:
       "category": "correctness|coverage|resilience|api|security",
       "description": "Concrete finding",
       "suggestion": "Specific fix",
-      "severity": "minor|major|critical"
+      "severity": "nit|minor|major|critical"
     }
   ],
   "disagreements": [
     {
       "id": "d1",
-      "severity": "major|critical",
+      "severity": "nit|minor|major|critical",
       "category": "correctness|coverage|resilience|api|security",
       "title": "Short title",
       "impact": "Why this matters",
@@ -194,6 +196,7 @@ func BuildReviewCouncilTurnPrompt(planTitle, planSummary, tasksJSON, seat string
 	b.WriteString("- Use `adoptedPriorVerdict=true` only when you intentionally adopt the prior seat's verdict after reviewing its artifact.\n")
 	b.WriteString("- Use `stance=converged` only when you are adopting the prior verdict and believe the council has converged.\n")
 	b.WriteString("- If you adopt the prior verdict but still disagree on the outcome, keep `stance=revise` or `propose`; do not claim convergence.\n")
+	b.WriteString("- Any `major` or `critical` finding requires `verdict=fail`; only `minor` and `nit` findings may coexist with `pass`.\n")
 	b.WriteString("- Use `questionsForUser` only for genuinely blocking operator input.\n")
 	b.WriteString("- This replaces the legacy single-pass plan-level implementation review. Per-task inline reviews are unchanged.\n\n")
 	b.WriteString("### Current Turn\n\n")

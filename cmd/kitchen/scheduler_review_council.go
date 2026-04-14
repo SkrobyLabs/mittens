@@ -215,6 +215,7 @@ func (s *Scheduler) handleReviewCouncilArtifactFailure(task pool.Task, bundle St
 }
 
 func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPlan, artifact *adapter.ReviewCouncilTurnArtifact) error {
+	normalizeReviewCouncilArtifact(artifact)
 	now := time.Now().UTC()
 	bundle.Execution.ReviewCouncilTurnsCompleted = artifact.Turn
 	bundle.Execution.ReviewCouncilTurns = append(bundle.Execution.ReviewCouncilTurns, ReviewCouncilTurnRecord{
@@ -278,16 +279,21 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			Summary: fmt.Sprintf("Review council converged on %s.", artifact.Verdict),
 		})
 		if strings.TrimSpace(artifact.Verdict) == pool.ReviewPass {
+			passFindings := reviewCouncilFollowupStrings(bundle.Execution.ReviewCouncilTurns, reviewSeverityAtMost(pool.SeverityMinor))
 			bundle.Plan.State = planStateCompleted
 			bundle.Execution.State = planStateCompleted
 			bundle.Execution.CompletedAt = &now
 			bundle.Execution.ImplReviewStatus = planReviewStatusPassed
 			bundle.Execution.ImplReviewFindings = nil
+			bundle.Execution.ImplReviewFollowups = passFindings
 			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 				Type:    planHistoryImplReviewPassed,
 				Cycle:   artifact.Turn,
 				TaskID:  task.ID,
 				Verdict: artifact.Verdict,
+				Findings: append([]string(nil),
+					passFindings...,
+				),
 			})
 		} else {
 			if handled, err := s.startAutoRemediationForReviewFailure(&bundle, task, reviewCouncilConverged, artifact); err != nil {
@@ -297,6 +303,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				bundle.Execution.State = planStateImplementationReviewFailed
 				bundle.Execution.CompletedAt = nil
 				bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+				bundle.Execution.ImplReviewFollowups = nil
 				bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
 				if len(bundle.Execution.ImplReviewFindings) == 0 {
 					bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
@@ -353,6 +360,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
 			bundle.Execution.RejectedBy = rejectedByReviewCouncil
 			bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+			bundle.Execution.ImplReviewFollowups = nil
 			bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(rejectArtifact.Findings, rejectArtifact.Disagreements)
 			if len(bundle.Execution.ImplReviewFindings) == 0 {
 				bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
@@ -458,6 +466,7 @@ func (s *Scheduler) startAutoRemediationForReviewFailure(bundle *StoredPlan, tas
 	bundle.Execution.AutoRemediationSource = newAutoRemediationSourceRecord(decision, task.ID, artifact)
 	bundle.Execution.ImplReviewStatus = ""
 	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewFollowups = nil
 	bundle.Execution.ImplReviewedAt = nil
 	bundle.Execution.ReviewCouncilMaxTurns = 0
 	bundle.Execution.ReviewCouncilTurnsCompleted = 0
@@ -567,49 +576,7 @@ func (s *Scheduler) ensureAutoRemediationTask(bundle *StoredPlan, recovered bool
 }
 
 func reviewCouncilFindingsToStrings(findings []adapter.ReviewFinding, disagreements []adapter.CouncilDisagreement) []string {
-	out := make([]string, 0, len(findings)+len(disagreements))
-	for _, finding := range findings {
-		parts := make([]string, 0, 3)
-		if sev := strings.TrimSpace(finding.Severity); sev != "" {
-			parts = append(parts, "["+sev+"]")
-		}
-		location := strings.TrimSpace(finding.File)
-		if location != "" && finding.Line > 0 {
-			location = fmt.Sprintf("%s:%d", location, finding.Line)
-		}
-		if location != "" {
-			parts = append(parts, location)
-		}
-		if category := strings.TrimSpace(finding.Category); category != "" {
-			parts = append(parts, category)
-		}
-		prefix := strings.Join(parts, " ")
-		desc := strings.TrimSpace(finding.Description)
-		if prefix != "" && desc != "" {
-			out = append(out, prefix+" - "+desc)
-		} else if prefix != "" {
-			out = append(out, prefix)
-		} else if desc != "" {
-			out = append(out, desc)
-		}
-	}
-	for _, item := range disagreements {
-		label := "[disagreement"
-		if sev := strings.TrimSpace(item.Severity); sev != "" {
-			label += "/" + sev
-		}
-		label += "]"
-		text := strings.TrimSpace(item.Title)
-		if impact := strings.TrimSpace(item.Impact); impact != "" {
-			if text != "" {
-				text += " - " + impact
-			} else {
-				text = impact
-			}
-		}
-		out = append(out, strings.TrimSpace(label+" "+text))
-	}
-	return out
+	return reviewCouncilFindingsToStringsFiltered(findings, disagreements, nil)
 }
 
 func latestReviewCouncilFindings(bundle StoredPlan) []string {
@@ -731,6 +698,7 @@ func (s *Scheduler) markReviewCouncilFailed(task pool.Task, message string) erro
 	bundle.Execution.ActiveTaskIDs = nil
 	bundle.Execution.FailedTaskIDs = appendUniqueIDs(bundle.Execution.FailedTaskIDs, task.ID)
 	bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+	bundle.Execution.ImplReviewFollowups = nil
 	bundle.Execution.ImplReviewFindings = mergeReviewCouncilFailureFindings(bundle, message)
 	bundle.Execution.ImplReviewedAt = &now
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{

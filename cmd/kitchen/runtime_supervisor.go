@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -40,13 +41,25 @@ func supervisedPoolStateDir(project ProjectPaths) string {
 func configuredServeProviders(cfg KitchenConfig) ([]string, error) {
 	seen := make(map[string]bool)
 	var providers []string
-	for role, policy := range cfg.RoleProviders {
+	roles := make([]string, 0, len(cfg.RoleProviders))
+	for role := range cfg.RoleProviders {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		policy := cfg.RoleProviders[role]
 		role = normalizeRoutingRole(role)
 		if err := collectServeProvidersForPolicy(seen, &providers, "roleProviders."+role, policy); err != nil {
 			return nil, err
 		}
 	}
-	for seat, policy := range cfg.CouncilSeatProviders {
+	seats := make([]string, 0, len(cfg.CouncilSeatProviders))
+	for seat := range cfg.CouncilSeatProviders {
+		seats = append(seats, seat)
+	}
+	sort.Strings(seats)
+	for _, seat := range seats {
+		policy := cfg.CouncilSeatProviders[seat]
 		seat = normalizeCouncilSeat(seat)
 		if seat == "" {
 			continue

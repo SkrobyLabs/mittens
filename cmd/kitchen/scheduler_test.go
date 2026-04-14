@@ -2897,6 +2897,121 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	}
 }
 
+func TestApplyReviewCouncilTurnResult_PassWithMinorFindingsStaysPassedAndVisible(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_pass_minor",
+			Lineage: "feat-ir-pass-minor",
+			Title:   "Impl review pass with minor findings",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: pool.ReviewPass,
+					Summary: "first pass",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-pass-minor"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	task := pool.Task{
+		ID:         reviewCouncilTaskID(planID, 2),
+		PlanID:     planID,
+		WorkerID:   "w-rev",
+		Role:       "reviewer",
+		Complexity: string(ComplexityMedium),
+		Status:     pool.TaskCompleted,
+	}
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	artifact := &adapter.ReviewCouncilTurnArtifact{
+		Seat:                "B",
+		Turn:                2,
+		Stance:              "converged",
+		Verdict:             pool.ReviewPass,
+		AdoptedPriorVerdict: true,
+		Summary:             "pass with minor follow-up",
+		Findings: []adapter.ReviewFinding{
+			{
+				ID:          "f1",
+				File:        "cmd/kitchen/tui.go",
+				Line:        10,
+				Category:    "coverage",
+				Description: "Add a focused test for the selected-plan footer.",
+				Severity:    pool.SeverityMinor,
+			},
+			{
+				ID:          "f2",
+				File:        "cmd/kitchen/tui.go",
+				Line:        12,
+				Category:    "style",
+				Description: "Tighten the label wording.",
+				Severity:    pool.SeverityNit,
+			},
+		},
+	}
+
+	if err := s.applyReviewCouncilTurnResult(task, bundle, artifact); err != nil {
+		t.Fatalf("applyReviewCouncilTurnResult: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
+	}
+	if bundle.Execution.ImplReviewStatus != planReviewStatusPassed {
+		t.Fatalf("impl review status = %q, want %q", bundle.Execution.ImplReviewStatus, planReviewStatusPassed)
+	}
+	if len(bundle.Execution.ImplReviewFollowups) != 2 {
+		t.Fatalf("impl review followups = %v, want both minor + nit findings preserved", bundle.Execution.ImplReviewFollowups)
+	}
+}
+
 func TestOnImplementationReviewCompleted_FailQueuesAutoRemediation(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
@@ -4353,6 +4468,225 @@ func TestApplyReviewCouncilTurnResult_ActionableFailStartsAutoRemediation(t *tes
 	}
 }
 
+func TestApplyReviewCouncilTurnResult_PassWithMajorNormalizesToFail(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_pass_major",
+			Lineage: "feat-ir-pass-major",
+			Title:   "Implementation review invalid pass",
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityHigh,
+				TimeoutMinutes:   25,
+			}},
+			State: planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: pool.ReviewFail,
+					Summary: "previous normalized fail",
+					Findings: []adapter.ReviewFinding{{
+						ID:          "f1",
+						Category:    "correctness",
+						Description: "previous major issue",
+						Severity:    pool.SeverityMajor,
+					}},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-pass-major"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	task := pool.Task{
+		ID:         reviewCouncilTaskID(planID, 2),
+		PlanID:     planID,
+		WorkerID:   "w-rev",
+		Role:       "reviewer",
+		Complexity: string(ComplexityHigh),
+		Status:     pool.TaskCompleted,
+	}
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	artifact := &adapter.ReviewCouncilTurnArtifact{
+		Seat:                "B",
+		Turn:                2,
+		Stance:              "converged",
+		Verdict:             pool.ReviewPass,
+		AdoptedPriorVerdict: true,
+		Summary:             "incorrect pass with major finding",
+		Findings: []adapter.ReviewFinding{{
+			ID:          "f2",
+			File:        "cmd/kitchen/planner.go",
+			Line:        42,
+			Category:    "correctness",
+			Description: "This cannot be approved with a major finding.",
+			Severity:    pool.SeverityMajor,
+		}},
+	}
+
+	if err := s.applyReviewCouncilTurnResult(task, bundle, artifact); err != nil {
+		t.Fatalf("applyReviewCouncilTurnResult: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if !bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected normalized fail to enter auto remediation")
+	}
+	lastTurn := bundle.Execution.AutoRemediationSource
+	if lastTurn == nil {
+		t.Fatal("expected normalized review source to be persisted")
+	}
+	if lastTurn.Verdict != pool.ReviewFail {
+		t.Fatalf("remediation source verdict = %q, want fail", lastTurn.Verdict)
+	}
+}
+
+func TestApplyReviewCouncilTurnResult_PassWithMajorDisagreementNormalizesToFail(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_pass_major_disagreement",
+			Lineage: "feat-ir-pass-major-disagreement",
+			Title:   "Implementation review invalid pass disagreement",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: pool.ReviewFail,
+					Disagreements: []adapter.CouncilDisagreement{{
+						ID:       "d1",
+						Severity: pool.SeverityMajor,
+						Category: "correctness",
+						Title:    "Major disagreement",
+						Impact:   "Previous seat already considered this a blocking issue.",
+					}},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-pass-major-disagreement"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	task := pool.Task{ID: reviewCouncilTaskID(planID, 2), PlanID: planID, WorkerID: "w-rev", Role: "reviewer", Status: pool.TaskCompleted}
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	artifact := &adapter.ReviewCouncilTurnArtifact{
+		Seat:                "B",
+		Turn:                2,
+		Stance:              "converged",
+		Verdict:             pool.ReviewPass,
+		AdoptedPriorVerdict: true,
+		Disagreements: []adapter.CouncilDisagreement{{
+			ID:       "d2",
+			Severity: pool.SeverityCritical,
+			Category: "correctness",
+			Title:    "Blocking disagreement",
+			Impact:   "A pass cannot keep a critical disagreement.",
+		}},
+	}
+
+	if err := s.applyReviewCouncilTurnResult(task, bundle, artifact); err != nil {
+		t.Fatalf("applyReviewCouncilTurnResult: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReviewFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReviewFailed)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		t.Fatal("did not expect disagreement-only normalized fail to auto remediate")
+	}
+}
+
 func TestApplyReviewCouncilTurnResult_DisagreementOnlyRejectRemainsTerminal(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
@@ -4667,6 +5001,150 @@ func TestSyncPlanExecutionCompletedAutoRemediationRequeuesImplementationReview(t
 	}
 	if bundle.Execution.AutoRemediationActive {
 		t.Fatal("expected auto-remediation to clear after successful completion")
+	}
+	if bundle.Execution.ReviewCouncilCycle != 2 {
+		t.Fatalf("review council cycle = %d, want 2", bundle.Execution.ReviewCouncilCycle)
+	}
+	reviewTaskID := reviewCouncilTaskIDForCycle(planID, 2, 1)
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want queued", task.Status)
+	}
+}
+
+func TestSyncPlanExecutionCompletedManualRemediationRequeuesImplementationReview(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan_ir_manual_retry_cycle"
+	remediationTaskID := planTaskRuntimeID(planID, "review-fix-manual-r1")
+	_, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "feat-ir-manual-retry-cycle",
+			Title:   "Retry implementation review after manual remediation",
+			State:   planStateActive,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}, {
+				ID:               "review-fix-manual-r1",
+				Title:            "Address implementation review findings",
+				Prompt:           "fix review findings",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateActive,
+			ImplReviewRequested:         true,
+			ReviewCouncilCycle:          1,
+			AutoRemediationActive:       true,
+			AutoRemediationPlanTaskID:   "review-fix-manual-r1",
+			AutoRemediationTaskID:       remediationTaskID,
+			AutoRemediationSourceTaskID: reviewCouncilTaskID(planID, 2),
+			AutoRemediationSource: &AutoRemediationSourceRecord{
+				Decision:     manualReviewRemediationDecisionMinor,
+				Verdict:      pool.ReviewPass,
+				Seat:         "B",
+				Turn:         2,
+				ReviewTaskID: reviewCouncilTaskID(planID, 2),
+				Summary:      "Queued manual remediation should re-enter review when done.",
+				Findings: []adapter.ReviewFinding{{
+					ID:          "f1",
+					Category:    "coverage",
+					Description: "Review should be requeued after manual remediation.",
+					Severity:    pool.SeverityMinor,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-manual-retry-cycle"), "kitchen-test")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:                 remediationTaskID,
+		PlanID:             planID,
+		Prompt:             "fix review findings",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               "implementer",
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask remediation: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-fix", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker implementer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-fix", "container-w-fix"); err != nil {
+		t.Fatalf("RegisterWorker implementer: %v", err)
+	}
+	if err := pm.DispatchTask(remediationTaskID, "w-fix"); err != nil {
+		t.Fatalf("DispatchTask remediation: %v", err)
+	}
+	if err := pm.CompleteTask("w-fix", remediationTaskID); err != nil {
+		t.Fatalf("CompleteTask remediation: %v", err)
+	}
+	staleReviewTaskID := reviewCouncilTaskID(planID, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:       staleReviewTaskID,
+		PlanID:   planID,
+		Prompt:   "stale prior review",
+		Priority: 1,
+		Role:     "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask stale review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-review-old", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker stale reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-old", "container-w-review-old"); err != nil {
+		t.Fatalf("RegisterWorker stale reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(staleReviewTaskID, "w-review-old"); err != nil {
+		t.Fatalf("DispatchTask stale review: %v", err)
+	}
+	if err := pm.CompleteTask("w-review-old", staleReviewTaskID); err != nil {
+		t.Fatalf("CompleteTask stale review: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan after sync: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected manual remediation to clear after successful completion")
 	}
 	if bundle.Execution.ReviewCouncilCycle != 2 {
 		t.Fatalf("review council cycle = %d, want 2", bundle.Execution.ReviewCouncilCycle)

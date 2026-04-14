@@ -81,6 +81,7 @@ func newRootCommand() *cobra.Command {
 	var configPathsOnly bool
 	var capabilitiesCLIOnly bool
 	var replanReason string
+	var remediateIncludeNits bool
 	var retrySameWorker bool
 	var mergeNoCommit bool
 	var researchFile string
@@ -419,6 +420,39 @@ func newRootCommand() *cobra.Command {
 			return writeJSON(cmd.OutOrStdout(), detail)
 		},
 	}
+
+	remediateReviewCmd := &cobra.Command{
+		Use:   "remediate-review PLAN_ID",
+		Short: "Queue a manual remediation task from a passed implementation review",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.RemediateReview(args[0], remediateIncludeNits)
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			if err := k.RemediateReview(args[0], remediateIncludeNits); err != nil {
+				return err
+			}
+			detail, err := k.PlanDetail(args[0])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), detail)
+		},
+	}
+	remediateReviewCmd.Flags().BoolVar(&remediateIncludeNits, "include-nits", false, "include nit findings in the remediation task")
 
 	cancelCmd := &cobra.Command{
 		Use:   "cancel PLAN_ID",
@@ -1170,6 +1204,7 @@ func newRootCommand() *cobra.Command {
 		rejectCmd,
 		replanCmd,
 		reviewCmd,
+		remediateReviewCmd,
 		cancelCmd,
 		deleteCmd,
 		retryCmd,

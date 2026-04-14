@@ -1134,6 +1134,119 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 	}
 }
 
+func TestRemediateReviewQueuesManualRemediationTask(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_manual_remediation",
+			Lineage: "manual-remediation",
+			Title:   "Manual remediation",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+				TimeoutMinutes:   15,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:                  planStateCompleted,
+			CompletedAt:            &now,
+			ImplReviewRequested:    true,
+			ImplReviewStatus:       planReviewStatusPassed,
+			AutoRemediationAttempt: 2,
+			ImplReviewFollowups: []string{
+				"[minor] cmd/kitchen/tui.go:42 coverage - add a footer test",
+				"[nit] cmd/kitchen/tui.go:44 style - tighten label",
+			},
+			ImplReviewedAt:              &now,
+			ReviewCouncilCycle:          1,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 2,
+			ReviewCouncilFinalDecision:  reviewCouncilConverged,
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: pool.ReviewPass,
+				},
+			}, {
+				Seat: "B",
+				Turn: 2,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:                "B",
+					Turn:                2,
+					Stance:              "converged",
+					Verdict:             pool.ReviewPass,
+					AdoptedPriorVerdict: true,
+					Summary:             "passed with lower-severity follow-up",
+					Findings: []adapter.ReviewFinding{
+						{
+							ID:          "f1",
+							File:        "cmd/kitchen/tui.go",
+							Line:        42,
+							Category:    "coverage",
+							Description: "add a footer test",
+							Severity:    pool.SeverityMinor,
+						},
+						{
+							ID:          "f2",
+							File:        "cmd/kitchen/tui.go",
+							Line:        44,
+							Category:    "style",
+							Description: "tighten label",
+							Severity:    pool.SeverityNit,
+						},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.RemediateReview(planID, false); err != nil {
+		t.Fatalf("RemediateReview: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if !bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected remediation to be active")
+	}
+	if bundle.Execution.AutoRemediationAttempt != 0 {
+		t.Fatalf("auto remediation attempt = %d, want reset for manual remediation", bundle.Execution.AutoRemediationAttempt)
+	}
+	if bundle.Execution.AutoRemediationSource == nil {
+		t.Fatal("expected remediation source")
+	}
+	if got := bundle.Execution.AutoRemediationSource.Decision; got != manualReviewRemediationDecisionMinor {
+		t.Fatalf("source decision = %q, want %q", got, manualReviewRemediationDecisionMinor)
+	}
+	if got := len(bundle.Execution.AutoRemediationSource.Findings); got != 1 {
+		t.Fatalf("source findings = %d, want only minor finding", got)
+	}
+	if bundle.Execution.AutoRemediationPlanTaskID == "" {
+		t.Fatal("expected remediation plan task id")
+	}
+	if _, ok := k.pm.Task(bundle.Execution.AutoRemediationTaskID); !ok {
+		t.Fatalf("expected remediation task %q to be queued", bundle.Execution.AutoRemediationTaskID)
+	}
+}
+
 func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
 	k := newTestKitchen(t)
 	attachTestScheduler(t, k)

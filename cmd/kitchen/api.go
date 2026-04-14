@@ -37,6 +37,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("DELETE /v1/plans/{id}/purge", k.withAPIAuth(token, k.handleDeletePlan))
 	mux.HandleFunc("POST /v1/plans/{id}/replan", k.withAPIAuth(token, k.handleReplanPlan))
 	mux.HandleFunc("POST /v1/plans/{id}/review", k.withAPIAuth(token, k.handleRequestReview))
+	mux.HandleFunc("POST /v1/plans/{id}/remediate-review", k.withAPIAuth(token, k.handleRemediateReview))
 	mux.HandleFunc("POST /v1/plans/{id}/approve", k.withAPIAuth(token, k.handleApprovePlan))
 	mux.HandleFunc("POST /v1/plans/{id}/affinity/invalidate", k.withAPIAuth(token, k.handleInvalidateAffinity))
 	mux.HandleFunc("POST /v1/plans/{id}/reject", k.withAPIAuth(token, k.handleRejectPlan))
@@ -423,6 +424,26 @@ func (k *Kitchen) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 func (k *Kitchen) handleRequestReview(w http.ResponseWriter, r *http.Request) {
 	planID := r.PathValue("id")
 	if err := k.RequestReview(planID); err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	detail, err := k.PlanDetail(planID)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, detail)
+}
+
+func (k *Kitchen) handleRemediateReview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IncludeNits bool `json:"includeNits"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	planID := r.PathValue("id")
+	if err := k.RemediateReview(planID, req.IncludeNits); err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}

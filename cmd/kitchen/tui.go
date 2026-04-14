@@ -35,6 +35,7 @@ type kitchenTUIBackend interface {
 	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
 	ExtendCouncil(planID string, turns int) error
 	RequestReview(planID string) error
+	RemediateReview(planID string, includeNits bool) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
 	DeletePlan(planID string) error
@@ -126,6 +127,10 @@ func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
 }
 func (b *kitchenAPIBackend) RequestReview(planID string) error {
 	_, err := b.client.RequestReview(planID)
+	return err
+}
+func (b *kitchenAPIBackend) RemediateReview(planID string, includeNits bool) error {
+	_, err := b.client.RemediateReview(planID, includeNits)
 	return err
 }
 func (b *kitchenAPIBackend) ApprovePlan(planID string) error {
@@ -333,6 +338,11 @@ func (b *kitchenLocalBackend) RequestReview(planID string) error {
 		return k.RequestReview(planID)
 	})
 }
+func (b *kitchenLocalBackend) RemediateReview(planID string, includeNits bool) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.RemediateReview(planID, includeNits)
+	})
+}
 
 func (b *kitchenLocalBackend) ApprovePlan(planID string) error {
 	return b.withKitchen(func(k *Kitchen) error {
@@ -505,6 +515,7 @@ const (
 	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
 	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
 	kitchenTUIInputMergeMenu kitchenTUIInputMode = "merge-menu"
+	kitchenTUIInputRemediate kitchenTUIInputMode = "remediate-review"
 
 	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
 	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
@@ -552,6 +563,7 @@ type kitchenTUIModel struct {
 	selectedQuestion  int
 	selectedOption    int
 	mergeMenuSelected int
+	remediateSelected int
 	leftMode          kitchenTUILeftMode
 	taskPaneMode      kitchenTUITaskPaneMode
 	detail            *PlanDetail
@@ -718,6 +730,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.inputMode == kitchenTUIInputMergeMenu {
 			return m.updateMergeMenuInput(msg)
+		}
+		if m.inputMode == kitchenTUIInputRemediate {
+			return m.updateRemediateMenuInput(msg)
 		}
 		if m.inputMode != kitchenTUIInputNone {
 			return m.updateInput(msg)
@@ -1028,6 +1043,16 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "f":
+			if m.leftMode == kitchenTUILeftPlans {
+				if !m.canRemediateSelectedPlan() {
+					m.flash = "selected plan has no lower-severity findings to remediate"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				m.inputMode = kitchenTUIInputRemediate
+				m.remediateSelected = 0
+				return m, nil
+			}
 			if m.leftMode != kitchenTUILeftTasks {
 				return m, nil
 			}
@@ -1056,6 +1081,11 @@ var kitchenTUIMergeMenuOptions = []string{
 	"Execute merge",
 	"Fix conflicts",
 	"Reapply on base",
+}
+
+var kitchenTUIRemediationOptions = []string{
+	"Fix minor findings",
+	"Fix minor findings and nits",
 }
 
 func (m kitchenTUIModel) updateMergeMenuInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1106,6 +1136,42 @@ func (m kitchenTUIModel) updateMergeMenuInput(msg tea.KeyMsg) (tea.Model, tea.Cm
 				return summary, plan.Record.PlanID, err
 			})
 		}
+	}
+	return m, nil
+}
+
+func (m kitchenTUIModel) updateRemediateMenuInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode = kitchenTUIInputNone
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.remediateSelected > 0 {
+			m.remediateSelected--
+		}
+		return m, nil
+	case "down", "j":
+		if m.remediateSelected < len(kitchenTUIRemediationOptions)-1 {
+			m.remediateSelected++
+		}
+		return m, nil
+	case "enter":
+		plan := m.selectedPlanItem()
+		m.inputMode = kitchenTUIInputNone
+		if plan == nil {
+			return m, nil
+		}
+		includeNits := m.remediateSelected == 1
+		scope := "minor findings"
+		if includeNits {
+			scope = "minor findings and nits"
+		}
+		return m, m.actionCmd(func() (string, string, error) {
+			err := m.backend.RemediateReview(plan.Record.PlanID, includeNits)
+			return "queued remediation for " + scope, plan.Record.PlanID, err
+		})
 	}
 	return m, nil
 }
@@ -1569,6 +1635,20 @@ func (m kitchenTUIModel) canRequestReviewSelectedPlan() bool {
 	}
 }
 
+func (m kitchenTUIModel) canRemediateSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil || plan.Progress == nil {
+		return false
+	}
+	if strings.TrimSpace(plan.Progress.State) != planStateCompleted {
+		return false
+	}
+	if strings.TrimSpace(plan.Progress.ImplReviewStatus) != planReviewStatusPassed {
+		return false
+	}
+	return len(plan.Progress.ImplReviewFollowups) > 0
+}
+
 func (m kitchenTUIModel) canCancelSelectedPlan() bool {
 	plan := m.selectedPlanItem()
 	if plan == nil {
@@ -1716,6 +1796,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			return []string{"enter answer", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputMergeMenu:
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputRemediate:
+			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		default:
 			return []string{"esc cancel", "ctrl+c quit"}
 		}
@@ -1746,6 +1828,9 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 		if m.canRequestReviewSelectedPlan() {
 			actions = append(actions, "v review")
+		}
+		if m.canRemediateSelectedPlan() {
+			actions = append(actions, "f remediate")
 		}
 		if m.canCancelSelectedPlan() {
 			actions = append(actions, "C cancel")
@@ -2062,6 +2147,10 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 		lines = append(lines, m.renderMergeMenuLines(innerWidth)...)
 		lines = append(lines, "")
 		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+	} else if m.inputMode == kitchenTUIInputRemediate {
+		lines = append(lines, m.renderRemediationMenuLines(innerWidth)...)
+		lines = append(lines, "")
+		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 	} else {
 		lines = m.renderPlanDetailLines(innerWidth)
 	}
@@ -2088,6 +2177,22 @@ func (m kitchenTUIModel) renderMergeMenuLines(innerWidth int) []string {
 	}
 	for i, option := range kitchenTUIMergeMenuOptions {
 		if i == m.mergeMenuSelected {
+			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
+			continue
+		}
+		lines = append(lines, truncate("  "+option, innerWidth))
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderRemediationMenuLines(innerWidth int) []string {
+	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Review Remediation"),
+		"Choose which lower-severity findings to fix before re-review.",
+	}
+	for i, option := range kitchenTUIRemediationOptions {
+		if i == m.remediateSelected {
 			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
 			continue
 		}
@@ -2306,23 +2411,33 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 	if detail.Progress.ImplReviewRequested {
 		status := firstNonEmpty(detail.Progress.ImplReviewStatus, "pending")
 		if detail.Progress.AutoRemediationActive {
-			status = fmt.Sprintf("auto-remediating (%d/%d)", max(1, detail.Progress.AutoRemediationAttempt), AutoRemediationHardCap)
+			if detail.Progress.ReviewRemediationMode == reviewRemediationModeManual {
+				status = "manual remediation in progress"
+			} else {
+				status = fmt.Sprintf("auto-remediating (%d/%d)", max(1, detail.Progress.AutoRemediationAttempt), AutoRemediationHardCap)
+			}
 		}
 		lines = append(lines, fmt.Sprintf("Implementation review: %s", status))
 		if detail.Progress.AutoRemediationActive {
-			lines = append(lines, fmt.Sprintf("Auto-remediation task: %s", firstNonEmpty(detail.Progress.AutoRemediationTaskID, "-")))
+			taskLabel := "Auto-remediation task"
+			findingsLabel := "Auto-remediation findings:"
+			if detail.Progress.ReviewRemediationMode == reviewRemediationModeManual {
+				taskLabel = "Remediation task"
+				findingsLabel = "Remediation findings:"
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", taskLabel, firstNonEmpty(detail.Progress.AutoRemediationTaskID, "-")))
 			if detail.Progress.AutoRemediationSourceVerdict != "" {
 				lines = append(lines, fmt.Sprintf("Source verdict: %s", detail.Progress.AutoRemediationSourceVerdict))
 			}
 			if len(detail.Progress.AutoRemediationFindings) > 0 {
-				lines = append(lines, "Auto-remediation findings:")
+				lines = append(lines, findingsLabel)
 				for _, finding := range detail.Progress.AutoRemediationFindings {
 					lines = append(lines, wrapText("- "+finding, innerWidth)...)
 				}
 			}
-		} else if len(detail.Progress.ImplReviewFindings) > 0 {
-			lines = append(lines, "Implementation review findings:")
-			for _, finding := range detail.Progress.ImplReviewFindings {
+		} else if len(detail.Progress.ImplReviewFollowups) > 0 {
+			lines = append(lines, "Implementation review follow-up findings:")
+			for _, finding := range detail.Progress.ImplReviewFollowups {
 				lines = append(lines, wrapText("- "+finding, innerWidth)...)
 			}
 		}
@@ -2553,8 +2668,11 @@ func summarizeImplementationReviewTask(detail *PlanDetail, task kitchenTUITaskIt
 
 	status := summarizeImplementationReviewStatus(detail, task)
 	findingCount := len(detail.Progress.ImplReviewFindings)
-	summary := firstNonEmpty(strings.TrimSpace(task.Summary), firstPlanReviewFinding(detail.Progress.ImplReviewFindings), defaultImplementationReviewSummary(status))
 	if status == "approved" {
+		findingCount = len(detail.Progress.ImplReviewFollowups)
+	}
+	summary := firstNonEmpty(strings.TrimSpace(task.Summary), firstPlanReviewFinding(planReviewFollowupStrings(detail.Progress)), defaultImplementationReviewSummary(status))
+	if status == "approved" && findingCount == 0 {
 		findingCount = 0
 	}
 	return implementationReviewTLDR{
@@ -2640,6 +2758,13 @@ func firstPlanReviewFinding(findings []string) string {
 	return ""
 }
 
+func planReviewFollowupStrings(progress PlanProgress) []string {
+	if strings.TrimSpace(progress.ImplReviewStatus) == planReviewStatusPassed {
+		return append([]string(nil), progress.ImplReviewFollowups...)
+	}
+	return append([]string(nil), progress.ImplReviewFindings...)
+}
+
 func implementationReviewTurnForTask(planID, runtimeID string) int {
 	return reviewCouncilTurnNumberFromTaskID(planID, runtimeID)
 }
@@ -2709,7 +2834,7 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 
 func (m kitchenTUIModel) renderInputBar() string {
 	// Multiple-choice answer mode doesn't use the input bar
-	if m.inputMode == kitchenTUIInputMergeMenu || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
+	if m.inputMode == kitchenTUIInputMergeMenu || m.inputMode == kitchenTUIInputRemediate || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
 		return ""
 	}
 	label := "Input"
@@ -2733,6 +2858,8 @@ func (m kitchenTUIModel) renderInputBar() string {
 		label = "Replan"
 	case kitchenTUIInputAnswer:
 		label = "Answer"
+	case kitchenTUIInputRemediate:
+		label = "Review remediation"
 	}
 	body := m.input.View()
 	height := 3

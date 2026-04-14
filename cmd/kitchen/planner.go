@@ -574,6 +574,7 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 		bundle.Execution.ActiveTaskIDs = nil
 		bundle.Execution.ImplReviewStatus = ""
 		bundle.Execution.ImplReviewFindings = nil
+		bundle.Execution.ImplReviewFollowups = nil
 		bundle.Execution.ImplReviewedAt = nil
 		clearAutoRemediationState(&bundle.Execution, true)
 		bundle.Plan.State = planStateImplementationReview
@@ -638,6 +639,7 @@ func (k *Kitchen) RequestReview(planID string) error {
 	bundle.Execution.ImplReviewRequested = true
 	bundle.Execution.ImplReviewStatus = ""
 	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewFollowups = nil
 	bundle.Execution.ImplReviewedAt = nil
 	bundle.Execution.ReviewCouncilTurnsCompleted = 0
 	bundle.Execution.ReviewCouncilTurns = nil
@@ -654,6 +656,90 @@ func (k *Kitchen) RequestReview(planID string) error {
 		Summary: "Manual implementation review requested.",
 	})
 	return k.scheduler.enqueueImplementationReview(bundle)
+}
+
+func (k *Kitchen) RemediateReview(planID string, includeNits bool) error {
+	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
+		return fmt.Errorf("kitchen is not fully configured")
+	}
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return fmt.Errorf("plan ID must not be empty")
+	}
+
+	k.councilExtendMu.Lock()
+	defer k.councilExtendMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(bundle.Execution.State) != planStateCompleted {
+		return fmt.Errorf("invalid plan state %q for manual review remediation", bundle.Execution.State)
+	}
+	if !bundle.Execution.ImplReviewRequested || strings.TrimSpace(bundle.Execution.ImplReviewStatus) != planReviewStatusPassed {
+		return fmt.Errorf("plan %s must have a passed implementation review to remediate", planID)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		return fmt.Errorf("plan %s already has review remediation in progress", planID)
+	}
+
+	sourceTaskID, source := manualReviewRemediationSource(bundle, includeNits)
+	if source == nil {
+		return fmt.Errorf("missing passed implementation review artifact for %s", planID)
+	}
+	if len(source.Findings) == 0 && len(source.Disagreements) == 0 {
+		scope := "minor"
+		if includeNits {
+			scope = "minor or nit"
+		}
+		return fmt.Errorf("invalid remediation scope: plan %s has no actionable %s findings to remediate", planID, scope)
+	}
+	findings := autoRemediationFindings(source)
+
+	planTaskID := nextManualReviewRemediationPlanTaskID(bundle.Plan)
+	runtimeTaskID := planTaskRuntimeID(planID, planTaskID)
+	bundle.Execution.AutoRemediationAttempt = 0
+	bundle.Execution.AutoRemediationActive = true
+	bundle.Execution.AutoRemediationPlanTaskID = planTaskID
+	bundle.Execution.AutoRemediationTaskID = runtimeTaskID
+	bundle.Execution.AutoRemediationSourceTaskID = sourceTaskID
+	bundle.Execution.AutoRemediationSource = source
+	bundle.Execution.ImplReviewStatus = ""
+	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewFollowups = nil
+	bundle.Execution.ImplReviewedAt = nil
+	bundle.Execution.ReviewCouncilMaxTurns = 0
+	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
+	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.ReviewCouncilSeats = [2]CouncilSeatRecord{}
+	bundle.Execution.ReviewCouncilTurns = nil
+	bundle.Execution.ReviewCouncilWarnings = nil
+	bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
+	bundle.Execution.RejectedBy = ""
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedAt = nil
+	bundle.Plan.State = planStateActive
+	bundle.Execution.State = planStateActive
+	scope := "minor findings"
+	if includeNits {
+		scope = "minor findings plus nits"
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:     planHistoryManualReviewRemediation,
+		Cycle:    currentReviewCouncilCycle(bundle.Execution),
+		TaskID:   runtimeTaskID,
+		Summary:  fmt.Sprintf("Manual review remediation queued for %s.", scope),
+		Findings: append([]string(nil), findings...),
+	})
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		return err
+	}
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	return k.scheduler.ensureAutoRemediationTask(&bundle, false)
 }
 
 func (k *Kitchen) CancelPlan(planID string) error {
@@ -855,6 +941,7 @@ func (k *Kitchen) RetryTask(taskID string, requireFreshWorker bool) error {
 		bundle.Execution.ReviewCouncilAwaitingAnswers = false
 		bundle.Execution.ImplReviewStatus = ""
 		bundle.Execution.ImplReviewFindings = nil
+		bundle.Execution.ImplReviewFollowups = nil
 		bundle.Execution.ImplReviewedAt = nil
 	case task.Role == plannerTaskRole:
 		if bundle.Execution.CouncilTurnsCompleted > 0 || len(bundle.Execution.CouncilTurns) > 0 {

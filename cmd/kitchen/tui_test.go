@@ -35,6 +35,9 @@ type fakeKitchenTUIBackend struct {
 	promotePlanID             string
 	requestedReviewPlanID     string
 	requestReviewCalls        int
+	remediatedReviewPlanID    string
+	remediateIncludeNits      bool
+	remediateReviewCalls      int
 	retriedTaskID             string
 	retriedRequireFreshWorker bool
 	retryCalls                int
@@ -114,6 +117,12 @@ func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { 
 func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
 	b.requestReviewCalls++
 	b.requestedReviewPlanID = planID
+	return nil
+}
+func (b *fakeKitchenTUIBackend) RemediateReview(planID string, includeNits bool) error {
+	b.remediateReviewCalls++
+	b.remediatedReviewPlanID = planID
+	b.remediateIncludeNits = includeNits
 	return nil
 }
 func (b *fakeKitchenTUIBackend) ApprovePlan(planID string) error { return nil }
@@ -1489,6 +1498,64 @@ func TestKitchenTUIReviewKeyRequestsReviewForSelectedPlan(t *testing.T) {
 	}
 	if backend.requestReviewCalls != 1 || backend.requestedReviewPlanID != "plan_review" {
 		t.Fatalf("backend review = %+v", backend)
+	}
+}
+
+func TestKitchenTUIFooterShowsManualRemediationForPassedReviewFindings(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{{
+			Record: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", State: planStateCompleted},
+			Progress: &PlanProgress{
+				State:               planStateCompleted,
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+				ImplReviewFollowups: []string{"[minor] add a regression test"},
+			},
+		}},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "f remediate") {
+		t.Fatalf("footer = %q, want remediate action for passed review findings", footer)
+	}
+}
+
+func TestKitchenTUIRemediationMenuQueuesSelectedScope(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:   backend,
+		leftMode:  kitchenTUILeftPlans,
+		inputMode: kitchenTUIInputRemediate,
+		plans: []kitchenTUIPlanItem{{
+			Record: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", State: planStateCompleted},
+			Progress: &PlanProgress{
+				State:               planStateCompleted,
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+				ImplReviewFollowups: []string{"[minor] add a regression test", "[nit] tighten wording"},
+			},
+		}},
+		remediateSelected: 1,
+	}
+
+	_, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected remediation command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.remediateReviewCalls != 1 || backend.remediatedReviewPlanID != "plan_fix_review" || !backend.remediateIncludeNits {
+		t.Fatalf("backend remediation = %+v", backend)
+	}
+	if action.selectedPlanID != "plan_fix_review" {
+		t.Fatalf("selectedPlanID = %q, want plan_fix_review", action.selectedPlanID)
 	}
 }
 

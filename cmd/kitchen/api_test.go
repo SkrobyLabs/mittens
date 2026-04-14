@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
@@ -499,6 +500,78 @@ func TestKitchenAPIRequestReviewEndpoint(t *testing.T) {
 	}
 	if !detail.Execution.ImplReviewRequested {
 		t.Fatalf("execution = %+v, want impl review requested", detail.Execution)
+	}
+}
+
+func TestKitchenAPIRemediateReviewEndpoint(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_api_remediate",
+			Lineage: "api-remediate",
+			Title:   "API remediate",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:               planStateCompleted,
+			CompletedAt:         &now,
+			ImplReviewRequested: true,
+			ImplReviewStatus:    planReviewStatusPassed,
+			ImplReviewFollowups: []string{"[minor] foo", "[nit] bar"},
+			ImplReviewedAt:      &now,
+			ReviewCouncilCycle:  1,
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "B",
+				Turn: 2,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:                "B",
+					Turn:                2,
+					Stance:              "converged",
+					Verdict:             pool.ReviewPass,
+					AdoptedPriorVerdict: true,
+					Findings: []adapter.ReviewFinding{
+						{ID: "f1", Category: "coverage", Description: "minor follow-up", Severity: pool.SeverityMinor},
+						{ID: "f2", Category: "style", Description: "nit follow-up", Severity: pool.SeverityNit},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/remediate-review", map[string]any{
+		"includeNits": true,
+	})
+	var detail PlanDetail
+	decodeResponse(t, resp, &detail)
+	if detail.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", detail.Execution.State, planStateActive)
+	}
+	if !detail.Execution.AutoRemediationActive {
+		t.Fatal("expected remediation to be active")
+	}
+	if detail.Execution.AutoRemediationSource == nil {
+		t.Fatal("expected remediation source")
+	}
+	if got := detail.Execution.AutoRemediationSource.Decision; got != manualReviewRemediationDecisionMinorNit {
+		t.Fatalf("source decision = %q, want %q", got, manualReviewRemediationDecisionMinorNit)
+	}
+	if got := len(detail.Execution.AutoRemediationSource.Findings); got != 2 {
+		t.Fatalf("source findings = %d, want minor + nit included", got)
 	}
 }
 

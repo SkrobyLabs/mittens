@@ -59,7 +59,7 @@ func TestPlanStoreUpdateExecutionAndAffinity(t *testing.T) {
 		Approved:            true,
 		ImplReviewRequested: true,
 		ImplReviewStatus:    "passed",
-		ImplReviewFindings:  []string{"single-task draft"},
+		ImplReviewFollowups: []string{"single-task draft"},
 		CouncilMaxTurns:     4,
 		History: []PlanHistoryEntry{
 			{

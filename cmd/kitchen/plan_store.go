@@ -105,6 +105,7 @@ type ExecutionRecord struct {
 	ImplReviewRequested                  bool                          `json:"implReviewRequested,omitempty"`
 	ImplReviewStatus                     string                        `json:"implReviewStatus,omitempty"`
 	ImplReviewFindings                   []string                      `json:"implReviewFindings,omitempty"`
+	ImplReviewFollowups                  []string                      `json:"implReviewFollowups,omitempty"`
 	ImplReviewedAt                       *time.Time                    `json:"implReviewedAt,omitempty"`
 	CouncilMaxTurns                      int                           `json:"councilMaxTurns,omitempty"`
 	CouncilTurnsCompleted                int                           `json:"councilTurnsCompleted,omitempty"`
