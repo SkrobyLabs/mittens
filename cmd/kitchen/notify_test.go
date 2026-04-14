@@ -168,6 +168,16 @@ func TestFormatNotification(t *testing.T) {
 			want: "[RUNTIME] Worker w-2 assignment accepted: plan [assignment assign-7]",
 		},
 		{
+			name: "runtime discovery unavailable",
+			n:    pool.Notification{Type: "scheduler_runtime_discovery_unavailable", ID: "kitchen-test", Message: "runtime unavailable"},
+			want: "[RUNTIME BLOCKED] runtime unavailable",
+		},
+		{
+			name: "runtime discovery recovered",
+			n:    pool.Notification{Type: "scheduler_runtime_discovery_recovered", ID: "kitchen-test"},
+			want: "[RUNTIME OK] kitchen-test",
+		},
+		{
 			name: "unknown type with message",
 			n:    pool.Notification{Type: "custom", ID: "x-1", Message: "hello"},
 			want: "[custom] x-1: hello",
@@ -193,7 +203,7 @@ func TestNotificationLevel(t *testing.T) {
 	warnTypes := []string{
 		"question", "task_failed", "pipeline_failed",
 		"plan_failed", "plan_review_failed", "plan_impl_review_failed",
-		"plan_review_council_rejected",
+		"plan_review_council_rejected", "scheduler_runtime_discovery_unavailable",
 		"escalation_accept", "escalation_retry", "escalation_abort",
 		"review_fail",
 	}
@@ -208,7 +218,7 @@ func TestNotificationLevel(t *testing.T) {
 		"plan_submitted", "plan_ready", "plan_review_requested", "plan_review_passed", "plan_revising",
 		"plan_impl_review_requested", "plan_impl_review_passed",
 		"plan_review_council_started", "plan_review_council_turn_completed", "plan_review_council_converged",
-		"runtime_worker_spawned", "runtime_assignment_submitted",
+		"runtime_worker_spawned", "runtime_assignment_submitted", "scheduler_runtime_discovery_recovered",
 	}
 	for _, typ := range infoTypes {
 		if notificationLevel(typ) != "info" {

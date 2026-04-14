@@ -37,13 +37,16 @@ func RequeueOrphanedTasks(pm *PoolManager) int {
 }
 
 // Reconcile matches WAL-recovered pool state against discovered session containers.
-// A worker counts as live only when at least one discovered container is running.
-// Workers without a running container are marked dead. Stale worker containers and
-// orphaned worker containers are removed best-effort during the same pass.
-// Returns counts of reconciled (marked dead) workers and removed worker containers.
-func Reconcile(pm *PoolManager, containers []ContainerInfo) (reconciled int, killed int) {
+// A worker counts as live only when at least one discovered container is running
+// and the worker remains healthy under the pool's heartbeat/spawn-grace rules.
+// Workers without a running container or with stale health are marked dead. Stale
+// worker containers and orphaned worker containers are removed best-effort during
+// the same pass. Returns counts of reconciled (marked dead) workers and removed
+// worker containers.
+func Reconcile(pm *PoolManager, containers []ContainerInfo, staleThreshold time.Duration) (reconciled int, killed int) {
 	runningWorkers := make(map[string]bool, len(containers))
 	staleWorkers := make(map[string]bool, len(containers))
+	reapRunningWorkers := make(map[string]struct{})
 	for _, c := range containers {
 		if c.WorkerID == "" {
 			continue
@@ -68,6 +71,11 @@ func Reconcile(pm *PoolManager, containers []ContainerInfo) (reconciled int, kil
 			if err := pm.MarkDead(w.ID); err == nil {
 				reconciled++
 			}
+			continue
+		}
+		if staleThreshold > 0 && pm.MarkDeadIfStale(w.ID, staleThreshold) {
+			reconciled++
+			reapRunningWorkers[w.ID] = struct{}{}
 		}
 	}
 
@@ -83,6 +91,9 @@ func Reconcile(pm *PoolManager, containers []ContainerInfo) (reconciled int, kil
 		if !known || status == WorkerDead {
 			cleanupWorkers[wid] = struct{}{}
 		}
+	}
+	for wid := range reapRunningWorkers {
+		cleanupWorkers[wid] = struct{}{}
 	}
 
 	pm.mu.RLock()

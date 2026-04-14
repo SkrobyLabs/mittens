@@ -1047,6 +1047,26 @@ func TestAliveWorkers(t *testing.T) {
 	}
 }
 
+func TestHealthyWorkersExcludesStaleWorkers(t *testing.T) {
+	pm := newTestPoolManager(t)
+	pm.SpawnWorker(WorkerSpec{ID: "w-fresh"})
+	pm.RegisterWorker("w-fresh", "")
+	pm.Heartbeat("w-fresh", "idle", nil, "")
+
+	pm.SpawnWorker(WorkerSpec{ID: "w-stale"})
+	pm.RegisterWorker("w-stale", "")
+	setWorkerHeartbeat(pm, "w-stale", time.Now().Add(-2*time.Minute))
+
+	pm.SpawnWorker(WorkerSpec{ID: "w-grace"})
+
+	if got := pm.HealthyWorkers(90 * time.Second); got != 2 {
+		t.Fatalf("healthy workers = %d, want 2 (fresh idle + spawning within grace)", got)
+	}
+	if pm.WorkerHealthy("w-stale", 90*time.Second) {
+		t.Fatal("expected stale worker to be unhealthy")
+	}
+}
+
 func TestQueuedTasks(t *testing.T) {
 	pm := newTestPoolManager(t)
 	pm.SpawnWorker(WorkerSpec{ID: "w-1"})

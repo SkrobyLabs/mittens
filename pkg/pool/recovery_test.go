@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRequeueOrphanedTasks_DispatchedOnDeadWorker(t *testing.T) {
@@ -91,7 +92,7 @@ func TestReconcile_MarkMissingWorkersDead(t *testing.T) {
 		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up"},
 	}
 
-	reconciled, killed := Reconcile(pm, running)
+	reconciled, killed := Reconcile(pm, running, 90*time.Second)
 	if reconciled != 1 {
 		t.Errorf("reconciled = %d, want 1", reconciled)
 	}
@@ -129,7 +130,7 @@ func TestReconcile_KillOrphans(t *testing.T) {
 		{ContainerID: "def", WorkerID: "w-orphan", State: "running", Status: "Up"},
 	}
 
-	reconciled, killed := Reconcile(pm, running)
+	reconciled, killed := Reconcile(pm, running, 90*time.Second)
 	if reconciled != 0 {
 		t.Errorf("reconciled = %d, want 0", reconciled)
 	}
@@ -149,7 +150,7 @@ func TestReconcile_ZeroContainers(t *testing.T) {
 	pm.RegisterWorker("w-2", "")
 
 	// All workers crashed — no containers running.
-	reconciled, _ := Reconcile(pm, nil)
+	reconciled, _ := Reconcile(pm, nil, 90*time.Second)
 	if reconciled != 2 {
 		t.Errorf("reconciled = %d, want 2", reconciled)
 	}
@@ -168,7 +169,7 @@ func TestReconcile_AlreadyDeadNotRecounted(t *testing.T) {
 	pm.MarkDead("w-1")
 
 	// No running containers — but w-1 is already dead.
-	reconciled, _ := Reconcile(pm, nil)
+	reconciled, _ := Reconcile(pm, nil, 90*time.Second)
 	if reconciled != 0 {
 		t.Errorf("reconciled = %d, want 0 (already dead)", reconciled)
 	}
@@ -211,7 +212,7 @@ func TestReconcile_NonRunningWorkersAreMarkedDeadAndCleanedUp(t *testing.T) {
 		{ContainerID: "def", WorkerID: "w-stale-orphan", State: "dead", Status: "Dead"},
 	}
 
-	reconciled, killed := Reconcile(pm, containers)
+	reconciled, killed := Reconcile(pm, containers, 90*time.Second)
 	if reconciled != 1 {
 		t.Fatalf("reconciled = %d, want 1", reconciled)
 	}
@@ -235,6 +236,34 @@ func TestReconcile_NonRunningWorkersAreMarkedDeadAndCleanedUp(t *testing.T) {
 	}
 }
 
+func TestReconcile_RunningWorkerWithStaleHeartbeatIsMarkedDeadAndCleanedUp(t *testing.T) {
+	mock := &mockHostAPI{}
+	pm := newTestPoolManagerWithHostAPI(t, mock)
+	pm.SpawnWorker(WorkerSpec{ID: "w-1"})
+	pm.RegisterWorker("w-1", "")
+	setWorkerHeartbeat(pm, "w-1", time.Now().Add(-2*time.Minute))
+
+	containers := []ContainerInfo{
+		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
+	}
+
+	reconciled, killed := Reconcile(pm, containers, 90*time.Second)
+	if reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", reconciled)
+	}
+	if killed != 1 {
+		t.Fatalf("killed = %d, want 1", killed)
+	}
+	if len(mock.killed) != 1 || mock.killed[0] != "w-1" {
+		t.Fatalf("killed workers = %v, want [w-1]", mock.killed)
+	}
+
+	w1, _ := pm.Worker("w-1")
+	if w1.Status != WorkerDead {
+		t.Fatalf("w-1 status = %q, want dead", w1.Status)
+	}
+}
+
 func TestReconcile_RunningContainerForDeadWorkerIsCleanedUp(t *testing.T) {
 	mock := &mockHostAPI{}
 	pm := newTestPoolManagerWithHostAPI(t, mock)
@@ -246,7 +275,7 @@ func TestReconcile_RunningContainerForDeadWorkerIsCleanedUp(t *testing.T) {
 		{ContainerID: "abc", WorkerID: "w-1", State: "running", Status: "Up 5 minutes"},
 	}
 
-	reconciled, killed := Reconcile(pm, containers)
+	reconciled, killed := Reconcile(pm, containers, 90*time.Second)
 	if reconciled != 0 {
 		t.Fatalf("reconciled = %d, want 0", reconciled)
 	}
@@ -448,7 +477,7 @@ func TestFullRecoverySequence(t *testing.T) {
 		{ContainerID: "cid-w-2", WorkerID: "w-2", State: "exited", Status: "Exited (137) 10 seconds ago"},
 		{ContainerID: "cid-ghost", WorkerID: "w-ghost", State: "running", Status: "Up 30 seconds"}, // orphan
 	}
-	reconciled, killed := Reconcile(pm2, running)
+	reconciled, killed := Reconcile(pm2, running, 90*time.Second)
 
 	if reconciled != 2 {
 		t.Errorf("reconciled = %d, want 2", reconciled)

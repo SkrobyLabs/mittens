@@ -57,6 +57,9 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 	if reserved, ok := s.reservedCouncilWorkerIDs()[worker.ID]; ok && reserved != bundle.Plan.PlanID+":"+seat.Seat {
 		return false, true
 	}
+	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
+		return false, true
+	}
 	if targetWorkerID != "" {
 		if worker.ID != targetWorkerID {
 			return false, true
@@ -64,6 +67,24 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 		return workerMatchesAnyRouteKey(worker, keys), true
 	}
 	return workerMatchesAnyRouteKey(worker, keys), true
+}
+
+func (s *Scheduler) refreshCouncilSeatWorker(workerID string) (*pool.Worker, bool) {
+	if s == nil || s.pm == nil {
+		return nil, false
+	}
+	s.pm.MarkDeadIfStale(workerID, s.reapTimeout)
+	return s.pm.Worker(workerID)
+}
+
+func (s *Scheduler) councilSeatWorkerUsable(worker pool.Worker, task pool.Task) bool {
+	if worker.Status == pool.WorkerDead {
+		return false
+	}
+	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
+		return false
+	}
+	return s.seatWorkerMatchesRoute(worker, task)
 }
 
 func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
@@ -105,7 +126,7 @@ func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
 		seat.Seat = councilSeatForTurn(turn)
 	}
 	if workerID := strings.TrimSpace(seat.WorkerID); workerID != "" {
-		if worker, ok := s.pm.Worker(workerID); ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
+		if worker, ok := s.refreshCouncilSeatWorker(workerID); ok && s.councilSeatWorkerUsable(*worker, pool.Task{
 			ID:         taskID,
 			PlanID:     bundle.Plan.PlanID,
 			Complexity: string(ComplexityMedium),
@@ -414,8 +435,8 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 			if workerID == "" {
 				continue
 			}
-			worker, ok := s.pm.Worker(workerID)
-			if ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
+			worker, ok := s.refreshCouncilSeatWorker(workerID)
+			if ok && s.councilSeatWorkerUsable(*worker, pool.Task{
 				ID:         councilTaskID(bundle.Plan.PlanID, bundle.Execution.CouncilTurnsCompleted+1),
 				PlanID:     bundle.Plan.PlanID,
 				Complexity: string(ComplexityMedium),

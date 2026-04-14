@@ -124,6 +124,13 @@ func formatNotification(n pool.Notification) string {
 			return fmt.Sprintf("[RUNTIME] Worker %s assignment accepted: %s", n.ID, n.Message)
 		}
 		return fmt.Sprintf("[RUNTIME] Worker %s assignment accepted", n.ID)
+	case "scheduler_runtime_discovery_unavailable":
+		if n.Message != "" {
+			return fmt.Sprintf("[RUNTIME BLOCKED] %s", n.Message)
+		}
+		return fmt.Sprintf("[RUNTIME BLOCKED] %s", n.ID)
+	case "scheduler_runtime_discovery_recovered":
+		return fmt.Sprintf("[RUNTIME OK] %s", firstNonEmpty(n.Message, n.ID))
 	default:
 		if n.Message != "" {
 			return fmt.Sprintf("[%s] %s: %s", n.Type, n.ID, n.Message)
@@ -137,7 +144,7 @@ func notificationLevel(eventType string) string {
 	switch eventType {
 	case "question", "task_failed", "pipeline_failed",
 		"plan_failed", "plan_review_failed", "plan_impl_review_failed",
-		"plan_review_council_rejected",
+		"plan_review_council_rejected", "scheduler_runtime_discovery_unavailable",
 		"escalation_accept", "escalation_retry", "escalation_abort",
 		"review_fail":
 		return "warning"

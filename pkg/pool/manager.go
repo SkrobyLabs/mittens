@@ -116,6 +116,8 @@ func normalizeWorkerHeartbeat(activity *WorkerActivity, legacyCurrentTool string
 	}, legacyCurrentTool
 }
 
+const workerSpawnGracePeriod = 2 * time.Minute
+
 func rejectDeadWorkerActivity(action string, w *Worker) error {
 	if w != nil && w.Status == WorkerDead {
 		return fmt.Errorf("%s: worker %q is dead", action, w.ID)
@@ -385,7 +387,6 @@ func (pm *PoolManager) MarkDeadIfStale(workerID string, staleThreshold time.Dura
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	const spawnGracePeriod = 2 * time.Minute
 	now := time.Now()
 
 	w := pm.workers[workerID]
@@ -393,17 +394,7 @@ func (pm *PoolManager) MarkDeadIfStale(workerID string, staleThreshold time.Dura
 		return false
 	}
 
-	// Grace period for workers still starting up.
-	if w.Status == WorkerSpawning && now.Sub(w.SpawnedAt) < spawnGracePeriod {
-		return false
-	}
-
-	// Check heartbeat staleness under lock.
-	if w.LastHeartbeat.IsZero() {
-		if now.Sub(w.SpawnedAt) < spawnGracePeriod {
-			return false
-		}
-	} else if now.Sub(w.LastHeartbeat) <= staleThreshold {
+	if workerHealthyLocked(w, now, staleThreshold) {
 		return false
 	}
 
@@ -1329,6 +1320,22 @@ func (pm *PoolManager) AliveWorkers() int {
 	return pm.aliveWorkersLocked()
 }
 
+// HealthyWorkers returns the count of non-dead workers that are still usable
+// under the pool's heartbeat and spawn-grace rules.
+func (pm *PoolManager) HealthyWorkers(staleThreshold time.Duration) int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.healthyWorkersLocked(time.Now(), staleThreshold)
+}
+
+// WorkerHealthy reports whether a worker remains usable under the pool's
+// heartbeat and spawn-grace rules.
+func (pm *PoolManager) WorkerHealthy(workerID string, staleThreshold time.Duration) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return workerHealthyLocked(pm.workers[workerID], time.Now(), staleThreshold)
+}
+
 // ValidateWorkerToken returns the owning worker ID when token matches a
 // persisted per-worker token. Tokens are stored in durable worker state via
 // the worker_spawned event, so callers do not need process-local replay.
@@ -1443,6 +1450,42 @@ func (pm *PoolManager) aliveWorkersLocked() int {
 		}
 	}
 	return count
+}
+
+func (pm *PoolManager) healthyWorkersLocked(now time.Time, staleThreshold time.Duration) int {
+	count := 0
+	for _, w := range pm.workers {
+		if workerHealthyLocked(w, now, staleThreshold) {
+			count++
+		}
+	}
+	return count
+}
+
+func workerHealthyLocked(w *Worker, now time.Time, staleThreshold time.Duration) bool {
+	if w == nil || w.Status == WorkerDead {
+		return false
+	}
+	if staleThreshold <= 0 {
+		return true
+	}
+	if w.Status == WorkerSpawning {
+		return workerWithinSpawnGrace(w, now)
+	}
+	if w.LastHeartbeat.IsZero() {
+		return workerWithinSpawnGrace(w, now)
+	}
+	return now.Sub(w.LastHeartbeat) <= staleThreshold
+}
+
+func workerWithinSpawnGrace(w *Worker, now time.Time) bool {
+	if w == nil {
+		return false
+	}
+	if w.SpawnedAt.IsZero() {
+		return false
+	}
+	return now.Sub(w.SpawnedAt) < workerSpawnGracePeriod
 }
 
 func (pm *PoolManager) sendNotify(n Notification) {

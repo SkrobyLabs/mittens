@@ -76,10 +76,31 @@ func (s *Scheduler) workerCanRunReviewCouncilTask(worker pool.Worker, task pool.
 	if strings.TrimSpace(worker.Role) != task.Role {
 		return false, true
 	}
+	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
+		return false, true
+	}
 	if len(keys) == 0 {
 		return true, true
 	}
 	return workerMatchesAnyRouteKey(worker, keys), true
+}
+
+func (s *Scheduler) refreshReviewCouncilSeatWorker(workerID string) (*pool.Worker, bool) {
+	if s == nil || s.pm == nil {
+		return nil, false
+	}
+	s.pm.MarkDeadIfStale(workerID, s.reapTimeout)
+	return s.pm.Worker(workerID)
+}
+
+func (s *Scheduler) reviewCouncilSeatWorkerUsable(worker pool.Worker, task pool.Task) bool {
+	if worker.Status == pool.WorkerDead {
+		return false
+	}
+	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
+		return false
+	}
+	return s.seatWorkerMatchesRoute(worker, task)
 }
 
 func (s *Scheduler) enqueueReviewCouncilTurn(bundle StoredPlan) error {
@@ -115,13 +136,14 @@ func (s *Scheduler) enqueueReviewCouncilTurn(bundle StoredPlan) error {
 	if seat.Seat == "" {
 		seat.Seat = reviewCouncilSeatForTurn(turn)
 	}
+	seatTask := pool.Task{
+		ID:         taskID,
+		PlanID:     bundle.Plan.PlanID,
+		Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
+		Role:       "reviewer",
+	}
 	if workerID := strings.TrimSpace(seat.WorkerID); workerID != "" {
-		if worker, ok := s.pm.Worker(workerID); ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
-			ID:         taskID,
-			PlanID:     bundle.Plan.PlanID,
-			Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
-			Role:       "reviewer",
-		}) {
+		if worker, ok := s.refreshReviewCouncilSeatWorker(workerID); ok && s.reviewCouncilSeatWorkerUsable(*worker, seatTask) {
 			if worker.Status == pool.WorkerIdle {
 				if err := s.pm.DispatchTask(taskID, workerID); err != nil {
 					return err
@@ -495,7 +517,7 @@ func (s *Scheduler) onReviewCouncilTurnFailed(task pool.Task, class FailureClass
 		return err
 	}
 	switch class {
-	case FailureEnvironment, FailureInfrastructure, FailureAuth:
+	case FailureEnvironment, FailureInfrastructure:
 		if err := s.pm.ReviveFailedTask(task.ID, false); err != nil {
 			return err
 		}
@@ -506,6 +528,11 @@ func (s *Scheduler) onReviewCouncilTurnFailed(task pool.Task, class FailureClass
 			return err
 		}
 		return s.plans.UpdateExecution(task.PlanID, bundle.Execution)
+	case FailureAuth:
+		if handled, err := s.retryAuthFailedTask(&task, bundle); handled || err != nil {
+			return err
+		}
+		return s.markReviewCouncilFailed(task, s.taskFailureSummary(task))
 	case FailurePlan, FailureCapability, FailureTimeout:
 		turn := reviewCouncilTurnNumberFromTaskID(task.PlanID, task.ID)
 		msg := "review council seat blocked"
@@ -617,13 +644,14 @@ func (s *Scheduler) recoverReviewCouncilPlansOnStartup() error {
 			if workerID == "" {
 				continue
 			}
-			worker, ok := s.pm.Worker(workerID)
-			if ok && worker.Status != pool.WorkerDead && s.seatWorkerMatchesRoute(*worker, pool.Task{
+			seatTask := pool.Task{
 				ID:         reviewCouncilTaskID(bundle.Plan.PlanID, bundle.Execution.ReviewCouncilTurnsCompleted+1),
 				PlanID:     bundle.Plan.PlanID,
 				Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
 				Role:       "reviewer",
-			}) {
+			}
+			worker, ok := s.refreshReviewCouncilSeatWorker(workerID)
+			if ok && s.reviewCouncilSeatWorkerUsable(*worker, seatTask) {
 				continue
 			}
 			s.invalidateReviewCouncilSeat(&bundle, i, bundle.Execution.ReviewCouncilTurnsCompleted+1, "")

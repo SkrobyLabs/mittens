@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ type schedulerHostAPI struct {
 	spawnSpecs    []pool.WorkerSpec
 	containers    []pool.ContainerInfo
 	killedWorkers []string
+	listErr       error
 }
 
 func (h *schedulerHostAPI) SpawnWorker(_ context.Context, spec pool.WorkerSpec) (string, string, error) {
@@ -47,7 +49,7 @@ func reviewCouncilTestArtifact(t *testing.T, seat string, turn int, verdict, sta
 }
 
 func (h *schedulerHostAPI) ListContainers(_ context.Context, _ string) ([]pool.ContainerInfo, error) {
-	return h.containers, nil
+	return h.containers, h.listErr
 }
 
 func (h *schedulerHostAPI) RecycleWorker(_ context.Context, _ string) error { return nil }
@@ -382,6 +384,135 @@ func TestScheduleReviewCouncilDoesNotReuseIdlePlannerWorker(t *testing.T) {
 	}
 	if planner.CurrentTaskID != "" {
 		t.Fatalf("planner current task = %q, want idle", planner.CurrentTaskID)
+	}
+}
+
+func TestRecoverReviewCouncilPlansOnStartupInvalidatesStaleReservedSeat(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newReviewCouncilSeats()
+	seats[0].WorkerID = "reviewer-1"
+	seats[0].Seat = "A"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_review_stale_seat",
+			Lineage: "feat-review-stale-seat",
+			Title:   "Review stale seat recovery",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-stale-seat"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "reviewer-1",
+		Role:     "reviewer",
+		Provider: "anthropic",
+		Model:    "sonnet",
+	}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("reviewer-1", "container-reviewer-1"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.Heartbeat("reviewer-1", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat reviewer: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.reapTimeout = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverReviewCouncilPlansOnStartup: %v", err)
+	}
+
+	worker, ok := pm.Worker("reviewer-1")
+	if !ok {
+		t.Fatal("reviewer-1 missing")
+	}
+	if worker.Status != pool.WorkerDead {
+		t.Fatalf("worker status = %q, want dead", worker.Status)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if got := strings.TrimSpace(bundle.Execution.ReviewCouncilSeats[0].WorkerID); got != "" {
+		t.Fatalf("seat worker = %q, want cleared", got)
+	}
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
+	}
+}
+
+func TestDispatchReadyTaskToWorkerSkipsStaleIdleWorker(t *testing.T) {
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, t.TempDir(), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-stale", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-stale", "container-w-stale"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.Heartbeat("w-stale", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if _, err := pm.EnqueueTask(pool.TaskSpec{ID: "t-1", Prompt: "work", Priority: 1, Role: "implementer"}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), nil, nil, nil, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.reapTimeout = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+
+	if err := s.dispatchReadyTaskToWorker("w-stale"); err != nil {
+		t.Fatalf("dispatchReadyTaskToWorker: %v", err)
+	}
+
+	worker, ok := pm.Worker("w-stale")
+	if !ok {
+		t.Fatal("w-stale missing")
+	}
+	if worker.Status != pool.WorkerDead {
+		t.Fatalf("worker status = %q, want dead", worker.Status)
+	}
+	task, ok := pm.Task("t-1")
+	if !ok {
+		t.Fatal("t-1 missing")
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
 	}
 }
 
@@ -2926,6 +3057,787 @@ func TestOnImplementationReviewFailed(t *testing.T) {
 	task, ok := pm.Task(reviewTaskID)
 	if !ok || task.Status != pool.TaskQueued {
 		t.Fatalf("review task = %+v, want queued retry", task)
+	}
+}
+
+func TestOnImplementationReviewFailed_AuthFailureRetriesWithFreshReviewer(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_auth_retry",
+			Lineage: "feat-ir-auth-retry",
+			Title:   "Impl review auth retry test",
+			State:   planStateImplementationReview,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: strings.TrimSpace(head),
+			},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "pass",
+					Summary: "initial review",
+				},
+			}},
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: strings.TrimSpace(head),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-auth"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.failurePolicy[string(FailureAuth)] = FailurePolicyRule{Action: authActionRecycleWorkerRetrySameProvider, Max: 1}
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn review): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1", len(host.spawnSpecs))
+	}
+	initialSpawn := host.spawnSpecs[0]
+	if initialSpawn.WorkspacePath == "" {
+		t.Fatal("expected review auth retry test to use a dedicated workspace")
+	}
+	markerPath := filepath.Join(initialSpawn.WorkspacePath, "auth-retry-marker.txt")
+	if err := os.WriteFile(markerPath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("WriteFile marker: %v", err)
+	}
+
+	if err := pm.RegisterWorker(initialSpawn.ID, "container-"+initialSpawn.ID); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	host.spawnSpecs = nil
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch review): %v", err)
+	}
+
+	if err := pm.FailTask(initialSpawn.ID, reviewTaskID, "Failed to authenticate. API Error: 401 Invalid authentication credentials"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+
+	if err := s.onTaskFailed(reviewTaskID, FailureAuth); err != nil {
+		t.Fatalf("onTaskFailed(review auth): %v", err)
+	}
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+	if task.RetryCount != 1 {
+		t.Fatalf("retryCount = %d, want 1", task.RetryCount)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected auth-retried review task to require a fresh worker")
+	}
+
+	worker, ok := pm.Worker(initialSpawn.ID)
+	if !ok || worker.Status != pool.WorkerDead {
+		t.Fatalf("worker state = %+v, want dead after auth retry cleanup", worker)
+	}
+	if len(host.killedWorkers) != 1 || host.killedWorkers[0] != initialSpawn.ID {
+		t.Fatalf("killed workers = %+v, want [%s]", host.killedWorkers, initialSpawn.ID)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs after auth retry = %d, want 1", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != "reviewer" {
+		t.Fatalf("spawn role = %q, want reviewer", host.spawnSpecs[0].Role)
+	}
+	if host.spawnSpecs[0].WorkspacePath == "" {
+		t.Fatal("expected fresh reviewer spawn to receive a workspace")
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old review worktree contents to be discarded, stat err = %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if len(bundle.Execution.FailedTaskIDs) != 0 {
+		t.Fatalf("failed task IDs = %+v, want empty after auth revive", bundle.Execution.FailedTaskIDs)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != reviewTaskID {
+		t.Fatalf("active task IDs = %+v, want [%s]", bundle.Execution.ActiveTaskIDs, reviewTaskID)
+	}
+}
+
+func TestSchedulerRunSkipsStartupRecoveryWhenRuntimeDiscoveryFails(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planID := "plan_startup_conflict_outage"
+	taskID := planTaskRuntimeID(planID, "t1")
+	store := NewPlanStore(project.PlansDir)
+	_, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "parser-errors",
+			Title:   "Startup conflict outage",
+			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+			Tasks:   []PlanTask{{ID: "t1", Title: "Task 1", Prompt: "task 1", Complexity: ComplexityMedium}},
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:         planStateActive,
+			ActiveTaskIDs: []string{taskID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-startup-conflict-outage"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", strings.TrimSpace(head)); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.failurePolicy["conflict"] = FailurePolicyRule{Action: "retry_merge", Max: 2}
+	s.reconcileInterval = 10 * time.Millisecond
+	host.spawnSpecs = nil
+
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "task 1",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.FailTask("w-1", taskID, "merge conflicts: shared.txt"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	<-done
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskFailed {
+		t.Fatalf("task status = %q, want failed while discovery is unavailable", task.Status)
+	}
+	if task.RetryCount != 0 {
+		t.Fatalf("retryCount = %d, want 0", task.RetryCount)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs = %d, want 0 during startup outage", len(host.spawnSpecs))
+	}
+}
+
+func TestSchedulerReconcileRuntimeDiscoveryFailurePausesSpawnsAndReapsStaleWorkers(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-runtime-discovery-fail"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-stale", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker stale: %v", err)
+	}
+	if err := pm.RegisterWorker("w-stale", "container-w-stale"); err != nil {
+		t.Fatalf("RegisterWorker stale: %v", err)
+	}
+	if _, err := pm.EnqueueTask(pool.TaskSpec{ID: "t-inflight", Prompt: "work", Priority: 1, Role: "implementer"}); err != nil {
+		t.Fatalf("EnqueueTask inflight: %v", err)
+	}
+	if err := pm.DispatchTask("t-inflight", "w-stale"); err != nil {
+		t.Fatalf("DispatchTask inflight: %v", err)
+	}
+	if err := pm.Heartbeat("w-stale", "working", nil, ""); err != nil {
+		t.Fatalf("Heartbeat stale worker: %v", err)
+	}
+	if _, err := pm.EnqueueTask(pool.TaskSpec{ID: "t-pending", Prompt: "more work", Priority: 2, Role: "implementer"}); err != nil {
+		t.Fatalf("EnqueueTask pending: %v", err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.reapTimeout = time.Millisecond
+	notifications := make(chan pool.Notification, 8)
+	s.notify = func(n pool.Notification) { notifications <- n }
+	time.Sleep(5 * time.Millisecond)
+	host.spawnSpecs = nil
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := s.reconcile(); err == nil {
+			t.Fatalf("reconcile attempt %d unexpectedly succeeded", attempt+1)
+		}
+		select {
+		case n := <-notifications:
+			t.Fatalf("unexpected notification on attempt %d: %+v", attempt+1, n)
+		default:
+		}
+	}
+	if err := s.reconcile(); err == nil {
+		t.Fatal("third reconcile unexpectedly succeeded")
+	}
+	select {
+	case n := <-notifications:
+		if n.Type != "scheduler_runtime_discovery_unavailable" {
+			t.Fatalf("notification type = %q, want scheduler_runtime_discovery_unavailable", n.Type)
+		}
+	default:
+		t.Fatal("expected outage notification on third failure")
+	}
+	if err := s.reconcile(); err == nil {
+		t.Fatal("fourth reconcile unexpectedly succeeded")
+	}
+
+	worker, ok := pm.Worker("w-stale")
+	if !ok {
+		t.Fatal("w-stale missing")
+	}
+	if worker.Status != pool.WorkerDead {
+		t.Fatalf("worker status = %q, want dead after stale self-heal", worker.Status)
+	}
+	task, ok := pm.Task("t-inflight")
+	if !ok {
+		t.Fatal("t-inflight missing")
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("t-inflight status = %q, want queued", task.Status)
+	}
+
+	select {
+	case n := <-notifications:
+		t.Fatalf("unexpected duplicate notification: %+v", n)
+	default:
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule during outage: %v", err)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs during outage = %d, want 0", len(host.spawnSpecs))
+	}
+
+	host.listErr = nil
+	host.containers = nil
+	if err := s.reconcile(); err != nil {
+		t.Fatalf("reconcile after recovery: %v", err)
+	}
+	select {
+	case n := <-notifications:
+		if n.Type != "scheduler_runtime_discovery_recovered" {
+			t.Fatalf("notification type = %q, want scheduler_runtime_discovery_recovered", n.Type)
+		}
+	default:
+		t.Fatal("expected recovery notification")
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule after recovery: %v", err)
+	}
+	if len(host.spawnSpecs) != 2 {
+		t.Fatalf("spawn specs after recovery = %d, want 2", len(host.spawnSpecs))
+	}
+}
+
+func TestSchedulerReconcileRuntimeDiscoveryFailureInvalidatesReservedReviewSeat(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newReviewCouncilSeats()
+	seats[0].WorkerID = "reviewer-1"
+	seats[0].Seat = "A"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_review_runtime_outage",
+			Lineage: "feat-review-runtime-outage",
+			Title:   "Review runtime outage",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-runtime-outage"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "reviewer-1",
+		Role:     "reviewer",
+		Provider: "anthropic",
+		Model:    "sonnet",
+	}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("reviewer-1", "container-reviewer-1"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.Heartbeat("reviewer-1", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat reviewer: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.reapTimeout = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+
+	if err := s.reconcile(); err == nil {
+		t.Fatal("reconcile unexpectedly succeeded")
+	}
+
+	worker, ok := pm.Worker("reviewer-1")
+	if !ok {
+		t.Fatal("reviewer-1 missing")
+	}
+	if worker.Status != pool.WorkerDead {
+		t.Fatalf("worker status = %q, want dead", worker.Status)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if got := strings.TrimSpace(bundle.Execution.ReviewCouncilSeats[0].WorkerID); got != "" {
+		t.Fatalf("seat worker = %q, want cleared", got)
+	}
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
+	}
+}
+
+func TestSchedulerReconcileRuntimeDiscoveryFailureInvalidatesReservedCouncilSeat(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newCouncilSeats()
+	seats[0].WorkerID = "planner-1"
+	seats[0].Seat = "A"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_runtime_outage",
+			Lineage: "feat-council-runtime-outage",
+			Title:   "Council runtime outage",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       2,
+			CouncilTurnsCompleted: 1,
+			CouncilSeats:          seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-runtime-outage"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "planner-1",
+		Role:     plannerTaskRole,
+		Provider: "anthropic",
+		Model:    "sonnet",
+	}); err != nil {
+		t.Fatalf("SpawnWorker planner: %v", err)
+	}
+	if err := pm.RegisterWorker("planner-1", "container-planner-1"); err != nil {
+		t.Fatalf("RegisterWorker planner: %v", err)
+	}
+	if err := pm.Heartbeat("planner-1", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat planner: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	s.reapTimeout = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+
+	if err := s.reconcile(); err == nil {
+		t.Fatal("reconcile unexpectedly succeeded")
+	}
+
+	worker, ok := pm.Worker("planner-1")
+	if !ok {
+		t.Fatal("planner-1 missing")
+	}
+	if worker.Status != pool.WorkerDead {
+		t.Fatalf("worker status = %q, want dead", worker.Status)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if got := strings.TrimSpace(bundle.Execution.CouncilSeats[0].WorkerID); got != "" {
+		t.Fatalf("seat worker = %q, want cleared", got)
+	}
+	taskID := councilTaskID(planID, 2)
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("council task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
+	}
+}
+
+func TestSchedulerReconcileAfterRuntimeDiscoveryRecoveryReplaysDeferredReviewFailure(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_runtime_recovery",
+			Lineage: "feat-ir-runtime-recovery",
+			Title:   "Impl review recovery",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ActiveTaskIDs:               []string{reviewCouncilTaskID("plan_ir_runtime_recovery", 2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-runtime-recovery"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(reviewTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+
+	if err := s.reconcile(); err == nil {
+		t.Fatal("reconcile unexpectedly succeeded")
+	}
+
+	if err := pm.FailTask("w-rev", reviewTaskID, "container crashed"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+	s.handleNotification(pool.Notification{Type: "task_failed", ID: reviewTaskID})
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskFailed {
+		t.Fatalf("task status during outage = %q, want failed", task.Status)
+	}
+	if got := s.deferredTaskFailures[reviewTaskID]; got != FailureInfrastructure {
+		t.Fatalf("deferred failure class = %q, want %q", got, FailureInfrastructure)
+	}
+
+	host.listErr = nil
+	host.containers = nil
+	if err := s.reconcile(); err != nil {
+		t.Fatalf("reconcile after recovery: %v", err)
+	}
+
+	task, ok = pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found after recovery", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status after recovery = %q, want queued", task.Status)
+	}
+	if len(s.deferredTaskFailures) != 0 {
+		t.Fatalf("deferred task failures = %v, want empty", s.deferredTaskFailures)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if !containsString(bundle.Execution.ActiveTaskIDs, reviewTaskID) {
+		t.Fatalf("active task ids = %v, want %q present", bundle.Execution.ActiveTaskIDs, reviewTaskID)
+	}
+}
+
+func TestSchedulerReconcileAfterRuntimeDiscoveryRecoveryReplaysDeferredCouncilFailure(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_runtime_recovery",
+			Lineage: "feat-council-runtime-recovery",
+			Title:   "Council recovery",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       2,
+			CouncilTurnsCompleted: 1,
+			CouncilSeats:          newCouncilSeats(),
+			ActiveTaskIDs:         []string{councilTaskID("plan_council_runtime_recovery", 2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{listErr: errors.New("runtime unavailable")}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-runtime-recovery"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID := councilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "review the plan",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask council: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-plan", Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker planner: %v", err)
+	}
+	if err := pm.RegisterWorker("w-plan", "container-w-plan"); err != nil {
+		t.Fatalf("RegisterWorker planner: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-plan"); err != nil {
+		t.Fatalf("DispatchTask council: %v", err)
+	}
+
+	if err := s.reconcile(); err == nil {
+		t.Fatal("reconcile unexpectedly succeeded")
+	}
+
+	if err := pm.FailTask("w-plan", taskID, "container crashed"); err != nil {
+		t.Fatalf("FailTask council: %v", err)
+	}
+	s.handleNotification(pool.Notification{Type: "task_failed", ID: taskID})
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("council task %q not found", taskID)
+	}
+	if task.Status != pool.TaskFailed {
+		t.Fatalf("task status during outage = %q, want failed", task.Status)
+	}
+	if got := s.deferredTaskFailures[taskID]; got != FailureInfrastructure {
+		t.Fatalf("deferred failure class = %q, want %q", got, FailureInfrastructure)
+	}
+
+	host.listErr = nil
+	host.containers = nil
+	if err := s.reconcile(); err != nil {
+		t.Fatalf("reconcile after recovery: %v", err)
+	}
+
+	task, ok = pm.Task(taskID)
+	if !ok {
+		t.Fatalf("council task %q not found after recovery", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status after recovery = %q, want queued", task.Status)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateReviewing {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateReviewing)
+	}
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	if !containsString(bundle.Execution.ActiveTaskIDs, taskID) {
+		t.Fatalf("active task ids = %v, want %q present", bundle.Execution.ActiveTaskIDs, taskID)
 	}
 }
 

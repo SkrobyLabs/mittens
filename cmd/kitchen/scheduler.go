@@ -24,45 +24,52 @@ const (
 )
 
 type Scheduler struct {
-	pm                  *pool.PoolManager
-	hostAPI             pool.RuntimeAPI
-	router              *ComplexityRouter
-	git                 *GitManager
-	plans               *PlanStore
-	lineages            *LineageManager
-	cfg                 ConcurrencyConfig
-	failurePolicy       map[string]FailurePolicyRule
-	sessionID           string
-	kitchenAddr         string
-	notify              func(pool.Notification)
-	activatePlan        func(string) error
-	pendingSpawn        map[string]string
-	reconcileInterval   time.Duration
-	reapInterval        time.Duration
-	reapTimeout         time.Duration
-	nowFunc             func() time.Time
-	stderr              io.Writer
-	keepDeadWorkers     bool
-	retainedDeadWorkers []string
+	pm                               *pool.PoolManager
+	hostAPI                          pool.RuntimeAPI
+	router                           *ComplexityRouter
+	git                              *GitManager
+	plans                            *PlanStore
+	lineages                         *LineageManager
+	cfg                              ConcurrencyConfig
+	failurePolicy                    map[string]FailurePolicyRule
+	sessionID                        string
+	kitchenAddr                      string
+	notify                           func(pool.Notification)
+	activatePlan                     func(string) error
+	pendingSpawn                     map[string]string
+	reconcileInterval                time.Duration
+	reapInterval                     time.Duration
+	reapTimeout                      time.Duration
+	nowFunc                          func() time.Time
+	stderr                           io.Writer
+	keepDeadWorkers                  bool
+	retainedDeadWorkers              []string
+	runtimeDiscoveryFailures         int
+	runtimeDiscoveryFailureThreshold int
+	runtimeDiscoveryOutage           bool
+	runtimeDiscoveryAlerted          bool
+	deferredTaskFailures             map[string]FailureClass
 }
 
 func NewScheduler(pm *pool.PoolManager, hostAPI pool.RuntimeAPI, router *ComplexityRouter, git *GitManager, plans *PlanStore, lineages *LineageManager, cfg ConcurrencyConfig, sessionID string) *Scheduler {
 	return &Scheduler{
-		pm:                pm,
-		hostAPI:           hostAPI,
-		router:            router,
-		git:               git,
-		plans:             plans,
-		lineages:          lineages,
-		cfg:               cfg,
-		failurePolicy:     DefaultKitchenConfig().FailurePolicy,
-		sessionID:         sessionID,
-		pendingSpawn:      make(map[string]string),
-		reconcileInterval: 5 * time.Second,
-		reapInterval:      30 * time.Second,
-		reapTimeout:       90 * time.Second,
-		nowFunc:           time.Now,
-		stderr:            os.Stderr,
+		pm:                               pm,
+		hostAPI:                          hostAPI,
+		router:                           router,
+		git:                              git,
+		plans:                            plans,
+		lineages:                         lineages,
+		cfg:                              cfg,
+		failurePolicy:                    DefaultKitchenConfig().FailurePolicy,
+		sessionID:                        sessionID,
+		pendingSpawn:                     make(map[string]string),
+		reconcileInterval:                5 * time.Second,
+		reapInterval:                     30 * time.Second,
+		reapTimeout:                      90 * time.Second,
+		nowFunc:                          time.Now,
+		stderr:                           os.Stderr,
+		runtimeDiscoveryFailureThreshold: 3,
+		deferredTaskFailures:             make(map[string]FailureClass),
 	}
 }
 
@@ -74,35 +81,20 @@ func (s *Scheduler) Run(ctx context.Context) {
 	stopReaper := pool.StartReaperWithReservations(s.pm, s.reapInterval, s.reapTimeout, s.reservedWorkerIDs)
 	defer stopReaper()
 
-	if err := s.reconcile(); err != nil {
-		s.logf("scheduler reconcile: %v", err)
+	startupReconcileErr := s.reconcile()
+	if startupReconcileErr != nil {
+		s.logf("scheduler reconcile: %v", startupReconcileErr)
 	}
-	if err := s.recoverFailedTasksOnStartup(); err != nil {
-		s.logf("scheduler failed task recovery: %v", err)
-	}
-	// One-shot reconciliation of plan execution state against the
-	// pool's task map. Catches plans left with stale activeTaskIDs
-	// because a completion handler errored out before syncPlanExecution
-	// ran (e.g. worktree cleanup blew up with EACCES after the ref
-	// advance had already succeeded).
-	if err := s.reconcilePlanExecutionOnStartup(); err != nil {
-		s.logf("scheduler startup sync: %v", err)
-	}
-	if err := s.recoverOrphanedPlansOnStartup(); err != nil {
-		s.logf("scheduler orphaned plan recovery: %v", err)
-	}
-	if err := s.recoverCouncilPlansOnStartup(); err != nil {
-		s.logf("scheduler council recovery: %v", err)
-	}
-	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
-		s.logf("scheduler review council recovery: %v", err)
-	}
-	s.recoverWaitingPlansOnStartup()
-	if err := s.enforceTaskTimeouts(); err != nil {
-		s.logf("scheduler timeouts: %v", err)
-	}
-	if err := s.schedule(); err != nil {
-		s.logf("scheduler: %v", err)
+	if startupReconcileErr == nil {
+		if err := s.runRecoverySuite(); err != nil {
+			s.logf("scheduler startup recovery: %v", err)
+		}
+		if err := s.enforceTaskTimeouts(); err != nil {
+			s.logf("scheduler timeouts: %v", err)
+		}
+		if err := s.schedule(); err != nil {
+			s.logf("scheduler: %v", err)
+		}
 	}
 
 	ticker := time.NewTicker(s.reconcileInterval)
@@ -140,6 +132,12 @@ func (s *Scheduler) handleNotification(n pool.Notification) {
 	case "task_failed":
 		task, ok := s.pm.Task(n.ID)
 		if !ok {
+			return
+		}
+		if s.runtimeDiscoveryOutage {
+			if s.deferredTaskFailures != nil {
+				s.deferredTaskFailures[n.ID] = s.taskFailureClass(task)
+			}
 			return
 		}
 		if err := s.onTaskFailed(n.ID, s.taskFailureClass(task)); err != nil {
@@ -423,8 +421,11 @@ func (s *Scheduler) schedule() error {
 	if len(queued) == 0 {
 		return nil
 	}
+	if s.runtimeDiscoveryOutage {
+		return nil
+	}
 
-	availableCapacity := s.cfg.MaxWorkersTotal - s.pm.AliveWorkers()
+	availableCapacity := s.cfg.MaxWorkersTotal - s.pm.HealthyWorkers(s.reapTimeout)
 	if availableCapacity <= 0 {
 		return nil
 	}
@@ -777,12 +778,70 @@ func (s *Scheduler) reconcile() error {
 	}
 	containers, err := s.hostAPI.ListContainers(context.Background(), s.sessionID)
 	if err != nil {
+		s.handleRuntimeDiscoveryFailure(err)
 		return err
 	}
-	pool.Reconcile(s.pm, containers)
+	wasOutage := s.runtimeDiscoveryOutage
+	wasAlerted := s.runtimeDiscoveryAlerted
+	s.runtimeDiscoveryFailures = 0
+	s.runtimeDiscoveryOutage = false
+	s.runtimeDiscoveryAlerted = false
+	if wasOutage && wasAlerted && s.notify != nil {
+		s.notify(pool.Notification{Type: "scheduler_runtime_discovery_recovered", ID: s.sessionID})
+	}
+	pool.Reconcile(s.pm, containers, s.reapTimeout)
 	pool.RequeueOrphanedTasks(s.pm)
+	if wasOutage {
+		if err := s.runRecoverySuite(); err != nil {
+			return err
+		}
+	} else {
+		if err := s.recoverCouncilPlansOnStartup(); err != nil {
+			return err
+		}
+		if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+			return err
+		}
+	}
 	s.refreshPendingSpawns()
 	return nil
+}
+
+func (s *Scheduler) handleRuntimeDiscoveryFailure(err error) {
+	if s == nil || s.pm == nil {
+		return
+	}
+	s.runtimeDiscoveryFailures++
+	s.runtimeDiscoveryOutage = true
+	protected := s.reservedWorkerIDs()
+	for _, worker := range s.pm.Workers() {
+		if worker.Status == pool.WorkerDead {
+			continue
+		}
+		if _, ok := protected[worker.ID]; ok {
+			continue
+		}
+		s.pm.MarkDeadIfStale(worker.ID, s.reapTimeout)
+	}
+	pool.RequeueOrphanedTasks(s.pm)
+	if councilErr := s.recoverCouncilPlansOnStartup(); councilErr != nil {
+		s.logf("scheduler council recovery during runtime discovery failure: %v", councilErr)
+	}
+	if reviewErr := s.recoverReviewCouncilPlansOnStartup(); reviewErr != nil {
+		s.logf("scheduler review council recovery during runtime discovery failure: %v", reviewErr)
+	}
+	s.refreshPendingSpawns()
+	if s.runtimeDiscoveryAlerted || s.runtimeDiscoveryFailures < s.runtimeDiscoveryFailureThreshold {
+		return
+	}
+	s.runtimeDiscoveryAlerted = true
+	if s.notify != nil {
+		s.notify(pool.Notification{
+			Type:    "scheduler_runtime_discovery_unavailable",
+			ID:      s.sessionID,
+			Message: strings.TrimSpace(err.Error()),
+		})
+	}
 }
 
 func (s *Scheduler) enforceTaskTimeouts() error {
@@ -934,6 +993,10 @@ func (s *Scheduler) dispatchReadyTaskToWorker(workerID string) error {
 	if !ok || worker.Status != pool.WorkerIdle {
 		return nil
 	}
+	if !s.pm.WorkerHealthy(workerID, s.reapTimeout) {
+		s.pm.MarkDeadIfStale(workerID, s.reapTimeout)
+		return nil
+	}
 
 	queued := s.pm.QueuedTasks()
 	sort.Slice(queued, func(i, j int) bool {
@@ -983,6 +1046,56 @@ func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 		}
 		if err := s.syncPlanExecution(planID); err != nil {
 			s.logf("startup sync %s: %v", planID, err)
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) runRecoverySuite() error {
+	if s == nil {
+		return nil
+	}
+	if err := s.recoverFailedTasksOnStartup(); err != nil {
+		return err
+	}
+	if err := s.replayDeferredTaskFailures(); err != nil {
+		return err
+	}
+	// One-shot reconciliation of plan execution state against the
+	// pool's task map. Catches plans left with stale activeTaskIDs
+	// because a completion handler errored out before syncPlanExecution
+	// ran (e.g. worktree cleanup blew up with EACCES after the ref
+	// advance had already succeeded).
+	if err := s.reconcilePlanExecutionOnStartup(); err != nil {
+		return err
+	}
+	if err := s.recoverOrphanedPlansOnStartup(); err != nil {
+		return err
+	}
+	if err := s.recoverCouncilPlansOnStartup(); err != nil {
+		return err
+	}
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		return err
+	}
+	s.recoverWaitingPlansOnStartup()
+	return nil
+}
+
+func (s *Scheduler) replayDeferredTaskFailures() error {
+	if s == nil || len(s.deferredTaskFailures) == 0 {
+		return nil
+	}
+	taskIDs := make([]string, 0, len(s.deferredTaskFailures))
+	for taskID := range s.deferredTaskFailures {
+		taskIDs = append(taskIDs, taskID)
+	}
+	sort.Strings(taskIDs)
+	for _, taskID := range taskIDs {
+		class := s.deferredTaskFailures[taskID]
+		delete(s.deferredTaskFailures, taskID)
+		if err := s.onTaskFailed(taskID, class); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1232,6 +1345,9 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	}
 	if allowed, handled := s.workerCanRunCouncilTask(worker, task); handled {
 		return allowed
+	}
+	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
+		return false
 	}
 	workerRole := strings.TrimSpace(worker.Role)
 	taskRole := strings.TrimSpace(task.Role)
