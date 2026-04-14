@@ -1818,14 +1818,18 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 		return paneBox(width, height, title+"\n\nSelected plan has no task list.")
 	}
 	innerWidth := max(20, width-6)
-	lines := make([]string, 0, len(m.tasks)*2)
-	for i, task := range m.tasks {
+	visibleLineBudget := max(1, height-1)
+	visibleItems := max(1, visibleLineBudget/2)
+	start, end := selectableItemWindow(len(m.tasks), m.selectedTask, visibleItems)
+	lines := make([]string, 0, (end-start)*2)
+	for i := start; i < end; i++ {
+		task := m.tasks[i]
 		marker := rowMarker(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks)
 		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 6), task.Title), innerWidth)
 		secondary := truncate("    "+task.ID+" · "+task.Kind, innerWidth)
 		lines = append(lines, renderSelectableRow(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks, primary, secondary)...)
 	}
-	return paneBox(width, height, title+"\n"+fitListLines(lines, height-1))
+	return paneBox(width, height, title+"\n"+fitListLines(lines, visibleLineBudget))
 }
 
 func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
@@ -3071,6 +3075,34 @@ func renderSelectableRow(selected bool, primary, secondary string) []string {
 		primary,
 		lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(secondary),
 	}
+}
+
+func selectableItemWindow(totalItems, selected, visibleItems int) (start, end int) {
+	if totalItems <= 0 {
+		return 0, 0
+	}
+	if visibleItems <= 0 || visibleItems >= totalItems {
+		return 0, totalItems
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= totalItems {
+		selected = totalItems - 1
+	}
+	start = selected - visibleItems + 1
+	if start < 0 {
+		start = 0
+	}
+	end = start + visibleItems
+	if end > totalItems {
+		end = totalItems
+		start = end - visibleItems
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start, end
 }
 
 func fitListLines(lines []string, height int) string {

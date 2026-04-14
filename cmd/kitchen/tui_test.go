@@ -2390,6 +2390,48 @@ func TestBuildTaskItemsPlacesLineageFixMergeTasksAfterReviewTimeline(t *testing.
 	}
 }
 
+func TestRenderTasksPaneUsesWholeTaskRows(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:     kitchenTUILeftTasks,
+		selectedTask: 0,
+		tasks: []kitchenTUITaskItem{
+			{ID: "council_plan_a_t1", Title: "Planner cycle 1", Kind: "planner", State: pool.TaskCompleted},
+			{ID: "council_plan_a_t2", Title: "Planner cycle 2", Kind: "planner", State: pool.TaskCompleted},
+			{ID: "plan_a-t1", Title: "Implementation task", Kind: "implementation", State: pool.TaskCompleted},
+			{ID: "review_council_plan_a_t1", Title: "Implementation review 1", Kind: "implementation-review", State: pool.TaskQueued},
+		},
+	}
+
+	rendered := ansi.Strip(model.renderTasksPane(80, 7))
+	if strings.Contains(rendered, "Implementation review 1") || strings.Contains(rendered, "review_council_plan_a_t1") {
+		t.Fatalf("rendered pane = %q, want clipped tasks omitted entirely instead of partial trailing row", rendered)
+	}
+	if !strings.Contains(rendered, "Implementation task") || !strings.Contains(rendered, "plan_a-t1") {
+		t.Fatalf("rendered pane = %q, want last fully visible task row preserved", rendered)
+	}
+}
+
+func TestRenderTasksPaneKeepsSelectedTaskVisible(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:     kitchenTUILeftTasks,
+		selectedTask: 3,
+		tasks: []kitchenTUITaskItem{
+			{ID: "council_plan_a_t1", Title: "Planner cycle 1", Kind: "planner", State: pool.TaskCompleted},
+			{ID: "council_plan_a_t2", Title: "Planner cycle 2", Kind: "planner", State: pool.TaskCompleted},
+			{ID: "plan_a-t1", Title: "Implementation task", Kind: "implementation", State: pool.TaskCompleted},
+			{ID: "review_council_plan_a_t1", Title: "Implementation review 1", Kind: "implementation-review", State: pool.TaskQueued},
+		},
+	}
+
+	rendered := ansi.Strip(model.renderTasksPane(80, 7))
+	if !strings.Contains(rendered, "Implementation review 1") || !strings.Contains(rendered, "review_council_plan_a_t1") {
+		t.Fatalf("rendered pane = %q, want selected trailing task visible", rendered)
+	}
+	if strings.Contains(rendered, "Planner cycle 1") {
+		t.Fatalf("rendered pane = %q, want window shifted to keep trailing selection visible", rendered)
+	}
+}
+
 // TestKitchenTUIRenderPlansPaneBadge verifies that plans with pending questions show a
 // [N?] badge and plans without questions do not.
 func TestKitchenTUIRenderPlansPaneBadge(t *testing.T) {
