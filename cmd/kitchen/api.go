@@ -21,6 +21,8 @@ const apiMaxBodyBytes = 1 << 20
 func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/ideas", k.withAPIAuth(token, k.handleSubmitIdea))
+	mux.HandleFunc("POST /v1/research", k.withAPIAuth(token, k.handleSubmitResearch))
+	mux.HandleFunc("POST /v1/plans/{id}/promote", k.withAPIAuth(token, k.handlePromoteResearch))
 	mux.HandleFunc("GET /v1/plans", k.withAPIAuth(token, k.handleListPlans))
 	mux.HandleFunc("GET /v1/plans/{id}", k.withAPIAuth(token, k.handleGetPlan))
 	mux.HandleFunc("GET /v1/plans/{id}/history", k.withAPIAuth(token, k.handlePlanHistory))
@@ -152,6 +154,48 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["councilMaxTurns"] = bundle.Execution.CouncilMaxTurns
 	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+func (k *Kitchen) handleSubmitResearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Topic string `json:"topic"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	bundle, err := k.SubmitResearch(req.Topic)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"planId": bundle.Plan.PlanID,
+		"state":  bundle.Execution.State,
+		"mode":   bundle.Plan.Mode,
+	})
+}
+
+func (k *Kitchen) handlePromoteResearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Lineage    string `json:"lineage"`
+		Auto       bool   `json:"auto"`
+		ImplReview bool   `json:"implReview"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	bundle, err := k.PromoteResearch(r.PathValue("id"), req.Lineage, req.Auto, req.ImplReview)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"planId":          bundle.Plan.PlanID,
+		"state":           bundle.Execution.State,
+		"lineage":         bundle.Plan.Lineage,
+		"researchPlanId":  bundle.Plan.ResearchPlanID,
+		"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
+	})
 }
 
 func (k *Kitchen) handleExtendCouncil(w http.ResponseWriter, r *http.Request) {

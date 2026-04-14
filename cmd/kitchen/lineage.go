@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 const activePlanLinkName = "active_plan"
@@ -96,6 +97,9 @@ func (lm *LineageManager) ActivePlan(lineage string) (string, error) {
 func (lm *LineageManager) ClearActivePlan(lineage, planID string) error {
 	if lm == nil {
 		return fmt.Errorf("lineage manager not configured")
+	}
+	if strings.TrimSpace(lineage) == "" {
+		return nil
 	}
 	currentPlan, err := lm.ActivePlan(lineage)
 	if err != nil {

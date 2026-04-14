@@ -251,7 +251,7 @@ func BuildPlannerPrompt(taskPrompt, priorContext string) string {
 	return b.String()
 }
 
-func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string) string {
+func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string, researchContext ...string) string {
 	var b strings.Builder
 	b.WriteString("## Planner Council Turn\n\n")
 	b.WriteString("You are one seat in a two-seat planner council. Produce a full candidate plan each turn, integrating any improvements over the prior seat's plan.\n\n")
@@ -273,6 +273,12 @@ func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat strin
 	if strings.TrimSpace(idea) != "" {
 		b.WriteString("### Idea\n\n")
 		b.WriteString(strings.TrimSpace(idea))
+		b.WriteString("\n\n")
+	}
+	if len(researchContext) > 0 && strings.TrimSpace(researchContext[0]) != "" {
+		b.WriteString("### Prior Research\n\n")
+		b.WriteString("The following research was conducted before this planning session. Use it to inform your plan.\n\n")
+		b.WriteString(strings.TrimSpace(researchContext[0]))
 		b.WriteString("\n\n")
 	}
 	if len(prior) > 0 {

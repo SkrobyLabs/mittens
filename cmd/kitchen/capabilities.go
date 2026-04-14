@@ -46,6 +46,26 @@ func kitchenCapabilities() map[string]any {
 	return map[string]any{
 		"meta": kitchenCapabilityMetadata(),
 		"cli": map[string]any{
+			"research": map[string]any{
+				"inputs": []string{"inline", "file", "stdin"},
+				"description": "Submit a read-only research task that bypasses the planning council",
+			},
+			"promote": map[string]any{
+				"description": "Promote completed research into an implementation plan with research context injected into the council prompt",
+				"options": map[string]any{
+					"lineage": map[string]any{
+						"type": "string",
+					},
+					"auto": map[string]any{
+						"type":    "bool",
+						"default": false,
+					},
+					"implReview": map[string]any{
+						"type":    "bool",
+						"default": false,
+					},
+				},
+			},
 			"submit": map[string]any{
 				"inputs": []string{"inline", "file", "stdin", "editor"},
 				"options": map[string]any{
@@ -147,6 +167,8 @@ func kitchenCapabilities() map[string]any {
 			},
 			"endpoints": map[string]any{
 				"ideas":          "/v1/ideas",
+				"research":       "/v1/research",
+				"promote":        "/v1/plans/{id}/promote",
 				"plans":          "/v1/plans",
 				"planDelete":     "/v1/plans/{id}/purge",
 				"planHistory":    "/v1/plans/{id}/history",
@@ -194,6 +216,7 @@ func kitchenCapabilities() map[string]any {
 			"workerDrivenReview":        true,
 			"automaticReviewRefinement": true,
 			"plannerQuestions":          true,
+			"researchMode":              true,
 			"reviewCouncil": map[string]any{
 				"name":        "review_council",
 				"description": "Two-seat review council for plan-level implementation reviews, converges on verdict agreement",
@@ -203,7 +226,7 @@ func kitchenCapabilities() map[string]any {
 				},
 			},
 			"historyPersistence": true,
-			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "waiting_on_dependency", "active", "planning_failed", "implementation_review_failed", "completed", "merged", "closed", "rejected"},
+			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "waiting_on_dependency", "active", "planning_failed", "implementation_review_failed", "completed", "merged", "closed", "rejected", "research_complete"},
 		},
 		"git": map[string]any{
 			"lineageMerge":      true,

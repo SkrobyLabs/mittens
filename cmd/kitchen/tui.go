@@ -30,6 +30,8 @@ type kitchenTUIBackend interface {
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
 	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error)
+	SubmitResearch(topic string) (string, error)
+	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
 	ExtendCouncil(planID string, turns int) error
 	RequestReview(planID string) error
 	ApprovePlan(planID string) error
@@ -94,6 +96,28 @@ func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef s
 		return "", fmt.Errorf("submit response missing planId")
 	}
 	return planID, nil
+}
+func (b *kitchenAPIBackend) SubmitResearch(topic string) (string, error) {
+	resp, err := b.client.SubmitResearch(topic)
+	if err != nil {
+		return "", err
+	}
+	planID, _ := resp["planId"].(string)
+	if strings.TrimSpace(planID) == "" {
+		return "", fmt.Errorf("submit response missing planId")
+	}
+	return planID, nil
+}
+func (b *kitchenAPIBackend) PromoteResearch(planID, lineage string, auto, implReview bool) (string, error) {
+	resp, err := b.client.PromoteResearch(planID, lineage, auto, implReview)
+	if err != nil {
+		return "", err
+	}
+	newPlanID, _ := resp["planId"].(string)
+	if strings.TrimSpace(newPlanID) == "" {
+		return "", fmt.Errorf("promote response missing planId")
+	}
+	return newPlanID, nil
 }
 func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
 	_, err := b.client.ExtendCouncil(planID, turns)
@@ -269,6 +293,32 @@ func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef
 		return nil
 	})
 	return planID, err
+}
+
+func (b *kitchenLocalBackend) SubmitResearch(topic string) (string, error) {
+	var planID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		bundle, err := k.SubmitResearch(topic)
+		if err != nil {
+			return err
+		}
+		planID = bundle.Plan.PlanID
+		return nil
+	})
+	return planID, err
+}
+
+func (b *kitchenLocalBackend) PromoteResearch(planID, lineage string, auto, implReview bool) (string, error) {
+	var newPlanID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		bundle, err := k.PromoteResearch(planID, lineage, auto, implReview)
+		if err != nil {
+			return err
+		}
+		newPlanID = bundle.Plan.PlanID
+		return nil
+	})
+	return newPlanID, err
 }
 
 func (b *kitchenLocalBackend) ExtendCouncil(planID string, turns int) error {
@@ -450,6 +500,7 @@ type kitchenTUITaskPaneMode string
 const (
 	kitchenTUIInputNone      kitchenTUIInputMode = ""
 	kitchenTUIInputSubmit    kitchenTUIInputMode = "submit"
+	kitchenTUIInputPromote   kitchenTUIInputMode = "promote"
 	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
 	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
 	kitchenTUIInputMergeMenu kitchenTUIInputMode = "merge-menu"
@@ -510,9 +561,11 @@ type kitchenTUIModel struct {
 	input             textinput.Model
 	inputMode         kitchenTUIInputMode
 	submitImplReview  bool
+	submitResearch    bool
 	submitDependsOn   []string
 	submitSelecting   bool
 	submitPrevLeft    kitchenTUILeftMode
+	promotePlanID     string
 	flash             string
 	flashUntil        time.Time
 	errText           string
@@ -903,6 +956,19 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openInput(kitchenTUIInputReplan, "Replan reason", "Need a narrower retry")
 			}
 			return m, nil
+		case "P":
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				if !m.canPromoteSelectedPlan() {
+					m.flash = "selected plan cannot be promoted"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				m.openPromoteInput(plan.Record.PlanID)
+			}
+			return m, nil
 		case "v":
 			if m.leftMode != kitchenTUILeftPlans {
 				return m, nil
@@ -1082,13 +1148,19 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.closeInput()
 		return m, nil
-	case "tab":
+	case "ctrl+r":
 		if m.inputMode == kitchenTUIInputSubmit {
+			m.submitResearch = !m.submitResearch
+			m.refreshSubmitInputPresentation()
+			return m, nil
+		}
+	case "tab":
+		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.submitImplReview = !m.submitImplReview
 			return m, nil
 		}
 	case "D":
-		if m.inputMode == kitchenTUIInputSubmit {
+		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.beginSubmitDependencySelection()
 			return m, nil
 		}
@@ -1096,6 +1168,20 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		value := strings.TrimSpace(m.input.Value())
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
+			if m.submitResearch {
+				if value == "" {
+					m.errText = "research topic must not be empty"
+					return m, nil
+				}
+				m.closeInput()
+				return m, m.actionCmd(func() (string, string, error) {
+					planID, err := m.backend.SubmitResearch(value)
+					if err != nil {
+						return "", "", err
+					}
+					return "submitted research " + planID, planID, nil
+				})
+			}
 			idea, anchorRef, err := parseSubmitInput(value)
 			if err != nil {
 				m.errText = err.Error()
@@ -1114,6 +1200,26 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					status += " with impl review"
 				}
 				return status, planID, nil
+			})
+		case kitchenTUIInputPromote:
+			planID := strings.TrimSpace(m.promotePlanID)
+			if planID == "" {
+				if plan := m.selectedPlanItem(); plan != nil {
+					planID = strings.TrimSpace(plan.Record.PlanID)
+				}
+			}
+			if planID == "" {
+				m.closeInput()
+				return m, nil
+			}
+			lineage := value
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				newPlanID, err := m.backend.PromoteResearch(planID, lineage, false, false)
+				if err != nil {
+					return "", "", err
+				}
+				return "promoted as " + newPlanID, newPlanID, nil
 			})
 		case kitchenTUIInputReplan:
 			plan := m.selectedPlanItem()
@@ -1216,14 +1322,17 @@ func (m *kitchenTUIModel) openInput(mode kitchenTUIInputMode, prompt, placeholde
 
 func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitImplReview = true
+	m.submitResearch = false
 	m.submitDependsOn = nil
 	m.submitSelecting = false
 	m.submitPrevLeft = m.leftMode
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
-	if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
-		m.input.SetValue("[ref=" + ref + "] ")
-		m.input.CursorEnd()
-	}
+	m.refreshSubmitInputPresentation()
+}
+
+func (m *kitchenTUIModel) openPromoteInput(planID string) {
+	m.promotePlanID = strings.TrimSpace(planID)
+	m.openInput(kitchenTUIInputPromote, "Promote research", "Optional lineage")
 }
 
 func (m *kitchenTUIModel) closeInput() {
@@ -1233,12 +1342,14 @@ func (m *kitchenTUIModel) closeInput() {
 	}
 	m.inputMode = kitchenTUIInputNone
 	m.submitImplReview = false
+	m.submitResearch = false
+	m.promotePlanID = ""
 	m.input.Blur()
 	m.input.SetValue("")
 }
 
 func (m *kitchenTUIModel) beginSubmitDependencySelection() {
-	if m == nil || m.inputMode != kitchenTUIInputSubmit {
+	if m == nil || m.inputMode != kitchenTUIInputSubmit || m.submitResearch {
 		return
 	}
 	m.submitPrevLeft = m.leftMode
@@ -1257,6 +1368,29 @@ func (m *kitchenTUIModel) finishSubmitDependencySelection() {
 	if m.submitPrevLeft != "" {
 		m.leftMode = m.submitPrevLeft
 	}
+	m.input.Focus()
+}
+
+func (m *kitchenTUIModel) refreshSubmitInputPresentation() {
+	if m == nil || m.inputMode != kitchenTUIInputSubmit {
+		return
+	}
+	if m.submitResearch {
+		m.input.Prompt = "Submit research: "
+		m.input.Placeholder = "How does OAuth callback forwarding work end to end?"
+		m.input.SetValue(stripSubmitAnchorPrefix(m.input.Value()))
+		m.input.CursorEnd()
+		m.input.Focus()
+		return
+	}
+	m.input.Prompt = "Submit idea: "
+	m.input.Placeholder = "Add typed parser errors"
+	if strings.TrimSpace(m.input.Value()) == "" {
+		if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
+			m.input.SetValue("[ref=" + ref + "] ")
+		}
+	}
+	m.input.CursorEnd()
 	m.input.Focus()
 }
 
@@ -1518,6 +1652,14 @@ func (m kitchenTUIModel) canMergeSelectedPlan() bool {
 	return planDisplayState(*plan) == planStateCompleted
 }
 
+func (m kitchenTUIModel) canPromoteSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil {
+		return false
+	}
+	return strings.TrimSpace(plan.Record.Mode) == "research" && planDisplayState(*plan) == planStateResearchComplete
+}
+
 func (m kitchenTUIModel) nextPlanSelectionAfterDeletion() string {
 	if len(m.plans) <= 1 {
 		return ""
@@ -1538,12 +1680,24 @@ func (m kitchenTUIModel) footerActions() []string {
 			if m.submitSelecting {
 				return []string{"↑/↓ choose plan", "enter toggle dep", "D done", "esc done", "ctrl+c quit"}
 			}
-			mode := "off"
+			submitMode := "idea"
+			if m.submitResearch {
+				submitMode = "research"
+			}
+			actions := []string{"enter submit", "ctrl+r mode:" + submitMode}
+			if m.submitResearch {
+				actions = append(actions, "esc cancel", "ctrl+c quit")
+				return actions
+			}
+			implReviewMode := "off"
 			if m.submitImplReview {
-				mode = "on"
+				implReviewMode = "on"
 			}
 			deps := fmt.Sprintf("%d", len(m.submitDependsOn))
-			return []string{"enter submit", "tab impl-review:" + mode, "D deps:" + deps, "esc cancel", "ctrl+c quit"}
+			actions = append(actions, "tab impl-review:"+implReviewMode, "D deps:"+deps, "esc cancel", "ctrl+c quit")
+			return actions
+		case kitchenTUIInputPromote:
+			return []string{"enter promote", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputAnswer:
@@ -1590,6 +1744,9 @@ func (m kitchenTUIModel) footerActions() []string {
 		if m.selectedPlanItem() != nil {
 			actions = append(actions, "p replan")
 			actions = append(actions, "D delete")
+			if m.canPromoteSelectedPlan() {
+				actions = append(actions, "P promote")
+			}
 			if m.canMergeSelectedPlan() {
 				actions = append(actions, "M merge-menu")
 			}
@@ -2110,6 +2267,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 	lines := []string{
 		lipgloss.NewStyle().Bold(true).Render(detail.Plan.Title),
 		fmt.Sprintf("Plan ID: %s", detail.Plan.PlanID),
+		fmt.Sprintf("Mode: %s", firstNonEmpty(detail.Plan.Mode, "implementation")),
 		fmt.Sprintf("State: %s", state),
 		fmt.Sprintf("Phase: %s", detail.Progress.Phase),
 		fmt.Sprintf("Lineage: %s", detail.Plan.Lineage),
@@ -2126,6 +2284,13 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		fmt.Sprintf("Completed tasks: %s", joinOrDash(detail.Progress.CompletedTaskIDs)),
 		fmt.Sprintf("Failed tasks: %s", joinOrDash(detail.Progress.FailedTaskIDs)),
 	)
+	if strings.TrimSpace(detail.Plan.ResearchPlanID) != "" {
+		lines = append(lines, fmt.Sprintf("Research source: %s", detail.Plan.ResearchPlanID))
+	}
+	if strings.TrimSpace(detail.Execution.ResearchOutput) != "" {
+		lines = append(lines, "", "Research output:")
+		lines = append(lines, wrapText(detail.Execution.ResearchOutput, innerWidth)...)
+	}
 	if len(detail.Progress.DependsOn) > 0 {
 		lines = append(lines, fmt.Sprintf("Depends on: %s", strings.Join(detail.Progress.DependsOn, ", ")))
 	}
@@ -2541,15 +2706,19 @@ func (m kitchenTUIModel) renderInputBar() string {
 	switch m.inputMode {
 	case kitchenTUIInputSubmit:
 		label = "Submit"
-		if m.submitImplReview {
+		if m.submitResearch {
+			label += " · research"
+		} else if m.submitImplReview {
 			label += " · impl review on"
 		}
-		if len(m.submitDependsOn) > 0 {
+		if !m.submitResearch && len(m.submitDependsOn) > 0 {
 			label += fmt.Sprintf(" · deps %d", len(m.submitDependsOn))
 		}
-		if m.submitSelecting {
+		if !m.submitResearch && m.submitSelecting {
 			label += " · selecting dependencies"
 		}
+	case kitchenTUIInputPromote:
+		label = "Promote research"
 	case kitchenTUIInputReplan:
 		label = "Replan"
 	case kitchenTUIInputAnswer:
@@ -2557,7 +2726,7 @@ func (m kitchenTUIModel) renderInputBar() string {
 	}
 	body := m.input.View()
 	height := 3
-	if m.inputMode == kitchenTUIInputSubmit {
+	if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 		depsLine := "Depends on: -"
 		if len(m.submitDependsOn) > 0 {
 			depsLine = "Depends on: " + strings.Join(m.submitDependsOn, ", ")
@@ -2637,6 +2806,9 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	taskSummaryByID := make(map[string]pool.TaskSummary, len(snapshot.Queue.Tasks))
 	for _, task := range snapshot.Queue.Tasks {
 		taskSummaryByID[task.ID] = task
+	}
+	if strings.TrimSpace(detail.Plan.Mode) == "research" {
+		return []kitchenTUITaskItem{buildResearchTaskItem(*detail, taskSummaryByID)}
 	}
 
 	var items []kitchenTUITaskItem
@@ -2864,6 +3036,26 @@ func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, ta
 		Prompt:      task.Prompt,
 		Summary:     summarizeTaskHistory(detail.History, runtimeID),
 		HasConflict: summary.HasConflict,
+	}
+}
+
+func buildResearchTaskItem(detail PlanDetail, taskSummaryByID map[string]pool.TaskSummary) kitchenTUITaskItem {
+	runtimeID := "research_" + detail.Plan.PlanID
+	summary := taskSummaryByID[runtimeID]
+	state := string(planProgressTaskState(detail.Execution, runtimeID, nil))
+	if strings.TrimSpace(summary.Status) != "" {
+		state = summary.Status
+	}
+	return kitchenTUITaskItem{
+		ID:        runtimeID,
+		RuntimeID: runtimeID,
+		RowKey:    runtimeID,
+		Kind:      "research",
+		Title:     firstNonEmpty(strings.TrimSpace(detail.Plan.Title), "Research"),
+		State:     state,
+		WorkerID:  summary.WorkerID,
+		Prompt:    strings.TrimSpace(detail.Plan.Summary),
+		Summary:   strings.TrimSpace(detail.Execution.ResearchOutput),
 	}
 }
 
@@ -3444,4 +3636,18 @@ func parseSubmitInput(value string) (idea, anchorRef string, err error) {
 		return "", "", fmt.Errorf("idea must not be empty")
 	}
 	return value, anchorRef, nil
+}
+
+func stripSubmitAnchorPrefix(value string) string {
+	value = strings.TrimSpace(value)
+	idea, _, err := parseSubmitInput(value)
+	if err == nil {
+		return idea
+	}
+	if strings.HasPrefix(value, "[ref=") {
+		if end := strings.Index(value, "]"); end >= 0 {
+			return strings.TrimSpace(value[end+1:])
+		}
+	}
+	return value
 }

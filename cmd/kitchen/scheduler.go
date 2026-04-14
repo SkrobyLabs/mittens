@@ -469,6 +469,9 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	if !ok || task.PlanID == "" {
 		return nil
 	}
+	if task.Role == researcherTaskRole {
+		return s.onResearchTaskCompleted(*task)
+	}
 	if task.Role == plannerTaskRole {
 		return s.onCouncilTurnCompleted(*task)
 	}
@@ -513,6 +516,63 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	// of inheriting a stale cwd and the previous child branch.
 	s.killWorkerForDiscardedWorktree(task.WorkerID, taskID)
 	return s.syncPlanExecution(task.PlanID)
+}
+
+func (s *Scheduler) onResearchTaskCompleted(task pool.Task) error {
+	if s.plans == nil {
+		return nil
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+
+	var researchOutput string
+	if task.Result != nil && strings.TrimSpace(task.Result.Summary) != "" {
+		researchOutput = task.Result.Summary
+	}
+
+	now := time.Now().UTC()
+	bundle.Execution.ResearchOutput = researchOutput
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedTaskIDs = []string{task.ID}
+	bundle.Execution.State = planStateResearchComplete
+	bundle.Execution.CompletedAt = &now
+	bundle.Plan.State = planStateResearchComplete
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "research_complete", ID: task.PlanID})
+	}
+	return nil
+}
+
+func (s *Scheduler) onResearchTaskFailed(task pool.Task) error {
+	if s.plans == nil {
+		return nil
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.FailedTaskIDs = []string{task.ID}
+	bundle.Execution.State = planStatePlanningFailed
+	bundle.Plan.State = planStatePlanningFailed
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "research_failed", ID: task.PlanID})
+	}
+	return nil
 }
 
 func (s *Scheduler) onLineageFixMergeCompleted(task pool.Task) error {
@@ -643,6 +703,9 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 	}
 	if task.Status != pool.TaskFailed {
 		return nil
+	}
+	if task.Role == researcherTaskRole {
+		return s.onResearchTaskFailed(*task)
 	}
 	if task.Role == plannerTaskRole {
 		return s.onCouncilTurnFailed(*task, class)

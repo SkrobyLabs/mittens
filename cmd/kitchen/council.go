@@ -215,7 +215,7 @@ func buildCouncilTurnPrompt(bundle StoredPlan, turn int) (string, error) {
 	if idea == "" {
 		idea = strings.TrimSpace(bundle.Plan.Title)
 	}
-	return adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary), nil
+	return adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary, bundle.Plan.ResearchContext), nil
 }
 
 func marshalCouncilTurns(turns []CouncilTurnRecord) string {

@@ -23,9 +23,15 @@ type fakeKitchenTUIBackend struct {
 	questions                 []pool.Question
 	submitPlanID              string
 	submittedIdea             string
+	submittedResearchTopic    string
 	submittedImplReview       bool
 	submittedAnchorRef        string
 	submittedDependsOn        []string
+	promotedResearchPlanID    string
+	promotedLineage           string
+	promotedAuto              bool
+	promotedImplReview        bool
+	promotePlanID             string
 	requestedReviewPlanID     string
 	requestReviewCalls        int
 	retriedTaskID             string
@@ -85,6 +91,23 @@ func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorR
 		return "plan_submitted", nil
 	}
 	return b.submitPlanID, nil
+}
+func (b *fakeKitchenTUIBackend) SubmitResearch(topic string) (string, error) {
+	b.submittedResearchTopic = topic
+	if strings.TrimSpace(b.submitPlanID) == "" {
+		return "plan_research", nil
+	}
+	return b.submitPlanID, nil
+}
+func (b *fakeKitchenTUIBackend) PromoteResearch(planID, lineage string, auto, implReview bool) (string, error) {
+	b.promotedResearchPlanID = planID
+	b.promotedLineage = lineage
+	b.promotedAuto = auto
+	b.promotedImplReview = implReview
+	if strings.TrimSpace(b.promotePlanID) == "" {
+		return "plan_promoted", nil
+	}
+	return b.promotePlanID, nil
 }
 func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { return nil }
 func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
@@ -481,6 +504,62 @@ func TestKitchenTUIOpenSubmitInputPrefillsCurrentAnchorRef(t *testing.T) {
 	}
 }
 
+func TestKitchenTUISubmitModeToggleSwitchesToResearch(t *testing.T) {
+	repo := initGitRepo(t)
+	model := kitchenTUIModel{
+		repoPath: repo,
+		input:    textinput.New(),
+	}
+
+	model.openSubmitInput()
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	got := updated.(kitchenTUIModel)
+
+	if !got.submitResearch {
+		t.Fatal("submitResearch = false, want true after mode toggle")
+	}
+	if got.input.Prompt != "Submit research: " {
+		t.Fatalf("prompt = %q, want research prompt", got.input.Prompt)
+	}
+	if strings.Contains(got.input.Value(), "[ref=") {
+		t.Fatalf("submit input value = %q, want anchor prefix stripped in research mode", got.input.Value())
+	}
+}
+
+func TestKitchenTUISubmitResearchCallsBackend(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{submitPlanID: "plan_research_new"}
+	model := kitchenTUIModel{
+		backend:        backend,
+		inputMode:      kitchenTUIInputSubmit,
+		submitResearch: true,
+	}
+	model.input = textInputWithValue("How does OAuth callback forwarding work?")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.submittedResearchTopic != "How does OAuth callback forwarding work?" {
+		t.Fatalf("submittedResearchTopic = %q, want research topic", backend.submittedResearchTopic)
+	}
+	if action.selectedPlanID != "plan_research_new" {
+		t.Fatalf("selectedPlanID = %q, want plan_research_new", action.selectedPlanID)
+	}
+}
+
 func TestRenderCouncilTurnDiffLines(t *testing.T) {
 	prev := &adapter.PlanArtifact{
 		Title: "Parser cleanup",
@@ -716,6 +795,39 @@ func TestRenderPlanDetailLinesShowsBlockingPlanDependencies(t *testing.T) {
 	joined := strings.Join(model.renderPlanDetailLines(80), "\n")
 	if !strings.Contains(joined, "Depends on: plan_alpha, plan_beta") {
 		t.Fatalf("detail output missing dependency list:\n%s", joined)
+	}
+}
+
+func TestRenderPlanDetailLinesShowsResearchMetadata(t *testing.T) {
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID:  "plan_research",
+			Title:   "Research OAuth callbacks",
+			Summary: "Investigate callback forwarding.",
+			Mode:    "research",
+			State:   planStateResearchComplete,
+		},
+		Execution: ExecutionRecord{
+			State:          planStateResearchComplete,
+			ResearchOutput: "The callback is intercepted by the broker and forwarded to the initiating container.",
+		},
+		Progress: PlanProgress{
+			PlanID: "plan_research",
+			Phase:  planStateResearchComplete,
+		},
+	}
+	model := kitchenTUIModel{detail: detail}
+
+	joined := strings.Join(model.renderPlanDetailLines(80), "\n")
+	for _, want := range []string{
+		"Mode: research",
+		"Research output:",
+		"forwarded to the initiating",
+		"container.",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("detail output missing %q:\n%s", want, joined)
+		}
 	}
 }
 
@@ -1178,6 +1290,82 @@ func TestKitchenTUIFooterShowsPlanActionsOnlyWhenActionable(t *testing.T) {
 	}
 	if strings.Contains(footer, "R retry") || strings.Contains(footer, "M merge") {
 		t.Fatalf("footer = %q, did not expect unavailable actions", footer)
+	}
+}
+
+func TestKitchenTUIFooterShowsPromoteForCompletedResearchPlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateResearchComplete},
+				Progress: &PlanProgress{State: planStateResearchComplete},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "P promote") {
+		t.Fatalf("footer = %q, want promote action for completed research", footer)
+	}
+}
+
+func TestKitchenTUIPromoteKeyOpensPromoteInput(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateResearchComplete},
+				Progress: &PlanProgress{State: planStateResearchComplete},
+			},
+		},
+		input: textinput.New(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputPromote {
+		t.Fatalf("inputMode = %q, want promote", got.inputMode)
+	}
+	if got.promotePlanID != "plan_research" {
+		t.Fatalf("promotePlanID = %q, want plan_research", got.promotePlanID)
+	}
+}
+
+func TestKitchenTUIPromoteResearchCallsBackend(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{promotePlanID: "plan_promoted_new"}
+	model := kitchenTUIModel{
+		backend:       backend,
+		inputMode:     kitchenTUIInputPromote,
+		promotePlanID: "plan_research",
+	}
+	model.input = textInputWithValue("oauth-direct-forward")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected promote command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if backend.promotedResearchPlanID != "plan_research" {
+		t.Fatalf("promotedResearchPlanID = %q, want plan_research", backend.promotedResearchPlanID)
+	}
+	if backend.promotedLineage != "oauth-direct-forward" {
+		t.Fatalf("promotedLineage = %q, want oauth-direct-forward", backend.promotedLineage)
+	}
+	if action.selectedPlanID != "plan_promoted_new" {
+		t.Fatalf("selectedPlanID = %q, want promoted plan id", action.selectedPlanID)
 	}
 }
 
@@ -2426,6 +2614,50 @@ func TestBuildTaskItemsPlacesLineageFixMergeTasksAfterReviewTimeline(t *testing.
 	}
 	if items[len(items)-1].Kind != "implementation" || items[len(items)-1].ID != fixTaskID {
 		t.Fatalf("last item = %+v, want trailing lineage fix-merge task", items[len(items)-1])
+	}
+}
+
+func TestBuildTaskItemsShowsResearchTaskWithoutPlannerCycle(t *testing.T) {
+	planID := "plan_research_task_items"
+	researchTaskID := "research_" + planID
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Mode:    "research",
+			Title:   "Direct OAuth callback forwarding",
+			Summary: "Investigate the OAuth callback flow",
+		},
+		Execution: ExecutionRecord{
+			State:         planStateActive,
+			ActiveTaskIDs: []string{researchTaskID},
+		},
+	}
+	snapshot := tuiStatusSnapshot{
+		Queue: struct {
+			AliveWorkers     int                `json:"aliveWorkers"`
+			MaxWorkers       int                `json:"maxWorkers"`
+			PendingQuestions int                `json:"pendingQuestions"`
+			Tasks            []pool.TaskSummary `json:"tasks"`
+		}{
+			Tasks: []pool.TaskSummary{{
+				ID:     researchTaskID,
+				Status: pool.TaskQueued,
+			}},
+		},
+	}
+
+	items := buildTaskItems(detail, snapshot)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one research task", items)
+	}
+	if items[0].Kind != "research" {
+		t.Fatalf("kind = %q, want research", items[0].Kind)
+	}
+	if items[0].RuntimeID != researchTaskID {
+		t.Fatalf("runtimeID = %q, want %q", items[0].RuntimeID, researchTaskID)
+	}
+	if items[0].Title != "Direct OAuth callback forwarding" {
+		t.Fatalf("title = %q, want plan title", items[0].Title)
 	}
 }
 

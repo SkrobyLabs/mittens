@@ -67,24 +67,28 @@ type PlanTask struct {
 }
 
 type PlanRecord struct {
-	PlanID    string        `json:"planId"`
-	PlannerID string        `json:"plannerId,omitempty"`
-	Source    string        `json:"source,omitempty"`
-	Anchor    PlanAnchor    `json:"anchor,omitempty"`
-	Lineage   string        `json:"lineage"`
-	Title     string        `json:"title"`
-	Summary   string        `json:"summary,omitempty"`
-	Ownership PlanOwnership `json:"ownership,omitempty"`
-	Tasks     []PlanTask    `json:"tasks,omitempty"`
-	DependsOn []string      `json:"dependsOn,omitempty"`
-	State     string        `json:"state,omitempty"`
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
+	PlanID          string        `json:"planId"`
+	PlannerID       string        `json:"plannerId,omitempty"`
+	Source          string        `json:"source,omitempty"`
+	Mode            string        `json:"mode,omitempty"`
+	Anchor          PlanAnchor    `json:"anchor,omitempty"`
+	Lineage         string        `json:"lineage"`
+	Title           string        `json:"title"`
+	Summary         string        `json:"summary,omitempty"`
+	Ownership       PlanOwnership `json:"ownership,omitempty"`
+	Tasks           []PlanTask    `json:"tasks,omitempty"`
+	DependsOn       []string      `json:"dependsOn,omitempty"`
+	State           string        `json:"state,omitempty"`
+	ResearchPlanID  string        `json:"researchPlanId,omitempty"`
+	ResearchContext string        `json:"researchContext,omitempty"`
+	CreatedAt       time.Time     `json:"createdAt"`
+	UpdatedAt       time.Time     `json:"updatedAt"`
 }
 
 type ExecutionRecord struct {
 	PlanID                               string                        `json:"planId"`
 	State                                string                        `json:"state"`
+	ResearchOutput                       string                        `json:"researchOutput,omitempty"`
 	AutoApproved                         bool                          `json:"autoApproved,omitempty"`
 	Approved                             bool                          `json:"approved,omitempty"`
 	History                              []PlanHistoryEntry            `json:"history,omitempty"`
@@ -218,8 +222,10 @@ func (ps *PlanStore) Create(bundle StoredPlan) (string, error) {
 	if err := validatePathComponent("plan ID", plan.PlanID); err != nil {
 		return "", err
 	}
-	if err := validatePathComponent("lineage", plan.Lineage); err != nil {
-		return "", err
+	if plan.Lineage != "" {
+		if err := validatePathComponent("lineage", plan.Lineage); err != nil {
+			return "", err
+		}
 	}
 	if strings.TrimSpace(plan.Title) == "" {
 		return "", fmt.Errorf("plan title must not be empty")

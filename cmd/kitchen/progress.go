@@ -281,8 +281,11 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 		}
 	}
 
-	cycleCount := max(1, bundle.Execution.CouncilTurnsCompleted)
-	if bundle.Execution.State == planStatePlanning || bundle.Execution.State == planStateReviewing {
+	cycleCount := maxObservedCouncilTurn(bundle, tasks)
+	if hasCouncilState(bundle.Execution) && cycleCount == 0 {
+		cycleCount = 1
+	}
+	if cycleCount > 0 && (bundle.Execution.State == planStatePlanning || bundle.Execution.State == planStateReviewing) {
 		nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
 		if nextTurn > cycleCount && nextTurn <= bundle.Execution.CouncilMaxTurns {
 			cycleCount = nextTurn
@@ -317,6 +320,37 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 	}
 
 	return cycles
+}
+
+func maxObservedCouncilTurn(bundle StoredPlan, tasks map[string]poolTaskState) int {
+	planID := strings.TrimSpace(bundle.Plan.PlanID)
+	maxTurn := bundle.Execution.CouncilTurnsCompleted
+	for taskID := range tasks {
+		if turn := councilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.ActiveTaskIDs {
+		if turn := councilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.CompletedTaskIDs {
+		if turn := councilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, taskID := range bundle.Execution.FailedTaskIDs {
+		if turn := councilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	for _, entry := range bundle.Execution.History {
+		if turn := councilTurnNumberFromTaskID(planID, entry.TaskID); turn > maxTurn {
+			maxTurn = turn
+		}
+	}
+	return maxTurn
 }
 
 func maxObservedReviewCouncilTurn(bundle StoredPlan, tasks map[string]poolTaskState) int {

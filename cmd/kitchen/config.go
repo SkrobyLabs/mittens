@@ -143,6 +143,7 @@ func configurableKitchenRoles() []string {
 		"implementer",
 		"reviewer",
 		lineageFixMergeRole,
+		researcherTaskRole,
 	}
 }
 

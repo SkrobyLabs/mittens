@@ -24,6 +24,7 @@ const (
 	planStateMerged                     = "merged"
 	planStateClosed                     = "closed"
 	planStateRejected                   = "rejected"
+	planStateResearchComplete           = "research_complete"
 	planStateWaitingOnDependency        = "waiting_on_dependency"
 
 	planReviewStatusPassed = "passed"
@@ -123,6 +124,118 @@ func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implRevie
 	}
 	k.sendNotify(pool.Notification{Type: "plan_submitted", ID: planID, Message: plan.Title})
 	return &bundle, nil
+}
+
+func (k *Kitchen) SubmitResearch(topic string) (*StoredPlan, error) {
+	if k == nil || k.planStore == nil {
+		return nil, fmt.Errorf("kitchen plan store not configured")
+	}
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return nil, fmt.Errorf("research topic must not be empty")
+	}
+
+	title := derivePlanTitle(topic)
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		return nil, err
+	}
+	planID := generatePlanID(title)
+	researchTaskID := "research_" + planID
+
+	plan := PlanRecord{
+		PlanID:  planID,
+		Source:  "operator",
+		Mode:    "research",
+		Anchor:  anchor,
+		Title:   title,
+		Summary: topic,
+		State:   planStateActive,
+	}
+
+	execution := ExecutionRecord{
+		State:         planStateActive,
+		ActiveTaskIDs: []string{researchTaskID},
+		Anchor:        anchor,
+	}
+
+	if _, err = k.planStore.Create(StoredPlan{
+		Plan:      plan,
+		Execution: execution,
+	}); err != nil {
+		return nil, err
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+
+	prompt := buildResearchPrompt(topic)
+
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         researchTaskID,
+		PlanID:     planID,
+		Prompt:     prompt,
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       researcherTaskRole,
+	}); err != nil {
+		return nil, err
+	}
+	k.sendNotify(pool.Notification{Type: "research_submitted", ID: planID, Message: plan.Title})
+	return &bundle, nil
+}
+
+func buildResearchPrompt(topic string) string {
+	return "## Research Task\n\n" +
+		"You are a researcher. Investigate the following topic in this codebase. You are in READ-ONLY mode — do NOT modify any files, do NOT create files, do NOT commit changes.\n\n" +
+		"### Topic\n\n" +
+		topic + "\n\n" +
+		"### Instructions\n\n" +
+		"- Explore the codebase thoroughly to understand the topic\n" +
+		"- Identify relevant files, patterns, dependencies, and constraints\n" +
+		"- Note any risks, edge cases, or architectural considerations\n" +
+		"- Produce a structured research report\n\n" +
+		"When you are done, output your findings in a <research> tag block.\n"
+}
+
+func (k *Kitchen) PromoteResearch(researchPlanID string, lineage string, auto bool, implReview bool) (*StoredPlan, error) {
+	if k == nil || k.planStore == nil {
+		return nil, fmt.Errorf("kitchen plan store not configured")
+	}
+
+	researchBundle, err := k.planStore.Get(researchPlanID)
+	if err != nil {
+		return nil, fmt.Errorf("research plan not found: %w", err)
+	}
+	if researchBundle.Plan.Mode != "research" {
+		return nil, fmt.Errorf("plan %s is not a research plan", researchPlanID)
+	}
+	if researchBundle.Execution.State != planStateResearchComplete {
+		return nil, fmt.Errorf("research plan %s is not in research_complete state (current: %s)", researchPlanID, researchBundle.Execution.State)
+	}
+
+	researchOutput := strings.TrimSpace(researchBundle.Execution.ResearchOutput)
+	idea := researchBundle.Plan.Summary
+	if researchOutput != "" {
+		idea += "\n\n---\n\nPrior research findings are attached and should inform the planning process."
+	}
+
+	bundle, err := k.SubmitIdea(idea, lineage, auto, implReview)
+	if err != nil {
+		return nil, err
+	}
+
+	bundle.Plan.ResearchPlanID = researchPlanID
+	bundle.Plan.ResearchContext = researchOutput
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return nil, err
+	}
+	updated, err := k.planStore.Get(bundle.Plan.PlanID)
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 func (k *Kitchen) ValidatePlan(plan PlanRecord) error {
@@ -1583,6 +1696,7 @@ func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanR
 const (
 	plannerTaskRole     = "planner"
 	lineageFixMergeRole = "lineage-fix-merge"
+	researcherTaskRole  = "researcher"
 )
 
 func isValidComplexity(value Complexity) bool {

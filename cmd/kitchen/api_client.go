@@ -106,6 +106,24 @@ func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview b
 	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)
 }
 
+func (c *kitchenAPIClient) SubmitResearch(topic string) (map[string]any, error) {
+	req := map[string]any{
+		"topic": topic,
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/research", req, &resp)
+}
+
+func (c *kitchenAPIClient) PromoteResearch(planID, lineage string, auto, implReview bool) (map[string]any, error) {
+	req := map[string]any{
+		"lineage":    lineage,
+		"auto":       auto,
+		"implReview": implReview,
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/promote", req, &resp)
+}
+
 func (c *kitchenAPIClient) ExtendCouncil(planID string, turns int) (map[string]any, error) {
 	req := map[string]any{}
 	if turns != 0 {

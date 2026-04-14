@@ -163,3 +163,20 @@ func TestPlanCyclesIncludeFailedImplementationReviewTurn(t *testing.T) {
 		t.Fatalf("last impl review task state = %q, want %q", last.ImplReviewTaskState, pool.TaskFailed)
 	}
 }
+
+func TestPlanCyclesResearchPlanDoesNotInventPlannerCycle(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitResearch("Investigate direct OAuth callback forwarding")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+
+	detail, err := k.PlanDetail(bundle.Plan.PlanID)
+	if err != nil {
+		t.Fatalf("PlanDetail: %v", err)
+	}
+	if len(detail.Progress.Cycles) != 0 {
+		t.Fatalf("cycles = %+v, want no fabricated planner cycles for research", detail.Progress.Cycles)
+	}
+}

@@ -83,6 +83,10 @@ func newRootCommand() *cobra.Command {
 	var replanReason string
 	var retrySameWorker bool
 	var mergeNoCommit bool
+	var researchFile string
+	var promoteLineage string
+	var promoteAuto bool
+	var promoteImplReview bool
 	var serveAddr string
 	var serveToken string
 	var serveProvider string
@@ -1025,6 +1029,82 @@ func newRootCommand() *cobra.Command {
 	serveCmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "worker broker address advertised to spawned workers")
 	serveCmd.Flags().BoolVar(&keepDeadWorkers, "keep-dead-workers", false, "retain finished worker containers for debugging; oldest is evicted when the container count reaches maxWorkersTotal")
 
+	researchCmd := &cobra.Command{
+		Use:   "research [--file PATH|-] [TOPIC]",
+		Short: "Submit a research topic for read-only investigation",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			topic, err := resolveSubmitIdea(cmd, args, researchFile)
+			if err != nil {
+				return err
+			}
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.SubmitResearch(topic)
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			bundle, err := k.SubmitResearch(topic)
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), map[string]any{
+				"planId": bundle.Plan.PlanID,
+				"state":  bundle.Execution.State,
+				"mode":   bundle.Plan.Mode,
+			})
+		},
+	}
+	researchCmd.Flags().StringVar(&researchFile, "file", "", "read the research topic from a file path or '-' for stdin")
+
+	promoteCmd := &cobra.Command{
+		Use:   "promote PLAN_ID [--lineage LINEAGE] [--auto] [--impl-review]",
+		Short: "Promote completed research into an implementation plan",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				resp, err := client.PromoteResearch(args[0], promoteLineage, promoteAuto, promoteImplReview)
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), resp)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			bundle, err := k.PromoteResearch(args[0], promoteLineage, promoteAuto, promoteImplReview)
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), map[string]any{
+				"planId":          bundle.Plan.PlanID,
+				"state":           bundle.Execution.State,
+				"lineage":         bundle.Plan.Lineage,
+				"researchPlanId":  bundle.Plan.ResearchPlanID,
+				"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
+			})
+		},
+	}
+	promoteCmd.Flags().StringVar(&promoteLineage, "lineage", "", "lineage for the implementation plan")
+	promoteCmd.Flags().BoolVar(&promoteAuto, "auto", false, "auto-approve the generated plan")
+	promoteCmd.Flags().BoolVar(&promoteImplReview, "impl-review", false, "request a post-implementation adversarial review")
+
 	configureCmd := &cobra.Command{
 		Use:   "configure",
 		Short: "Configure provider and model routing",
@@ -1071,6 +1151,8 @@ func newRootCommand() *cobra.Command {
 
 	rootCmd.AddCommand(
 		submitCmd,
+		researchCmd,
+		promoteCmd,
 		plansCmd,
 		planCmd,
 		evidenceCmd,
