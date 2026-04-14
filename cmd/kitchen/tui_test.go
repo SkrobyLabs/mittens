@@ -1521,6 +1521,62 @@ func TestKitchenTUIFooterShowsManualRemediationForPassedReviewFindings(t *testin
 	}
 }
 
+func TestKitchenTUIManualRemediationFallsBackToDetailProgress(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{{
+			Record: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", State: planStateCompleted},
+		}},
+		detail: &PlanDetail{
+			Plan: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", State: planStateCompleted},
+			Progress: PlanProgress{
+				PlanID:                 "plan_fix_review",
+				State:                  planStateCompleted,
+				ImplReviewRequested:    true,
+				ImplReviewStatus:       planReviewStatusPassed,
+				ImplReviewFollowups:    []string{"[minor] add a regression test"},
+			},
+		},
+	}
+
+	if !model.canRemediateSelectedPlan() {
+		t.Fatal("expected remediation to be available from detail progress fallback")
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "f remediate") {
+		t.Fatalf("footer = %q, want remediate action from detail progress fallback", footer)
+	}
+}
+
+func TestKitchenTUIFooterPrioritizesManualRemediationAction(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{{
+			Record: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", Lineage: "feat/fix-review", State: planStateCompleted},
+			Progress: &PlanProgress{
+				State:               planStateCompleted,
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+				ImplReviewFollowups: []string{"[minor] add a regression test"},
+			},
+		}},
+	}
+
+	footer := model.renderFooter()
+	remediateIndex := strings.Index(footer, "f remediate")
+	scrollIndex := strings.Index(footer, "PgUp/PgDn scroll")
+	if remediateIndex == -1 {
+		t.Fatalf("footer = %q, want remediate action", footer)
+	}
+	if scrollIndex == -1 {
+		t.Fatalf("footer = %q, want navigation action", footer)
+	}
+	if remediateIndex > scrollIndex {
+		t.Fatalf("footer = %q, want remediate before navigation so it remains visible on narrow terminals", footer)
+	}
+}
+
 func TestKitchenTUIRemediationMenuQueuesSelectedScope(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{}
 	model := kitchenTUIModel{

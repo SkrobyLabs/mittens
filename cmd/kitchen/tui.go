@@ -1635,18 +1635,31 @@ func (m kitchenTUIModel) canRequestReviewSelectedPlan() bool {
 	}
 }
 
+func (m kitchenTUIModel) selectedPlanProgress() *PlanProgress {
+	if plan := m.selectedPlanItem(); plan != nil && plan.Progress != nil {
+		return plan.Progress
+	}
+	if m.detail != nil {
+		planID := strings.TrimSpace(m.selectedPlanID())
+		if planID != "" && strings.TrimSpace(m.detail.Plan.PlanID) == planID {
+			return &m.detail.Progress
+		}
+	}
+	return nil
+}
+
 func (m kitchenTUIModel) canRemediateSelectedPlan() bool {
-	plan := m.selectedPlanItem()
-	if plan == nil || plan.Progress == nil {
+	progress := m.selectedPlanProgress()
+	if progress == nil {
 		return false
 	}
-	if strings.TrimSpace(plan.Progress.State) != planStateCompleted {
+	if strings.TrimSpace(progress.State) != planStateCompleted {
 		return false
 	}
-	if strings.TrimSpace(plan.Progress.ImplReviewStatus) != planReviewStatusPassed {
+	if strings.TrimSpace(progress.ImplReviewStatus) != planReviewStatusPassed {
 		return false
 	}
-	return len(plan.Progress.ImplReviewFollowups) > 0
+	return len(progress.ImplReviewFollowups) > 0
 }
 
 func (m kitchenTUIModel) canCancelSelectedPlan() bool {
@@ -1819,7 +1832,9 @@ func (m kitchenTUIModel) footerActions() []string {
 	} else if m.leftMode == kitchenTUILeftQuestions {
 		actions = append(actions, "a answer", "esc back")
 	} else {
-		actions = append(actions, "PgUp/PgDn scroll")
+		if m.canRemediateSelectedPlan() {
+			actions = append(actions, "f remediate")
+		}
 		if m.canApproveSelectedPlan() {
 			actions = append(actions, "a approve")
 		}
@@ -1828,9 +1843,6 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 		if m.canRequestReviewSelectedPlan() {
 			actions = append(actions, "v review")
-		}
-		if m.canRemediateSelectedPlan() {
-			actions = append(actions, "f remediate")
 		}
 		if m.canCancelSelectedPlan() {
 			actions = append(actions, "C cancel")
@@ -1846,6 +1858,7 @@ func (m kitchenTUIModel) footerActions() []string {
 			}
 			actions = append(actions, "? questions")
 		}
+		actions = append(actions, "PgUp/PgDn scroll")
 	}
 	actions = append(actions, "r refresh", "q quit")
 	return actions
