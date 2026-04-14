@@ -1658,7 +1658,15 @@ func (m kitchenTUIModel) canPromoteSelectedPlan() bool {
 	if plan == nil {
 		return false
 	}
-	return strings.TrimSpace(plan.Record.Mode) == "research" && planDisplayState(*plan) == planStateResearchComplete
+	if strings.TrimSpace(plan.Record.Mode) != "research" {
+		return false
+	}
+	switch planDisplayState(*plan) {
+	case planStateResearchComplete, planStateCompleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m kitchenTUIModel) nextPlanSelectionAfterDeletion() string {

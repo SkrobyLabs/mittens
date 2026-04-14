@@ -278,6 +278,37 @@ func TestPromoteResearchNotCompleteFails(t *testing.T) {
 	}
 }
 
+func TestPromoteResearchAllowsCompletedResearchWithStoredOutput(t *testing.T) {
+	k := newTestKitchen(t)
+
+	researchBundle, err := k.SubmitResearch("Investigate provider override flow")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+	researchPlanID := researchBundle.Plan.PlanID
+
+	researchBundle.Execution.State = planStateCompleted
+	researchBundle.Execution.ResearchOutput = "Stored research findings survive even if the state was flattened."
+	researchBundle.Plan.State = planStateCompleted
+	if err := k.planStore.UpdatePlan(researchBundle.Plan); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	if err := k.planStore.UpdateExecution(researchPlanID, researchBundle.Execution); err != nil {
+		t.Fatalf("UpdateExecution: %v", err)
+	}
+
+	promoted, err := k.PromoteResearch(researchPlanID, "provider-overrides", false, false)
+	if err != nil {
+		t.Fatalf("PromoteResearch: %v", err)
+	}
+	if promoted.Plan.ResearchPlanID != researchPlanID {
+		t.Fatalf("ResearchPlanID = %q, want %q", promoted.Plan.ResearchPlanID, researchPlanID)
+	}
+	if !strings.Contains(promoted.Plan.ResearchContext, "flattened") {
+		t.Fatalf("ResearchContext = %q, want stored research output", promoted.Plan.ResearchContext)
+	}
+}
+
 func TestPromoteResearchCouncilPromptIncludesResearch(t *testing.T) {
 	k := newTestKitchen(t)
 
@@ -303,21 +334,27 @@ func TestPromoteResearchCouncilPromptIncludesResearch(t *testing.T) {
 		t.Fatalf("PromoteResearch: %v", err)
 	}
 
-	// Build the council prompt for the promoted plan and check that research context is included.
 	bundle, err := k.planStore.Get(promoted.Plan.PlanID)
 	if err != nil {
 		t.Fatalf("Get promoted plan: %v", err)
 	}
+	if bundle.Plan.ResearchPlanID != researchPlanID {
+		t.Fatalf("ResearchPlanID = %q, want %q", bundle.Plan.ResearchPlanID, researchPlanID)
+	}
+	if !strings.Contains(bundle.Plan.ResearchContext, "WAL for crash recovery") {
+		t.Fatal("promoted plan should persist the research findings")
+	}
 
-	prompt, err := buildCouncilTurnPrompt(bundle, 1)
-	if err != nil {
-		t.Fatalf("buildCouncilTurnPrompt: %v", err)
+	taskID := councilTaskID(promoted.Plan.PlanID, 1)
+	task, ok := k.pm.Task(taskID)
+	if !ok {
+		t.Fatalf("planner task %q not found", taskID)
 	}
-	if !strings.Contains(prompt, "Prior Research") {
-		t.Fatal("council prompt should contain 'Prior Research' section")
+	if !strings.Contains(task.Prompt, "Prior Research") {
+		t.Fatal("queued council prompt should contain 'Prior Research' section")
 	}
-	if !strings.Contains(prompt, "WAL for crash recovery") {
-		t.Fatal("council prompt should contain the actual research findings")
+	if !strings.Contains(task.Prompt, "WAL for crash recovery") {
+		t.Fatal("queued council prompt should contain the actual research findings")
 	}
 }
 

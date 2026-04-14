@@ -2380,6 +2380,62 @@ func TestSyncPlanExecution_NoImplReview(t *testing.T) {
 	}
 }
 
+func TestSyncPlanExecution_PreservesResearchComplete(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID: "plan_research_sync",
+			Mode:   "research",
+			Title:  "Research promotion readiness",
+			State:  planStateResearchComplete,
+		},
+		Execution: ExecutionRecord{
+			State:          planStateResearchComplete,
+			ResearchOutput: "Research findings are available for promotion.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-research-complete"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateResearchComplete {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateResearchComplete)
+	}
+	if bundle.Plan.State != planStateResearchComplete {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateResearchComplete)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil for preserved research_complete", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestSyncPlanExecution_DoesNotRequeueCompletedImplementationReviewAfterFixMerge(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

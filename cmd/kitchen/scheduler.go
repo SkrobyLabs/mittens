@@ -1556,6 +1556,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	case planStatePlanning,
 		planStateReviewing,
 		planStateImplementationReview,
+		planStateResearchComplete,
 		planStatePlanningFailed,
 		planStateImplementationReviewFailed,
 		planStateMerged,

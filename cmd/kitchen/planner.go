@@ -32,10 +32,14 @@ const (
 )
 
 func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool, dependsOn ...string) (*StoredPlan, error) {
-	return k.SubmitIdeaAt(idea, lineage, auto, implReview, "", dependsOn...)
+	return k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, "", "", "", dependsOn...)
 }
 
 func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, anchorRef string, dependsOn ...string) (*StoredPlan, error) {
+	return k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, anchorRef, "", "", dependsOn...)
+}
+
+func (k *Kitchen) submitIdeaAtWithResearch(idea string, lineage string, auto bool, implReview bool, anchorRef string, researchPlanID string, researchContext string, dependsOn ...string) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
@@ -71,14 +75,16 @@ func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implRevie
 	}
 
 	plan := PlanRecord{
-		PlanID:    planID,
-		Source:    "operator",
-		Anchor:    anchor,
-		Lineage:   lineage,
-		Title:     title,
-		Summary:   idea,
-		DependsOn: cleanDeps,
-		State:     planStatePlanning,
+		PlanID:          planID,
+		Source:          "operator",
+		Anchor:          anchor,
+		Lineage:         lineage,
+		Title:           title,
+		Summary:         idea,
+		DependsOn:       cleanDeps,
+		State:           planStatePlanning,
+		ResearchPlanID:  strings.TrimSpace(researchPlanID),
+		ResearchContext: strings.TrimSpace(researchContext),
 	}
 
 	execution := ExecutionRecord{
@@ -211,7 +217,8 @@ func (k *Kitchen) PromoteResearch(researchPlanID string, lineage string, auto bo
 	if researchBundle.Plan.Mode != "research" {
 		return nil, fmt.Errorf("plan %s is not a research plan", researchPlanID)
 	}
-	if researchBundle.Execution.State != planStateResearchComplete {
+	if researchBundle.Execution.State != planStateResearchComplete &&
+		!(researchBundle.Execution.State == planStateCompleted && strings.TrimSpace(researchBundle.Execution.ResearchOutput) != "") {
 		return nil, fmt.Errorf("research plan %s is not in research_complete state (current: %s)", researchPlanID, researchBundle.Execution.State)
 	}
 
@@ -221,21 +228,11 @@ func (k *Kitchen) PromoteResearch(researchPlanID string, lineage string, auto bo
 		idea += "\n\n---\n\nPrior research findings are attached and should inform the planning process."
 	}
 
-	bundle, err := k.SubmitIdea(idea, lineage, auto, implReview)
+	bundle, err := k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, "", researchPlanID, researchOutput)
 	if err != nil {
 		return nil, err
 	}
-
-	bundle.Plan.ResearchPlanID = researchPlanID
-	bundle.Plan.ResearchContext = researchOutput
-	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
-		return nil, err
-	}
-	updated, err := k.planStore.Get(bundle.Plan.PlanID)
-	if err != nil {
-		return nil, err
-	}
-	return &updated, nil
+	return bundle, nil
 }
 
 func (k *Kitchen) ValidatePlan(plan PlanRecord) error {

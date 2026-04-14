@@ -1311,6 +1311,23 @@ func TestKitchenTUIFooterShowsPromoteForCompletedResearchPlan(t *testing.T) {
 	}
 }
 
+func TestKitchenTUIFooterShowsPromoteForFlattenedCompletedResearchPlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "P promote") {
+		t.Fatalf("footer = %q, want promote action for flattened completed research", footer)
+	}
+}
+
 func TestKitchenTUIPromoteKeyOpensPromoteInput(t *testing.T) {
 	model := kitchenTUIModel{
 		leftMode: kitchenTUILeftPlans,
