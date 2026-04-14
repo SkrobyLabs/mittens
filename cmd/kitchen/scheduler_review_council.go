@@ -111,7 +111,7 @@ func (s *Scheduler) enqueueReviewCouncilTurn(bundle StoredPlan) error {
 	if turn > bundle.Execution.ReviewCouncilMaxTurns {
 		return nil
 	}
-	taskID := reviewCouncilTaskID(bundle.Plan.PlanID, turn)
+	taskID := reviewCouncilTaskIDForExecution(bundle.Plan.PlanID, bundle.Execution, turn)
 	if _, exists := s.pm.Task(taskID); !exists {
 		prompt, err := buildReviewCouncilTurnPrompt(bundle, turn)
 		if err != nil {
@@ -778,7 +778,7 @@ func (s *Scheduler) recoverReviewCouncilPlansOnStartup() error {
 			}
 		}
 		nextTurn := bundle.Execution.ReviewCouncilTurnsCompleted + 1
-		nextTaskID := reviewCouncilTaskID(bundle.Plan.PlanID, nextTurn)
+		nextTaskID := reviewCouncilTaskIDForExecution(bundle.Plan.PlanID, bundle.Execution, nextTurn)
 		if bundle.Execution.ReviewCouncilFinalDecision == "" &&
 			bundle.Execution.ReviewCouncilTurnsCompleted < bundle.Execution.ReviewCouncilMaxTurns &&
 			!bundle.Execution.ReviewCouncilAwaitingAnswers &&
@@ -812,7 +812,7 @@ func (s *Scheduler) recoverReviewCouncilPlansOnStartup() error {
 				continue
 			}
 			seatTask := pool.Task{
-				ID:         reviewCouncilTaskID(bundle.Plan.PlanID, bundle.Execution.ReviewCouncilTurnsCompleted+1),
+				ID:         reviewCouncilTaskIDForExecution(bundle.Plan.PlanID, bundle.Execution, bundle.Execution.ReviewCouncilTurnsCompleted+1),
 				PlanID:     bundle.Plan.PlanID,
 				Complexity: string(implementationReviewComplexityForPlan(bundle.Plan)),
 				Role:       "reviewer",
@@ -844,7 +844,7 @@ func (s *Scheduler) enqueueReviewCouncilResumeIfReady(bundle StoredPlan) error {
 		return nil
 	}
 	nextTurn := bundle.Execution.ReviewCouncilTurnsCompleted + 1
-	nextTaskID := reviewCouncilTaskID(bundle.Plan.PlanID, nextTurn)
+	nextTaskID := reviewCouncilTaskIDForExecution(bundle.Plan.PlanID, bundle.Execution, nextTurn)
 	if _, exists := s.pm.Task(nextTaskID); exists {
 		return nil
 	}

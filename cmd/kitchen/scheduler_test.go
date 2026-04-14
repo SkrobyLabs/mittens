@@ -4529,6 +4529,7 @@ func TestSyncPlanExecutionCompletedAutoRemediationRequeuesImplementationReview(t
 		Execution: ExecutionRecord{
 			State:                       planStateActive,
 			ImplReviewRequested:         true,
+			ReviewCouncilCycle:          1,
 			AutoRemediationAttempt:      1,
 			AutoRemediationActive:       true,
 			AutoRemediationPlanTaskID:   "review-fix-r1",
@@ -4579,6 +4580,28 @@ func TestSyncPlanExecutionCompletedAutoRemediationRequeuesImplementationReview(t
 	if err := pm.CompleteTask("w-fix", remediationTaskID); err != nil {
 		t.Fatalf("CompleteTask remediation: %v", err)
 	}
+	staleReviewTaskID := reviewCouncilTaskID(planID, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:       staleReviewTaskID,
+		PlanID:   planID,
+		Prompt:   "stale prior review",
+		Priority: 1,
+		Role:     "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask stale review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-review-old", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker stale reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-old", "container-w-review-old"); err != nil {
+		t.Fatalf("RegisterWorker stale reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(staleReviewTaskID, "w-review-old"); err != nil {
+		t.Fatalf("DispatchTask stale review: %v", err)
+	}
+	if err := pm.CompleteTask("w-review-old", staleReviewTaskID); err != nil {
+		t.Fatalf("CompleteTask stale review: %v", err)
+	}
 
 	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
 	if err != nil {
@@ -4601,7 +4624,10 @@ func TestSyncPlanExecutionCompletedAutoRemediationRequeuesImplementationReview(t
 	if bundle.Execution.AutoRemediationActive {
 		t.Fatal("expected auto-remediation to clear after successful completion")
 	}
-	reviewTaskID := reviewCouncilTaskID(planID, 1)
+	if bundle.Execution.ReviewCouncilCycle != 2 {
+		t.Fatalf("review council cycle = %d, want 2", bundle.Execution.ReviewCouncilCycle)
+	}
+	reviewTaskID := reviewCouncilTaskIDForCycle(planID, 2, 1)
 	task, ok := pm.Task(reviewTaskID)
 	if !ok {
 		t.Fatalf("review task %q not found", reviewTaskID)

@@ -2174,6 +2174,10 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		if detail.Execution.State == planStateImplementationReviewFailed && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
 			status = "failed"
 		}
+		reviewLabel := fmt.Sprintf("Review Council: turn %d/%d · Seat %s [%s]", max(1, activeTurn), max(1, detail.Execution.ReviewCouncilMaxTurns), activeSeat, status)
+		if detail.Progress.ReviewCouncilCycle > 1 {
+			reviewLabel = fmt.Sprintf("Review Council: cycle %d turn %d/%d · Seat %s [%s]", detail.Progress.ReviewCouncilCycle, max(1, activeTurn), max(1, detail.Execution.ReviewCouncilMaxTurns), activeSeat, status)
+		}
 		trajectory := make([]string, 0, len(detail.Execution.ReviewCouncilTurns))
 		for _, turn := range detail.Execution.ReviewCouncilTurns {
 			verdict := "-"
@@ -2186,7 +2190,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			trajectory = append(trajectory, fmt.Sprintf("%s: -", activeSeat))
 		}
 		lines = append(lines,
-			fmt.Sprintf("Review Council: turn %d/%d · Seat %s [%s]", max(1, activeTurn), max(1, detail.Execution.ReviewCouncilMaxTurns), activeSeat, status),
+			reviewLabel,
 			fmt.Sprintf("Review verdicts: %s", firstNonEmpty(strings.Join(trajectory, ", "), "-")),
 		)
 	}
@@ -2662,7 +2666,11 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 			items = append(items, buildImplementationTaskItem(*detail, task, round, taskSummaryByID))
 		}
 		for _, cycle := range reviewCyclesByRound[round] {
-			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, "Implementation review "+fmt.Sprint(max(1, cycle.Index)), cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
+			title := "Implementation review " + fmt.Sprint(max(1, cycle.Index))
+			if cycle.ImplReviewCycle > 1 {
+				title = fmt.Sprintf("Implementation review %d.%d", cycle.ImplReviewCycle, max(1, cycle.ImplReviewTurn))
+			}
+			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, title, cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
 		}
 	}
 	for _, task := range orderTrailingTimelineTasks(trailingTimelineTasks, detail.History) {

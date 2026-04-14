@@ -41,23 +41,61 @@ func reviewCouncilSeatForTurn(turn int) string {
 }
 
 func reviewCouncilTaskID(planID string, turn int) string {
+	return reviewCouncilTaskIDForCycle(planID, 1, turn)
+}
+
+func reviewCouncilTaskIDForCycle(planID string, cycle, turn int) string {
 	if turn <= 0 {
 		turn = 1
 	}
-	return fmt.Sprintf("review_council_%s_t%d", planID, turn)
+	if cycle <= 1 {
+		return fmt.Sprintf("review_council_%s_t%d", planID, turn)
+	}
+	return fmt.Sprintf("review_council_%s_r%d_t%d", planID, cycle, turn)
+}
+
+func reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID string) (int, int) {
+	prefix := "review_council_" + strings.TrimSpace(planID) + "_"
+	var cycle, turn int
+	if _, err := fmt.Sscanf(strings.TrimSpace(taskID), prefix+"r%d_t%d", &cycle, &turn); err == nil && cycle > 0 && turn > 0 {
+		return cycle, turn
+	}
+	if _, err := fmt.Sscanf(strings.TrimSpace(taskID), prefix+"t%d", &turn); err == nil && turn > 0 {
+		return 1, turn
+	}
+	return 0, 0
+}
+
+func reviewCouncilCycleNumberFromTaskID(planID, taskID string) int {
+	cycle, _ := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID)
+	return cycle
 }
 
 func reviewCouncilTurnNumberFromTaskID(planID, taskID string) int {
-	prefix := "review_council_" + strings.TrimSpace(planID) + "_t"
-	var turn int
-	if _, err := fmt.Sscanf(strings.TrimSpace(taskID), prefix+"%d", &turn); err == nil && turn > 0 {
-		return turn
-	}
-	return 0
+	_, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID)
+	return turn
 }
 
 func isReviewCouncilTask(task pool.Task) bool {
 	return task.PlanID != "" && reviewCouncilTurnNumberFromTaskID(task.PlanID, task.ID) > 0
+}
+
+func currentReviewCouncilCycle(exec ExecutionRecord) int {
+	if exec.ReviewCouncilCycle > 0 {
+		return exec.ReviewCouncilCycle
+	}
+	return 1
+}
+
+func nextReviewCouncilCycle(exec ExecutionRecord) int {
+	if exec.ReviewCouncilCycle <= 0 {
+		return 1
+	}
+	return exec.ReviewCouncilCycle + 1
+}
+
+func reviewCouncilTaskIDForExecution(planID string, exec ExecutionRecord, turn int) string {
+	return reviewCouncilTaskIDForCycle(planID, currentReviewCouncilCycle(exec), turn)
 }
 
 func pendingReviewCouncilQuestionsForPlan(pm *pool.PoolManager, planID string) []pool.Question {

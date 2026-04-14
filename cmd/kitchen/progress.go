@@ -18,6 +18,8 @@ type PlanCycleProgress struct {
 	PlannerTaskState    string `json:"plannerTaskState,omitempty"`
 	ReviewTaskID        string `json:"reviewTaskId,omitempty"`
 	ReviewTaskState     string `json:"reviewTaskState,omitempty"`
+	ImplReviewCycle     int    `json:"implReviewCycle,omitempty"`
+	ImplReviewTurn      int    `json:"implReviewTurn,omitempty"`
 	ImplReviewTaskID    string `json:"implReviewTaskId,omitempty"`
 	ImplReviewTaskState string `json:"implReviewTaskState,omitempty"`
 }
@@ -37,6 +39,7 @@ type PlanProgress struct {
 	AutoRemediationTaskID        string              `json:"autoRemediationTaskId,omitempty"`
 	AutoRemediationSourceVerdict string              `json:"autoRemediationSourceVerdict,omitempty"`
 	AutoRemediationFindings      []string            `json:"autoRemediationFindings,omitempty"`
+	ReviewCouncilCycle           int                 `json:"reviewCouncilCycle,omitempty"`
 	ReviewCouncilTurnsCompleted  int                 `json:"reviewCouncilTurnsCompleted,omitempty"`
 	ReviewCouncilMaxTurns        int                 `json:"reviewCouncilMaxTurns,omitempty"`
 	ReviewCouncilFinalDecision   string              `json:"reviewCouncilFinalDecision,omitempty"`
@@ -198,6 +201,7 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 			return bundle.Execution.AutoRemediationSource.Verdict
 		}()),
 		AutoRemediationFindings:     autoRemediationFindings(bundle.Execution.AutoRemediationSource),
+		ReviewCouncilCycle:          currentReviewCouncilCycle(bundle.Execution),
 		ReviewCouncilTurnsCompleted: bundle.Execution.ReviewCouncilTurnsCompleted,
 		ReviewCouncilMaxTurns:       bundle.Execution.ReviewCouncilMaxTurns,
 		ReviewCouncilFinalDecision:  bundle.Execution.ReviewCouncilFinalDecision,
@@ -297,12 +301,15 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 	}
 
 	reviewTurns := maxObservedReviewCouncilTurn(bundle, tasks)
+	reviewCycle := currentReviewCouncilCycle(bundle.Execution)
 	if bundle.Execution.State == planStateImplementationReview && reviewTurns == 0 {
 		reviewTurns = 1
 	}
 	for i := 1; i <= reviewTurns; i++ {
-		irTaskID := reviewCouncilTaskID(planID, i)
+		irTaskID := reviewCouncilTaskIDForCycle(planID, reviewCycle, i)
 		cycles = append(cycles, PlanCycleProgress{
+			ImplReviewCycle:     reviewCycle,
+			ImplReviewTurn:      i,
 			Index:               i,
 			ImplReviewTaskID:    irTaskID,
 			ImplReviewTaskState: string(planProgressTaskState(bundle.Execution, irTaskID, tasks)),
@@ -314,29 +321,30 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 
 func maxObservedReviewCouncilTurn(bundle StoredPlan, tasks map[string]poolTaskState) int {
 	planID := strings.TrimSpace(bundle.Plan.PlanID)
+	currentCycle := currentReviewCouncilCycle(bundle.Execution)
 	maxTurn := bundle.Execution.ReviewCouncilTurnsCompleted
 	for taskID := range tasks {
-		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+		if cycle, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID); cycle == currentCycle && turn > maxTurn {
 			maxTurn = turn
 		}
 	}
 	for _, taskID := range bundle.Execution.ActiveTaskIDs {
-		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+		if cycle, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID); cycle == currentCycle && turn > maxTurn {
 			maxTurn = turn
 		}
 	}
 	for _, taskID := range bundle.Execution.CompletedTaskIDs {
-		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+		if cycle, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID); cycle == currentCycle && turn > maxTurn {
 			maxTurn = turn
 		}
 	}
 	for _, taskID := range bundle.Execution.FailedTaskIDs {
-		if turn := reviewCouncilTurnNumberFromTaskID(planID, taskID); turn > maxTurn {
+		if cycle, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, taskID); cycle == currentCycle && turn > maxTurn {
 			maxTurn = turn
 		}
 	}
 	for _, entry := range bundle.Execution.History {
-		if turn := reviewCouncilTurnNumberFromTaskID(planID, entry.TaskID); turn > maxTurn {
+		if cycle, turn := reviewCouncilTaskCycleAndTurnFromTaskID(planID, entry.TaskID); cycle == currentCycle && turn > maxTurn {
 			maxTurn = turn
 		}
 	}

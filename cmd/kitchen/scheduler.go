@@ -1606,6 +1606,7 @@ func (s *Scheduler) enqueueImplementationReview(bundle StoredPlan) error {
 		return nil
 	}
 	bundle.Execution.ReviewCouncilMaxTurns = 4
+	bundle.Execution.ReviewCouncilCycle = nextReviewCouncilCycle(bundle.Execution)
 	bundle.Execution.ReviewCouncilTurnsCompleted = 0
 	bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
 	bundle.Execution.ReviewCouncilAwaitingAnswers = false

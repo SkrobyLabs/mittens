@@ -996,6 +996,9 @@ func TestRequestReviewOnCompletedPlan(t *testing.T) {
 	if bundle.Execution.ReviewCouncilMaxTurns != 4 {
 		t.Fatalf("review council max turns = %d, want 4", bundle.Execution.ReviewCouncilMaxTurns)
 	}
+	if bundle.Execution.ReviewCouncilCycle != 1 {
+		t.Fatalf("review council cycle = %d, want 1", bundle.Execution.ReviewCouncilCycle)
+	}
 	task, ok := k.pm.Task(reviewCouncilTaskID(planID, 1))
 	if !ok {
 		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskID(planID, 1))
@@ -1049,6 +1052,7 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 			ImplReviewFindings:          []string{"missing tests"},
 			ImplReviewedAt:              &now,
 			ReviewCouncilMaxTurns:       6,
+			ReviewCouncilCycle:          1,
 			ReviewCouncilTurnsCompleted: 5,
 			ReviewCouncilFinalDecision:  reviewCouncilReject,
 			RejectedBy:                  rejectedByReviewCouncil,
@@ -1075,6 +1079,15 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Create plan: %v", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:       reviewCouncilTaskID(planID, 1),
+		PlanID:   planID,
+		Prompt:   "stale prior review",
+		Priority: 1,
+		Role:     "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask stale review: %v", err)
 	}
 
 	if err := k.RequestReview(planID); err != nil {
@@ -1103,15 +1116,18 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 	if bundle.Execution.CompletedAt != nil {
 		t.Fatalf("completedAt = %v, want cleared", bundle.Execution.CompletedAt)
 	}
+	if bundle.Execution.ReviewCouncilCycle != 2 {
+		t.Fatalf("review council cycle = %d, want 2", bundle.Execution.ReviewCouncilCycle)
+	}
 	if bundle.Execution.AutoRemediationActive {
 		t.Fatal("expected auto-remediation to clear on manual request review")
 	}
 	if bundle.Execution.AutoRemediationAttempt != 0 {
 		t.Fatalf("auto remediation attempt = %d, want 0", bundle.Execution.AutoRemediationAttempt)
 	}
-	task, ok := k.pm.Task(reviewCouncilTaskID(planID, 1))
+	task, ok := k.pm.Task(reviewCouncilTaskIDForCycle(planID, 2, 1))
 	if !ok {
-		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskID(planID, 1))
+		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskIDForCycle(planID, 2, 1))
 	}
 	if task.Status != pool.TaskQueued {
 		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)

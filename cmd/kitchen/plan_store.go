@@ -111,6 +111,7 @@ type ExecutionRecord struct {
 	CouncilWarnings                      []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
 	CouncilUnresolvedDisagreements       []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
 	ReviewCouncilMaxTurns                int                           `json:"reviewCouncilMaxTurns,omitempty"`
+	ReviewCouncilCycle                   int                           `json:"reviewCouncilCycle,omitempty"`
 	ReviewCouncilTurnsCompleted          int                           `json:"reviewCouncilTurnsCompleted,omitempty"`
 	ReviewCouncilAwaitingAnswers         bool                          `json:"reviewCouncilAwaitingAnswers,omitempty"`
 	ReviewCouncilFinalDecision           string                        `json:"reviewCouncilFinalDecision,omitempty"`

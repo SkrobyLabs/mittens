@@ -470,7 +470,7 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 		bundle.Execution.State = planStateImplementationReview
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilExtended,
-			TaskID:  reviewCouncilTaskID(planID, bundle.Execution.ReviewCouncilTurnsCompleted+1),
+			TaskID:  reviewCouncilTaskIDForExecution(planID, bundle.Execution, bundle.Execution.ReviewCouncilTurnsCompleted+1),
 			Summary: fmt.Sprintf("Review council extended by %d turns.", turns),
 		})
 		return k.scheduler.enqueueReviewCouncilTurn(bundle)

@@ -217,7 +217,7 @@ func (k *Kitchen) queueReviewCouncilResumeIfReady(planID string) error {
 	}
 
 	nextTurn := bundle.Execution.ReviewCouncilTurnsCompleted + 1
-	nextTaskID := reviewCouncilTaskID(planID, nextTurn)
+	nextTaskID := reviewCouncilTaskIDForExecution(planID, bundle.Execution, nextTurn)
 	if _, exists := k.pm.Task(nextTaskID); exists {
 		return nil
 	}
