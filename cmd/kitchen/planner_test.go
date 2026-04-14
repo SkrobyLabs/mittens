@@ -1052,6 +1052,25 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 			ReviewCouncilTurnsCompleted: 5,
 			ReviewCouncilFinalDecision:  reviewCouncilReject,
 			RejectedBy:                  rejectedByReviewCouncil,
+			AutoRemediationAttempt:      2,
+			AutoRemediationActive:       true,
+			AutoRemediationPlanTaskID:   "review-fix-r2",
+			AutoRemediationTaskID:       planTaskRuntimeID("plan_manual_review_failed", "review-fix-r2"),
+			AutoRemediationSourceTaskID: reviewCouncilTaskID("plan_manual_review_failed", 6),
+			AutoRemediationSource: &AutoRemediationSourceRecord{
+				Decision:     reviewCouncilConverged,
+				Verdict:      pool.ReviewFail,
+				Seat:         "B",
+				Turn:         6,
+				ReviewTaskID: reviewCouncilTaskID("plan_manual_review_failed", 6),
+				Summary:      "Previous remediation loop should clear on manual review request.",
+				Findings: []adapter.ReviewFinding{{
+					ID:          "f1",
+					Category:    "correctness",
+					Description: "Manual request review should clear remediation metadata.",
+					Severity:    pool.SeverityMajor,
+				}},
+			},
 		},
 	})
 	if err != nil {
@@ -1084,12 +1103,155 @@ func TestRequestReviewOnFailedImplReviewRestartsCouncil(t *testing.T) {
 	if bundle.Execution.CompletedAt != nil {
 		t.Fatalf("completedAt = %v, want cleared", bundle.Execution.CompletedAt)
 	}
+	if bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected auto-remediation to clear on manual request review")
+	}
+	if bundle.Execution.AutoRemediationAttempt != 0 {
+		t.Fatalf("auto remediation attempt = %d, want 0", bundle.Execution.AutoRemediationAttempt)
+	}
 	task, ok := k.pm.Task(reviewCouncilTaskID(planID, 1))
 	if !ok {
 		t.Fatalf("expected review council task %q to be queued", reviewCouncilTaskID(planID, 1))
 	}
 	if task.Status != pool.TaskQueued {
 		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+}
+
+func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_extend_clears_auto_fix",
+			Lineage: "extend-clears-auto-fix",
+			Title:   "Extend clears auto remediation",
+			State:   planStateRejected,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateRejected,
+			ImplReviewRequested:         true,
+			ImplReviewStatus:            planReviewStatusFailed,
+			ReviewCouncilMaxTurns:       4,
+			ReviewCouncilTurnsCompleted: 4,
+			ReviewCouncilFinalDecision:  reviewCouncilReject,
+			RejectedBy:                  rejectedByReviewCouncil,
+			AutoRemediationAttempt:      2,
+			AutoRemediationActive:       true,
+			AutoRemediationPlanTaskID:   "review-fix-r2",
+			AutoRemediationTaskID:       planTaskRuntimeID("plan_extend_clears_auto_fix", "review-fix-r2"),
+			AutoRemediationSourceTaskID: reviewCouncilTaskID("plan_extend_clears_auto_fix", 4),
+			AutoRemediationSource: &AutoRemediationSourceRecord{
+				Decision:     reviewCouncilReject,
+				Verdict:      pool.ReviewFail,
+				Seat:         "B",
+				Turn:         4,
+				ReviewTaskID: reviewCouncilTaskID("plan_extend_clears_auto_fix", 4),
+				Summary:      "Extension should clear remediation state.",
+				Findings: []adapter.ReviewFinding{{
+					ID:          "f1",
+					Category:    "correctness",
+					Description: "Clears remediation state on extension.",
+					Severity:    pool.SeverityMajor,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.ExtendCouncil(planID, 1); err != nil {
+		t.Fatalf("ExtendCouncil: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected auto-remediation state to clear on review council extension")
+	}
+	if bundle.Execution.AutoRemediationAttempt != 0 {
+		t.Fatalf("auto remediation attempt = %d, want 0", bundle.Execution.AutoRemediationAttempt)
+	}
+}
+
+func TestRetryTaskPreservesAutoRemediationStateForRemediationTask(t *testing.T) {
+	k := newTestKitchen(t)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_retry_auto_fix",
+			Lineage: "retry-auto-fix",
+			Title:   "Retry remediation task",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateActive,
+			ImplReviewRequested:         true,
+			AutoRemediationAttempt:      1,
+			AutoRemediationActive:       true,
+			AutoRemediationPlanTaskID:   "review-fix-r1",
+			AutoRemediationTaskID:       planTaskRuntimeID("plan_retry_auto_fix", "review-fix-r1"),
+			AutoRemediationSourceTaskID: reviewCouncilTaskID("plan_retry_auto_fix", 2),
+			AutoRemediationSource: &AutoRemediationSourceRecord{
+				Decision:     reviewCouncilConverged,
+				Verdict:      pool.ReviewFail,
+				Seat:         "B",
+				Turn:         2,
+				ReviewTaskID: reviewCouncilTaskID("plan_retry_auto_fix", 2),
+				Summary:      "Retry should preserve remediation metadata.",
+				Findings: []adapter.ReviewFinding{{
+					ID:          "f1",
+					Category:    "correctness",
+					Description: "Preserve remediation metadata across retry.",
+					Severity:    pool.SeverityMajor,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(planID, "review-fix-r1")
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:                 taskID,
+		PlanID:             planID,
+		Prompt:             "fix review findings",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               "implementer",
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-fix", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-fix", "container-w-fix"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-fix"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := k.pm.FailTask("w-fix", taskID, "transient failure"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	if err := k.RetryTask(taskID, true); err != nil {
+		t.Fatalf("RetryTask: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if !bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected auto-remediation to remain active after retrying the remediation task")
+	}
+	if bundle.Execution.AutoRemediationAttempt != 1 {
+		t.Fatalf("auto remediation attempt = %d, want 1", bundle.Execution.AutoRemediationAttempt)
 	}
 }
 

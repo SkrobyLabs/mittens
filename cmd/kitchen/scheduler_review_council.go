@@ -246,6 +246,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 	})
 
 	decision, warnings := decideReviewCouncilNext(bundle, artifact)
+	autoRemediationHandled := false
 	switch decision {
 	case reviewCouncilAskUser:
 		if err := s.seedReviewCouncilQuestions(task, artifact.QuestionsForUser); err != nil {
@@ -289,21 +290,27 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Verdict: artifact.Verdict,
 			})
 		} else {
-			bundle.Plan.State = planStateImplementationReviewFailed
-			bundle.Execution.State = planStateImplementationReviewFailed
-			bundle.Execution.CompletedAt = nil
-			bundle.Execution.ImplReviewStatus = planReviewStatusFailed
-			bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
-			if len(bundle.Execution.ImplReviewFindings) == 0 {
-				bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
+			if handled, err := s.startAutoRemediationForReviewFailure(&bundle, task, reviewCouncilConverged, artifact); err != nil {
+				return err
+			} else if !handled {
+				bundle.Plan.State = planStateImplementationReviewFailed
+				bundle.Execution.State = planStateImplementationReviewFailed
+				bundle.Execution.CompletedAt = nil
+				bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+				bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
+				if len(bundle.Execution.ImplReviewFindings) == 0 {
+					bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
+				}
+				bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+					Type:     planHistoryImplReviewFailed,
+					Cycle:    artifact.Turn,
+					TaskID:   task.ID,
+					Verdict:  artifact.Verdict,
+					Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
+				})
+			} else {
+				autoRemediationHandled = true
 			}
-			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-				Type:     planHistoryImplReviewFailed,
-				Cycle:    artifact.Turn,
-				TaskID:   task.ID,
-				Verdict:  artifact.Verdict,
-				Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
-			})
 		}
 	case reviewCouncilReject:
 		rejectArtifact := artifact
@@ -329,40 +336,54 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Summary:              artifact.Summary,
 			}
 		}
-		bundle.Plan.State = planStateImplementationReviewFailed
-		bundle.Execution.State = planStateImplementationReviewFailed
-		bundle.Execution.ReviewCouncilFinalDecision = reviewCouncilReject
-		bundle.Execution.ReviewCouncilWarnings = nil
-		bundle.Execution.ReviewCouncilUnresolvedDisagreements = append([]adapter.CouncilDisagreement(nil), rejectArtifact.Disagreements...)
-		bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
-		bundle.Execution.RejectedBy = rejectedByReviewCouncil
-		bundle.Execution.ImplReviewStatus = planReviewStatusFailed
-		bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(rejectArtifact.Findings, rejectArtifact.Disagreements)
-		if len(bundle.Execution.ImplReviewFindings) == 0 {
-			bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
-		}
-		bundle.Execution.ImplReviewedAt = &now
-		bundle.Execution.ActiveTaskIDs = nil
-		bundle.Execution.CompletedAt = nil
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilRejected,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Review council rejected the implementation review.",
 		})
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
-			Type:     planHistoryImplReviewFailed,
-			Cycle:    artifact.Turn,
-			TaskID:   task.ID,
-			Verdict:  pool.ReviewFail,
-			Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
-		})
+		if handled, err := s.startAutoRemediationForReviewFailure(&bundle, task, reviewCouncilReject, rejectArtifact); err != nil {
+			return err
+		} else if !handled {
+			bundle.Plan.State = planStateImplementationReviewFailed
+			bundle.Execution.State = planStateImplementationReviewFailed
+			bundle.Execution.ReviewCouncilFinalDecision = reviewCouncilReject
+			bundle.Execution.ReviewCouncilWarnings = nil
+			bundle.Execution.ReviewCouncilUnresolvedDisagreements = append([]adapter.CouncilDisagreement(nil), rejectArtifact.Disagreements...)
+			bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
+			bundle.Execution.RejectedBy = rejectedByReviewCouncil
+			bundle.Execution.ImplReviewStatus = planReviewStatusFailed
+			bundle.Execution.ImplReviewFindings = reviewCouncilFindingsToStrings(rejectArtifact.Findings, rejectArtifact.Disagreements)
+			if len(bundle.Execution.ImplReviewFindings) == 0 {
+				bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
+			}
+			bundle.Execution.ImplReviewedAt = &now
+			bundle.Execution.ActiveTaskIDs = nil
+			bundle.Execution.CompletedAt = nil
+			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+				Type:     planHistoryImplReviewFailed,
+				Cycle:    artifact.Turn,
+				TaskID:   task.ID,
+				Verdict:  pool.ReviewFail,
+				Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
+			})
+		} else {
+			autoRemediationHandled = true
+		}
 	}
-	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
-		return err
-	}
-	if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
-		return err
+	if autoRemediationHandled {
+		latest, err := s.plans.Get(task.PlanID)
+		if err != nil {
+			return err
+		}
+		bundle = latest
+	} else {
+		if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+			return err
+		}
+		if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+			return err
+		}
 	}
 	switch decision {
 	case reviewCouncilAskUser:
@@ -387,7 +408,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 		if strings.TrimSpace(artifact.Verdict) == pool.ReviewPass {
 			return s.syncPlanExecution(task.PlanID)
 		}
-		return nil
+		return s.syncPlanExecution(task.PlanID)
 	case reviewCouncilReject:
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_review_council_rejected", ID: task.PlanID, Message: bundle.Plan.Title})
@@ -397,6 +418,152 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 	default:
 		return nil
 	}
+}
+
+func (s *Scheduler) startAutoRemediationForReviewFailure(bundle *StoredPlan, task pool.Task, decision string, artifact *adapter.ReviewCouncilTurnArtifact) (bool, error) {
+	if s == nil || bundle == nil {
+		return false, nil
+	}
+	if !autoRemediationEligible(decision, artifact) {
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryAutoRemediationSkipped,
+			Cycle:   artifact.Turn,
+			TaskID:  task.ID,
+			Summary: "Implementation review fail left terminal because it was not actionable for auto-remediation.",
+		})
+		return false, nil
+	}
+	if bundle.Execution.AutoRemediationAttempt >= AutoRemediationHardCap {
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryAutoRemediationSkipped,
+			Cycle:   artifact.Turn,
+			TaskID:  task.ID,
+			Summary: fmt.Sprintf("Implementation review fail left terminal because auto-remediation hit its hard cap (%d).", AutoRemediationHardCap),
+		})
+		return false, nil
+	}
+
+	findings := reviewCouncilFindingsToStrings(artifact.Findings, artifact.Disagreements)
+	if len(findings) == 0 {
+		findings = []string{"Implementation review failed."}
+	}
+	attempt := bundle.Execution.AutoRemediationAttempt + 1
+	planTaskID := autoRemediationPlanTaskID(attempt)
+	runtimeTaskID := planTaskRuntimeID(bundle.Plan.PlanID, planTaskID)
+	bundle.Execution.AutoRemediationAttempt = attempt
+	bundle.Execution.AutoRemediationActive = true
+	bundle.Execution.AutoRemediationPlanTaskID = planTaskID
+	bundle.Execution.AutoRemediationTaskID = runtimeTaskID
+	bundle.Execution.AutoRemediationSourceTaskID = task.ID
+	bundle.Execution.AutoRemediationSource = newAutoRemediationSourceRecord(decision, task.ID, artifact)
+	bundle.Execution.ImplReviewStatus = ""
+	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewedAt = nil
+	bundle.Execution.ReviewCouncilMaxTurns = 0
+	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
+	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.ReviewCouncilSeats = [2]CouncilSeatRecord{}
+	bundle.Execution.ReviewCouncilTurns = nil
+	bundle.Execution.ReviewCouncilWarnings = nil
+	bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
+	bundle.Execution.RejectedBy = ""
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedAt = nil
+	bundle.Plan.State = planStateActive
+	bundle.Execution.State = planStateActive
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:     planHistoryImplReviewFailed,
+		Cycle:    artifact.Turn,
+		TaskID:   task.ID,
+		Verdict:  pool.ReviewFail,
+		Findings: append([]string(nil), findings...),
+	})
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryAutoRemediationRequested,
+		Cycle:   attempt,
+		TaskID:  runtimeTaskID,
+		Summary: fmt.Sprintf("Auto-remediation attempt %d/%d queued from implementation review findings.", attempt, AutoRemediationHardCap),
+	})
+	if err := s.plans.UpdateExecution(bundle.Plan.PlanID, bundle.Execution); err != nil {
+		return true, err
+	}
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return true, err
+	}
+	return true, s.ensureAutoRemediationTask(bundle, false)
+}
+
+func (s *Scheduler) ensureAutoRemediationTask(bundle *StoredPlan, recovered bool) error {
+	if s == nil || s.pm == nil || s.plans == nil || bundle == nil || !bundle.Execution.AutoRemediationActive {
+		return nil
+	}
+	if bundle.Execution.AutoRemediationSource == nil {
+		return nil
+	}
+	planTask := autoRemediationPlanTask(*bundle, bundle.Execution.AutoRemediationAttempt)
+	runtimeTaskID := planTaskRuntimeID(bundle.Plan.PlanID, planTask.ID)
+	bundle.Execution.AutoRemediationPlanTaskID = planTask.ID
+	bundle.Execution.AutoRemediationTaskID = runtimeTaskID
+
+	changed := false
+	if !planHasTask(bundle.Plan, planTask.ID) {
+		if err := s.plans.AddTask(bundle.Plan.PlanID, planTask); err != nil {
+			return err
+		}
+		changed = true
+	}
+	task, exists := s.pm.Task(runtimeTaskID)
+	if !exists {
+		if _, err := s.pm.EnqueueTask(pool.TaskSpec{
+			ID:                 runtimeTaskID,
+			PlanID:             bundle.Plan.PlanID,
+			Prompt:             planTask.Prompt,
+			Complexity:         string(planTask.Complexity),
+			Priority:           1,
+			TimeoutMinutes:     planTask.TimeoutMinutes,
+			Role:               "implementer",
+			RequireFreshWorker: true,
+		}); err != nil {
+			return err
+		}
+		changed = true
+	} else if task.Status == pool.TaskCanceled {
+		if err := s.pm.ReviveCanceledTask(runtimeTaskID, false); err != nil {
+			return err
+		}
+		changed = true
+	}
+	latest, err := s.plans.Get(bundle.Plan.PlanID)
+	if err != nil {
+		return err
+	}
+	active, completed, failed := summarizePlanTasks(s.pm.Tasks(), bundle.Plan.PlanID)
+	latest.Plan.State = planStateActive
+	latest.Execution.State = planStateActive
+	latest.Execution.ActiveTaskIDs = active
+	latest.Execution.CompletedTaskIDs = completed
+	latest.Execution.FailedTaskIDs = failed
+	latest.Execution.CompletedAt = nil
+	latest.Execution.AutoRemediationActive = true
+	latest.Execution.AutoRemediationPlanTaskID = planTask.ID
+	latest.Execution.AutoRemediationTaskID = runtimeTaskID
+	if changed && recovered {
+		latest.Execution = appendPlanHistory(latest.Execution, PlanHistoryEntry{
+			Type:    planHistoryAutoRemediationRecovered,
+			Cycle:   latest.Execution.AutoRemediationAttempt,
+			TaskID:  runtimeTaskID,
+			Summary: "Recovered auto-remediation task after partial persistence.",
+		})
+	}
+	if err := s.plans.UpdatePlan(latest.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(bundle.Plan.PlanID, latest.Execution); err != nil {
+		return err
+	}
+	*bundle = latest
+	return nil
 }
 
 func reviewCouncilFindingsToStrings(findings []adapter.ReviewFinding, disagreements []adapter.CouncilDisagreement) []string {

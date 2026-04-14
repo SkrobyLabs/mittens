@@ -36,6 +36,9 @@ const (
 	planHistoryImplReviewRequested         = "impl_review_requested"
 	planHistoryImplReviewPassed            = "impl_review_passed"
 	planHistoryImplReviewFailed            = "impl_review_failed"
+	planHistoryAutoRemediationRequested    = "auto_remediation_requested"
+	planHistoryAutoRemediationRecovered    = "auto_remediation_recovered"
+	planHistoryAutoRemediationSkipped      = "auto_remediation_skipped"
 )
 
 type PlanHistoryEntry struct {
@@ -163,6 +166,12 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Implementation review passed"
 	case planHistoryImplReviewFailed:
 		return "Implementation review failed"
+	case planHistoryAutoRemediationRequested:
+		return "Auto-remediation requested"
+	case planHistoryAutoRemediationRecovered:
+		return "Auto-remediation recovered"
+	case planHistoryAutoRemediationSkipped:
+		return "Auto-remediation skipped"
 	default:
 		return strings.TrimSpace(entryType)
 	}

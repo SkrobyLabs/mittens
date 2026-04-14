@@ -1811,6 +1811,45 @@ func TestRenderTaskDetailLinesOmitsReviewTLDRForNonReviewTasks(t *testing.T) {
 	}
 }
 
+func TestRenderPlanDetailLinesShowsAutoRemediationVisibility(t *testing.T) {
+	model := kitchenTUIModel{
+		detail: &PlanDetail{
+			Plan: PlanRecord{
+				PlanID: "plan_auto_fix_detail",
+				Title:  "Auto remediation detail",
+			},
+			Execution: ExecutionRecord{
+				State: planStateActive,
+			},
+			Progress: PlanProgress{
+				ImplReviewRequested:          true,
+				AutoRemediationActive:        true,
+				AutoRemediationAttempt:       1,
+				AutoRemediationTaskID:        "plan_auto_fix_detail-review-fix-r1",
+				AutoRemediationSourceVerdict: pool.ReviewFail,
+				AutoRemediationFindings: []string{
+					"[major] cmd/kitchen/planner.go:42 correctness - Create a remediation task",
+				},
+			},
+		},
+	}
+
+	lines := model.renderPlanDetailLines(90)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Implementation review: auto-remediating (1/2)") {
+		t.Fatalf("plan detail missing auto-remediation status:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Auto-remediation task: plan_auto_fix_detail-review-fix-r1") {
+		t.Fatalf("plan detail missing remediation task:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Source verdict: fail") {
+		t.Fatalf("plan detail missing source verdict:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Auto-remediation findings:") {
+		t.Fatalf("plan detail missing remediation findings header:\n%s", joined)
+	}
+}
+
 func TestRenderTaskLogLinesHighlightsHeader(t *testing.T) {
 	model := kitchenTUIModel{
 		tasks: []kitchenTUITaskItem{{

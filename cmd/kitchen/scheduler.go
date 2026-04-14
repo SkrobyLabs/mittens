@@ -81,6 +81,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	stopReaper := pool.StartReaperWithReservations(s.pm, s.reapInterval, s.reapTimeout, s.reservedWorkerIDs)
 	defer stopReaper()
 
+	if err := s.recoverAutoRemediationIntents(); err != nil {
+		s.logf("scheduler auto-remediation recovery: %v", err)
+	}
 	startupReconcileErr := s.reconcile()
 	if startupReconcileErr != nil {
 		s.logf("scheduler reconcile: %v", startupReconcileErr)
@@ -393,6 +396,9 @@ func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (boo
 func (s *Scheduler) schedule() error {
 	if s == nil || s.pm == nil {
 		return nil
+	}
+	if err := s.recoverAutoRemediationIntents(); err != nil {
+		return err
 	}
 
 	s.reapOrphanPlanTasks()
@@ -1497,6 +1503,19 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	}
 
 	if len(active) == 0 && len(failed) == 0 {
+		if bundle.Execution.AutoRemediationActive {
+			if strings.TrimSpace(bundle.Execution.AutoRemediationTaskID) != "" && containsTrimmedString(completed, bundle.Execution.AutoRemediationTaskID) {
+				completeAutoRemediationState(&bundle.Execution)
+			} else {
+				bundle.Plan.State = planStateActive
+				bundle.Execution.State = planStateActive
+				bundle.Execution.CompletedAt = nil
+				if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+					return err
+				}
+				return s.plans.UpdateExecution(planID, bundle.Execution)
+			}
+		}
 		if shouldEnqueueImplementationReview(bundle.Execution) {
 			return s.enqueueImplementationReview(bundle)
 		}
@@ -1528,6 +1547,9 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 
 func shouldEnqueueImplementationReview(exec ExecutionRecord) bool {
 	if !exec.ImplReviewRequested || exec.State != planStateActive {
+		return false
+	}
+	if exec.AutoRemediationActive {
 		return false
 	}
 	if strings.TrimSpace(exec.ImplReviewStatus) != "" || exec.ImplReviewedAt != nil {
@@ -1613,6 +1635,29 @@ func (s *Scheduler) enqueueImplementationReview(bundle StoredPlan) error {
 		s.notify(pool.Notification{Type: "plan_review_council_started", ID: bundle.Plan.PlanID, Message: bundle.Plan.Title})
 	}
 	return s.enqueueReviewCouncilTurn(bundle)
+}
+
+func (s *Scheduler) recoverAutoRemediationIntents() error {
+	if s == nil || s.plans == nil || s.pm == nil {
+		return nil
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return err
+	}
+	for _, plan := range plans {
+		bundle, err := s.plans.Get(plan.PlanID)
+		if err != nil {
+			continue
+		}
+		if !bundle.Execution.AutoRemediationActive {
+			continue
+		}
+		if err := s.ensureAutoRemediationTask(&bundle, true); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func isPlanControlTask(task pool.Task) bool {

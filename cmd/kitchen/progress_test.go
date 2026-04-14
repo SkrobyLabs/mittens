@@ -21,6 +21,23 @@ func TestPlanPhase_ImplementationReview(t *testing.T) {
 	}
 }
 
+func TestPlanPhase_AutoRemediationImplementationReview(t *testing.T) {
+	bundle := StoredPlan{
+		Plan: PlanRecord{
+			PlanID: "plan_phase_auto_fix",
+		},
+		Execution: ExecutionRecord{
+			State:                  planStateActive,
+			AutoRemediationActive:  true,
+			AutoRemediationAttempt: 1,
+		},
+	}
+	phase := planPhase(bundle, 0)
+	if phase != "auto_remediating_implementation_review" {
+		t.Fatalf("planPhase = %q, want %q", phase, "auto_remediating_implementation_review")
+	}
+}
+
 func TestOpenPlanProgressWithLimitIncludesExtendableRejectedReviewCouncilPlans(t *testing.T) {
 	k := newTestKitchen(t)
 	if _, err := k.planStore.Create(StoredPlan{

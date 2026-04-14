@@ -118,6 +118,12 @@ type ExecutionRecord struct {
 	ReviewCouncilTurns                   []ReviewCouncilTurnRecord     `json:"reviewCouncilTurns,omitempty"`
 	ReviewCouncilWarnings                []adapter.CouncilDisagreement `json:"reviewCouncilWarnings,omitempty"`
 	ReviewCouncilUnresolvedDisagreements []adapter.CouncilDisagreement `json:"reviewCouncilUnresolvedDisagreements,omitempty"`
+	AutoRemediationAttempt               int                           `json:"autoRemediationAttempt,omitempty"`
+	AutoRemediationActive                bool                          `json:"autoRemediationActive,omitempty"`
+	AutoRemediationPlanTaskID            string                        `json:"autoRemediationPlanTaskId,omitempty"`
+	AutoRemediationTaskID                string                        `json:"autoRemediationTaskId,omitempty"`
+	AutoRemediationSourceTaskID          string                        `json:"autoRemediationSourceTaskId,omitempty"`
+	AutoRemediationSource                *AutoRemediationSourceRecord  `json:"autoRemediationSource,omitempty"`
 	RejectedBy                           string                        `json:"rejectedBy,omitempty"`
 }
 
@@ -142,6 +148,20 @@ type ReviewCouncilTurnRecord struct {
 	Turn       int                                `json:"turn"`
 	Artifact   *adapter.ReviewCouncilTurnArtifact `json:"artifact"`
 	OccurredAt time.Time                          `json:"occurredAt"`
+}
+
+type AutoRemediationSourceRecord struct {
+	Decision        string                        `json:"decision,omitempty"`
+	Verdict         string                        `json:"verdict,omitempty"`
+	Seat            string                        `json:"seat,omitempty"`
+	Turn            int                           `json:"turn,omitempty"`
+	ReviewTaskID    string                        `json:"reviewTaskId,omitempty"`
+	Summary         string                        `json:"summary,omitempty"`
+	Findings        []adapter.ReviewFinding       `json:"findings,omitempty"`
+	Disagreements   []adapter.CouncilDisagreement `json:"disagreements,omitempty"`
+	Strengths       []string                      `json:"strengths,omitempty"`
+	SeatMemo        string                        `json:"seatMemo,omitempty"`
+	RejectedReasons []string                      `json:"rejectedReasons,omitempty"`
 }
 
 type AffinityRecord struct {

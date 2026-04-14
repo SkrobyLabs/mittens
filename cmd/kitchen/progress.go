@@ -23,29 +23,34 @@ type PlanCycleProgress struct {
 }
 
 type PlanProgress struct {
-	PlanID                      string              `json:"planId"`
-	Lineage                     string              `json:"lineage,omitempty"`
-	Title                       string              `json:"title,omitempty"`
-	State                       string              `json:"state,omitempty"`
-	Phase                       string              `json:"phase,omitempty"`
-	DependsOn                   []string            `json:"dependsOn,omitempty"`
-	ImplReviewRequested         bool                `json:"implReviewRequested,omitempty"`
-	ImplReviewStatus            string              `json:"implReviewStatus,omitempty"`
-	ImplReviewFindings          []string            `json:"implReviewFindings,omitempty"`
-	ReviewCouncilTurnsCompleted int                 `json:"reviewCouncilTurnsCompleted,omitempty"`
-	ReviewCouncilMaxTurns       int                 `json:"reviewCouncilMaxTurns,omitempty"`
-	ReviewCouncilFinalDecision  string              `json:"reviewCouncilFinalDecision,omitempty"`
-	ReviewCouncilActiveSeat     string              `json:"reviewCouncilActiveSeat,omitempty"`
-	PendingQuestions            int                 `json:"pendingQuestions"`
-	PendingQuestionIDs          []string            `json:"pendingQuestionIds,omitempty"`
-	ActiveTaskIDs               []string            `json:"activeTaskIds,omitempty"`
-	CompletedTaskIDs            []string            `json:"completedTaskIds,omitempty"`
-	FailedTaskIDs               []string            `json:"failedTaskIds,omitempty"`
-	Cycles                      []PlanCycleProgress `json:"cycles,omitempty"`
-	History                     []PlanHistoryEntry  `json:"history,omitempty"`
-	HistoryTotal                int                 `json:"historyTotal,omitempty"`
-	HistoryIncluded             int                 `json:"historyIncluded,omitempty"`
-	HistoryTruncated            bool                `json:"historyTruncated,omitempty"`
+	PlanID                       string              `json:"planId"`
+	Lineage                      string              `json:"lineage,omitempty"`
+	Title                        string              `json:"title,omitempty"`
+	State                        string              `json:"state,omitempty"`
+	Phase                        string              `json:"phase,omitempty"`
+	DependsOn                    []string            `json:"dependsOn,omitempty"`
+	ImplReviewRequested          bool                `json:"implReviewRequested,omitempty"`
+	ImplReviewStatus             string              `json:"implReviewStatus,omitempty"`
+	ImplReviewFindings           []string            `json:"implReviewFindings,omitempty"`
+	AutoRemediationActive        bool                `json:"autoRemediationActive,omitempty"`
+	AutoRemediationAttempt       int                 `json:"autoRemediationAttempt,omitempty"`
+	AutoRemediationTaskID        string              `json:"autoRemediationTaskId,omitempty"`
+	AutoRemediationSourceVerdict string              `json:"autoRemediationSourceVerdict,omitempty"`
+	AutoRemediationFindings      []string            `json:"autoRemediationFindings,omitempty"`
+	ReviewCouncilTurnsCompleted  int                 `json:"reviewCouncilTurnsCompleted,omitempty"`
+	ReviewCouncilMaxTurns        int                 `json:"reviewCouncilMaxTurns,omitempty"`
+	ReviewCouncilFinalDecision   string              `json:"reviewCouncilFinalDecision,omitempty"`
+	ReviewCouncilActiveSeat      string              `json:"reviewCouncilActiveSeat,omitempty"`
+	PendingQuestions             int                 `json:"pendingQuestions"`
+	PendingQuestionIDs           []string            `json:"pendingQuestionIds,omitempty"`
+	ActiveTaskIDs                []string            `json:"activeTaskIds,omitempty"`
+	CompletedTaskIDs             []string            `json:"completedTaskIds,omitempty"`
+	FailedTaskIDs                []string            `json:"failedTaskIds,omitempty"`
+	Cycles                       []PlanCycleProgress `json:"cycles,omitempty"`
+	History                      []PlanHistoryEntry  `json:"history,omitempty"`
+	HistoryTotal                 int                 `json:"historyTotal,omitempty"`
+	HistoryIncluded              int                 `json:"historyIncluded,omitempty"`
+	HistoryTruncated             bool                `json:"historyTruncated,omitempty"`
 }
 
 type PlanDetail struct {
@@ -175,14 +180,24 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 	sort.Strings(pendingQuestionIDs)
 
 	progress := PlanProgress{
-		PlanID:                      planID,
-		Lineage:                     bundle.Plan.Lineage,
-		Title:                       bundle.Plan.Title,
-		State:                       bundle.Execution.State,
-		DependsOn:                   append([]string(nil), bundle.Plan.DependsOn...),
-		ImplReviewRequested:         bundle.Execution.ImplReviewRequested,
-		ImplReviewStatus:            bundle.Execution.ImplReviewStatus,
-		ImplReviewFindings:          append([]string(nil), bundle.Execution.ImplReviewFindings...),
+		PlanID:                 planID,
+		Lineage:                bundle.Plan.Lineage,
+		Title:                  bundle.Plan.Title,
+		State:                  bundle.Execution.State,
+		DependsOn:              append([]string(nil), bundle.Plan.DependsOn...),
+		ImplReviewRequested:    bundle.Execution.ImplReviewRequested,
+		ImplReviewStatus:       bundle.Execution.ImplReviewStatus,
+		ImplReviewFindings:     append([]string(nil), bundle.Execution.ImplReviewFindings...),
+		AutoRemediationActive:  bundle.Execution.AutoRemediationActive,
+		AutoRemediationAttempt: bundle.Execution.AutoRemediationAttempt,
+		AutoRemediationTaskID:  bundle.Execution.AutoRemediationTaskID,
+		AutoRemediationSourceVerdict: strings.TrimSpace(func() string {
+			if bundle.Execution.AutoRemediationSource == nil {
+				return ""
+			}
+			return bundle.Execution.AutoRemediationSource.Verdict
+		}()),
+		AutoRemediationFindings:     autoRemediationFindings(bundle.Execution.AutoRemediationSource),
 		ReviewCouncilTurnsCompleted: bundle.Execution.ReviewCouncilTurnsCompleted,
 		ReviewCouncilMaxTurns:       bundle.Execution.ReviewCouncilMaxTurns,
 		ReviewCouncilFinalDecision:  bundle.Execution.ReviewCouncilFinalDecision,
@@ -374,6 +389,9 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 		}
 		return "awaiting_approval"
 	case planStateActive:
+		if bundle.Execution.AutoRemediationActive {
+			return "auto_remediating_implementation_review"
+		}
 		return "executing"
 	case planStateWaitingOnDependency:
 		return "waiting_on_dependency"

@@ -2130,8 +2130,23 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 		lines = append(lines, fmt.Sprintf("Depends on: %s", strings.Join(detail.Progress.DependsOn, ", ")))
 	}
 	if detail.Progress.ImplReviewRequested {
-		lines = append(lines, fmt.Sprintf("Implementation review: %s", firstNonEmpty(detail.Progress.ImplReviewStatus, "pending")))
-		if len(detail.Progress.ImplReviewFindings) > 0 {
+		status := firstNonEmpty(detail.Progress.ImplReviewStatus, "pending")
+		if detail.Progress.AutoRemediationActive {
+			status = fmt.Sprintf("auto-remediating (%d/%d)", max(1, detail.Progress.AutoRemediationAttempt), AutoRemediationHardCap)
+		}
+		lines = append(lines, fmt.Sprintf("Implementation review: %s", status))
+		if detail.Progress.AutoRemediationActive {
+			lines = append(lines, fmt.Sprintf("Auto-remediation task: %s", firstNonEmpty(detail.Progress.AutoRemediationTaskID, "-")))
+			if detail.Progress.AutoRemediationSourceVerdict != "" {
+				lines = append(lines, fmt.Sprintf("Source verdict: %s", detail.Progress.AutoRemediationSourceVerdict))
+			}
+			if len(detail.Progress.AutoRemediationFindings) > 0 {
+				lines = append(lines, "Auto-remediation findings:")
+				for _, finding := range detail.Progress.AutoRemediationFindings {
+					lines = append(lines, wrapText("- "+finding, innerWidth)...)
+				}
+			}
+		} else if len(detail.Progress.ImplReviewFindings) > 0 {
 			lines = append(lines, "Implementation review findings:")
 			for _, finding := range detail.Progress.ImplReviewFindings {
 				lines = append(lines, wrapText("- "+finding, innerWidth)...)

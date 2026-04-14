@@ -459,11 +459,13 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 		bundle.Execution.ReviewCouncilWarnings = nil
 		bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
 		bundle.Execution.ReviewCouncilAwaitingAnswers = false
+		bundle.Execution.ReviewCouncilSeats = [2]CouncilSeatRecord{}
 		bundle.Execution.RejectedBy = ""
 		bundle.Execution.ActiveTaskIDs = nil
 		bundle.Execution.ImplReviewStatus = ""
 		bundle.Execution.ImplReviewFindings = nil
 		bundle.Execution.ImplReviewedAt = nil
+		clearAutoRemediationState(&bundle.Execution, true)
 		bundle.Plan.State = planStateImplementationReview
 		bundle.Execution.State = planStateImplementationReview
 		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
@@ -528,9 +530,15 @@ func (k *Kitchen) RequestReview(planID string) error {
 	bundle.Execution.ImplReviewFindings = nil
 	bundle.Execution.ImplReviewedAt = nil
 	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilTurns = nil
+	bundle.Execution.ReviewCouncilWarnings = nil
+	bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
 	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.ReviewCouncilSeats = [2]CouncilSeatRecord{}
 	bundle.Execution.RejectedBy = ""
 	bundle.Execution.CompletedAt = nil
+	clearAutoRemediationState(&bundle.Execution, true)
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryImplReviewRequested,
 		Summary: "Manual implementation review requested.",
@@ -1504,6 +1512,19 @@ func appendUniqueIDs(existing []string, ids ...string) []string {
 		result = append(result, id)
 	}
 	return result
+}
+
+func containsTrimmedString(items []string, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func planFromArtifact(existing PlanRecord, artifact *adapter.PlanArtifact) PlanRecord {
