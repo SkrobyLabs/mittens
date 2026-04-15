@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -204,6 +205,89 @@ func buildResearchPrompt(topic string) string {
 		"- Note any risks, edge cases, or architectural considerations\n" +
 		"- Produce a structured research report\n\n" +
 		"When you are done, output your findings in a <research> tag block.\n"
+}
+
+func buildResearchRefinementPrompt(originalTopic, priorFindings, clarification string) string {
+	prompt := "## Research Refinement Task\n\n" +
+		"You are a researcher. Investigate the following topic in this codebase. You are in READ-ONLY mode — do NOT modify any files, do NOT create files, do NOT commit changes.\n\n" +
+		"### Original Topic\n\n" +
+		originalTopic + "\n\n" +
+		"### Clarification from Operator\n\n" +
+		clarification + "\n\n"
+	if strings.TrimSpace(priorFindings) != "" {
+		prompt += "### Prior Research Findings\n\n" +
+			"The following research was done previously but did not fully address the intent. Use it as background context and build upon or correct it:\n\n" +
+			priorFindings + "\n\n"
+	}
+	prompt += "### Instructions\n\n" +
+		"- The operator has clarified what they actually need — treat the clarification as the authoritative intent\n" +
+		"- Re-examine the codebase with the corrected understanding\n" +
+		"- Produce a complete, standalone research report (do not assume the reader has seen the prior findings)\n" +
+		"- Identify relevant files, patterns, dependencies, and constraints\n" +
+		"- Note any risks, edge cases, or architectural considerations\n\n" +
+		"When you are done, output your findings in a <research> tag block.\n"
+	return prompt
+}
+
+func (k *Kitchen) RefineResearch(planID, clarification string) (*StoredPlan, error) {
+	if k == nil || k.planStore == nil {
+		return nil, fmt.Errorf("kitchen plan store not configured")
+	}
+	clarification = strings.TrimSpace(clarification)
+	if clarification == "" {
+		return nil, fmt.Errorf("clarification must not be empty")
+	}
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return nil, fmt.Errorf("plan not found: %w", err)
+	}
+	if bundle.Plan.Mode != "research" {
+		return nil, fmt.Errorf("plan %s is not a research plan", planID)
+	}
+	if bundle.Execution.State != planStateResearchComplete {
+		return nil, fmt.Errorf("plan %s must be in research_complete state to refine (current: %s)", planID, bundle.Execution.State)
+	}
+
+	newTaskID := "research-refine-" + strconv.FormatInt(time.Now().UnixMilli(), 36)
+	priorFindings := strings.TrimSpace(bundle.Execution.ResearchOutput)
+	prompt := buildResearchRefinementPrompt(bundle.Plan.Summary, priorFindings, clarification)
+
+	bundle.Execution.State = planStateActive
+	bundle.Plan.State = planStateActive
+	bundle.Execution.ActiveTaskIDs = []string{newTaskID}
+	bundle.Execution.CompletedTaskIDs = nil
+	bundle.Execution.FailedTaskIDs = nil
+	bundle.Execution.CompletedAt = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    "research_refinement_requested",
+		Summary: clarification,
+	})
+
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return nil, err
+	}
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		return nil, err
+	}
+
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         newTaskID,
+		PlanID:     planID,
+		Prompt:     prompt,
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       researcherTaskRole,
+	}); err != nil {
+		return nil, err
+	}
+	k.sendNotify(pool.Notification{Type: "research_refinement_submitted", ID: planID, Message: bundle.Plan.Title})
+
+	updated, err := k.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 func (k *Kitchen) PromoteResearch(researchPlanID string, lineage string, auto bool, implReview bool) (*StoredPlan, error) {

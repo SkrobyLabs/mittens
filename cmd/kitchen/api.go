@@ -23,6 +23,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("POST /v1/ideas", k.withAPIAuth(token, k.handleSubmitIdea))
 	mux.HandleFunc("POST /v1/research", k.withAPIAuth(token, k.handleSubmitResearch))
 	mux.HandleFunc("POST /v1/plans/{id}/promote", k.withAPIAuth(token, k.handlePromoteResearch))
+	mux.HandleFunc("POST /v1/plans/{id}/refine-research", k.withAPIAuth(token, k.handleRefineResearch))
 	mux.HandleFunc("GET /v1/plans", k.withAPIAuth(token, k.handleListPlans))
 	mux.HandleFunc("GET /v1/plans/{id}", k.withAPIAuth(token, k.handleGetPlan))
 	mux.HandleFunc("GET /v1/plans/{id}/history", k.withAPIAuth(token, k.handlePlanHistory))
@@ -120,11 +121,11 @@ func apiErrorStatus(err error) int {
 		return http.StatusNotFound
 	case strings.Contains(msg, "not implemented"):
 		return http.StatusNotImplemented
-	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"), strings.Contains(msg, "active tasks"), strings.Contains(msg, "unfinished tasks"):
+	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"), strings.Contains(msg, "active tasks"), strings.Contains(msg, "unfinished tasks"), strings.Contains(msg, "must be in research_complete"):
 		return http.StatusConflict
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "forbidden"):
 		return http.StatusUnauthorized
-	case strings.Contains(msg, "must not"), strings.Contains(msg, "invalid"), strings.Contains(msg, "missing"), strings.Contains(msg, "unknown"):
+	case strings.Contains(msg, "must not"), strings.Contains(msg, "invalid"), strings.Contains(msg, "missing"), strings.Contains(msg, "unknown"), strings.Contains(msg, "not a research plan"):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
@@ -201,6 +202,25 @@ func (k *Kitchen) handlePromoteResearch(w http.ResponseWriter, r *http.Request) 
 		"lineage":         bundle.Plan.Lineage,
 		"researchPlanId":  bundle.Plan.ResearchPlanID,
 		"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
+	})
+}
+
+func (k *Kitchen) handleRefineResearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Clarification string `json:"clarification"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	bundle, err := k.RefineResearch(r.PathValue("id"), req.Clarification)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"planId": bundle.Plan.PlanID,
+		"state":  bundle.Execution.State,
+		"mode":   bundle.Plan.Mode,
 	})
 }
 

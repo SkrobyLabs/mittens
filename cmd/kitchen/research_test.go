@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,6 +360,132 @@ func TestPromoteResearchCouncilPromptIncludesResearch(t *testing.T) {
 	}
 }
 
+func TestRefineResearch(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitResearch("How does the scheduler handle task failures?")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+	planID := bundle.Plan.PlanID
+
+	// Manually set the plan to research_complete with prior findings.
+	bundle.Execution.State = planStateResearchComplete
+	bundle.Execution.ResearchOutput = "The scheduler uses onTaskFailed with a FailureClassifier."
+	bundle.Plan.State = planStateResearchComplete
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		t.Fatalf("UpdateExecution: %v", err)
+	}
+
+	clarification := "Focus specifically on how conflict failures are retried with RequireFreshWorker"
+	refined, err := k.RefineResearch(planID, clarification)
+	if err != nil {
+		t.Fatalf("RefineResearch: %v", err)
+	}
+
+	// Plan ID is unchanged.
+	if refined.Plan.PlanID != planID {
+		t.Fatalf("plan ID = %q, want %q", refined.Plan.PlanID, planID)
+	}
+	// State transitions back to active.
+	if refined.Execution.State != planStateActive {
+		t.Fatalf("state = %q, want %q", refined.Execution.State, planStateActive)
+	}
+	if refined.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", refined.Plan.State, planStateActive)
+	}
+	// A new task was enqueued.
+	if len(refined.Execution.ActiveTaskIDs) != 1 {
+		t.Fatalf("active tasks = %v, want 1", refined.Execution.ActiveTaskIDs)
+	}
+	newTaskID := refined.Execution.ActiveTaskIDs[0]
+	if !strings.HasPrefix(newTaskID, "research-refine-") {
+		t.Fatalf("task ID = %q, want prefix 'research-refine-'", newTaskID)
+	}
+
+	// Verify the enqueued task prompt contains prior findings and the clarification.
+	task, ok := k.pm.Task(newTaskID)
+	if !ok {
+		t.Fatalf("task %q not found in pool", newTaskID)
+	}
+	if task.Role != researcherTaskRole {
+		t.Fatalf("task role = %q, want %q", task.Role, researcherTaskRole)
+	}
+	if !strings.Contains(task.Prompt, "READ-ONLY") {
+		t.Fatal("refinement prompt should mention READ-ONLY mode")
+	}
+	if !strings.Contains(task.Prompt, clarification) {
+		t.Fatal("refinement prompt should contain the clarification")
+	}
+	if !strings.Contains(task.Prompt, "onTaskFailed") {
+		t.Fatal("refinement prompt should contain prior findings")
+	}
+}
+
+func TestRefineResearchEmptyClarificationFails(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitResearch("Explore something")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+	planID := bundle.Plan.PlanID
+
+	bundle.Execution.State = planStateResearchComplete
+	bundle.Plan.State = planStateResearchComplete
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		t.Fatalf("UpdateExecution: %v", err)
+	}
+
+	_, err = k.RefineResearch(planID, "   ")
+	if err == nil {
+		t.Fatal("expected error for empty clarification")
+	}
+	if !strings.Contains(err.Error(), "clarification must not be empty") {
+		t.Fatalf("error = %q, want 'clarification must not be empty'", err.Error())
+	}
+}
+
+func TestRefineResearchNotCompleteFails(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitResearch("Explore something")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+
+	_, err = k.RefineResearch(bundle.Plan.PlanID, "Some clarification")
+	if err == nil {
+		t.Fatal("expected error when refining incomplete research")
+	}
+	if !strings.Contains(err.Error(), "research_complete state") {
+		t.Fatalf("error = %q, want mention of 'research_complete state'", err.Error())
+	}
+}
+
+func TestRefineResearchNonResearchPlanFails(t *testing.T) {
+	k := newTestKitchen(t)
+
+	bundle, err := k.SubmitIdea("Add a feature", "my-feature", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	_, err = k.RefineResearch(bundle.Plan.PlanID, "Some clarification")
+	if err == nil {
+		t.Fatal("expected error when refining a non-research plan")
+	}
+	if !strings.Contains(err.Error(), "not a research plan") {
+		t.Fatalf("error = %q, want mention of 'not a research plan'", err.Error())
+	}
+}
+
 func TestBuildCouncilTurnPromptWithoutResearchContext(t *testing.T) {
 	// Verify that a normal plan (no research context) doesn't include the Prior Research section.
 	prompt := adapter.BuildCouncilTurnPrompt("Build a parser", nil, "A", 1, "Build a parser")
@@ -374,4 +502,34 @@ func TestBuildCouncilTurnPromptWithResearchContext(t *testing.T) {
 	if !strings.Contains(prompt, "recursive descent") {
 		t.Fatal("prompt should contain the research findings text")
 	}
+}
+
+func TestRefineResearchAPIWrongModePlanReturns400(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	// Submit a normal implementation idea (not a research plan).
+	bundle, err := k.SubmitIdea("Add a feature", "my-feature", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+
+	apiRequestExpectStatus(t, server, http.MethodPost, "/v1/plans/"+bundle.Plan.PlanID+"/refine-research",
+		map[string]any{"clarification": "some clarification"}, http.StatusBadRequest)
+}
+
+func TestRefineResearchAPIWrongStateReturns409(t *testing.T) {
+	k := newTestKitchen(t)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	// Submit a research plan but do not complete it (state remains active).
+	bundle, err := k.SubmitResearch("Explore something")
+	if err != nil {
+		t.Fatalf("SubmitResearch: %v", err)
+	}
+
+	apiRequestExpectStatus(t, server, http.MethodPost, "/v1/plans/"+bundle.Plan.PlanID+"/refine-research",
+		map[string]any{"clarification": "some clarification"}, http.StatusConflict)
 }
