@@ -6,6 +6,28 @@ import (
 	"time"
 )
 
+// ResolveProvider returns a single PoolKey for the named provider at the given
+// complexity, bypassing policy lookup. Returns nil if the provider is unhealthy
+// or not configured, letting the caller fall through to normal role routing.
+func (r *ComplexityRouter) ResolveProvider(provider string, complexity Complexity) []PoolKey {
+	if r == nil {
+		return nil
+	}
+	provider = canonicalKitchenProviderName(provider)
+	model, ok := modelForProviderComplexity(r.cfg, provider, complexity)
+	if !ok {
+		return nil
+	}
+	key := PoolKey{Provider: provider, Model: model}
+	if r.health != nil && !r.health.Available(poolKeyID(key), time.Now().UTC()) {
+		return nil
+	}
+	if len(r.hostPools) >= 1 && !r.supportsProvider(provider) {
+		return nil
+	}
+	return []PoolKey{key}
+}
+
 type ComplexityRouter struct {
 	cfg       KitchenConfig
 	health    *ProviderHealth

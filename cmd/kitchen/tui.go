@@ -30,7 +30,7 @@ type kitchenTUIBackend interface {
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
-	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error)
+	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error)
 	SubmitResearch(topic string) (string, error)
 	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
 	ExtendCouncil(planID string, turns int) error
@@ -88,8 +88,8 @@ func (b *kitchenAPIBackend) TaskOutput(taskID string) (string, error) {
 	return b.client.TaskOutput(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
-func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
-	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef, dependsOn...)
+func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef, overrides, dependsOn...)
 	if err != nil {
 		return "", err
 	}
@@ -288,10 +288,10 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 	return questions, err
 }
 
-func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
+func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
-		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, anchorRef, dependsOn...)
+		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, overrides, anchorRef, dependsOn...)
 		if err != nil {
 			return err
 		}
@@ -573,11 +573,14 @@ type kitchenTUIModel struct {
 	rightPaneOffsets  map[string]int
 	input             textinput.Model
 	inputMode         kitchenTUIInputMode
-	submitImplReview  bool
-	submitResearch    bool
-	submitDependsOn   []string
-	submitSelecting   bool
-	submitPrevLeft    kitchenTUILeftMode
+	submitImplReview           bool
+	submitResearch             bool
+	submitDependsOn            []string
+	submitSelecting            bool
+	submitPrevLeft             kitchenTUILeftMode
+	submitProviderOverrideMode bool
+	submitProviderOverrides    PlanProviderOverrides
+	submitProviderOverrideFocus int // 0=planner,1=council_a,2=council_b,3=implementer
 	promotePlanID     string
 	flash             string
 	flashUntil        time.Time
@@ -1211,13 +1214,47 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Provider override picker: intercept navigation keys when active.
+	if m.inputMode == kitchenTUIInputSubmit && m.submitProviderOverrideMode && !m.submitResearch {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "A", "esc":
+			m.submitProviderOverrideMode = false
+			return m, nil
+		case "left":
+			if m.submitProviderOverrideFocus > 0 {
+				m.submitProviderOverrideFocus--
+			}
+			return m, nil
+		case "right":
+			if m.submitProviderOverrideFocus < 3 {
+				m.submitProviderOverrideFocus++
+			}
+			return m, nil
+		case "up":
+			m.cycleSubmitProviderOverride(+1)
+			return m, nil
+		case "down":
+			m.cycleSubmitProviderOverride(-1)
+			return m, nil
+		}
+		// Let enter fall through to the main switch so the user can submit
+		// while the override picker is visible.
+	}
+
 	switch msg.String() {
 	case "esc":
+		if m.inputMode == kitchenTUIInputSubmit && m.submitProviderOverrideMode {
+			m.submitProviderOverrideMode = false
+			return m, nil
+		}
 		m.closeInput()
 		return m, nil
 	case "ctrl+r":
 		if m.inputMode == kitchenTUIInputSubmit {
 			m.submitResearch = !m.submitResearch
+			m.submitProviderOverrideMode = false
 			m.refreshSubmitInputPresentation()
 			return m, nil
 		}
@@ -1229,6 +1266,11 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "D":
 		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.beginSubmitDependencySelection()
+			return m, nil
+		}
+	case "A":
+		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
+			m.submitProviderOverrideMode = !m.submitProviderOverrideMode
 			return m, nil
 		}
 	case "enter":
@@ -1256,9 +1298,10 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			implReview := m.submitImplReview
 			dependsOn := append([]string(nil), m.submitDependsOn...)
+			overrides := buildSubmitProviderOverrides(m.submitProviderOverrides)
 			m.closeInput()
 			return m, m.actionCmd(func() (string, string, error) {
-				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef, dependsOn)
+				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef, dependsOn, overrides)
 				if err != nil {
 					return "", "", err
 				}
@@ -1393,6 +1436,9 @@ func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitDependsOn = nil
 	m.submitSelecting = false
 	m.submitPrevLeft = m.leftMode
+	m.submitProviderOverrideMode = false
+	m.submitProviderOverrides = PlanProviderOverrides{}
+	m.submitProviderOverrideFocus = 0
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
 	m.refreshSubmitInputPresentation()
 }
@@ -1477,6 +1523,69 @@ func (m *kitchenTUIModel) toggleSubmitDependency(planID string) {
 	}
 	m.submitDependsOn = append(m.submitDependsOn, planID)
 	sort.Strings(m.submitDependsOn)
+}
+
+var submitProviderOptions = []string{"", "claude", "codex", "gemini"}
+
+func cycleProviderOption(current string, dir int) string {
+	for i, o := range submitProviderOptions {
+		if o == current {
+			return submitProviderOptions[(i+dir+len(submitProviderOptions))%len(submitProviderOptions)]
+		}
+	}
+	return submitProviderOptions[0]
+}
+
+func (m *kitchenTUIModel) cycleSubmitProviderOverride(dir int) {
+	switch m.submitProviderOverrideFocus {
+	case 0: // planner
+		if m.submitProviderOverrides.ByRole == nil {
+			m.submitProviderOverrides.ByRole = make(map[string]string)
+		}
+		m.submitProviderOverrides.ByRole[plannerTaskRole] = cycleProviderOption(m.submitProviderOverrides.ByRole[plannerTaskRole], dir)
+	case 1: // council A
+		if m.submitProviderOverrides.BySeat == nil {
+			m.submitProviderOverrides.BySeat = make(map[string]string)
+		}
+		m.submitProviderOverrides.BySeat["A"] = cycleProviderOption(m.submitProviderOverrides.BySeat["A"], dir)
+	case 2: // council B
+		if m.submitProviderOverrides.BySeat == nil {
+			m.submitProviderOverrides.BySeat = make(map[string]string)
+		}
+		m.submitProviderOverrides.BySeat["B"] = cycleProviderOption(m.submitProviderOverrides.BySeat["B"], dir)
+	case 3: // implementer
+		if m.submitProviderOverrides.ByRole == nil {
+			m.submitProviderOverrides.ByRole = make(map[string]string)
+		}
+		m.submitProviderOverrides.ByRole["implementer"] = cycleProviderOption(m.submitProviderOverrides.ByRole["implementer"], dir)
+	}
+}
+
+// buildSubmitProviderOverrides returns nil if all overrides are empty (no override needed).
+func buildSubmitProviderOverrides(ov PlanProviderOverrides) *PlanProviderOverrides {
+	byRole := make(map[string]string)
+	for k, v := range ov.ByRole {
+		if v != "" {
+			byRole[k] = v
+		}
+	}
+	bySeat := make(map[string]string)
+	for k, v := range ov.BySeat {
+		if v != "" {
+			bySeat[k] = v
+		}
+	}
+	if len(byRole) == 0 && len(bySeat) == 0 {
+		return nil
+	}
+	result := &PlanProviderOverrides{}
+	if len(byRole) > 0 {
+		result.ByRole = byRole
+	}
+	if len(bySeat) > 0 {
+		result.BySeat = bySeat
+	}
+	return result
 }
 
 func (m kitchenTUIModel) submitDependencySelected(planID string) bool {
@@ -1782,6 +1891,9 @@ func (m kitchenTUIModel) footerActions() []string {
 			if m.submitSelecting {
 				return []string{"↑/↓ choose plan", "enter toggle dep", "D done", "esc done", "ctrl+c quit"}
 			}
+			if m.submitProviderOverrideMode {
+				return []string{"←/→ focus", "↑/↓ change", "enter submit", "A close", "ctrl+c quit"}
+			}
 			submitMode := "idea"
 			if m.submitResearch {
 				submitMode = "research"
@@ -1796,7 +1908,7 @@ func (m kitchenTUIModel) footerActions() []string {
 				implReviewMode = "on"
 			}
 			deps := fmt.Sprintf("%d", len(m.submitDependsOn))
-			actions = append(actions, "tab impl-review:"+implReviewMode, "D deps:"+deps, "esc cancel", "ctrl+c quit")
+			actions = append(actions, "tab impl-review:"+implReviewMode, "D deps:"+deps, "A providers", "esc cancel", "ctrl+c quit")
 			return actions
 		case kitchenTUIInputPromote:
 			return []string{"enter promote", "esc cancel", "ctrl+c quit"}
@@ -2865,6 +2977,9 @@ func (m kitchenTUIModel) renderInputBar() string {
 		if !m.submitResearch && m.submitSelecting {
 			label += " · selecting dependencies"
 		}
+		if !m.submitResearch && m.submitProviderOverrideMode {
+			label += " · providers"
+		}
 	case kitchenTUIInputPromote:
 		label = "Promote research"
 	case kitchenTUIInputReplan:
@@ -2883,6 +2998,10 @@ func (m kitchenTUIModel) renderInputBar() string {
 		}
 		body += "\n" + truncate(depsLine, max(20, m.width-6))
 		height = 4
+		if m.submitProviderOverrideMode {
+			body += "\n" + m.renderProviderOverrideLine()
+			height = 5
+		}
 	}
 	return paneBox(m.width, height, label+"\n"+body)
 }
@@ -2896,6 +3015,47 @@ func (m kitchenTUIModel) renderFooter() string {
 		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("84")).Render(m.flash)
 	}
 	return footer
+}
+
+func (m kitchenTUIModel) renderProviderOverrideLine() string {
+	type slot struct {
+		label    string
+		provider string
+	}
+	plannerProvider := ""
+	implProvider := ""
+	seatAProvider := ""
+	seatBProvider := ""
+	if m.submitProviderOverrides.ByRole != nil {
+		plannerProvider = m.submitProviderOverrides.ByRole[plannerTaskRole]
+		implProvider = m.submitProviderOverrides.ByRole["implementer"]
+	}
+	if m.submitProviderOverrides.BySeat != nil {
+		seatAProvider = m.submitProviderOverrides.BySeat["A"]
+		seatBProvider = m.submitProviderOverrides.BySeat["B"]
+	}
+	slots := []slot{
+		{"Planner", plannerProvider},
+		{"CouncilA", seatAProvider},
+		{"CouncilB", seatBProvider},
+		{"Impl", implProvider},
+	}
+	focusStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	var parts []string
+	for i, s := range slots {
+		display := s.provider
+		if display == "" {
+			display = "global"
+		}
+		cell := s.label + ":[" + display + "]"
+		if i == m.submitProviderOverrideFocus {
+			parts = append(parts, focusStyle.Render(cell))
+		} else {
+			parts = append(parts, dimStyle.Render(cell))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func paneTitle(title string, focused bool) string {

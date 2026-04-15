@@ -151,6 +151,62 @@ func TestComplexityRouterResolveDoesNotFallbackToArbitraryProviderWhenMultipleHo
 	}
 }
 
+func TestResolveProviderReturnsSingleKeyForNamedProvider(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	router := NewComplexityRouter(cfg, nil)
+
+	got := router.ResolveProvider("anthropic", ComplexityMedium)
+	if len(got) != 1 {
+		t.Fatalf("len(ResolveProvider) = %d, want 1", len(got))
+	}
+	if got[0].Provider != "claude" {
+		t.Fatalf("provider = %q, want claude", got[0].Provider)
+	}
+}
+
+func TestResolveProviderReturnsNilWhenSinglePoolDoesNotSupportProvider(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	// Single claude-only host pool: override to codex should return nil, not a
+	// stale codex PoolKey that no worker will ever match.
+	router := NewComplexityRouter(cfg, nil, PoolKey{Provider: "claude", Model: "sonnet"})
+
+	got := router.ResolveProvider("codex", ComplexityMedium)
+	if len(got) != 0 {
+		t.Fatalf("ResolveProvider single-pool codex against claude host = %+v, want nil", got)
+	}
+}
+
+func TestResolveProviderReturnsKeyWhenSinglePoolMatchesProvider(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	router := NewComplexityRouter(cfg, nil, PoolKey{Provider: "claude", Model: "sonnet"})
+
+	got := router.ResolveProvider("claude", ComplexityMedium)
+	if len(got) == 0 {
+		t.Fatal("ResolveProvider single matching pool returned nil, want claude key")
+	}
+	if got[0].Provider != "claude" {
+		t.Fatalf("provider = %q, want claude", got[0].Provider)
+	}
+}
+
+func TestResolveProviderReturnsNilWhenProviderUnhealthy(t *testing.T) {
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	cfg := DefaultKitchenConfig()
+	model := cfg.ProviderModels["anthropic"][ComplexityMedium]
+	if err := health.MarkAuthFailure("claude/"+model, time.Now().UTC()); err != nil {
+		t.Fatalf("MarkAuthFailure: %v", err)
+	}
+	router := NewComplexityRouter(cfg, health)
+
+	got := router.ResolveProvider("claude", ComplexityMedium)
+	if len(got) != 0 {
+		t.Fatalf("ResolveProvider unhealthy = %+v, want nil", got)
+	}
+}
+
 func TestComplexityRouterResolveForRoleOutcomeSingleHostPoolRespectsHealthExhaustion(t *testing.T) {
 	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
 	if err != nil {

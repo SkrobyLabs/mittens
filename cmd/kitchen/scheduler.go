@@ -1587,6 +1587,31 @@ func (s *Scheduler) routeResolutionForTask(task pool.Task) RouteResolution {
 			Availability: RouteAvailable,
 		}
 	}
+	// Check plan-level provider override before council seat / role routing.
+	if task.PlanID != "" && s.plans != nil {
+		if bundle, err := s.plans.Get(task.PlanID); err == nil && bundle.Plan.ProviderOverrides != nil {
+			overrides := bundle.Plan.ProviderOverrides
+			var overrideProvider string
+			if task.Role == plannerTaskRole {
+				if seat := councilSeatForTask(task); seat != "" {
+					overrideProvider = overrides.BySeat[seat]
+				}
+			} else if isReviewCouncilTask(task) {
+				turn := reviewCouncilTurnNumberFromTaskID(task.PlanID, task.ID)
+				if seat := reviewCouncilSeatForTurn(turn); seat != "" {
+					overrideProvider = overrides.BySeat[seat]
+				}
+			}
+			if overrideProvider == "" {
+				overrideProvider = overrides.ByRole[task.Role]
+			}
+			if overrideProvider != "" {
+				if keys := s.router.ResolveProvider(overrideProvider, Complexity(task.Complexity)); len(keys) > 0 {
+					return RouteResolution{Keys: keys, Candidates: keys, Availability: RouteAvailable}
+				}
+			}
+		}
+	}
 	if task.Role == plannerTaskRole && task.PlanID != "" {
 		if seat := councilSeatForTask(task); seat != "" {
 			return s.router.ResolveCouncilSeatOutcome(seat, Complexity(task.Complexity))

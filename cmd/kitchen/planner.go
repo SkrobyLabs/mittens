@@ -32,14 +32,14 @@ const (
 )
 
 func (k *Kitchen) SubmitIdea(idea string, lineage string, auto bool, implReview bool, dependsOn ...string) (*StoredPlan, error) {
-	return k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, "", "", "", dependsOn...)
+	return k.SubmitIdeaAt(idea, lineage, auto, implReview, nil, "", dependsOn...)
 }
 
-func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, anchorRef string, dependsOn ...string) (*StoredPlan, error) {
-	return k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, anchorRef, "", "", dependsOn...)
+func (k *Kitchen) SubmitIdeaAt(idea string, lineage string, auto bool, implReview bool, overrides *PlanProviderOverrides, anchorRef string, dependsOn ...string) (*StoredPlan, error) {
+	return k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, overrides, anchorRef, "", "", dependsOn...)
 }
 
-func (k *Kitchen) submitIdeaAtWithResearch(idea string, lineage string, auto bool, implReview bool, anchorRef string, researchPlanID string, researchContext string, dependsOn ...string) (*StoredPlan, error) {
+func (k *Kitchen) submitIdeaAtWithResearch(idea string, lineage string, auto bool, implReview bool, overrides *PlanProviderOverrides, anchorRef string, researchPlanID string, researchContext string, dependsOn ...string) (*StoredPlan, error) {
 	if k == nil || k.planStore == nil {
 		return nil, fmt.Errorf("kitchen plan store not configured")
 	}
@@ -75,16 +75,17 @@ func (k *Kitchen) submitIdeaAtWithResearch(idea string, lineage string, auto boo
 	}
 
 	plan := PlanRecord{
-		PlanID:          planID,
-		Source:          "operator",
-		Anchor:          anchor,
-		Lineage:         lineage,
-		Title:           title,
-		Summary:         idea,
-		DependsOn:       cleanDeps,
-		State:           planStatePlanning,
-		ResearchPlanID:  strings.TrimSpace(researchPlanID),
-		ResearchContext: strings.TrimSpace(researchContext),
+		PlanID:            planID,
+		Source:            "operator",
+		Anchor:            anchor,
+		Lineage:           lineage,
+		Title:             title,
+		Summary:           idea,
+		DependsOn:         cleanDeps,
+		State:             planStatePlanning,
+		ProviderOverrides: overrides,
+		ResearchPlanID:    strings.TrimSpace(researchPlanID),
+		ResearchContext:   strings.TrimSpace(researchContext),
 	}
 
 	execution := ExecutionRecord{
@@ -228,7 +229,7 @@ func (k *Kitchen) PromoteResearch(researchPlanID string, lineage string, auto bo
 		idea += "\n\n---\n\nPrior research findings are attached and should inform the planning process."
 	}
 
-	bundle, err := k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, "", researchPlanID, researchOutput)
+	bundle, err := k.submitIdeaAtWithResearch(idea, lineage, auto, implReview, nil, "", researchPlanID, researchOutput)
 	if err != nil {
 		return nil, err
 	}
@@ -1259,7 +1260,7 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 		}
 		newPlan.Summary += "Replan requested: " + reason
 	}
-	replanned, err := k.SubmitIdeaAt(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested, preferredAnchorRef(newPlan.Anchor), bundle.Plan.DependsOn...)
+	replanned, err := k.SubmitIdeaAt(newPlan.Summary, newPlan.Lineage, false, bundle.Execution.ImplReviewRequested, nil, preferredAnchorRef(newPlan.Anchor), bundle.Plan.DependsOn...)
 	if err != nil {
 		return "", err
 	}

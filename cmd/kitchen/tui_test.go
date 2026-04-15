@@ -23,11 +23,12 @@ type fakeKitchenTUIBackend struct {
 	plans                     []PlanRecord
 	questions                 []pool.Question
 	submitPlanID              string
-	submittedIdea             string
-	submittedResearchTopic    string
-	submittedImplReview       bool
-	submittedAnchorRef        string
-	submittedDependsOn        []string
+	submittedIdea              string
+	submittedResearchTopic     string
+	submittedImplReview        bool
+	submittedAnchorRef         string
+	submittedDependsOn         []string
+	submittedOverrides         *PlanProviderOverrides
 	promotedResearchPlanID    string
 	promotedLineage           string
 	promotedAuto              bool
@@ -86,11 +87,12 @@ func (b *fakeKitchenTUIBackend) TaskOutput(taskID string) (string, error) {
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
 }
-func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string) (string, error) {
+func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
 	b.submittedIdea = idea
 	b.submittedImplReview = implReview
 	b.submittedAnchorRef = anchorRef
 	b.submittedDependsOn = append([]string(nil), dependsOn...)
+	b.submittedOverrides = overrides
 	if strings.TrimSpace(b.submitPlanID) == "" {
 		return "plan_submitted", nil
 	}
@@ -3250,6 +3252,53 @@ func TestSummarizeReapply(t *testing.T) {
 	}
 	if got := summarizeReapply(map[string]any{"status": "conflicts", "baseBranch": "main", "conflicts": []string{"a.go", "b.go"}}); got != "reapply: conflicts on main files=a.go, b.go" {
 		t.Fatalf("conflicts summary = %q", got)
+	}
+}
+
+// TestKitchenTUIAdvancedSubmitCyclesProviderAndSubmitsOverride covers the
+// positive path for the capital-A provider override overlay: open overlay,
+// cycle the planner slot to "claude", submit, and assert the override is
+// forwarded to SubmitIdea.
+func TestKitchenTUIAdvancedSubmitCyclesProviderAndSubmitsOverride(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:   backend,
+		inputMode: kitchenTUIInputSubmit,
+		input:     textInputWithValue("Add provider override feature"),
+	}
+
+	// Press 'A' to open the provider override overlay.
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	got := updated.(kitchenTUIModel)
+	if !got.submitProviderOverrideMode {
+		t.Fatal("submitProviderOverrideMode = false after 'A', want true")
+	}
+
+	// Focus=0 is planner. Press 'up' (dir=+1): "" → "claude" (index 1 in submitProviderOptions).
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyUp})
+	got = updated.(kitchenTUIModel)
+	if got.submitProviderOverrides.ByRole[plannerTaskRole] != "claude" {
+		t.Fatalf("planner override = %q after up, want claude", got.submitProviderOverrides.ByRole[plannerTaskRole])
+	}
+
+	// Press 'enter' to submit — overlay is still active but enter falls through.
+	_, cmd := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected submit command from enter while overlay is open")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action.err = %v", action.err)
+	}
+	if backend.submittedOverrides == nil {
+		t.Fatal("submittedOverrides = nil, want non-nil with planner=claude")
+	}
+	if backend.submittedOverrides.ByRole[plannerTaskRole] != "claude" {
+		t.Fatalf("submittedOverrides.ByRole[planner] = %q, want claude", backend.submittedOverrides.ByRole[plannerTaskRole])
 	}
 }
 

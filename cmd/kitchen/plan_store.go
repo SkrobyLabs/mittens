@@ -66,23 +66,33 @@ type PlanTask struct {
 	TimeoutMinutes   int                  `json:"timeoutMinutes,omitempty"`
 }
 
+// PlanProviderOverrides pins a specific provider for roles/seats for this plan only.
+// Keys for ByRole: task role strings (plannerTaskRole, "implementer", etc.).
+// Keys for BySeat: "A", "B".
+// Values: canonical provider name ("claude", "codex", "gemini").
+type PlanProviderOverrides struct {
+	ByRole map[string]string `json:"byRole,omitempty"`
+	BySeat map[string]string `json:"bySeat,omitempty"`
+}
+
 type PlanRecord struct {
-	PlanID          string        `json:"planId"`
-	PlannerID       string        `json:"plannerId,omitempty"`
-	Source          string        `json:"source,omitempty"`
-	Mode            string        `json:"mode,omitempty"`
-	Anchor          PlanAnchor    `json:"anchor,omitempty"`
-	Lineage         string        `json:"lineage"`
-	Title           string        `json:"title"`
-	Summary         string        `json:"summary,omitempty"`
-	Ownership       PlanOwnership `json:"ownership,omitempty"`
-	Tasks           []PlanTask    `json:"tasks,omitempty"`
-	DependsOn       []string      `json:"dependsOn,omitempty"`
-	State           string        `json:"state,omitempty"`
-	ResearchPlanID  string        `json:"researchPlanId,omitempty"`
-	ResearchContext string        `json:"researchContext,omitempty"`
-	CreatedAt       time.Time     `json:"createdAt"`
-	UpdatedAt       time.Time     `json:"updatedAt"`
+	PlanID           string                 `json:"planId"`
+	PlannerID        string                 `json:"plannerId,omitempty"`
+	Source           string                 `json:"source,omitempty"`
+	Mode             string                 `json:"mode,omitempty"`
+	Anchor           PlanAnchor             `json:"anchor,omitempty"`
+	Lineage          string                 `json:"lineage"`
+	Title            string                 `json:"title"`
+	Summary          string                 `json:"summary,omitempty"`
+	Ownership        PlanOwnership          `json:"ownership,omitempty"`
+	Tasks            []PlanTask             `json:"tasks,omitempty"`
+	DependsOn        []string               `json:"dependsOn,omitempty"`
+	State            string                 `json:"state,omitempty"`
+	ResearchPlanID   string                 `json:"researchPlanId,omitempty"`
+	ResearchContext  string                 `json:"researchContext,omitempty"`
+	ProviderOverrides *PlanProviderOverrides `json:"providerOverrides,omitempty"`
+	CreatedAt        time.Time              `json:"createdAt"`
+	UpdatedAt        time.Time              `json:"updatedAt"`
 }
 
 type ExecutionRecord struct {

@@ -127,7 +127,7 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef, submitDependsOn...)
+				resp, err := client.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef, nil, submitDependsOn...)
 				if err != nil {
 					return err
 				}
@@ -140,7 +140,7 @@ func newRootCommand() *cobra.Command {
 			}
 			defer closeFn()
 
-			bundle, err := k.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, submitAnchorRef, submitDependsOn...)
+			bundle, err := k.SubmitIdeaAt(idea, submitLineage, submitAuto, submitImplReview, nil, submitAnchorRef, submitDependsOn...)
 			if err != nil {
 				return err
 			}

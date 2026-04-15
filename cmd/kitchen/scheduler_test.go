@@ -6167,3 +6167,206 @@ func newSchedulerPoolManagerWithHost(t *testing.T, host pool.HostAPI, stateDir, 
 	t.Cleanup(func() { _ = wal.Close() })
 	return pm
 }
+
+// TestRouteKeysForTaskRespectsProviderOverridesByRole covers the orchestration
+// path in routeKeysForTask: plan store lookup, ByRole priority, and the
+// provider key returned when a plan carries ProviderOverrides.
+func TestRouteKeysForTaskRespectsProviderOverridesByRole(t *testing.T) {
+	store := NewPlanStore(t.TempDir())
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_override_role",
+			Lineage: "test-lineage",
+			Title:   "Provider override role test",
+			ProviderOverrides: &PlanProviderOverrides{
+				ByRole: map[string]string{"implementer": "codex"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	s := &Scheduler{
+		router: NewComplexityRouter(DefaultKitchenConfig(), nil),
+		plans:  store,
+	}
+
+	task := pool.Task{
+		ID:         "task_impl_override",
+		PlanID:     planID,
+		Role:       "implementer",
+		Complexity: string(ComplexityMedium),
+	}
+
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 {
+		t.Fatal("routeKeysForTask returned no keys for plan with implementer override, want codex key")
+	}
+	if keys[0].Provider != "codex" {
+		t.Fatalf("routeKeysForTask key provider = %q, want codex", keys[0].Provider)
+	}
+}
+
+// TestRouteKeysForTaskFallsThroughWhenOverrideProviderUnavailable verifies that
+// routeKeysForTask falls back to normal role routing when the override provider
+// is not supported (e.g. single-pool deployment where override doesn't match).
+func TestRouteKeysForTaskFallsThroughWhenOverrideProviderUnavailable(t *testing.T) {
+	store := NewPlanStore(t.TempDir())
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_override_fallthrough",
+			Lineage: "test-lineage",
+			Title:   "Provider override fallthrough test",
+			ProviderOverrides: &PlanProviderOverrides{
+				ByRole: map[string]string{"implementer": "codex"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	// Single claude-only host pool — codex override is unsupported.
+	router := NewComplexityRouter(DefaultKitchenConfig(), nil, PoolKey{Provider: "claude", Model: "sonnet"})
+	s := &Scheduler{
+		router: router,
+		plans:  store,
+	}
+
+	task := pool.Task{
+		ID:         "task_impl_fallthrough",
+		PlanID:     planID,
+		Role:       "implementer",
+		Complexity: string(ComplexityMedium),
+	}
+
+	keys := s.routeKeysForTask(task)
+	// Override returns nil (codex not supported), so normal role routing applies.
+	// The single-pool fallback in resolvePolicy yields the claude host pool.
+	for _, k := range keys {
+		if k.Provider == "codex" {
+			t.Fatalf("routeKeysForTask returned codex key despite single-pool claude host: %+v", keys)
+		}
+	}
+}
+
+// TestRouteKeysForTaskRespectsProviderOverridesBySeatPlanner verifies that
+// BySeat overrides are applied to planner-council tasks.
+func TestRouteKeysForTaskRespectsProviderOverridesBySeatPlanner(t *testing.T) {
+	store := NewPlanStore(t.TempDir())
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_override_seat_planner",
+			Lineage: "test-lineage",
+			Title:   "BySeat planner override test",
+			ProviderOverrides: &PlanProviderOverrides{
+				BySeat: map[string]string{"A": "codex"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	s := &Scheduler{
+		router: NewComplexityRouter(DefaultKitchenConfig(), nil),
+		plans:  store,
+	}
+
+	// Turn 1 → seat A (odd turns are A per councilSeatForTurn).
+	task := pool.Task{
+		ID:         councilTaskID(planID, 1),
+		PlanID:     planID,
+		Role:       plannerTaskRole,
+		Complexity: string(ComplexityMedium),
+	}
+
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 {
+		t.Fatal("routeKeysForTask returned no keys for planner seat-A override, want codex")
+	}
+	if keys[0].Provider != "codex" {
+		t.Fatalf("routeKeysForTask key provider = %q, want codex", keys[0].Provider)
+	}
+}
+
+// TestRouteKeysForTaskRespectsProviderOverridesBySeatReviewer verifies that
+// BySeat overrides are applied to review-council tasks (role "reviewer").
+func TestRouteKeysForTaskRespectsProviderOverridesBySeatReviewer(t *testing.T) {
+	store := NewPlanStore(t.TempDir())
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_override_seat_reviewer",
+			Lineage: "test-lineage",
+			Title:   "BySeat reviewer override test",
+			ProviderOverrides: &PlanProviderOverrides{
+				BySeat: map[string]string{"A": "codex"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	s := &Scheduler{
+		router: NewComplexityRouter(DefaultKitchenConfig(), nil),
+		plans:  store,
+	}
+
+	// reviewCouncilTaskID(planID, 1) → turn 1 → seat A (odd turns are A per reviewCouncilSeatForTurn).
+	task := pool.Task{
+		ID:         reviewCouncilTaskID(planID, 1),
+		PlanID:     planID,
+		Role:       "reviewer",
+		Complexity: string(ComplexityMedium),
+	}
+
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 {
+		t.Fatal("routeKeysForTask returned no keys for reviewer seat-A override, want codex")
+	}
+	if keys[0].Provider != "codex" {
+		t.Fatalf("routeKeysForTask key provider = %q, want codex", keys[0].Provider)
+	}
+}
+
+// TestRouteKeysForTaskRespectsProviderOverridesBySeatReviewerSeatB verifies
+// that seat B override also works for review-council tasks.
+func TestRouteKeysForTaskRespectsProviderOverridesBySeatReviewerSeatB(t *testing.T) {
+	store := NewPlanStore(t.TempDir())
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_override_seat_reviewer_b",
+			Lineage: "test-lineage",
+			Title:   "BySeat reviewer seat-B override test",
+			ProviderOverrides: &PlanProviderOverrides{
+				BySeat: map[string]string{"B": "codex"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	s := &Scheduler{
+		router: NewComplexityRouter(DefaultKitchenConfig(), nil),
+		plans:  store,
+	}
+
+	// reviewCouncilTaskID(planID, 2) → turn 2 → seat B (even turns are B per reviewCouncilSeatForTurn).
+	task := pool.Task{
+		ID:         reviewCouncilTaskID(planID, 2),
+		PlanID:     planID,
+		Role:       "reviewer",
+		Complexity: string(ComplexityMedium),
+	}
+
+	keys := s.routeKeysForTask(task)
+	if len(keys) == 0 {
+		t.Fatal("routeKeysForTask returned no keys for reviewer seat-B override, want codex")
+	}
+	if keys[0].Provider != "codex" {
+		t.Fatalf("routeKeysForTask key provider = %q, want codex", keys[0].Provider)
+	}
+}

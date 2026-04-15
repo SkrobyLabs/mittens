@@ -133,17 +133,18 @@ func apiErrorStatus(err error) int {
 
 func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Idea       string   `json:"idea"`
-		Lineage    string   `json:"lineage"`
-		Auto       bool     `json:"auto"`
-		ImplReview bool     `json:"implReview"`
-		AnchorRef  string   `json:"anchorRef"`
-		DependsOn  []string `json:"dependsOn"`
+		Idea              string                 `json:"idea"`
+		Lineage           string                 `json:"lineage"`
+		Auto              bool                   `json:"auto"`
+		ImplReview        bool                   `json:"implReview"`
+		AnchorRef         string                 `json:"anchorRef"`
+		DependsOn         []string               `json:"dependsOn"`
+		ProviderOverrides *PlanProviderOverrides `json:"providerOverrides"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
 	}
-	bundle, err := k.SubmitIdeaAt(req.Idea, req.Lineage, req.Auto, req.ImplReview, req.AnchorRef, req.DependsOn...)
+	bundle, err := k.SubmitIdeaAt(req.Idea, req.Lineage, req.Auto, req.ImplReview, req.ProviderOverrides, req.AnchorRef, req.DependsOn...)
 	if err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
