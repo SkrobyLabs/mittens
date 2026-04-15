@@ -48,7 +48,11 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 	if err != nil {
 		return false, true
 	}
-	keys := s.routeKeysForTask(task)
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return false, true
+	}
+	keys := resolution.Keys
 	if len(keys) == 0 {
 		return s.workerCanRunTaskWithoutCouncilAffinity(worker, task), true
 	}
@@ -61,10 +65,12 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 		return false, true
 	}
 	if targetWorkerID != "" {
-		if worker.ID != targetWorkerID {
-			return false, true
+		if targetWorker, ok := s.refreshCouncilSeatWorker(targetWorkerID); ok && s.councilSeatWorkerUsable(*targetWorker, task) {
+			if worker.ID != targetWorkerID {
+				return false, true
+			}
+			return workerMatchesAnyRouteKey(worker, keys), true
 		}
-		return workerMatchesAnyRouteKey(worker, keys), true
 	}
 	return workerMatchesAnyRouteKey(worker, keys), true
 }
@@ -126,20 +132,24 @@ func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
 		seat.Seat = councilSeatForTurn(turn)
 	}
 	if workerID := strings.TrimSpace(seat.WorkerID); workerID != "" {
-		if worker, ok := s.refreshCouncilSeatWorker(workerID); ok && s.councilSeatWorkerUsable(*worker, pool.Task{
+		seatTask := pool.Task{
 			ID:         taskID,
 			PlanID:     bundle.Plan.PlanID,
 			Complexity: string(ComplexityMedium),
 			Role:       plannerTaskRole,
-		}) {
+		}
+		if worker, ok := s.refreshCouncilSeatWorker(workerID); ok && s.councilSeatWorkerUsable(*worker, seatTask) {
 			if worker.Status == pool.WorkerIdle {
 				if err := s.pm.DispatchTask(taskID, workerID); err != nil {
 					return err
 				}
 			}
 		} else {
-			s.invalidateCouncilSeat(&bundle, idx, turn, taskID)
-			seat = bundle.Execution.CouncilSeats[idx]
+			resolution := s.routeResolutionForTask(seatTask)
+			if !routeResolutionTemporarilyExhausted(resolution) {
+				s.invalidateCouncilSeat(&bundle, idx, turn, taskID)
+				seat = bundle.Execution.CouncilSeats[idx]
+			}
 		}
 	}
 	bundle.Execution.CouncilSeats[idx] = seat
@@ -435,17 +445,21 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 			if workerID == "" {
 				continue
 			}
-			worker, ok := s.refreshCouncilSeatWorker(workerID)
-			if ok && s.councilSeatWorkerUsable(*worker, pool.Task{
+			seatTask := pool.Task{
 				ID:         councilTaskID(bundle.Plan.PlanID, bundle.Execution.CouncilTurnsCompleted+1),
 				PlanID:     bundle.Plan.PlanID,
 				Complexity: string(ComplexityMedium),
 				Role:       plannerTaskRole,
-			}) {
+			}
+			worker, ok := s.refreshCouncilSeatWorker(workerID)
+			if ok && s.councilSeatWorkerUsable(*worker, seatTask) {
 				continue
 			}
-			s.invalidateCouncilSeat(&bundle, i, bundle.Execution.CouncilTurnsCompleted+1, "")
-			changedSeats = true
+			resolution := s.routeResolutionForTask(seatTask)
+			if !routeResolutionTemporarilyExhausted(resolution) {
+				s.invalidateCouncilSeat(&bundle, i, bundle.Execution.CouncilTurnsCompleted+1, "")
+				changedSeats = true
+			}
 		}
 		if changedSeats {
 			if err := s.plans.UpdateExecution(bundle.Plan.PlanID, bundle.Execution); err != nil {
@@ -462,7 +476,11 @@ func (s *Scheduler) workerCanRunTaskWithoutCouncilAffinity(worker pool.Worker, t
 	if workerRole != "" && workerRole != "general" && taskRole != "" && workerRole != taskRole {
 		return false
 	}
-	keys := s.routeKeysForTask(task)
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return false
+	}
+	keys := resolution.Keys
 	if len(keys) == 0 || strings.TrimSpace(worker.Provider) == "" {
 		return true
 	}
@@ -470,7 +488,11 @@ func (s *Scheduler) workerCanRunTaskWithoutCouncilAffinity(worker pool.Worker, t
 }
 
 func (s *Scheduler) seatWorkerMatchesRoute(worker pool.Worker, task pool.Task) bool {
-	return workerMatchesAnyRouteKey(worker, s.routeKeysForTask(task))
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return false
+	}
+	return workerMatchesAnyRouteKey(worker, resolution.Keys)
 }
 
 func (s *Scheduler) invalidateCouncilSeat(bundle *StoredPlan, idx, turn int, taskID string) {
@@ -560,7 +582,8 @@ func (s *Scheduler) onCouncilTurnFailed(task pool.Task, class FailureClass) erro
 			}
 			if requireFresh {
 				if revivedTask, ok := s.pm.Task(task.ID); ok {
-					return s.spawnWorkerForTask(*revivedTask)
+					_, err := s.spawnWorkerForTask(*revivedTask)
+					return err
 				}
 			}
 			return nil
@@ -589,7 +612,8 @@ func (s *Scheduler) onCouncilTurnFailed(task pool.Task, class FailureClass) erro
 				return err
 			}
 			if revivedTask, ok := s.pm.Task(task.ID); ok {
-				return s.spawnWorkerForTask(*revivedTask)
+				_, err := s.spawnWorkerForTask(*revivedTask)
+				return err
 			}
 			return nil
 		default:

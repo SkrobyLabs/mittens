@@ -55,7 +55,11 @@ func (s *Scheduler) workerCanRunReviewCouncilTask(worker pool.Worker, task pool.
 	if err != nil {
 		return false, true
 	}
-	keys := s.routeKeysForTask(task)
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return false, true
+	}
+	keys := resolution.Keys
 	if len(keys) == 0 {
 		return s.workerCanRunTaskWithoutCouncilAffinity(worker, task), true
 	}
@@ -70,17 +74,18 @@ func (s *Scheduler) workerCanRunReviewCouncilTask(worker pool.Worker, task pool.
 	if targetWorkerID == "" {
 		return false, true
 	}
-	if worker.ID != targetWorkerID {
-		return false, true
-	}
 	if strings.TrimSpace(worker.Role) != task.Role {
 		return false, true
 	}
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
 		return false, true
 	}
-	if len(keys) == 0 {
-		return true, true
+	if targetWorker, ok := s.refreshReviewCouncilSeatWorker(targetWorkerID); ok && s.reviewCouncilSeatWorkerUsable(*targetWorker, task) {
+		if worker.ID != targetWorkerID {
+			return false, true
+		}
+	} else if worker.ID == targetWorkerID {
+		return false, true
 	}
 	return workerMatchesAnyRouteKey(worker, keys), true
 }
@@ -150,8 +155,11 @@ func (s *Scheduler) enqueueReviewCouncilTurn(bundle StoredPlan) error {
 				}
 			}
 		} else {
-			s.invalidateReviewCouncilSeat(&bundle, idx, turn, taskID)
-			seat = bundle.Execution.ReviewCouncilSeats[idx]
+			resolution := s.routeResolutionForTask(seatTask)
+			if !routeResolutionTemporarilyExhausted(resolution) {
+				s.invalidateReviewCouncilSeat(&bundle, idx, turn, taskID)
+				seat = bundle.Execution.ReviewCouncilSeats[idx]
+			}
 		}
 	}
 	bundle.Execution.ReviewCouncilSeats[idx] = seat
@@ -789,8 +797,11 @@ func (s *Scheduler) recoverReviewCouncilPlansOnStartup() error {
 			if ok && s.reviewCouncilSeatWorkerUsable(*worker, seatTask) {
 				continue
 			}
-			s.invalidateReviewCouncilSeat(&bundle, i, bundle.Execution.ReviewCouncilTurnsCompleted+1, "")
-			changedSeats = true
+			resolution := s.routeResolutionForTask(seatTask)
+			if !routeResolutionTemporarilyExhausted(resolution) {
+				s.invalidateReviewCouncilSeat(&bundle, i, bundle.Execution.ReviewCouncilTurnsCompleted+1, "")
+				changedSeats = true
+			}
 		}
 		if changedSeats {
 			if err := s.plans.UpdateExecution(bundle.Plan.PlanID, bundle.Execution); err != nil {

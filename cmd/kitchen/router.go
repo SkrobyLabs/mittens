@@ -12,6 +12,20 @@ type ComplexityRouter struct {
 	hostPools []PoolKey
 }
 
+type RouteAvailability string
+
+const (
+	RouteAvailable            RouteAvailability = "available"
+	RouteTemporarilyExhausted RouteAvailability = "temporarily_exhausted"
+	RouteUnroutable           RouteAvailability = "unroutable"
+)
+
+type RouteResolution struct {
+	Keys         []PoolKey
+	Candidates   []PoolKey
+	Availability RouteAvailability
+}
+
 func NewComplexityRouter(cfg KitchenConfig, health *ProviderHealth, hostPool ...PoolKey) *ComplexityRouter {
 	r := &ComplexityRouter{
 		cfg:    cloneKitchenConfig(cfg),
@@ -34,6 +48,13 @@ func (r *ComplexityRouter) ResolveForRole(role string, c Complexity) []PoolKey {
 	if r == nil {
 		return nil
 	}
+	return r.ResolveForRoleOutcome(role, c).Keys
+}
+
+func (r *ComplexityRouter) ResolveForRoleOutcome(role string, c Complexity) RouteResolution {
+	if r == nil {
+		return RouteResolution{Availability: RouteAvailable}
+	}
 	policy := effectiveProviderPolicyForRole(r.cfg, role)
 	return r.resolvePolicy(policy, c)
 }
@@ -42,35 +63,78 @@ func (r *ComplexityRouter) ResolveCouncilSeat(seat string, c Complexity) []PoolK
 	if r == nil {
 		return nil
 	}
+	return r.ResolveCouncilSeatOutcome(seat, c).Keys
+}
+
+func (r *ComplexityRouter) ResolveCouncilSeatOutcome(seat string, c Complexity) RouteResolution {
+	if r == nil {
+		return RouteResolution{Availability: RouteAvailable}
+	}
 	policy := effectiveProviderPolicyForCouncilSeat(r.cfg, seat)
 	return r.resolvePolicy(policy, c)
 }
 
-func (r *ComplexityRouter) resolvePolicy(policy ProviderPolicy, c Complexity) []PoolKey {
+func (r *ComplexityRouter) resolvePolicy(policy ProviderPolicy, c Complexity) RouteResolution {
 	if len(policy.Prefer) == 0 {
-		return nil
+		return RouteResolution{Availability: RouteUnroutable}
 	}
 	ordered := r.poolKeysForPolicy(policy, c)
+	if len(ordered) == 0 {
+		return RouteResolution{Availability: RouteUnroutable}
+	}
 	healthy := ordered
+	filteredByHealth := false
 	if r.health != nil {
 		now := time.Now().UTC()
 		healthy = nil
 		for _, key := range ordered {
 			if r.health.Available(poolKeyID(key), now) {
 				healthy = append(healthy, key)
+			} else {
+				filteredByHealth = true
 			}
 		}
 	}
 	if len(r.hostPools) == 0 {
-		return healthy
+		if len(healthy) > 0 {
+			return RouteResolution{
+				Keys:         append([]PoolKey(nil), healthy...),
+				Candidates:   append([]PoolKey(nil), ordered...),
+				Availability: RouteAvailable,
+			}
+		}
+		if filteredByHealth {
+			return RouteResolution{
+				Candidates:   append([]PoolKey(nil), ordered...),
+				Availability: RouteTemporarilyExhausted,
+			}
+		}
+		return RouteResolution{
+			Candidates:   append([]PoolKey(nil), ordered...),
+			Availability: RouteUnroutable,
+		}
 	}
 	if len(r.hostPools) == 1 {
 		for _, key := range healthy {
 			if sameProvider(key.Provider, r.hostPools[0].Provider) {
-				return healthy
+				return RouteResolution{
+					Keys:         append([]PoolKey(nil), healthy...),
+					Candidates:   append([]PoolKey(nil), ordered...),
+					Availability: RouteAvailable,
+				}
 			}
 		}
-		return append([]PoolKey(nil), r.hostPools...)
+		if filteredByHealth && len(healthy) == 0 {
+			return RouteResolution{
+				Candidates:   append([]PoolKey(nil), ordered...),
+				Availability: RouteTemporarilyExhausted,
+			}
+		}
+		return RouteResolution{
+			Keys:         append([]PoolKey(nil), r.hostPools...),
+			Candidates:   append([]PoolKey(nil), ordered...),
+			Availability: RouteAvailable,
+		}
 	}
 	supported := make([]PoolKey, 0, len(healthy))
 	for _, key := range healthy {
@@ -79,9 +143,22 @@ func (r *ComplexityRouter) resolvePolicy(policy ProviderPolicy, c Complexity) []
 		}
 	}
 	if len(supported) > 0 {
-		return supported
+		return RouteResolution{
+			Keys:         supported,
+			Candidates:   append([]PoolKey(nil), ordered...),
+			Availability: RouteAvailable,
+		}
 	}
-	return nil
+	if filteredByHealth && len(healthy) == 0 {
+		return RouteResolution{
+			Candidates:   append([]PoolKey(nil), ordered...),
+			Availability: RouteTemporarilyExhausted,
+		}
+	}
+	return RouteResolution{
+		Candidates:   append([]PoolKey(nil), ordered...),
+		Availability: RouteUnroutable,
+	}
 }
 
 func (r *ComplexityRouter) poolKeysForPolicy(policy ProviderPolicy, c Complexity) []PoolKey {

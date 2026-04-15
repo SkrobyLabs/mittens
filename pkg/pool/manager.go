@@ -837,6 +837,37 @@ func (pm *PoolManager) FailTaskDetailed(workerID, taskID, errMsg, failureClass s
 	return nil
 }
 
+// FailQueuedTaskDetailed marks a queued task as failed without requiring a worker assignment.
+// This is used for scheduler-detected terminal routing/configuration failures before dispatch.
+func (pm *PoolManager) FailQueuedTaskDetailed(taskID, errMsg, failureClass string, detail json.RawMessage) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	t := pm.tasks[taskID]
+	if t == nil {
+		return fmt.Errorf("fail queued task: task %q not found", taskID)
+	}
+	if t.Status != TaskQueued {
+		return fmt.Errorf("fail queued task: task %q is %q, expected queued", taskID, t.Status)
+	}
+
+	e := Event{
+		Timestamp: time.Now(),
+		Type:      EventTaskFailed,
+		TaskID:    taskID,
+		Data: marshalData(TaskFailedData{
+			Error:        errMsg,
+			FailureClass: strings.TrimSpace(failureClass),
+			Detail:       append(json.RawMessage(nil), detail...),
+		}),
+	}
+	if _, err := pm.wal.Append(e); err != nil {
+		return fmt.Errorf("fail queued task wal: %w", err)
+	}
+	Apply(pm, e)
+	return nil
+}
+
 // FailCompletedTask converts a completed task into a failed task when
 // downstream finalization (for example merge-back) fails after execution.
 func (pm *PoolManager) FailCompletedTask(taskID, errMsg string) error {

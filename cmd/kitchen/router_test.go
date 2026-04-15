@@ -150,3 +150,62 @@ func TestComplexityRouterResolveDoesNotFallbackToArbitraryProviderWhenMultipleHo
 		t.Fatalf("resolve = %+v, want no supported pools", got)
 	}
 }
+
+func TestComplexityRouterResolveForRoleOutcomeSingleHostPoolRespectsHealthExhaustion(t *testing.T) {
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatalf("SetCooldown: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer: []string{"anthropic"},
+	}
+	router := NewComplexityRouter(cfg, health, PoolKey{Provider: "claude", Model: "sonnet"})
+
+	got := router.ResolveForRoleOutcome(defaultRoutingRole, ComplexityMedium)
+	if got.Availability != RouteTemporarilyExhausted {
+		t.Fatalf("availability = %q, want %q", got.Availability, RouteTemporarilyExhausted)
+	}
+	if len(got.Keys) != 0 {
+		t.Fatalf("keys = %+v, want no eligible keys while cooldown is active", got.Keys)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Provider != "anthropic" {
+		t.Fatalf("candidates = %+v, want anthropic candidate preserved", got.Candidates)
+	}
+}
+
+func TestComplexityRouterResolveForRoleOutcomeMultiHostPoolRespectsHealthExhaustion(t *testing.T) {
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[defaultRoutingRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	router := NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"})
+
+	got := router.ResolveForRoleOutcome(defaultRoutingRole, ComplexityMedium)
+	if got.Availability != RouteTemporarilyExhausted {
+		t.Fatalf("availability = %q, want %q", got.Availability, RouteTemporarilyExhausted)
+	}
+	if len(got.Keys) != 0 {
+		t.Fatalf("keys = %+v, want no eligible keys while cooldown is active", got.Keys)
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("candidates = %+v, want openai and anthropic candidates preserved", got.Candidates)
+	}
+}

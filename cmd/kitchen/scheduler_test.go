@@ -15,13 +15,17 @@ import (
 )
 
 type schedulerHostAPI struct {
-	spawnSpecs    []pool.WorkerSpec
-	containers    []pool.ContainerInfo
-	killedWorkers []string
-	listErr       error
+	spawnSpecs      []pool.WorkerSpec
+	containers      []pool.ContainerInfo
+	killedWorkers   []string
+	listErr         error
+	requireProvider bool
 }
 
 func (h *schedulerHostAPI) SpawnWorker(_ context.Context, spec pool.WorkerSpec) (string, string, error) {
+	if h.requireProvider && strings.TrimSpace(spec.Provider) == "" {
+		return "", "", errors.New("provider is required when multiple runtimes are configured")
+	}
 	h.spawnSpecs = append(h.spawnSpecs, spec)
 	return "worker-" + spec.ID, "container-" + spec.ID, nil
 }
@@ -153,6 +157,699 @@ func TestSchedulerScheduleSpawnsAndDispatchesTask(t *testing.T) {
 	task, ok := pm.Task(taskID)
 	if !ok || task.Status != pool.TaskDispatched || task.WorkerID != "w-1" {
 		t.Fatalf("task = %+v, want dispatched to w-1", task)
+	}
+}
+
+func TestSchedulerBlocksExhaustedRouteWithoutStarvingOtherQueuedTasks(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	cooldownUntil := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", cooldownUntil); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", cooldownUntil); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-route-exhausted"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-review-idle",
+		Role:     "reviewer",
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-idle", "container-w-review-idle"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	store := NewPlanStore(project.PlansDir)
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	router := NewComplexityRouter(cfg, health)
+	s := NewScheduler(pm, host, router, gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	blockedTaskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-review-blocked",
+		Prompt:     "review work",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask blocked: %v", err)
+	}
+	healthyTaskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-implementer-healthy",
+		Prompt:     "implement work",
+		Complexity: string(ComplexityMedium),
+		Priority:   2,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask healthy: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	blockedTask, ok := pm.Task(blockedTaskID)
+	if !ok {
+		t.Fatalf("blocked task %q not found", blockedTaskID)
+	}
+	if blockedTask.Status != pool.TaskQueued {
+		t.Fatalf("blocked task status = %q, want queued", blockedTask.Status)
+	}
+	reviewer, ok := pm.Worker("w-review-idle")
+	if !ok {
+		t.Fatal("reviewer worker missing")
+	}
+	if strings.TrimSpace(reviewer.CurrentTaskID) != "" {
+		t.Fatalf("reviewer current task = %q, want idle while route is exhausted", reviewer.CurrentTaskID)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want only the healthy implementer spawn", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != "implementer" {
+		t.Fatalf("spawn role = %q, want implementer", host.spawnSpecs[0].Role)
+	}
+	if _, ok := s.routeNotices[blockedTaskID]; !ok {
+		t.Fatalf("expected blocked task %q to record a route notice", blockedTaskID)
+	}
+
+	healthySpawnID := host.spawnSpecs[0].ID
+	if err := pm.RegisterWorker(healthySpawnID, "container-"+healthySpawnID); err != nil {
+		t.Fatalf("RegisterWorker healthy spawn: %v", err)
+	}
+	host.spawnSpecs = nil
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch healthy): %v", err)
+	}
+	healthyTask, ok := pm.Task(healthyTaskID)
+	if !ok || healthyTask.Status != pool.TaskDispatched {
+		t.Fatalf("healthy task = %+v, want dispatched", healthyTask)
+	}
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock): %v", err)
+	}
+
+	blockedTask, ok = pm.Task(blockedTaskID)
+	if !ok || blockedTask.Status != pool.TaskDispatched || blockedTask.WorkerID != "w-review-idle" {
+		t.Fatalf("blocked task after unblock = %+v, want dispatched to idle reviewer", blockedTask)
+	}
+	if _, ok := s.routeNotices[blockedTaskID]; ok {
+		t.Fatalf("expected route notice for %q to clear after dispatch", blockedTaskID)
+	}
+}
+
+func TestSchedulerFailsUnroutableQueuedTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{Prefer: []string{"missing-provider"}}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-route-unroutable"), "kitchen-test")
+	store := NewPlanStore(project.PlansDir)
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, nil, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-review-unroutable",
+		Prompt:     "review work",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskFailed {
+		t.Fatalf("task status = %q, want failed", task.Status)
+	}
+	if task.Result == nil || task.Result.FailureClass != string(FailureCapability) {
+		t.Fatalf("task result = %+v, want capability failure", task.Result)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs = %d, want 0", len(host.spawnSpecs))
+	}
+}
+
+func TestSchedulerSkipsSpawnWhenMultiRuntimeRoutesAreTemporarilyExhausted(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+
+	host := &schedulerHostAPI{requireProvider: true}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-multiruntime-route-exhausted"), "kitchen-test")
+	store := NewPlanStore(project.PlansDir)
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         "t-review-multiruntime-exhausted",
+		Prompt:     "review work",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued", task.Status)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs = %d, want 0 when all routes are temporarily exhausted", len(host.spawnSpecs))
+	}
+	if _, ok := s.routeNotices[taskID]; !ok {
+		t.Fatalf("expected route notice for %q", taskID)
+	}
+}
+
+func TestEnqueueReviewCouncilTurnRetainsSeatWorkerWhileRouteIsTemporarilyExhausted(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newReviewCouncilSeats()
+	seats[0].WorkerID = "w-review-seat"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_review_seat_exhausted",
+			Lineage: "feat-review-seat-exhausted",
+			Title:   "Review seat exhaustion",
+			State:   planStateImplementationReview,
+			Tasks:   []PlanTask{{ID: "t1", Title: "Implement", Prompt: "implement", Complexity: ComplexityMedium}},
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateImplementationReview,
+			ImplReviewRequested:   true,
+			ReviewCouncilMaxTurns: 2,
+			ReviewCouncilSeats:    seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-seat-exhausted"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-review-seat",
+		Role:     "reviewer",
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker review seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-seat", "container-w-review-seat"); err != nil {
+		t.Fatalf("RegisterWorker review seat: %v", err)
+	}
+	host.spawnSpecs = nil
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultKitchenConfig()
+	cfg.Concurrency.MaxWorkersTotal = 1
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if err := s.enqueueReviewCouncilTurn(bundle); err != nil {
+		t.Fatalf("enqueueReviewCouncilTurn: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan after enqueue: %v", err)
+	}
+	if bundle.Execution.ReviewCouncilSeats[0].WorkerID != "w-review-seat" {
+		t.Fatalf("seat worker = %q, want reservation preserved", bundle.Execution.ReviewCouncilSeats[0].WorkerID)
+	}
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock review): %v", err)
+	}
+
+	taskID := reviewCouncilTaskID(planID, 1)
+	task, ok := pm.Task(taskID)
+	if !ok || task.Status != pool.TaskDispatched || task.WorkerID != "w-review-seat" {
+		t.Fatalf("review task after unblock = %+v, want dispatched to retained seat worker", task)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs = %d, want 0 because retained seat worker should be reused", len(host.spawnSpecs))
+	}
+}
+
+func TestEnqueueCouncilTurnRetainsSeatWorkerWhileRouteIsTemporarilyExhausted(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newCouncilSeats()
+	seats[0].WorkerID = "w-council-seat"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_seat_exhausted",
+			Lineage: "feat-council-seat-exhausted",
+			Title:   "Council seat exhaustion",
+			State:   planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			State:           planStatePlanning,
+			CouncilMaxTurns: 2,
+			CouncilSeats:    seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-seat-exhausted"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-council-seat",
+		Role:     plannerTaskRole,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker council seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-council-seat", "container-w-council-seat"); err != nil {
+		t.Fatalf("RegisterWorker council seat: %v", err)
+	}
+	host.spawnSpecs = nil
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultKitchenConfig()
+	cfg.Concurrency.MaxWorkersTotal = 1
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if err := s.enqueueCouncilTurn(bundle); err != nil {
+		t.Fatalf("enqueueCouncilTurn: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan after enqueue: %v", err)
+	}
+	if bundle.Execution.CouncilSeats[0].WorkerID != "w-council-seat" {
+		t.Fatalf("seat worker = %q, want reservation preserved", bundle.Execution.CouncilSeats[0].WorkerID)
+	}
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock council): %v", err)
+	}
+
+	taskID := councilTaskID(planID, 1)
+	task, ok := pm.Task(taskID)
+	if !ok || task.Status != pool.TaskDispatched || task.WorkerID != "w-council-seat" {
+		t.Fatalf("council task after unblock = %+v, want dispatched to retained seat worker", task)
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs = %d, want 0 because retained seat worker should be reused", len(host.spawnSpecs))
+	}
+}
+
+func TestReviewCouncilDispatchFallsBackWhenReservedSeatWorkerDiesDuringCooldown(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newReviewCouncilSeats()
+	seats[0].WorkerID = "w-review-seat-old"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_review_seat_dead_fallback",
+			Lineage: "feat-review-seat-dead-fallback",
+			Title:   "Review seat dead fallback",
+			State:   planStateImplementationReview,
+			Tasks:   []PlanTask{{ID: "t1", Title: "Implement", Prompt: "implement", Complexity: ComplexityMedium}},
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateImplementationReview,
+			ImplReviewRequested:   true,
+			ReviewCouncilMaxTurns: 2,
+			ReviewCouncilSeats:    seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-seat-dead-fallback"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-review-seat-old",
+		Role:     "reviewer",
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker old review seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-seat-old", "container-w-review-seat-old"); err != nil {
+		t.Fatalf("RegisterWorker old review seat: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if err := s.enqueueReviewCouncilTurn(bundle); err != nil {
+		t.Fatalf("enqueueReviewCouncilTurn: %v", err)
+	}
+	if err := pm.KillWorker("w-review-seat-old"); err != nil {
+		t.Fatalf("KillWorker old review seat: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-review-seat-new",
+		Role:     "reviewer",
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker new review seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-review-seat-new", "container-w-review-seat-new"); err != nil {
+		t.Fatalf("RegisterWorker new review seat: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock review): %v", err)
+	}
+
+	taskID := reviewCouncilTaskID(planID, 1)
+	task, ok := pm.Task(taskID)
+	if !ok || task.Status != pool.TaskDispatched || task.WorkerID != "w-review-seat-new" {
+		t.Fatalf("review task after fallback = %+v, want dispatched to replacement worker", task)
+	}
+}
+
+func TestCouncilDispatchFallsBackWhenReservedSeatWorkerDiesDuringCooldown(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	until := time.Now().UTC().Add(time.Minute)
+	if err := health.SetCooldown("openai/gpt-5.4", until); err != nil {
+		t.Fatalf("SetCooldown openai: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", until); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newCouncilSeats()
+	seats[0].WorkerID = "w-council-seat-old"
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_seat_dead_fallback",
+			Lineage: "feat-council-seat-dead-fallback",
+			Title:   "Council seat dead fallback",
+			State:   planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			State:           planStatePlanning,
+			CouncilMaxTurns: 2,
+			CouncilSeats:    seats,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-seat-dead-fallback"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-council-seat-old",
+		Role:     plannerTaskRole,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker old council seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-council-seat-old", "container-w-council-seat-old"); err != nil {
+		t.Fatalf("RegisterWorker old council seat: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"}), gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if err := s.enqueueCouncilTurn(bundle); err != nil {
+		t.Fatalf("enqueueCouncilTurn: %v", err)
+	}
+	if err := pm.KillWorker("w-council-seat-old"); err != nil {
+		t.Fatalf("KillWorker old council seat: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:       "w-council-seat-new",
+		Role:     plannerTaskRole,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	}); err != nil {
+		t.Fatalf("SpawnWorker new council seat: %v", err)
+	}
+	if err := pm.RegisterWorker("w-council-seat-new", "container-w-council-seat-new"); err != nil {
+		t.Fatalf("RegisterWorker new council seat: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock council): %v", err)
+	}
+
+	taskID := councilTaskID(planID, 1)
+	task, ok := pm.Task(taskID)
+	if !ok || task.Status != pool.TaskDispatched || task.WorkerID != "w-council-seat-new" {
+		t.Fatalf("council task after fallback = %+v, want dispatched to replacement worker", task)
 	}
 }
 
@@ -3390,6 +4087,282 @@ func TestOnImplementationReviewFailed_AuthFailureRetriesWithFreshReviewer(t *tes
 	}
 	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != reviewTaskID {
 		t.Fatalf("active task IDs = %+v, want [%s]", bundle.Execution.ActiveTaskIDs, reviewTaskID)
+	}
+}
+
+func TestOnImplementationReviewFailed_AuthFailureBlocksWhenFallbackProvidersAreExhausted(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_auth_exhausted",
+			Lineage: "feat-ir-auth-exhausted",
+			Title:   "Impl review auth exhaustion",
+			State:   planStateImplementationReview,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: strings.TrimSpace(head),
+			},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "pass",
+					Summary: "initial review",
+				},
+			}},
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: strings.TrimSpace(head),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders["reviewer"] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-auth-exhausted"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	router := NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"})
+	s := NewScheduler(pm, host, router, gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+	s.failurePolicy[string(FailureAuth)] = FailurePolicyRule{Action: authActionTryNextProvider, Cooldown: "60s"}
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn review): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1", len(host.spawnSpecs))
+	}
+	initialSpawn := host.spawnSpecs[0]
+	if initialSpawn.Provider != "openai" {
+		t.Fatalf("initial provider = %q, want openai", initialSpawn.Provider)
+	}
+	if err := pm.RegisterWorker(initialSpawn.ID, "container-"+initialSpawn.ID); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	host.spawnSpecs = nil
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch review): %v", err)
+	}
+
+	if err := pm.FailTask(initialSpawn.ID, reviewTaskID, "Failed to authenticate. API Error: 401 Invalid authentication credentials"); err != nil {
+		t.Fatalf("FailTask review: %v", err)
+	}
+	if err := s.onTaskFailed(reviewTaskID, FailureAuth); err != nil {
+		t.Fatalf("onTaskFailed(review auth): %v", err)
+	}
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want queued", task.Status)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected auth-retried review task to require a fresh worker")
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs after exhausting fallback = %d, want 0", len(host.spawnSpecs))
+	}
+	if _, ok := s.routeNotices[reviewTaskID]; !ok {
+		t.Fatalf("expected route notice for %q", reviewTaskID)
+	}
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock review): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs after unblock = %d, want 1", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != "reviewer" {
+		t.Fatalf("spawn role = %q, want reviewer", host.spawnSpecs[0].Role)
+	}
+}
+
+func TestOnCouncilTurnFailedAuthFailureBlocksWhenFallbackProvidersAreExhausted(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_auth_exhausted",
+			Lineage: "feat-council-auth-exhausted",
+			Title:   "Council auth exhaustion",
+			State:   planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			State:           planStatePlanning,
+			CouncilMaxTurns: 2,
+			CouncilSeats:    newCouncilSeats(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	health, err := NewProviderHealth(filepath.Join(t.TempDir(), "provider_health.json"))
+	if err != nil {
+		t.Fatalf("NewProviderHealth: %v", err)
+	}
+	if err := health.SetCooldown("anthropic/sonnet", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatalf("SetCooldown anthropic: %v", err)
+	}
+
+	cfg := DefaultKitchenConfig()
+	cfg.RoleProviders[plannerTaskRole] = ProviderPolicy{
+		Prefer:   []string{"openai"},
+		Fallback: []string{"anthropic"},
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-auth-exhausted"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	router := NewComplexityRouter(cfg, health, PoolKey{Provider: "codex"}, PoolKey{Provider: "claude"})
+	s := NewScheduler(pm, host, router, gitMgr, store, lineages, cfg.Concurrency, "kitchen-test")
+	s.failurePolicy[string(FailureAuth)] = FailurePolicyRule{Action: authActionTryNextProvider, Cooldown: "60s"}
+
+	taskID := councilTaskID(planID, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "review the plan",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask council: %v", err)
+	}
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn council): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1", len(host.spawnSpecs))
+	}
+	initialSpawn := host.spawnSpecs[0]
+	if initialSpawn.Provider != "openai" {
+		t.Fatalf("initial provider = %q, want openai", initialSpawn.Provider)
+	}
+	if err := pm.RegisterWorker(initialSpawn.ID, "container-"+initialSpawn.ID); err != nil {
+		t.Fatalf("RegisterWorker planner: %v", err)
+	}
+	host.spawnSpecs = nil
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch council): %v", err)
+	}
+
+	if err := pm.FailTask(initialSpawn.ID, taskID, "Failed to authenticate. API Error: 401 Invalid authentication credentials"); err != nil {
+		t.Fatalf("FailTask council: %v", err)
+	}
+	if err := s.onTaskFailed(taskID, FailureAuth); err != nil {
+		t.Fatalf("onTaskFailed(council auth): %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("council task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("council task status = %q, want queued", task.Status)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected auth-retried council task to require a fresh worker")
+	}
+	if len(host.spawnSpecs) != 0 {
+		t.Fatalf("spawn specs after exhausting fallback = %d, want 0", len(host.spawnSpecs))
+	}
+	if _, ok := s.routeNotices[taskID]; !ok {
+		t.Fatalf("expected route notice for %q", taskID)
+	}
+
+	if err := health.Reset("openai/gpt-5.4"); err != nil {
+		t.Fatalf("Reset openai: %v", err)
+	}
+	if err := health.Reset("anthropic/sonnet"); err != nil {
+		t.Fatalf("Reset anthropic: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(unblock council): %v", err)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs after unblock = %d, want 1", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != plannerTaskRole {
+		t.Fatalf("spawn role = %q, want %q", host.spawnSpecs[0].Role, plannerTaskRole)
 	}
 }
 

@@ -49,6 +49,7 @@ type Scheduler struct {
 	runtimeDiscoveryOutage           bool
 	runtimeDiscoveryAlerted          bool
 	deferredTaskFailures             map[string]FailureClass
+	routeNotices                     map[string]string
 }
 
 func NewScheduler(pm *pool.PoolManager, hostAPI pool.RuntimeAPI, router *ComplexityRouter, git *GitManager, plans *PlanStore, lineages *LineageManager, cfg ConcurrencyConfig, sessionID string) *Scheduler {
@@ -70,6 +71,7 @@ func NewScheduler(pm *pool.PoolManager, hostAPI pool.RuntimeAPI, router *Complex
 		stderr:                           os.Stderr,
 		runtimeDiscoveryFailureThreshold: 3,
 		deferredTaskFailures:             make(map[string]FailureClass),
+		routeNotices:                     make(map[string]string),
 	}
 }
 
@@ -359,7 +361,7 @@ func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (boo
 			return true, err
 		}
 		if revivedTask, ok := s.pm.Task(task.ID); ok && requireFreshWorker {
-			if err := s.spawnWorkerForTask(*revivedTask); err != nil {
+			if _, err := s.spawnWorkerForTask(*revivedTask); err != nil {
 				return true, err
 			}
 		}
@@ -383,7 +385,7 @@ func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (boo
 			return true, err
 		}
 		if revivedTask, ok := s.pm.Task(task.ID); ok {
-			if err := s.spawnWorkerForTask(*revivedTask); err != nil {
+			if _, err := s.spawnWorkerForTask(*revivedTask); err != nil {
 				return true, err
 			}
 		}
@@ -403,6 +405,7 @@ func (s *Scheduler) schedule() error {
 
 	s.reapOrphanPlanTasks()
 	s.refreshPendingSpawns()
+	s.pruneRouteNotices()
 
 	for taskID, workerID := range s.pendingSpawn {
 		worker, wok := s.pm.Worker(workerID)
@@ -453,8 +456,10 @@ func (s *Scheduler) schedule() error {
 		if !allowed {
 			continue
 		}
-		if err := s.spawnWorkerForTask(task); err != nil {
+		if spawned, err := s.spawnWorkerForTask(task); err != nil {
 			return err
+		} else if !spawned {
+			continue
 		}
 		availableCapacity--
 	}
@@ -753,7 +758,7 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 		}
 		revivedTask, ok := s.pm.Task(task.ID)
 		if ok {
-			if err := s.spawnWorkerForTask(*revivedTask); err != nil {
+			if _, err := s.spawnWorkerForTask(*revivedTask); err != nil {
 				return err
 			}
 		}
@@ -950,18 +955,23 @@ func (s *Scheduler) refreshPendingSpawns() {
 	}
 }
 
-func (s *Scheduler) spawnWorkerForTask(task pool.Task) error {
+func (s *Scheduler) spawnWorkerForTask(task pool.Task) (bool, error) {
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return s.handleRouteUnavailableTask(task, resolution)
+	}
+	s.clearRouteNotice(task.ID)
 	spec, err := s.workerSpecForTask(task)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.evictRetainedDeadWorkersUntilUnderCap()
 	worker, err := s.pm.SpawnWorker(spec)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.pendingSpawn[task.ID] = worker.ID
-	return nil
+	return true, nil
 }
 
 func (s *Scheduler) workerSpecForTask(task pool.Task) (pool.WorkerSpec, error) {
@@ -981,11 +991,11 @@ func (s *Scheduler) workerSpecForTask(task pool.Task) (pool.WorkerSpec, error) {
 		spec.Environment["MITTENS_KITCHEN_ADDR"] = kitchenAddr
 	}
 
-	keys := s.routeKeysForTask(task)
-	if len(keys) > 0 {
-		spec.Provider = keys[0].Provider
-		spec.Model = keys[0].Model
-		spec.Adapter = keys[0].Adapter
+	resolution := s.routeResolutionForTask(task)
+	if len(resolution.Keys) > 0 {
+		spec.Provider = resolution.Keys[0].Provider
+		spec.Model = resolution.Keys[0].Model
+		spec.Adapter = resolution.Keys[0].Adapter
 	}
 	if spec.Adapter == "" {
 		spec.Adapter = adapter.DefaultAdapterForProvider(spec.Provider)
@@ -1076,6 +1086,14 @@ func (s *Scheduler) dispatchReadyTaskToWorker(workerID string) error {
 		if _, reserved := s.pendingSpawn[task.ID]; reserved {
 			continue
 		}
+		resolution := s.routeResolutionForTask(task)
+		if routeResolutionUnavailable(resolution) {
+			if _, err := s.handleRouteUnavailableTask(task, resolution); err != nil {
+				return err
+			}
+			continue
+		}
+		s.clearRouteNotice(task.ID)
 		allowed, err := s.lineageHasCapacity(task)
 		if err != nil {
 			return err
@@ -1425,7 +1443,11 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	} else if workerRole != taskRole {
 		return false
 	}
-	keys := s.routeKeysForTask(task)
+	resolution := s.routeResolutionForTask(task)
+	if routeResolutionUnavailable(resolution) {
+		return false
+	}
+	keys := resolution.Keys
 	if len(keys) == 0 || strings.TrimSpace(worker.Provider) == "" {
 		return true
 	}
@@ -1437,22 +1459,144 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	return false
 }
 
-func (s *Scheduler) routeKeysForTask(task pool.Task) []PoolKey {
-	if s == nil || s.router == nil {
+func routeResolutionUnavailable(resolution RouteResolution) bool {
+	return resolution.Availability != "" && resolution.Availability != RouteAvailable
+}
+
+func routeResolutionTemporarilyExhausted(resolution RouteResolution) bool {
+	return resolution.Availability == RouteTemporarilyExhausted
+}
+
+func routeResolutionUnroutable(resolution RouteResolution) bool {
+	return resolution.Availability == RouteUnroutable
+}
+
+func routeResolutionCandidateSummary(candidates []PoolKey) string {
+	if len(candidates) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		part := strings.TrimSpace(candidate.Provider)
+		if model := strings.TrimSpace(candidate.Model); model != "" {
+			part += "/" + model
+		}
+		if part == "" {
+			part = "unknown"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func routeResolutionFingerprint(resolution RouteResolution) string {
+	return string(resolution.Availability) + ":" + routeResolutionCandidateSummary(resolution.Candidates)
+}
+
+func (s *Scheduler) noteRouteUnavailable(task pool.Task, resolution RouteResolution) {
+	if s == nil || !routeResolutionUnavailable(resolution) {
+		return
+	}
+	taskID := strings.TrimSpace(task.ID)
+	if taskID == "" {
+		return
+	}
+	fingerprint := routeResolutionFingerprint(resolution)
+	if s.routeNotices[taskID] == fingerprint {
+		return
+	}
+	s.routeNotices[taskID] = fingerprint
+	candidates := routeResolutionCandidateSummary(resolution.Candidates)
+	switch resolution.Availability {
+	case RouteTemporarilyExhausted:
+		s.logf("task %s blocked: no eligible provider currently available for role %q on routes [%s]; waiting for provider health to recover", taskID, task.Role, candidates)
+	case RouteUnroutable:
+		s.logf("task %s unroutable: no configured provider route available for role %q on routes [%s]", taskID, task.Role, candidates)
+	}
+}
+
+func (s *Scheduler) handleRouteUnavailableTask(task pool.Task, resolution RouteResolution) (bool, error) {
+	if !routeResolutionUnavailable(resolution) {
+		return false, nil
+	}
+	if routeResolutionTemporarilyExhausted(resolution) {
+		s.noteRouteUnavailable(task, resolution)
+		return false, nil
+	}
+	if routeResolutionUnroutable(resolution) {
+		return false, s.failQueuedTaskForRoute(task, resolution)
+	}
+	s.noteRouteUnavailable(task, resolution)
+	return false, nil
+}
+
+func (s *Scheduler) failQueuedTaskForRoute(task pool.Task, resolution RouteResolution) error {
+	if s == nil || s.pm == nil {
 		return nil
 	}
+	current, ok := s.pm.Task(task.ID)
+	if !ok || current.Status != pool.TaskQueued {
+		return nil
+	}
+	message := fmt.Sprintf("task %s unroutable: no configured provider route available for role %q on routes [%s]", task.ID, task.Role, routeResolutionCandidateSummary(resolution.Candidates))
+	detail, err := json.Marshal(pool.FailureDetail{Summary: message})
+	if err != nil {
+		return err
+	}
+	if err := s.pm.FailQueuedTaskDetailed(task.ID, message, string(FailureCapability), detail); err != nil {
+		return err
+	}
+	s.clearRouteNotice(task.ID)
+	return s.onTaskFailed(task.ID, FailureCapability)
+}
+
+func (s *Scheduler) clearRouteNotice(taskID string) {
+	if s == nil || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	delete(s.routeNotices, taskID)
+}
+
+func (s *Scheduler) pruneRouteNotices() {
+	if s == nil || s.pm == nil || len(s.routeNotices) == 0 {
+		return
+	}
+	for taskID := range s.routeNotices {
+		task, ok := s.pm.Task(taskID)
+		if !ok || task.Status != pool.TaskQueued {
+			delete(s.routeNotices, taskID)
+			continue
+		}
+		if !routeResolutionUnavailable(s.routeResolutionForTask(*task)) {
+			delete(s.routeNotices, taskID)
+		}
+	}
+}
+
+func (s *Scheduler) routeResolutionForTask(task pool.Task) RouteResolution {
+	if s == nil || s.router == nil {
+		return RouteResolution{Availability: RouteAvailable}
+	}
+	if !isValidComplexity(Complexity(task.Complexity)) {
+		return RouteResolution{Availability: RouteAvailable}
+	}
 	if retryKey, ok := retryRoutePoolKey(task); ok {
-		return []PoolKey{retryKey}
+		return RouteResolution{
+			Keys:         []PoolKey{retryKey},
+			Candidates:   []PoolKey{retryKey},
+			Availability: RouteAvailable,
+		}
 	}
 	if task.Role == plannerTaskRole && task.PlanID != "" {
 		if seat := councilSeatForTask(task); seat != "" {
-			keys := s.router.ResolveCouncilSeat(seat, Complexity(task.Complexity))
-			if len(keys) > 0 {
-				return keys
-			}
+			return s.router.ResolveCouncilSeatOutcome(seat, Complexity(task.Complexity))
 		}
 	}
-	return s.router.ResolveForRole(task.Role, Complexity(task.Complexity))
+	return s.router.ResolveForRoleOutcome(task.Role, Complexity(task.Complexity))
+}
+
+func (s *Scheduler) routeKeysForTask(task pool.Task) []PoolKey {
+	return s.routeResolutionForTask(task).Keys
 }
 
 func councilSeatForTask(task pool.Task) string {
