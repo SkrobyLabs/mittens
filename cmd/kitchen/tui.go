@@ -1936,7 +1936,7 @@ func (m kitchenTUIModel) canSteerImplementationSelectedPlan() bool {
 		return false
 	}
 	switch strings.TrimSpace(progress.State) {
-	case planStateCompleted, planStateImplementationReviewFailed:
+	case planStateCompleted, planStateImplementationFailed, planStateImplementationReviewFailed:
 		return true
 	default:
 		return false
@@ -2036,7 +2036,7 @@ func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
 		return false
 	}
 	switch planDisplayState(*plan) {
-	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged, planStateWaitingOnDependency:
+	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationFailed, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged, planStateWaitingOnDependency:
 		return false
 	default:
 		return true
@@ -3651,7 +3651,7 @@ func planDisplayState(plan kitchenTUIPlanItem) string {
 
 func needsUserAttention(plan kitchenTUIPlanItem) bool {
 	switch planDisplayState(plan) {
-	case planStatePendingApproval, planStatePlanningFailed, planStateImplementationReviewFailed, planStateResearchComplete:
+	case planStatePendingApproval, planStatePlanningFailed, planStateImplementationFailed, planStateImplementationReviewFailed, planStateResearchComplete:
 		return true
 	case planStateCompleted:
 		// Merge-ready: has a lineage branch and review hasn't failed.
@@ -4212,6 +4212,8 @@ func compactState(state string) string {
 		return "plan"
 	case planStateReviewing:
 		return "review"
+	case planStateImplementationFailed:
+		return "failed"
 	case planStateImplementationReviewFailed:
 		return "impl-fail"
 	case planStateImplementationReview:

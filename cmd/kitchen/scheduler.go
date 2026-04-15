@@ -1838,6 +1838,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	case planStatePlanning,
 		planStateReviewing,
 		planStatePendingApproval,
+		planStateImplementationFailed,
 		planStateImplementationReview,
 		planStateResearchComplete,
 		planStatePlanningFailed,
@@ -1870,6 +1871,10 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		bundle.Plan.State = planStateCompleted
 		bundle.Execution.State = planStateCompleted
 		bundle.Execution.CompletedAt = &now
+	} else if len(active) == 0 && len(failed) > 0 {
+		bundle.Plan.State = planStateImplementationFailed
+		bundle.Execution.State = planStateImplementationFailed
+		bundle.Execution.CompletedAt = nil
 	} else {
 		bundle.Plan.State = planStateActive
 		bundle.Execution.State = planStateActive

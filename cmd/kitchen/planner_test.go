@@ -1394,6 +1394,56 @@ func TestSteerImplementationOnFailedReviewIncludesExistingFindings(t *testing.T)
 	}
 }
 
+func TestSteerImplementationOnFailedImplementationQueuesManualRemediationTask(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_impl_steer_impl_failed",
+			Lineage: "impl-steer-impl-failed",
+			Title:   "Implementation steering after implementation failure",
+			State:   planStateImplementationFailed,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+				TimeoutMinutes:   15,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:         planStateImplementationFailed,
+			FailedTaskIDs: []string{planTaskRuntimeID("plan_impl_steer_impl_failed", "t1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerImplementation(planID, "Retry with a narrower TUI-only change."); err != nil {
+		t.Fatalf("SteerImplementation: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if !bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected implementation steering remediation to be active")
+	}
+	task, ok := k.pm.Task(bundle.Execution.AutoRemediationTaskID)
+	if !ok {
+		t.Fatalf("expected remediation task %q to be queued", bundle.Execution.AutoRemediationTaskID)
+	}
+	if !strings.Contains(task.Prompt, "Retry with a narrower TUI-only change.") {
+		t.Fatalf("task prompt missing operator note:\n%s", task.Prompt)
+	}
+}
+
 func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
 	k := newTestKitchen(t)
 	attachTestScheduler(t, k)

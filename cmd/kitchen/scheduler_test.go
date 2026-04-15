@@ -3171,6 +3171,92 @@ func TestSyncPlanExecution_NoImplReview(t *testing.T) {
 	}
 }
 
+func TestSyncPlanExecution_FailedImplementationBecomesTerminalFailed(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_impl_failed",
+			Lineage: "feat-impl-failed",
+			Title:   "Implementation failure should be terminal",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:               planStateActive,
+			ImplReviewRequested: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-impl-failed"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         planTaskRuntimeID(planID, "t1"),
+		PlanID:     planID,
+		Prompt:     "implement change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.FailTask("w-1", taskID, "boom"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	if err := s.syncPlanExecution(planID); err != nil {
+		t.Fatalf("syncPlanExecution: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationFailed {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationFailed)
+	}
+	if bundle.Plan.State != planStateImplementationFailed {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationFailed)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 0 {
+		t.Fatalf("active task IDs = %v, want none", bundle.Execution.ActiveTaskIDs)
+	}
+	if len(bundle.Execution.FailedTaskIDs) != 1 || bundle.Execution.FailedTaskIDs[0] != taskID {
+		t.Fatalf("failed task IDs = %v, want [%q]", bundle.Execution.FailedTaskIDs, taskID)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestSyncPlanExecution_PreservesResearchComplete(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

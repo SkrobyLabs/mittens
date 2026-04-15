@@ -19,6 +19,7 @@ const (
 	planStatePlanningFailed             = "planning_failed"
 	planStatePendingApproval            = "pending_approval"
 	planStateActive                     = "active"
+	planStateImplementationFailed       = "implementation_failed"
 	planStateCompleted                  = "completed"
 	planStateImplementationReview       = "implementation_review"
 	planStateImplementationReviewFailed = "implementation_review_failed"
@@ -918,9 +919,9 @@ func (k *Kitchen) SteerImplementation(planID, note string) error {
 		state = strings.TrimSpace(bundle.Plan.State)
 	}
 	switch state {
-	case planStateCompleted, planStateImplementationReviewFailed:
+	case planStateCompleted, planStateImplementationFailed, planStateImplementationReviewFailed:
 	default:
-		return fmt.Errorf("invalid plan state %q for implementation steering; must be completed or implementation_review_failed", state)
+		return fmt.Errorf("invalid plan state %q for implementation steering; must be completed, implementation_failed, or implementation_review_failed", state)
 	}
 	if bundle.Execution.AutoRemediationActive {
 		return fmt.Errorf("plan %s already has implementation remediation in progress", planID)

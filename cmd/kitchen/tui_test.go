@@ -3726,6 +3726,11 @@ func TestNeedsUserAttentionPredicate(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "implementation_failed needs attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateImplementationFailed}},
+			want: true,
+		},
+		{
 			name: "implementation_review_failed needs attention via progress",
 			plan: kitchenTUIPlanItem{
 				Record:   PlanRecord{State: planStateCompleted},
@@ -3853,8 +3858,10 @@ func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
 			{Record: PlanRecord{PlanID: "plan_a", Title: "Pending Approval Plan", State: planStatePendingApproval}},
 			// Index 1: not selected, needs attention — amber.
 			{Record: PlanRecord{PlanID: "plan_b", Title: "Planning Failed Plan", State: planStatePlanningFailed}},
-			// Index 2: not selected, no attention — plain.
-			{Record: PlanRecord{PlanID: "plan_c", Title: "Active Plan", State: planStateActive}},
+			// Index 2: not selected, needs attention — amber.
+			{Record: PlanRecord{PlanID: "plan_c", Title: "Implementation Failed Plan", State: planStateImplementationFailed}},
+			// Index 3: not selected, no attention — plain.
+			{Record: PlanRecord{PlanID: "plan_d", Title: "Active Plan", State: planStateActive}},
 		},
 	}
 
@@ -3862,7 +3869,7 @@ func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
 
 	// The pane must contain all three plan titles (after stripping ANSI).
 	stripped := ansi.Strip(pane)
-	for _, title := range []string{"Pending Approval Plan", "Planning Failed Plan", "Active Plan"} {
+	for _, title := range []string{"Pending Approval Plan", "Planning Failed Plan", "Implementation Failed Plan", "Active Plan"} {
 		if !strings.Contains(stripped, title) {
 			t.Fatalf("plans pane missing title %q: %q", title, stripped)
 		}
@@ -3879,6 +3886,17 @@ func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
 	}
 	if !foundAmber {
 		t.Fatalf("planning_failed plan row should have amber (94m) highlight; pane = %q", pane)
+	}
+
+	foundImplementationFailedAmber := false
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Implementation Failed Plan") && strings.Contains(line, "94m") {
+			foundImplementationFailedAmber = true
+			break
+		}
+	}
+	if !foundImplementationFailedAmber {
+		t.Fatalf("implementation_failed plan row should have amber (94m) highlight; pane = %q", pane)
 	}
 
 	// plan_a row (selected) should use purple (62m), not amber (94m).
