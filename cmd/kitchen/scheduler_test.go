@@ -5715,6 +5715,108 @@ func TestRecoverReviewCouncilPlansOnStartup_RequeuesMissingActiveTask(t *testing
 	}
 }
 
+func TestRecoverReviewCouncilPlansOnStartup_AdvancesCompletedActiveTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_completed_active_recover",
+			Lineage: "feat-ir-completed-active-recover",
+			Title:   "Implementation review completed active task recovery",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilCycle:          2,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 0,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ActiveTaskIDs:               []string{reviewCouncilTaskIDForCycle("plan_ir_completed_active_recover", 2, 1)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-completed-active-recover"), "kitchen-test")
+	completedTaskID := reviewCouncilTaskIDForCycle(planID, 2, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         completedTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-rev", Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker reviewer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-rev", "container-w-rev"); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := pm.DispatchTask(completedTaskID, "w-rev"); err != nil {
+		t.Fatalf("DispatchTask review: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), "w-rev")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := reviewCouncilTestArtifact(t, "A", 1, "fail", "propose", false, nil)
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask("w-rev", completedTaskID); err != nil {
+		t.Fatalf("CompleteTask review: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverReviewCouncilPlansOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.ReviewCouncilTurnsCompleted != 1 {
+		t.Fatalf("turns completed = %d, want 1", bundle.Execution.ReviewCouncilTurnsCompleted)
+	}
+	if !containsString(bundle.Execution.CompletedTaskIDs, completedTaskID) {
+		t.Fatalf("completed task ids = %v, want %q present", bundle.Execution.CompletedTaskIDs, completedTaskID)
+	}
+	nextTaskID := reviewCouncilTaskIDForCycle(planID, 2, 2)
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != nextTaskID {
+		t.Fatalf("active task ids = %+v, want [%q]", bundle.Execution.ActiveTaskIDs, nextTaskID)
+	}
+	task, ok := pm.Task(nextTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", nextTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+}
+
 func TestApplyReviewCouncilTurnResult_ActionableFailStartsAutoRemediation(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
