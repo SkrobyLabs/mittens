@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/credutil"
@@ -57,13 +58,18 @@ func runCredsyncMain() {
 		return
 	}
 	credFile := cfg.AIDir + "/" + cfg.AICredFile
-	runCredSync(bc, credFile)
+	logPath := "/tmp/credsync.log"
+	if strings.TrimSpace(cfg.LogDir) != "" {
+		_ = os.MkdirAll(cfg.LogDir, 0755)
+		logPath = cfg.LogDir + "/credsync.log"
+	}
+	runCredSync(bc, credFile, logPath, credSyncSource(cfg))
 }
 
 // runCredSync is the credential sync daemon main loop.
 // Runs as the main function of a forked child process: pushes refreshed tokens up and pulls newer tokens down.
-func runCredSync(bc *brokerClient, credFile string) {
-	log := newCredLogger()
+func runCredSync(bc *brokerClient, credFile, logPath, source string) {
+	log := newCredLogger(bc, logPath, source)
 
 	log.write("started (broker: %s)", bc.baseURL)
 
@@ -79,7 +85,7 @@ func runCredSync(bc *brokerClient, credFile string) {
 	if data, err := os.ReadFile(credFile); err == nil && len(data) > 0 {
 		localExp := credExpiresAt(data)
 		code, _ := bc.put("/", string(data))
-		log.write("initial push: expiresAt=%d → %d", localExp, code)
+		log.event("initial-push", "expiresAt=%d status=%d", localExp, code)
 	} else {
 		log.write("no credentials file at startup")
 	}
@@ -100,7 +106,16 @@ func runCredSync(bc *brokerClient, credFile string) {
 			if data, err := os.ReadFile(credFile); err == nil && len(data) > 0 {
 				localExp := credExpiresAt(data)
 				code, _ := bc.put("/", string(data))
-				log.write("push: file changed, expiresAt=%d → %d", localExp, code)
+				switch code {
+				case 204:
+					log.event("push-accepted", "expiresAt=%d", localExp)
+				case 409:
+					log.event("push-rejected", "stale expiresAt=%d", localExp)
+				case 400:
+					log.event("push-invalid", "expiresAt=%d", localExp)
+				default:
+					log.event("push-status", "expiresAt=%d status=%d", localExp, code)
+				}
 				if code == 204 || code == 409 || code == 400 {
 					lastHash = currentHash
 				}
@@ -114,7 +129,7 @@ func runCredSync(bc *brokerClient, credFile string) {
 		// stale near-expiry creds before the CLI can complete its OAuth refresh.
 		if refreshPending && time.Since(refreshTriggeredAt) > refreshPendingTimeout {
 			refreshPending = false
-			log.write("proactive refresh: timeout waiting for CLI refresh, resuming pull")
+			log.event("refresh-timeout", "waiting for CLI refresh timed out after %s", refreshPendingTimeout)
 		}
 		remote, code, err := bc.get("/")
 		if err == nil && code == 200 && remote != "" {
@@ -128,9 +143,9 @@ func runCredSync(bc *brokerClient, credFile string) {
 					lastHash = computeFileHash(credFile)
 					if refreshPending {
 						refreshPending = false
-						log.write("pull: CLI refreshed, accepted new creds (remote: %d, was: %d)", remoteExp, refreshOrigExp)
+						log.event("refresh-complete", "accepted refreshed creds remote=%d previous=%d", remoteExp, refreshOrigExp)
 					} else {
-						log.write("pull: updated local creds (remote: %d, was: %d)", remoteExp, localExp)
+						log.event("pull-update", "accepted broker creds remote=%d previous=%d", remoteExp, localExp)
 					}
 				}
 			}
@@ -144,14 +159,14 @@ func runCredSync(bc *brokerClient, credFile string) {
 			if remaining > 0 && remaining < refreshThresholdMS {
 				action := brokerRefreshRequest(bc)
 				if action == "refresh" {
-					log.write("proactive refresh: triggering (expires in %dms)", remaining)
+					log.event("refresh-trigger", "expires in %dms", remaining)
 					refreshOrigExp = curExp
 					triggerTokenRefresh(credFile, log)
 					lastHash = computeFileHash(credFile)
 					refreshPending = true
 					refreshTriggeredAt = time.Now()
 				} else {
-					log.write("proactive refresh: another container is handling it")
+					log.event("refresh-wait", "another container is handling proactive refresh")
 				}
 			}
 		}
@@ -214,7 +229,7 @@ func triggerTokenRefresh(credFile string, log *credLogger) {
 		if _, hasClaude := obj["claudeAiOauth"]; !hasClaude {
 			if _, hasExpiresAt := obj["expiresAt"]; !hasExpiresAt {
 				if _, hasExpiresAtSnake := obj["expires_at"]; !hasExpiresAtSnake {
-					log.write("proactive refresh: skipping (Gemini manages its own OAuth refresh)")
+					log.event("refresh-skip", "skipping proactive refresh because provider manages OAuth internally")
 					return
 				}
 			}
@@ -252,17 +267,22 @@ func triggerTokenRefresh(credFile string, log *credLogger) {
 		return
 	}
 	os.Rename(tmp, credFile)
-	log.write("proactive refresh: set early expiry, waiting for AI CLI to refresh")
+	log.event("refresh-armed", "set early expiry marker and waiting for CLI refresh")
 }
 
 // credLogger writes timestamped log entries.
 type credLogger struct {
 	file *os.File
+	bc   *brokerClient
+	source string
 }
 
-func newCredLogger() *credLogger {
-	f, _ := os.OpenFile("/tmp/cred-sync.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	return &credLogger{file: f}
+func newCredLogger(bc *brokerClient, logPath, source string) *credLogger {
+	if strings.TrimSpace(logPath) == "" {
+		logPath = "/tmp/credsync.log"
+	}
+	f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	return &credLogger{file: f, bc: bc, source: strings.TrimSpace(source)}
 }
 
 func (l *credLogger) write(format string, args ...interface{}) {
@@ -271,5 +291,44 @@ func (l *credLogger) write(format string, args ...interface{}) {
 	}
 	ts := time.Now().Format("15:04:05.000")
 	msg := fmt.Sprintf(format, args...)
+	if l.source != "" {
+		fmt.Fprintf(l.file, "%s [cred-sync %s] %s\n", ts, l.source, msg)
+		return
+	}
 	fmt.Fprintf(l.file, "%s [cred-sync] %s\n", ts, msg)
+}
+
+func (l *credLogger) event(event, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	l.write("%s — %s", strings.TrimSpace(event), msg)
+	if l == nil || l.bc == nil {
+		return
+	}
+	body, err := json.Marshal(map[string]string{
+		"component": "cred-sync",
+		"event":     strings.TrimSpace(event),
+		"message":   msg,
+		"source":    l.source,
+	})
+	if err != nil {
+		return
+	}
+	_, _ = l.bc.postJSON("/sync-log", string(body))
+}
+
+func credSyncSource(cfg *config) string {
+	if cfg == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if name := strings.TrimSpace(cfg.ProviderName); name != "" {
+		parts = append(parts, "provider="+name)
+	}
+	if container := strings.TrimSpace(cfg.ContainerName); container != "" {
+		parts = append(parts, "container="+container)
+	}
+	if instance := strings.TrimSpace(cfg.InstanceName); instance != "" {
+		parts = append(parts, "instance="+instance)
+	}
+	return strings.Join(parts, " ")
 }

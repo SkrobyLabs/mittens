@@ -132,3 +132,37 @@ func TestHomeDir(t *testing.T) {
 		t.Fatalf("homeDir() = %q, want %q", got, "/tmp/test-home-dir")
 	}
 }
+
+func TestMittensLogPath(t *testing.T) {
+	t.Setenv("HOME", "/tmp/test-home-dir")
+
+	tests := []struct {
+		category string
+		want     string
+		wantErr  bool
+	}{
+		{category: "", want: "/tmp/test-home-dir/.mittens/logs/broker.log"},
+		{category: "broker", want: "/tmp/test-home-dir/.mittens/logs/broker.log"},
+		{category: "credsync", want: "/tmp/test-home-dir/.mittens/logs/credsync.log"},
+		{category: "broker-debug", want: "/tmp/test-home-dir/.mittens/logs/broker-debug.log"},
+		{category: "unknown", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.category, func(t *testing.T) {
+			got, err := mittensLogPath(tc.category)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("mittensLogPath(%q) error = nil, want error", tc.category)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mittensLogPath(%q) error = %v", tc.category, err)
+			}
+			if got != tc.want {
+				t.Fatalf("mittensLogPath(%q) = %q, want %q", tc.category, got, tc.want)
+			}
+		})
+	}
+}

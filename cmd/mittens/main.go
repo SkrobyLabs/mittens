@@ -345,24 +345,42 @@ func providerByName(name string) (*Provider, error) {
 	}
 }
 
-// runLogs shows or follows the broker log file.
-// Usage: mittens logs [-f|--follow]
+// runLogs shows or follows a Mittens log file.
+// Usage: mittens logs [-f|--follow] [--category broker|credsync|broker-debug]
 func runLogs(args []string) error {
-	logPath := filepath.Join(homeDir(), ".mittens", "logs", "broker.log")
-
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		fmt.Println("No logs yet. Start a mittens session first.")
-		return nil
-	}
-
 	follow := false
-	for _, a := range args {
+	category := "broker"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch a {
 		case "-f", "--follow":
 			follow = true
+		case "--category":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("missing value for --category")
+			}
+			category = args[i]
 		default:
-			return fmt.Errorf("unknown flag %q for \"mittens logs\" (only -f/--follow is supported)", a)
+			if strings.HasPrefix(a, "--category=") {
+				category = strings.TrimPrefix(a, "--category=")
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("unknown flag %q for \"mittens logs\"", a)
+			}
+			category = a
 		}
+	}
+
+	logPath, err := mittensLogPath(category)
+	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		fmt.Printf("No %s logs yet. Start a mittens session first.\n", category)
+		return nil
 	}
 
 	if follow {

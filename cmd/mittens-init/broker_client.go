@@ -132,3 +132,18 @@ func (b *brokerClient) put(path, jsonBody string) (int, error) {
 	resp.Body.Close()
 	return resp.StatusCode, nil
 }
+
+func (b *brokerClient) postJSON(path, jsonBody string) (int, error) {
+	req, err := http.NewRequest(http.MethodPost, b.baseURL+path, strings.NewReader(jsonBody))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil
+}

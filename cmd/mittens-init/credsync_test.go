@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestShouldAcceptPull_NormalMode(t *testing.T) {
 	tests := []struct {
@@ -50,5 +55,33 @@ func TestShouldAcceptPull_RefreshPending(t *testing.T) {
 					tt.remote, origExp, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCredSyncSource(t *testing.T) {
+	cfg := &config{
+		ProviderName:  "anthropic",
+		ContainerName: "mittens-kitchen-w-101",
+		InstanceName:  "review-seat-a",
+	}
+	got := credSyncSource(cfg)
+	want := "provider=anthropic container=mittens-kitchen-w-101 instance=review-seat-a"
+	if got != want {
+		t.Fatalf("credSyncSource() = %q, want %q", got, want)
+	}
+}
+
+func TestCredLoggerWriteIncludesSource(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "credsync.log")
+	logger := newCredLogger(nil, logPath, "provider=anthropic container=mittens-kitchen-w-101")
+	logger.write("refresh-trigger — expires in %dms", 120000)
+	_ = logger.file.Close()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "[cred-sync provider=anthropic container=mittens-kitchen-w-101] refresh-trigger — expires in 120000ms") {
+		t.Fatalf("expected source-aware credsync log entry, got %q", string(data))
 	}
 }

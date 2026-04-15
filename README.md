@@ -247,7 +247,7 @@ See [Kitchen docs](docs/kitchen/README.md) for the full CLI reference, HTTP API,
 
 ## Debugging
 
-- `mittens logs [-f]` — view broker logs (credential sync, OAuth intercept, URL forwarding). `-f` follows the log.
+- `mittens logs [-f] [--category broker|credsync|broker-debug]` — view Mittens logs. Default is `broker` for high-signal lifecycle/auth events; `credsync` shows per-instance credential refresh/sync activity; `broker-debug` shows verbose broker transport polling. `-f` follows the selected log.
 - `--verbose` — prints the full `docker run` command so you can see all mounts, env vars, and flags.
 - `--shell` — drops into a bash shell inside the container for manual inspection.
 

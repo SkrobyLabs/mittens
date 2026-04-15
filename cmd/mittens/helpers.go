@@ -48,12 +48,30 @@ func logVerbose(verbose bool, format string, args ...interface{}) {
 
 const maxBrokerLogSize = 1 << 20 // 1 MB
 
-func rotateBrokerLog(logPath string) {
+func rotateLog(logPath string) {
 	fi, err := os.Stat(logPath)
 	if err != nil || fi.Size() < maxBrokerLogSize {
 		return
 	}
 	_ = os.Rename(logPath, logPath+".1")
+}
+
+func rotateBrokerLog(logPath string) {
+	rotateLog(logPath)
+}
+
+func mittensLogPath(category string) (string, error) {
+	base := filepath.Join(homeDir(), ".mittens", "logs")
+	switch strings.TrimSpace(category) {
+	case "", "broker":
+		return filepath.Join(base, "broker.log"), nil
+	case "credsync":
+		return filepath.Join(base, "credsync.log"), nil
+	case "broker-debug":
+		return filepath.Join(base, "broker-debug.log"), nil
+	default:
+		return "", fmt.Errorf("unknown log category %q (available: broker, credsync, broker-debug)", category)
+	}
 }
 
 // scriptDir returns the directory containing the running binary.

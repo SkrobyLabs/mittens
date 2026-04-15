@@ -86,6 +86,9 @@ type HostBroker struct {
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 
+	// DebugLogFile is an optional file for verbose broker transport logging.
+	DebugLogFile *os.File
+
 	runtimeNotifyMu   sync.RWMutex
 	runtimeNotifySubs map[int]chan pool.RuntimeEvent
 	runtimeNotifySeq  int
@@ -111,6 +114,7 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/open", b.withAuth(b.handleOpen))
 	mux.HandleFunc("/notify", b.withAuth(b.handleNotify))
 	mux.HandleFunc("/refresh", b.withAuth(b.handleRefresh))
+	mux.HandleFunc("/sync-log", b.withAuth(b.handleSyncLog))
 	mux.HandleFunc("/await-callback/", b.withAuth(b.handleAwaitCallback))
 	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
 	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
@@ -139,6 +143,19 @@ func (b *HostBroker) blog(format string, args ...interface{}) {
 		name = "?"
 	}
 	fmt.Fprintf(b.LogFile, "%s [broker:%d/%s] %s\n", ts, os.Getpid(), name, msg)
+}
+
+func (b *HostBroker) dblog(format string, args ...interface{}) {
+	if b.DebugLogFile == nil {
+		return
+	}
+	ts := time.Now().Format("15:04:05.000")
+	msg := fmt.Sprintf(format, args...)
+	name := b.Name
+	if name == "" {
+		name = "?"
+	}
+	fmt.Fprintf(b.DebugLogFile, "%s [broker:%d/%s] %s\n", ts, os.Getpid(), name, msg)
 }
 
 // ListenTCPAddr binds to a random TCP port on the given address and returns the port.
@@ -194,6 +211,10 @@ func (b *HostBroker) Close() error {
 		b.LogFile.Close()
 		b.LogFile = nil
 	}
+	if b.DebugLogFile != nil {
+		b.DebugLogFile.Close()
+		b.DebugLogFile = nil
+	}
 	if b.srv != nil {
 		return b.srv.Shutdown(context.Background())
 	}
@@ -225,11 +246,11 @@ func (b *HostBroker) handleGet(w http.ResponseWriter) {
 	b.mu.RUnlock()
 
 	if data == "" {
-		b.blog("GET → 204 (no credentials)")
+		b.dblog("GET → 204 (no credentials)")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	b.blog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
+	b.dblog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, data)
@@ -428,6 +449,50 @@ func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
 
 	if b.OnNotify != nil {
 		b.OnNotify(payload.Container, payload.Event, payload.Message)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (b *HostBroker) handleSyncLog(w http.ResponseWriter, r *http.Request) {
+	if !b.requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	body, ok := b.readBody(w, r, 4096)
+	if !ok {
+		return
+	}
+
+	var payload struct {
+		Component string `json:"component"`
+		Event     string `json:"event"`
+		Message   string `json:"message"`
+		Source    string `json:"source"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	component := strings.TrimSpace(payload.Component)
+	if component == "" {
+		component = "sync"
+	}
+	event := strings.TrimSpace(payload.Event)
+	message := strings.TrimSpace(payload.Message)
+	source := strings.TrimSpace(payload.Source)
+	prefix := component
+	if source != "" {
+		prefix += " [" + source + "]"
+	}
+	switch {
+	case event != "" && message != "":
+		b.blog("%s %s — %s", prefix, event, message)
+	case event != "":
+		b.blog("%s %s", prefix, event)
+	case message != "":
+		b.blog("%s %s", prefix, message)
+	default:
+		b.blog("%s event", prefix)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

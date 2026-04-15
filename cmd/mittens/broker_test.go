@@ -93,6 +93,33 @@ func TestBroker_GET_WithSeed(t *testing.T) {
 	}
 }
 
+func TestBroker_GET_DoesNotLogCredentialPolls(t *testing.T) {
+	seed := `{"accessToken":"tok","expiresAt":1700000000}`
+	b, client := startBroker(t, seed)
+
+	logPath := filepath.Join(t.TempDir(), "broker.log")
+	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.LogFile = lf
+	t.Cleanup(func() { _ = lf.Close() })
+
+	resp, err := client.Get("http://broker/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "GET →") {
+		t.Fatalf("expected no GET poll logging, got %q", string(data))
+	}
+}
+
 func TestBroker_PUT_Fresher(t *testing.T) {
 	seed := `{"accessToken":"old","expiresAt":100}`
 	_, client := startBroker(t, seed)
@@ -216,6 +243,38 @@ func TestBroker_MethodNotAllowed(t *testing.T) {
 	}
 	if allow := resp.Header.Get("Allow"); allow != "GET, PUT" {
 		t.Errorf("Allow header = %q, want %q", allow, "GET, PUT")
+	}
+}
+
+func TestBroker_SyncLog_WritesEventToBrokerLog(t *testing.T) {
+	b, client := startBroker(t, "")
+
+	logPath := filepath.Join(t.TempDir(), "broker.log")
+	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.LogFile = lf
+	t.Cleanup(func() { _ = lf.Close() })
+
+	body := `{"component":"cred-sync","event":"refresh-trigger","message":"expires in 120000ms","source":"provider=anthropic container=mittens-kitchen-w-101"}`
+	req, _ := http.NewRequest(http.MethodPost, "http://broker/sync-log", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /sync-log status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "cred-sync [provider=anthropic container=mittens-kitchen-w-101] refresh-trigger — expires in 120000ms") {
+		t.Fatalf("expected sync event in broker log, got %q", string(data))
 	}
 }
 

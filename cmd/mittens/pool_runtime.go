@@ -317,6 +317,7 @@ func (a *App) buildWorkerInitConfig(provider *Provider, containerName, workspace
 			Firewall:  firewallEnabled,
 			NoNotify:  true,
 		},
+		ProviderName:  provider.Name,
 		ContainerName: containerName,
 		HostWorkspace: workspacePath,
 		Broker: initcfg.BrokerConfig{

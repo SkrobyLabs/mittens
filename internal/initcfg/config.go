@@ -22,6 +22,7 @@ type ContainerConfig struct {
 	Broker BrokerConfig `json:"broker"`
 
 	// Runtime context.
+	ProviderName  string   `json:"providerName,omitempty"`
 	ContainerName string   `json:"containerName"`
 	InstanceName  string   `json:"instanceName,omitempty"`
 	HostWorkspace string   `json:"hostWorkspace,omitempty"`
@@ -29,6 +30,7 @@ type ContainerConfig struct {
 	FirewallExtra []string `json:"firewallExtra,omitempty"`
 	ImagePasteKey string   `json:"imagePasteKey,omitempty"`
 	MCP           string   `json:"mcp,omitempty"`
+	LogDir        string   `json:"logDir,omitempty"`
 
 	// Credential staging: each entry is "staging_path:target_dir" (e.g.
 	// "/mnt/mittens-creds-azure:.azure"). mittens-init copies the read-only

@@ -52,6 +52,7 @@ type config struct {
 	BrokerToken string
 
 	// Misc
+	ProviderName    string
 	ContainerName   string
 	InstanceName    string
 	HostWorkspace   string
@@ -59,6 +60,7 @@ type config struct {
 	FirewallExtra   []string
 	ImagePasteKey   string
 	MCP             string
+	LogDir          string
 	CredStagingDirs []string // "staging_path:target_dir" entries
 
 	// X11 clipboard
@@ -120,6 +122,7 @@ func loadConfig() *config {
 		BrokerSock:  jcfg.Broker.Sock,
 		BrokerToken: jcfg.Broker.Token,
 
+		ProviderName:    jcfg.ProviderName,
 		ContainerName:   jcfg.ContainerName,
 		InstanceName:    jcfg.InstanceName,
 		HostWorkspace:   jcfg.HostWorkspace,
@@ -127,6 +130,7 @@ func loadConfig() *config {
 		FirewallExtra:   jcfg.FirewallExtra,
 		ImagePasteKey:   jcfg.ImagePasteKey,
 		MCP:             jcfg.MCP,
+		LogDir:          jcfg.LogDir,
 		CredStagingDirs: jcfg.CredStagingDirs,
 
 		X11ClipboardImage:      jcfg.X11ClipboardImage,

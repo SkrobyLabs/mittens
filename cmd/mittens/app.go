@@ -429,6 +429,10 @@ func (a *App) Run() error {
 		if lf, err := os.OpenFile(filepath.Join(logDir, "broker.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 			a.broker.LogFile = lf
 		}
+		rotateLog(filepath.Join(logDir, "broker-debug.log"))
+		if lf, err := os.OpenFile(filepath.Join(logDir, "broker-debug.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			a.broker.DebugLogFile = lf
+		}
 
 		if a.PoolMode {
 			a.broker.OnPoolSpawn = a.spawnWorkerContainer
@@ -1146,8 +1150,8 @@ func (a *App) buildImage() error {
 // Broker, ExtraDirs, FirewallExtra, and X11 clipboard fields are set
 // later in assembleDockerArgs as they depend on further processing.
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
-	return &initcfg.ContainerConfig{
-		AI: initcfg.AIConfig{
+		return &initcfg.ContainerConfig{
+			AI: initcfg.AIConfig{
 			Binary:          a.Provider.Binary,
 			ConfigDir:       a.Provider.ConfigDir,
 			CredFile:        a.Provider.CredentialFile,
@@ -1166,18 +1170,20 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			PluginDir:       a.Provider.PluginDir,
 			PluginFiles:     a.Provider.PluginFiles,
 		},
-		Flags: initcfg.Flags{
+			Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
 			Yolo:      a.Yolo,
 			NoNotify:  a.NoNotify,
 			Shell:     a.Shell,
 			PrintMode: argExists(a.ClaudeArgs, "--print"),
-		},
-		ContainerName:   a.ContainerName,
-		InstanceName:    a.InstanceName,
-		HostWorkspace:   a.EffectiveWorkspace,
+			},
+			ProviderName:    a.Provider.Name,
+			ContainerName:   a.ContainerName,
+			InstanceName:    a.InstanceName,
+			HostWorkspace:   a.EffectiveWorkspace,
 		ImagePasteKey:   a.ImagePasteKey,
 		CredStagingDirs: a.credStagingDirs,
+		LogDir:          "/mnt/mittens-logs",
 	}
 }
 
@@ -1195,6 +1201,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Primary workspace mount (identity: host path = container path).
 	args = append(args, "-v", a.WorkspaceMountSrc+":"+a.WorkspaceMountSrc)
+	logDir := filepath.Join(home, ".mittens", "logs")
+	ensureDir(logDir)
+	args = append(args, "-v", logDir+":/mnt/mittens-logs")
 
 	// AI config staging (read-only). Providers that mount the whole config
 	// directory for session persistence should not also mount the same host
@@ -1730,7 +1739,7 @@ Commands:
   init --profile NAME           Configure a model profile (model + effort)
   init --profile NAME --delete  Delete a model profile
   daemon [--socket PATH]        Start a Kitchen runtime daemon on a Unix socket
-  logs [-f]                     Show broker logs (-f to follow)
+  logs [-f] [--category NAME]   Show Mittens logs (default: broker)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   extension list|install|remove Manage external extensions
   version [--json]              Show version information
