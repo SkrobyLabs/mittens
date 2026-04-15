@@ -775,7 +775,7 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 	}
 }
 
-func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.T) {
+func TestAssembleDockerArgs_CodexSessionPersistenceUsesStagingCopy(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENAI_API_KEY", "sk-test")
@@ -785,30 +785,43 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 	workspace := "/Users/test/project"
 
 	a := &App{
-		Provider:          p,
-		NoHistory:         false,
-		ContainerName:     "mittens-codex-session",
-		WorkspaceMountSrc: "/tmp/ws",
-		Workspace:         workspace,
+		Provider:           p,
+		NoHistory:          false,
+		ContainerName:      "mittens-codex-session",
+		WorkspaceMountSrc:  "/tmp/ws",
+		Workspace:          workspace,
 		EffectiveWorkspace: workspace,
-		Credentials:       &CredentialManager{},
+		Credentials:        &CredentialManager{},
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
 
-	if !argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.ContainerConfigDir()) {
-		t.Fatalf("missing whole-config history mount for codex")
+	if !argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.StagingConfigDir()+":ro") {
+		t.Fatalf("missing staging config mount for codex")
 	}
-	if argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.StagingConfigDir()+":ro") {
-		t.Fatalf("did not expect staging config mount when whole-config history is enabled")
+	if argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.ContainerConfigDir()) {
+		t.Fatalf("did not expect whole-config history mount for codex")
 	}
-	if argPairContains(args, "-v", "/projects/") {
-		t.Fatalf("did not expect project-only history mount for codex")
+	for _, rel := range []string{"history.jsonl", "memories", "plans", "projects", "sessions", "tasks"} {
+		hostPath := filepath.Join(p.HostConfigDir(home), rel)
+		containerPath := filepath.Join(p.ContainerConfigDir(), rel)
+		if !argPairExists(args, "-v", hostPath+":"+containerPath) {
+			t.Fatalf("missing direct codex state mount for %s", rel)
+		}
 	}
 
 	cfg := extractInitConfig(t, args)
 	if cfg.HostWorkspace != workspace {
 		t.Fatalf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
+	}
+	if len(cfg.AI.PersistFiles) != 0 {
+		t.Fatalf("PersistFiles = %v, want empty", cfg.AI.PersistFiles)
+	}
+	if len(cfg.AI.PersistDirs) != 0 {
+		t.Fatalf("PersistDirs = %v, want empty", cfg.AI.PersistDirs)
+	}
+	if len(cfg.AI.PersistGlobs) != 0 {
+		t.Fatalf("PersistGlobs = %v, want empty", cfg.AI.PersistGlobs)
 	}
 }
 

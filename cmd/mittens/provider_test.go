@@ -13,7 +13,12 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 		"ContainerEnv":             true, // optional runtime env overrides
 		"InitSettingsJQ":           true, // Gemini-only: post-init settings patch
 		"PersistFiles":             true, // Gemini-only: state files to survive between runs
-		"HistoryMountsWholeConfig": true, // Codex-only: mount whole config dir for history
+		"PersistDirs":              true, // provider-specific runtime persistence
+		"PersistGlobs":             true, // provider-specific runtime persistence
+		"LiveMountFiles":           true, // provider-specific direct runtime mounts
+		"LiveMountDirs":            true, // provider-specific direct runtime mounts
+		"HistoryMountsWholeConfig": true, // provider-specific direct config mount
+		"HistoryMountsProjectDirs": true, // provider-specific history strategy
 		"EffortTemplate":           true, // some providers don't use template mode
 	}
 	p := ClaudeProvider()
@@ -207,8 +212,29 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 	if len(p.FirewallDomains) == 0 {
 		t.Error("CodexProvider().FirewallDomains is empty")
 	}
+	if len(p.PersistFiles) != 0 {
+		t.Errorf("CodexProvider().PersistFiles = %v, want empty", p.PersistFiles)
+	}
+	if len(p.PersistDirs) != 0 {
+		t.Errorf("CodexProvider().PersistDirs = %v, want empty", p.PersistDirs)
+	}
+	if len(p.PersistGlobs) != 0 {
+		t.Errorf("CodexProvider().PersistGlobs = %v, want empty", p.PersistGlobs)
+	}
+	if len(p.LiveMountFiles) == 0 {
+		t.Error("CodexProvider().LiveMountFiles is empty")
+	}
+	if len(p.LiveMountDirs) == 0 {
+		t.Error("CodexProvider().LiveMountDirs is empty")
+	}
 	if len(p.ResumeFlags) == 0 {
 		t.Error("CodexProvider().ResumeFlags is empty")
+	}
+	if p.HistoryMountsWholeConfig {
+		t.Fatal("CodexProvider().HistoryMountsWholeConfig = true, want false")
+	}
+	if p.HistoryMountsProjectDirs {
+		t.Fatal("CodexProvider().HistoryMountsProjectDirs = true, want false")
 	}
 	if p.EffortFlag != "" {
 		t.Fatalf("CodexProvider().EffortFlag = %q, want empty", p.EffortFlag)

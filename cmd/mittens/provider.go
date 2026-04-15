@@ -53,7 +53,11 @@ type Provider struct {
 
 	// Files (relative to ConfigDir) to persist: copied in on start, copied back on exit.
 	// Used for provider state files that must survive between runs (e.g. Gemini auth state).
-	PersistFiles []string
+	PersistFiles   []string
+	PersistDirs    []string
+	PersistGlobs   []string
+	LiveMountFiles []string
+	LiveMountDirs  []string
 
 	// CLI flags
 	ResumeFlags              []string // flags that mean "resume session", e.g. ["--continue", "-c", "--resume", "-r"]
@@ -61,6 +65,7 @@ type Provider struct {
 	ContinueArgs             []string // args to prepend when resuming latest session, e.g. ["--continue"] or ["--resume", "latest"]
 	TrustedDirsFile          string   // separate JSON array file for trusted dirs (Gemini); empty = unused
 	HistoryMountsWholeConfig bool     // mount the provider config dir directly when history is enabled
+	HistoryMountsProjectDirs bool
 	ModelFlag                string
 	EffortFlag               string
 	EffortTemplate           string
@@ -186,13 +191,14 @@ func ClaudeProvider() *Provider {
 		YoloKey:        "skipDangerousModePermissionPrompt",
 		MCPServersKey:  "mcpServers",
 
-		ResumeFlags:     []string{"--continue", "-c", "--resume", "-r"},
-		SkipPermsFlag:   "--dangerously-skip-permissions",
-		ContinueArgs:    []string{"--continue"},
-		TrustedDirsFile: "",
-		StopHookEvent:   "Stop",
-		ModelFlag:       "--model",
-		EffortFlag:      "--effort",
+		ResumeFlags:              []string{"--continue", "-c", "--resume", "-r"},
+		SkipPermsFlag:            "--dangerously-skip-permissions",
+		ContinueArgs:             []string{"--continue"},
+		TrustedDirsFile:          "",
+		HistoryMountsProjectDirs: true,
+		StopHookEvent:            "Stop",
+		ModelFlag:                "--model",
+		EffortFlag:               "--effort",
 	}
 }
 
@@ -237,9 +243,19 @@ func CodexProvider() *Provider {
 		SkipPermsFlag:            "--dangerously-bypass-approvals-and-sandbox",
 		ContinueArgs:             []string{"--resume", "latest"},
 		TrustedDirsFile:          "",
-		HistoryMountsWholeConfig: true,
-		ModelFlag:                "--model",
-		EffortFlag:               "",
+		HistoryMountsProjectDirs: false,
+		LiveMountFiles: []string{
+			"history.jsonl",
+		},
+		LiveMountDirs: []string{
+			"memories",
+			"plans",
+			"projects",
+			"sessions",
+			"tasks",
+		},
+		ModelFlag:  "--model",
+		EffortFlag: "",
 		// Codex expects reasoning effort via -c key-value configuration.
 		EffortTemplate: "-c model_reasoning_effort=%s",
 	}
@@ -298,10 +314,11 @@ func GeminiProvider() *Provider {
 		MCPServersKey:   "mcpServers",
 		TrustedDirsFile: "trustedFolders.json",
 
-		ResumeFlags:   []string{"--resume", "-r"},
-		SkipPermsFlag: "--approval-mode=yolo",
-		ContinueArgs:  []string{"--resume", "latest"},
-		ModelFlag:     "--model",
+		ResumeFlags:              []string{"--resume", "-r"},
+		SkipPermsFlag:            "--approval-mode=yolo",
+		ContinueArgs:             []string{"--resume", "latest"},
+		ModelFlag:                "--model",
+		HistoryMountsProjectDirs: true,
 
 		ContainerHostname: "gemini-cli",
 		ContainerEnv: map[string]string{

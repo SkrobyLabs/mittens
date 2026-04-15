@@ -45,23 +45,25 @@ type ContainerConfig struct {
 // AIConfig describes the AI CLI binary, its config directory layout, and
 // settings keys used by mittens-init to stage configuration files.
 type AIConfig struct {
-	Binary         string   `json:"binary"`
-	ConfigDir      string   `json:"configDir"`
-	CredFile       string   `json:"credFile"`
-	PrefsFile      string   `json:"prefsFile,omitempty"`
-	SettingsFile   string   `json:"settingsFile"`
-	ProjectFile    string   `json:"projectFile"`
-	TrustedDirsKey string   `json:"trustedDirsKey,omitempty"`
-	YoloKey        string   `json:"yoloKey,omitempty"`
-	MCPServersKey  string   `json:"mcpServersKey,omitempty"`
-	TrustedDirsFile string  `json:"trustedDirsFile,omitempty"`
-	InitSettingsJQ string   `json:"initSettingsJQ,omitempty"`
-	StopHookEvent  string   `json:"stopHookEvent,omitempty"`
-	PersistFiles   []string `json:"persistFiles,omitempty"`
-	SettingsFormat string   `json:"settingsFormat"`
-	ConfigSubdirs  []string `json:"configSubdirs"`
-	PluginDir      string   `json:"pluginDir,omitempty"`
-	PluginFiles    []string `json:"pluginFiles,omitempty"`
+	Binary          string   `json:"binary"`
+	ConfigDir       string   `json:"configDir"`
+	CredFile        string   `json:"credFile"`
+	PrefsFile       string   `json:"prefsFile,omitempty"`
+	SettingsFile    string   `json:"settingsFile"`
+	ProjectFile     string   `json:"projectFile"`
+	TrustedDirsKey  string   `json:"trustedDirsKey,omitempty"`
+	YoloKey         string   `json:"yoloKey,omitempty"`
+	MCPServersKey   string   `json:"mcpServersKey,omitempty"`
+	TrustedDirsFile string   `json:"trustedDirsFile,omitempty"`
+	InitSettingsJQ  string   `json:"initSettingsJQ,omitempty"`
+	StopHookEvent   string   `json:"stopHookEvent,omitempty"`
+	PersistFiles    []string `json:"persistFiles,omitempty"`
+	PersistDirs     []string `json:"persistDirs,omitempty"`
+	PersistGlobs    []string `json:"persistGlobs,omitempty"`
+	SettingsFormat  string   `json:"settingsFormat"`
+	ConfigSubdirs   []string `json:"configSubdirs"`
+	PluginDir       string   `json:"pluginDir,omitempty"`
+	PluginFiles     []string `json:"pluginFiles,omitempty"`
 }
 
 // Flags holds boolean feature toggles.

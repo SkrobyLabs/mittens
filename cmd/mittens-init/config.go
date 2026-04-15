@@ -10,15 +10,15 @@ import (
 
 // config holds all configuration for the container entrypoint.
 type config struct {
-	ConfigMount  string
-	AIUsername   string
-	AIHome       string
-	AIConfigDir  string
-	AIDir        string
-	AICredFile   string
-	AIPrefsFile  string
-	AISettingsFile  string
-	AIProjectFile   string
+	ConfigMount       string
+	AIUsername        string
+	AIHome            string
+	AIConfigDir       string
+	AIDir             string
+	AICredFile        string
+	AIPrefsFile       string
+	AISettingsFile    string
+	AIProjectFile     string
 	AITrustedDirsKey  string
 	AIYoloKey         string
 	AIMCPServersKey   string
@@ -26,6 +26,8 @@ type config struct {
 	AIInitSettingsJQ  string
 	AIStopHookEvent   string
 	AIPersistFiles    []string
+	AIPersistDirs     []string
+	AIPersistGlobs    []string
 	AISettingsFormat  string
 	AIConfigSubdirs   []string
 	AIPluginDir       string
@@ -83,15 +85,15 @@ func loadConfig() *config {
 	home := "/home/" + username
 
 	return &config{
-		ConfigMount:  "/mnt/mittens-staging",
-		AIUsername:    username,
-		AIHome:       home,
-		AIConfigDir:  jcfg.AI.ConfigDir,
-		AIDir:        home + "/" + jcfg.AI.ConfigDir,
-		AICredFile:   jcfg.AI.CredFile,
-		AIPrefsFile:  jcfg.AI.PrefsFile,
-		AISettingsFile:  jcfg.AI.SettingsFile,
-		AIProjectFile:   jcfg.AI.ProjectFile,
+		ConfigMount:       "/mnt/mittens-staging",
+		AIUsername:        username,
+		AIHome:            home,
+		AIConfigDir:       jcfg.AI.ConfigDir,
+		AIDir:             home + "/" + jcfg.AI.ConfigDir,
+		AICredFile:        jcfg.AI.CredFile,
+		AIPrefsFile:       jcfg.AI.PrefsFile,
+		AISettingsFile:    jcfg.AI.SettingsFile,
+		AIProjectFile:     jcfg.AI.ProjectFile,
 		AITrustedDirsKey:  jcfg.AI.TrustedDirsKey,
 		AIYoloKey:         jcfg.AI.YoloKey,
 		AIMCPServersKey:   jcfg.AI.MCPServersKey,
@@ -99,6 +101,8 @@ func loadConfig() *config {
 		AIInitSettingsJQ:  jcfg.AI.InitSettingsJQ,
 		AIStopHookEvent:   jcfg.AI.StopHookEvent,
 		AIPersistFiles:    jcfg.AI.PersistFiles,
+		AIPersistDirs:     jcfg.AI.PersistDirs,
+		AIPersistGlobs:    jcfg.AI.PersistGlobs,
 		AISettingsFormat:  jcfg.AI.SettingsFormat,
 		AIConfigSubdirs:   jcfg.AI.ConfigSubdirs,
 		AIPluginDir:       jcfg.AI.PluginDir,

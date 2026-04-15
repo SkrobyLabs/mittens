@@ -69,8 +69,8 @@ type App struct {
 	HostProjectDir     string // cx_project_dir(Workspace)
 
 	// Image build state
-	imageTagParts []string
-	buildArgs     map[string]string
+	imageTagParts  []string
+	buildArgs      map[string]string
 	imageBuildOnce sync.Once
 	imageBuildErr  error
 
@@ -238,7 +238,7 @@ func (a *App) Run() error {
 	if !a.NoHistory {
 		if a.Provider.HistoryMountsWholeConfig {
 			ensureDir(a.Provider.HostConfigDir(home))
-		} else {
+		} else if a.Provider.HistoryMountsProjectDirs {
 			a.HostProjectDir = ProjectDir(a.Workspace)
 			ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
 		}
@@ -809,18 +809,12 @@ func (a *App) Cleanup() {
 				_ = a.broker.Close()
 			}
 		}
-		// Copy back provider persist files (e.g. Gemini google_accounts.json, installation_id).
-		if len(a.Provider.PersistFiles) > 0 {
+		// Copy back provider runtime state from the container snapshot.
+		if len(a.Provider.PersistFiles) > 0 || len(a.Provider.PersistDirs) > 0 || len(a.Provider.PersistGlobs) > 0 {
 			home := os.Getenv("HOME")
 			hostConfigDir := a.Provider.HostConfigDir(home)
-			for _, file := range a.Provider.PersistFiles {
-				src := a.Provider.ContainerConfigDir() + "/" + file
-				dst := filepath.Join(hostConfigDir, file)
-				if err := exec.Command("docker", "cp", a.ContainerName+":"+src, dst).Run(); err != nil {
-					logVerbose(a.Verbose, "Persist %s: not found in container", file)
-				} else {
-					logInfo("Persisted %s", file)
-				}
+			if err := persistContainerConfig(a.ContainerName, a.Provider.ContainerConfigDir(), hostConfigDir, a.Provider.PersistFiles, a.Provider.PersistDirs, a.Provider.PersistGlobs, a.Verbose); err != nil {
+				logWarn("Persist provider state: %v", err)
 			}
 		}
 
@@ -1150,8 +1144,8 @@ func (a *App) buildImage() error {
 // Broker, ExtraDirs, FirewallExtra, and X11 clipboard fields are set
 // later in assembleDockerArgs as they depend on further processing.
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
-		return &initcfg.ContainerConfig{
-			AI: initcfg.AIConfig{
+	return &initcfg.ContainerConfig{
+		AI: initcfg.AIConfig{
 			Binary:          a.Provider.Binary,
 			ConfigDir:       a.Provider.ConfigDir,
 			CredFile:        a.Provider.CredentialFile,
@@ -1165,22 +1159,24 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			InitSettingsJQ:  a.Provider.InitSettingsJQ,
 			StopHookEvent:   a.Provider.StopHookEvent,
 			PersistFiles:    a.Provider.PersistFiles,
+			PersistDirs:     a.Provider.PersistDirs,
+			PersistGlobs:    a.Provider.PersistGlobs,
 			SettingsFormat:  a.Provider.SettingsFormat,
 			ConfigSubdirs:   a.Provider.ConfigSubdirs,
 			PluginDir:       a.Provider.PluginDir,
 			PluginFiles:     a.Provider.PluginFiles,
 		},
-			Flags: initcfg.Flags{
+		Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
 			Yolo:      a.Yolo,
 			NoNotify:  a.NoNotify,
 			Shell:     a.Shell,
 			PrintMode: argExists(a.ClaudeArgs, "--print"),
-			},
-			ProviderName:    a.Provider.Name,
-			ContainerName:   a.ContainerName,
-			InstanceName:    a.InstanceName,
-			HostWorkspace:   a.EffectiveWorkspace,
+		},
+		ProviderName:    a.Provider.Name,
+		ContainerName:   a.ContainerName,
+		InstanceName:    a.InstanceName,
+		HostWorkspace:   a.EffectiveWorkspace,
 		ImagePasteKey:   a.ImagePasteKey,
 		CredStagingDirs: a.credStagingDirs,
 		LogDir:          "/mnt/mittens-logs",
@@ -1252,7 +1248,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		ensureDir(hostConfigDir)
 		args = append(args, "-v", hostConfigDir+":"+containerConfigDir)
-	} else if !a.NoHistory && a.HostProjectDir != "" {
+	} else if !a.NoHistory && a.Provider.HistoryMountsProjectDirs && a.HostProjectDir != "" {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		projDir := filepath.Join(hostConfigDir, "projects", a.HostProjectDir)
@@ -1266,6 +1262,22 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
 
+	}
+	if !a.NoHistory {
+		hostConfigDir := a.Provider.HostConfigDir(home)
+		containerConfigDir := a.Provider.ContainerConfigDir()
+		for _, rel := range a.Provider.LiveMountFiles {
+			hostPath := filepath.Join(hostConfigDir, rel)
+			containerPath := filepath.Join(containerConfigDir, rel)
+			ensureFile(hostPath)
+			args = append(args, "-v", hostPath+":"+containerPath)
+		}
+		for _, rel := range a.Provider.LiveMountDirs {
+			hostPath := filepath.Join(hostConfigDir, rel)
+			containerPath := filepath.Join(containerConfigDir, rel)
+			ensureDir(hostPath)
+			args = append(args, "-v", hostPath+":"+containerPath)
+		}
 	}
 
 	// Extra directory mounts.
@@ -1651,6 +1663,18 @@ func fileExists(path string) bool {
 
 func ensureDir(path string) {
 	_ = os.MkdirAll(path, 0o755)
+}
+
+func ensureFile(path string) {
+	ensureDir(filepath.Dir(path))
+	if fileExists(path) {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }
 
 type extraDirSpec struct {

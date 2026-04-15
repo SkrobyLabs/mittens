@@ -240,7 +240,9 @@ func copyConfigFiles(cfg *config) {
 	for _, file := range []string{cfg.AISettingsFile, "settings.local.json", cfg.AIProjectFile, "statusline.sh"} {
 		copyIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
 	}
-	normalizeEmptyJSONObjectFile(cfg.AIDir + "/" + cfg.AISettingsFile)
+	if cfg.AISettingsFormat == "json" {
+		normalizeEmptyJSONObjectFile(cfg.AIDir + "/" + cfg.AISettingsFile)
+	}
 
 	// Make statusline executable if copied.
 	if _, err := os.Stat(cfg.AIDir + "/statusline.sh"); err == nil {
@@ -250,6 +252,12 @@ func copyConfigFiles(cfg *config) {
 	// Persist files.
 	for _, file := range cfg.AIPersistFiles {
 		copyIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
+	}
+	for _, dir := range cfg.AIPersistDirs {
+		copyDirIfExists(staging+"/"+dir, cfg.AIDir+"/"+dir)
+	}
+	for _, pattern := range cfg.AIPersistGlobs {
+		copyGlobIfExists(staging, cfg.AIDir, pattern)
 	}
 }
 
@@ -524,6 +532,40 @@ func execArgs(defaultBinary string) error {
 func copyIfExists(src, dst string) {
 	if _, err := os.Stat(src); err == nil {
 		fileutil.CopyFile(src, dst)
+	}
+}
+
+func copyDirIfExists(src, dst string) {
+	if info, err := os.Stat(src); err == nil && info.IsDir() {
+		_ = os.RemoveAll(dst)
+		if err := fileutil.CopyDir(src, dst); err != nil {
+			logWarn("copy dir %s -> %s: %v", src, dst, err)
+		}
+	}
+}
+
+func copyGlobIfExists(srcRoot, dstRoot, pattern string) {
+	matches, err := filepath.Glob(filepath.Join(srcRoot, pattern))
+	if err != nil {
+		logWarn("copy glob %s: %v", pattern, err)
+		return
+	}
+	for _, src := range matches {
+		info, err := os.Stat(src)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		rel, err := filepath.Rel(srcRoot, src)
+		if err != nil {
+			continue
+		}
+		dst := filepath.Join(dstRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			continue
+		}
+		if err := fileutil.CopyFile(src, dst); err != nil {
+			logWarn("copy file %s -> %s: %v", src, dst, err)
+		}
 	}
 }
 

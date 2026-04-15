@@ -305,6 +305,8 @@ func (a *App) buildWorkerInitConfig(provider *Provider, containerName, workspace
 			InitSettingsJQ:  provider.InitSettingsJQ,
 			StopHookEvent:   provider.StopHookEvent,
 			PersistFiles:    provider.PersistFiles,
+			PersistDirs:     provider.PersistDirs,
+			PersistGlobs:    provider.PersistGlobs,
 			SettingsFormat:  provider.SettingsFormat,
 			ConfigSubdirs:   provider.ConfigSubdirs,
 			PluginDir:       provider.PluginDir,
