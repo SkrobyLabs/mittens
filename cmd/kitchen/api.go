@@ -124,7 +124,7 @@ func apiErrorStatus(err error) int {
 		return http.StatusNotFound
 	case strings.Contains(msg, "not implemented"):
 		return http.StatusNotImplemented
-	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"), strings.Contains(msg, "active tasks"), strings.Contains(msg, "unfinished tasks"), strings.Contains(msg, "must be in research_complete"):
+	case strings.Contains(msg, "already"), strings.Contains(msg, "conflict"), strings.Contains(msg, "active plan cancellation"), strings.Contains(msg, "active tasks"), strings.Contains(msg, "unfinished tasks"), strings.Contains(msg, "no changes to merge"), strings.Contains(msg, "must be in research_complete"):
 		return http.StatusConflict
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "forbidden"):
 		return http.StatusUnauthorized

@@ -246,6 +246,16 @@ func TestGitManagerMergeCheckAllowsSlashInBaseBranch(t *testing.T) {
 	if err := gm.CreateLineageBranch("parser-errors", "HEAD"); err != nil {
 		t.Fatalf("CreateLineageBranch: %v", err)
 	}
+	lineageWT, err := gm.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(lineageWT, "lineage.txt"), "lineage change\n")
+	mustRunGit(t, lineageWT, "add", "lineage.txt")
+	mustRunGit(t, lineageWT, "commit", "-m", "lineage change")
+	if err := gm.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
 
 	clean, conflicts, err := gm.MergeCheck("parser-errors", "feat/kitchen")
 	if err != nil {
@@ -259,7 +269,7 @@ func TestGitManagerMergeCheckAllowsSlashInBaseBranch(t *testing.T) {
 	}
 }
 
-func TestGitManagerMergeLineageSquashNoOpWhenBaseAlreadyContainsChanges(t *testing.T) {
+func TestGitManagerMergeLineageSquashBlocksWhenLineageHasNoChanges(t *testing.T) {
 	repo := initGitRepo(t)
 	worktrees := filepath.Join(t.TempDir(), "worktrees")
 
@@ -281,8 +291,9 @@ func TestGitManagerMergeLineageSquashNoOpWhenBaseAlreadyContainsChanges(t *testi
 	if err != nil {
 		t.Fatalf("rev-parse before: %v", err)
 	}
-	if err := gm.MergeLineage("parser-errors", "feat/kitchen", "squash"); err != nil {
-		t.Fatalf("MergeLineage: %v", err)
+	err = gm.MergeLineage("parser-errors", "feat/kitchen", "squash")
+	if err == nil || !strings.Contains(err.Error(), "has no changes to merge") {
+		t.Fatalf("MergeLineage error = %v, want no changes to merge", err)
 	}
 	after, err := runGit(repo, "rev-parse", "feat/kitchen")
 	if err != nil {

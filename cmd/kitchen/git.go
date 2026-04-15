@@ -256,6 +256,13 @@ func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
 		return err
 	}
 	lineageBranch := lineageBranchName(lineage)
+	hasChanges, err := g.lineageHasPendingChanges(baseBranch, lineageBranch)
+	if err != nil {
+		return err
+	}
+	if !hasChanges {
+		return fmt.Errorf("lineage %s has no changes to merge into %s", lineage, baseBranch)
+	}
 
 	squash := strings.EqualFold(mode, "squash")
 
@@ -318,6 +325,13 @@ func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (stri
 		return "", err
 	}
 	lineageBranch := lineageBranchName(lineage)
+	hasChanges, err := g.lineageHasPendingChanges(baseBranch, lineageBranch)
+	if err != nil {
+		return "", err
+	}
+	if !hasChanges {
+		return "", fmt.Errorf("lineage %s has no changes to merge into %s", lineage, baseBranch)
+	}
 
 	squash := strings.EqualFold(mode, "squash")
 
@@ -349,6 +363,13 @@ func (g *GitManager) MergeCheck(lineage, baseBranch string) (bool, []string, err
 		return false, nil, err
 	}
 	lineageBranch := lineageBranchName(lineage)
+	hasChanges, err := g.lineageHasPendingChanges(baseBranch, lineageBranch)
+	if err != nil {
+		return false, nil, err
+	}
+	if !hasChanges {
+		return false, nil, fmt.Errorf("lineage %s has no changes to merge into %s", lineage, baseBranch)
+	}
 
 	ff, err := g.isAncestor(baseBranch, lineageBranch)
 	if err != nil {
@@ -381,6 +402,22 @@ func (g *GitManager) MergeCheck(lineage, baseBranch string) (bool, []string, err
 	}
 	_, _ = runGit(tmpDir, "merge", "--abort")
 	return false, conflicts, nil
+}
+
+func (g *GitManager) lineageHasPendingChanges(baseBranch, lineageBranch string) (bool, error) {
+	mergeBase, err := runGit(g.repoPath, "merge-base", baseBranch, lineageBranch)
+	if err != nil {
+		return false, err
+	}
+	_, err = runGit(g.repoPath, "diff", "--quiet", strings.TrimSpace(mergeBase)+".."+lineageBranch)
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
 }
 
 // CreateFixLineageMergeWorktree prepares a worker worktree pre-loaded

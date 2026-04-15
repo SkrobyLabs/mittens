@@ -392,6 +392,60 @@ func TestKitchenMergeLineageBlocksFailedImplementationReview(t *testing.T) {
 	}
 }
 
+func TestKitchenMergeLineageBlocksLineageWithNoChanges(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_no_changes",
+			Lineage: "parser-errors",
+			Title:   "No lineage changes",
+			State:   planStateCompleted,
+			Anchor:  anchor,
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			Branch:      lineageBranchName("parser-errors"),
+			Anchor:      anchor,
+			CompletedAt: &completedAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+
+	_, err = k.MergeLineage("parser-errors")
+	if err == nil || !strings.Contains(err.Error(), "has no changes to merge") {
+		t.Fatalf("MergeLineage error = %v, want no changes to merge", err)
+	}
+
+	updated, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if updated.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", updated.Plan.State, planStateCompleted)
+	}
+	if updated.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", updated.Execution.State, planStateCompleted)
+	}
+}
+
 func TestKitchenMergeLineageIgnoresHistoricalCouncilFailuresOnCompletedPlan(t *testing.T) {
 	k := newTestKitchen(t)
 	completedAt := time.Now().UTC()
@@ -1507,7 +1561,7 @@ func TestKitchenLineagesCommandListsActiveLineages(t *testing.T) {
 	}
 }
 
-func TestKitchenMergeCheckCommandReportsCleanMerge(t *testing.T) {
+func TestKitchenMergeCheckCommandBlocksLineageWithNoChanges(t *testing.T) {
 	k := newTestKitchen(t)
 	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
 	if err != nil {
@@ -1526,16 +1580,26 @@ func TestKitchenMergeCheckCommandReportsCleanMerge(t *testing.T) {
 		t.Fatalf("CreateLineageBranch: %v", err)
 	}
 
-	output := runKitchenCommand(t, k, "merge-check", bundle.Plan.Lineage)
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(output), &payload); err != nil {
-		t.Fatalf("merge-check output is not JSON: %v\n%s", err, output)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if payload["clean"] != true {
-		t.Fatalf("merge-check payload = %+v, want clean=true", payload)
+	if err := os.Chdir(k.repoPath); err != nil {
+		t.Fatal(err)
 	}
-	if payload["baseBranch"] == "" {
-		t.Fatalf("merge-check payload missing baseBranch: %+v", payload)
+	t.Cleanup(func() {
+		_ = os.Chdir(wd)
+	})
+	t.Setenv("KITCHEN_HOME", k.paths.HomeDir)
+
+	cmd := newRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"merge-check", bundle.Plan.Lineage})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "has no changes to merge") {
+		t.Fatalf("merge-check error = %v, want no changes to merge\n%s", err, out.String())
 	}
 }
 
