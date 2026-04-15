@@ -1749,6 +1749,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	switch bundle.Execution.State {
 	case planStatePlanning,
 		planStateReviewing,
+		planStatePendingApproval,
 		planStateImplementationReview,
 		planStateResearchComplete,
 		planStatePlanningFailed,

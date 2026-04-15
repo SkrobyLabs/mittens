@@ -3366,6 +3366,92 @@ func TestReconcilePlanExecutionOnStartup_PreservesMergedPlanState(t *testing.T) 
 	}
 }
 
+func TestReconcilePlanExecutionOnStartup_PreservesPendingApprovalPlanState(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_pending_approval_restart_guard",
+			Lineage: "feat-pending-approval-restart-guard",
+			Title:   "Pending approval restart guard",
+			State:   planStatePendingApproval,
+		},
+		Execution: ExecutionRecord{
+			State:            planStatePendingApproval,
+			CompletedTaskIDs: []string{councilTaskID("plan_pending_approval_restart_guard", 1)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-pending-approval-restart-guard"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         councilTaskID(planID, 1),
+		PlanID:     planID,
+		Prompt:     "plan work",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if err := s.reconcilePlanExecutionOnStartup(); err != nil {
+		t.Fatalf("reconcilePlanExecutionOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStatePendingApproval {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStatePendingApproval)
+	}
+	if bundle.Execution.State != planStatePendingApproval {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStatePendingApproval)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 0 {
+		t.Fatalf("active task IDs = %+v, want empty", bundle.Execution.ActiveTaskIDs)
+	}
+	if len(bundle.Execution.CompletedTaskIDs) != 1 || bundle.Execution.CompletedTaskIDs[0] != taskID {
+		t.Fatalf("completed task IDs = %+v, want [%s]", bundle.Execution.CompletedTaskIDs, taskID)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
