@@ -6344,6 +6344,133 @@ func TestSyncPlanExecutionCompletedAutoRemediationRequeuesImplementationReview(t
 	}
 }
 
+func TestEnsureAutoRemediationTaskCompletedExistingTaskRequeuesImplementationReview(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan_ir_completed_remediation_intent"
+	remediationTaskID := planTaskRuntimeID(planID, "review-fix-r1")
+	_, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "feat-ir-completed-remediation-intent",
+			Title:   "Completed remediation intent should reconcile",
+			State:   planStateActive,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}, {
+				ID:               "review-fix-r1",
+				Title:            "Address implementation review findings",
+				Prompt:           "fix review findings",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateActive,
+			ImplReviewRequested:         true,
+			ReviewCouncilCycle:          1,
+			AutoRemediationAttempt:      1,
+			AutoRemediationActive:       true,
+			AutoRemediationPlanTaskID:   "review-fix-r1",
+			AutoRemediationTaskID:       remediationTaskID,
+			AutoRemediationSourceTaskID: reviewCouncilTaskID(planID, 2),
+			AutoRemediationSource: &AutoRemediationSourceRecord{
+				Decision:     reviewCouncilConverged,
+				Verdict:      pool.ReviewFail,
+				Seat:         "B",
+				Turn:         2,
+				ReviewTaskID: reviewCouncilTaskID(planID, 2),
+				Summary:      "Completed remediation should reconcile immediately.",
+				Findings: []adapter.ReviewFinding{{
+					ID:          "f1",
+					Category:    "correctness",
+					Description: "Stale remediation intent should not leave the plan active.",
+					Severity:    pool.SeverityMajor,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-completed-remediation-intent"), "kitchen-test")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:                 remediationTaskID,
+		PlanID:             planID,
+		Prompt:             "fix review findings",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               "implementer",
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask remediation: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-fix", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker implementer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-fix", "container-w-fix"); err != nil {
+		t.Fatalf("RegisterWorker implementer: %v", err)
+	}
+	if err := pm.DispatchTask(remediationTaskID, "w-fix"); err != nil {
+		t.Fatalf("DispatchTask remediation: %v", err)
+	}
+	if err := pm.CompleteTask("w-fix", remediationTaskID); err != nil {
+		t.Fatalf("CompleteTask remediation: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan before ensure: %v", err)
+	}
+	if err := s.ensureAutoRemediationTask(&bundle, false); err != nil {
+		t.Fatalf("ensureAutoRemediationTask: %v", err)
+	}
+
+	bundle, err = store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan after ensure: %v", err)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected auto-remediation to clear when target task already completed")
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	reviewTaskID := reviewCouncilTaskIDForCycle(planID, 2, 1)
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want queued", task.Status)
+	}
+}
+
 func TestSyncPlanExecutionCompletedManualRemediationRequeuesImplementationReview(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

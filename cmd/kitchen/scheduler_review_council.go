@@ -571,6 +571,11 @@ func (s *Scheduler) ensureAutoRemediationTask(bundle *StoredPlan, recovered bool
 			return err
 		}
 		changed = true
+	} else if task.Status == pool.TaskCompleted {
+		// A stale persisted remediation intent can point at a task that already
+		// completed in a previous cycle. Reconcile immediately instead of
+		// reasserting planStateActive with no runnable work left.
+		return s.syncPlanExecution(bundle.Plan.PlanID)
 	} else if task.Status == pool.TaskCanceled {
 		if err := s.pm.ReviveCanceledTask(runtimeTaskID, false); err != nil {
 			return err
