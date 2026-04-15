@@ -59,6 +59,9 @@ type fakeKitchenTUIBackend struct {
 	cancelPlanCalls           int
 	cancelledTaskID           string
 	cancelTaskCalls           int
+	refinedPlanID             string
+	refinedClarification      string
+	refineCalls               int
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -114,6 +117,12 @@ func (b *fakeKitchenTUIBackend) PromoteResearch(planID, lineage string, auto, im
 		return "plan_promoted", nil
 	}
 	return b.promotePlanID, nil
+}
+func (b *fakeKitchenTUIBackend) RefineResearch(planID, clarification string) error {
+	b.refineCalls++
+	b.refinedPlanID = planID
+	b.refinedClarification = clarification
+	return nil
 }
 func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { return nil }
 func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
@@ -1422,6 +1431,161 @@ func TestKitchenTUIPromoteResearchCallsBackend(t *testing.T) {
 	}
 	if action.selectedPlanID != "plan_promoted_new" {
 		t.Fatalf("selectedPlanID = %q, want promoted plan id", action.selectedPlanID)
+	}
+}
+
+func TestKitchenTUIFooterShowsRefineForResearchCompleteResearchPlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateResearchComplete},
+				Progress: &PlanProgress{State: planStateResearchComplete},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "R refine") {
+		t.Fatalf("footer = %q, want R refine action for research_complete research plan", footer)
+	}
+}
+
+func TestKitchenTUIFooterDoesNotShowRefineForFlattenedCompletedResearchPlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if strings.Contains(footer, "R refine") {
+		t.Fatalf("footer = %q, should not show R refine for flattened completed research plan", footer)
+	}
+}
+
+func TestKitchenTUIRefineKeyOpensRefineInput(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateResearchComplete},
+				Progress: &PlanProgress{State: planStateResearchComplete},
+			},
+		},
+		input: textinput.New(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputRefine {
+		t.Fatalf("inputMode = %q, want refine", got.inputMode)
+	}
+	if got.refinePlanID != "plan_research" {
+		t.Fatalf("refinePlanID = %q, want plan_research", got.refinePlanID)
+	}
+}
+
+func TestKitchenTUIRefineKeyDoesNotOpenRefineOnNonEligiblePlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted},
+			},
+		},
+		input: textinput.New(),
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	got := updated.(kitchenTUIModel)
+	if cmd != nil {
+		t.Fatal("expected no command for non-eligible plan")
+	}
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+	if got.flash != "selected plan cannot be refined" {
+		t.Fatalf("flash = %q, want refinement not available message", got.flash)
+	}
+}
+
+func TestKitchenTUIRefineResearchCallsBackend(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:      backend,
+		inputMode:    kitchenTUIInputRefine,
+		refinePlanID: "plan_research",
+		plans: []kitchenTUIPlanItem{
+			{
+				Record:   PlanRecord{PlanID: "plan_research", Title: "Research OAuth", Mode: "research", State: planStateResearchComplete},
+				Progress: &PlanProgress{State: planStateResearchComplete},
+			},
+		},
+	}
+	model.input = textInputWithValue("focus on the retry path in onTaskFailed")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected refine command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "refinement submitted plan_research" {
+		t.Fatalf("action status = %q, want 'refinement submitted plan_research'", action.status)
+	}
+	if action.selectedPlanID != "plan_research" {
+		t.Fatalf("selectedPlanID = %q, want plan_research (same plan, not a new one)", action.selectedPlanID)
+	}
+	if backend.refineCalls != 1 {
+		t.Fatalf("refineCalls = %d, want 1", backend.refineCalls)
+	}
+	if backend.refinedPlanID != "plan_research" {
+		t.Fatalf("refinedPlanID = %q, want plan_research", backend.refinedPlanID)
+	}
+	if backend.refinedClarification != "focus on the retry path in onTaskFailed" {
+		t.Fatalf("refinedClarification = %q", backend.refinedClarification)
+	}
+}
+
+func TestKitchenTUIRefineBlankClarificationRejectsLocally(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:      backend,
+		inputMode:    kitchenTUIInputRefine,
+		refinePlanID: "plan_research",
+	}
+	model.input = textInputWithValue("   ")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expected no command for blank clarification")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputRefine {
+		t.Fatalf("inputMode = %q, want refine (should stay open)", got.inputMode)
+	}
+	if got.errText != "clarification must not be empty" {
+		t.Fatalf("errText = %q, want validation error", got.errText)
+	}
+	if backend.refineCalls != 0 {
+		t.Fatalf("refineCalls = %d, want 0 (should not call backend)", backend.refineCalls)
 	}
 }
 

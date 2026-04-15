@@ -178,6 +178,16 @@ func TestFormatNotification(t *testing.T) {
 			want: "[RUNTIME OK] kitchen-test",
 		},
 		{
+			name: "research refinement submitted with message",
+			n:    pool.Notification{Type: "research_refinement_submitted", ID: "plan_research_1", Message: "Research OAuth"},
+			want: "[RESEARCH REFINE] Research OAuth: refinement submitted",
+		},
+		{
+			name: "research refinement submitted no message",
+			n:    pool.Notification{Type: "research_refinement_submitted", ID: "plan_research_1"},
+			want: "[RESEARCH REFINE] plan_research_1: refinement submitted",
+		},
+		{
 			name: "unknown type with message",
 			n:    pool.Notification{Type: "custom", ID: "x-1", Message: "hello"},
 			want: "[custom] x-1: hello",
@@ -219,6 +229,7 @@ func TestNotificationLevel(t *testing.T) {
 		"plan_impl_review_requested", "plan_impl_review_passed",
 		"plan_review_council_started", "plan_review_council_turn_completed", "plan_review_council_converged",
 		"runtime_worker_spawned", "runtime_assignment_submitted", "scheduler_runtime_discovery_recovered",
+		"research_refinement_submitted",
 	}
 	for _, typ := range infoTypes {
 		if notificationLevel(typ) != "info" {

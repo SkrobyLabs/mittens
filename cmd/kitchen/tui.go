@@ -33,6 +33,7 @@ type kitchenTUIBackend interface {
 	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error)
 	SubmitResearch(topic string) (string, error)
 	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
+	RefineResearch(planID, clarification string) error
 	ExtendCouncil(planID string, turns int) error
 	RequestReview(planID string) error
 	RemediateReview(planID string, includeNits bool) error
@@ -120,6 +121,10 @@ func (b *kitchenAPIBackend) PromoteResearch(planID, lineage string, auto, implRe
 		return "", fmt.Errorf("promote response missing planId")
 	}
 	return newPlanID, nil
+}
+func (b *kitchenAPIBackend) RefineResearch(planID, clarification string) error {
+	_, err := b.client.RefineResearch(planID, clarification)
+	return err
 }
 func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
 	_, err := b.client.ExtendCouncil(planID, turns)
@@ -327,6 +332,13 @@ func (b *kitchenLocalBackend) PromoteResearch(planID, lineage string, auto, impl
 	return newPlanID, err
 }
 
+func (b *kitchenLocalBackend) RefineResearch(planID, clarification string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		_, err := k.RefineResearch(planID, clarification)
+		return err
+	})
+}
+
 func (b *kitchenLocalBackend) ExtendCouncil(planID string, turns int) error {
 	return b.withKitchen(func(k *Kitchen) error {
 		return k.ExtendCouncil(planID, turns)
@@ -512,6 +524,7 @@ const (
 	kitchenTUIInputNone      kitchenTUIInputMode = ""
 	kitchenTUIInputSubmit    kitchenTUIInputMode = "submit"
 	kitchenTUIInputPromote   kitchenTUIInputMode = "promote"
+	kitchenTUIInputRefine    kitchenTUIInputMode = "refine"
 	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
 	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
 	kitchenTUIInputMergeMenu kitchenTUIInputMode = "merge-menu"
@@ -582,6 +595,7 @@ type kitchenTUIModel struct {
 	submitProviderOverrides    PlanProviderOverrides
 	submitProviderOverrideFocus int // 0=planner,1=council_a,2=council_b,3=implementer
 	promotePlanID     string
+	refinePlanID      string
 	flash             string
 	flashUntil        time.Time
 	errText           string
@@ -1018,6 +1032,16 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "R":
+			if m.leftMode == kitchenTUILeftPlans {
+				if !m.canRefineSelectedPlan() {
+					m.flash = "selected plan cannot be refined"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				plan := m.selectedPlanItem()
+				m.openRefineInput(plan.Record.PlanID)
+				return m, nil
+			}
 			if m.leftMode != kitchenTUILeftTasks {
 				return m, nil
 			}
@@ -1335,6 +1359,30 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return "promoted as " + newPlanID, newPlanID, nil
 			})
+		case kitchenTUIInputRefine:
+			planID := strings.TrimSpace(m.refinePlanID)
+			if planID == "" {
+				if plan := m.selectedPlanItem(); plan != nil {
+					planID = strings.TrimSpace(plan.Record.PlanID)
+				}
+			}
+			if planID == "" {
+				m.closeInput()
+				return m, nil
+			}
+			if value == "" {
+				m.errText = "clarification must not be empty"
+				return m, nil
+			}
+			clarification := value
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.RefineResearch(planID, clarification)
+				if err != nil {
+					return "", "", err
+				}
+				return "refinement submitted " + planID, planID, nil
+			})
 		case kitchenTUIInputReplan:
 			plan := m.selectedPlanItem()
 			if plan == nil {
@@ -1459,6 +1507,11 @@ func (m *kitchenTUIModel) openPromoteInput(planID string) {
 	m.openInput(kitchenTUIInputPromote, "Promote research", "Optional lineage")
 }
 
+func (m *kitchenTUIModel) openRefineInput(planID string) {
+	m.refinePlanID = strings.TrimSpace(planID)
+	m.openInput(kitchenTUIInputRefine, "Refine research", "Additional clarification or focus area...")
+}
+
 func (m *kitchenTUIModel) closeInput() {
 	if m.inputMode == kitchenTUIInputSubmit {
 		m.finishSubmitDependencySelection()
@@ -1468,6 +1521,7 @@ func (m *kitchenTUIModel) closeInput() {
 	m.submitImplReview = false
 	m.submitResearch = false
 	m.promotePlanID = ""
+	m.refinePlanID = ""
 	m.input.Blur()
 	m.input.SetValue("")
 }
@@ -1882,6 +1936,17 @@ func (m kitchenTUIModel) canPromoteSelectedPlan() bool {
 	}
 }
 
+func (m kitchenTUIModel) canRefineSelectedPlan() bool {
+	plan := m.selectedPlanItem()
+	if plan == nil {
+		return false
+	}
+	if strings.TrimSpace(plan.Record.Mode) != "research" {
+		return false
+	}
+	return planDisplayState(*plan) == planStateResearchComplete
+}
+
 func (m kitchenTUIModel) nextPlanSelectionAfterDeletion() string {
 	if len(m.plans) <= 1 {
 		return ""
@@ -1923,6 +1988,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			return actions
 		case kitchenTUIInputPromote:
 			return []string{"enter promote", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputRefine:
+			return []string{"enter refine", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputAnswer:
@@ -1975,6 +2042,9 @@ func (m kitchenTUIModel) footerActions() []string {
 			actions = append(actions, "D delete")
 			if m.canPromoteSelectedPlan() {
 				actions = append(actions, "P promote")
+			}
+			if m.canRefineSelectedPlan() {
+				actions = append(actions, "R refine")
 			}
 			if m.canMergeSelectedPlan() {
 				actions = append(actions, "M merge-menu")
@@ -2993,6 +3063,8 @@ func (m kitchenTUIModel) renderInputBar() string {
 		}
 	case kitchenTUIInputPromote:
 		label = "Promote research"
+	case kitchenTUIInputRefine:
+		label = "Refine research"
 	case kitchenTUIInputReplan:
 		label = "Replan"
 	case kitchenTUIInputAnswer:

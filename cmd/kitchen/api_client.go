@@ -127,6 +127,14 @@ func (c *kitchenAPIClient) PromoteResearch(planID, lineage string, auto, implRev
 	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/promote", req, &resp)
 }
 
+func (c *kitchenAPIClient) RefineResearch(planID, clarification string) (map[string]any, error) {
+	req := map[string]any{
+		"clarification": clarification,
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/refine-research", req, &resp)
+}
+
 func (c *kitchenAPIClient) ExtendCouncil(planID string, turns int) (map[string]any, error) {
 	req := map[string]any{}
 	if turns != 0 {

@@ -57,6 +57,11 @@ func formatNotification(n pool.Notification) string {
 		return fmt.Sprintf("[REVIEW COUNCIL PASS] %s: %s", n.ID, n.Message)
 	case "plan_review_council_rejected":
 		return fmt.Sprintf("[REVIEW COUNCIL FAIL] %s: %s", n.ID, n.Message)
+	case "research_refinement_submitted":
+		if n.Message != "" {
+			return fmt.Sprintf("[RESEARCH REFINE] %s: refinement submitted", n.Message)
+		}
+		return fmt.Sprintf("[RESEARCH REFINE] %s: refinement submitted", n.ID)
 	case "plan_waiting_on_dependency":
 		if n.Message != "" {
 			return fmt.Sprintf("[PLAN WAITING] %s: %s", n.ID, n.Message)
