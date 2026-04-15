@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3591,6 +3592,275 @@ func TestOnImplementationReviewCompleted_PassDiscardsWorktreeAndKillsWorker(t *t
 	worker, ok := pm.Worker("w-1")
 	if !ok || worker.Status != pool.WorkerDead {
 		t.Fatalf("worker state = %+v, want dead after review council completion", worker)
+	}
+}
+
+func TestOnImplementationReviewCompleted_KillsPriorReservedSeatWorkers(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newReviewCouncilSeats()
+	seats[0].WorkerID = "w-seat-a"
+	idleSince := time.Now().UTC()
+	seats[0].IdleSince = &idleSince
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_seat_cleanup",
+			Lineage: "feat-ir-seat-cleanup",
+			Title:   "Impl review seat cleanup",
+			State:   planStateImplementationReview,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: strings.TrimSpace(head),
+			},
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          seats,
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: "pass",
+					Summary: "initial review",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-seat-cleanup"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-seat-a", Role: "reviewer", Provider: "anthropic", Model: "sonnet"}); err != nil {
+		t.Fatalf("SpawnWorker seat A: %v", err)
+	}
+	if err := pm.RegisterWorker("w-seat-a", "container-w-seat-a"); err != nil {
+		t.Fatalf("RegisterWorker seat A: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewTaskID,
+		PlanID:     planID,
+		Prompt:     "review the implementation",
+		Complexity: string(ComplexityMedium),
+		Priority:   10,
+		Role:       "reviewer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask review: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(spawn review): %v", err)
+	}
+	if len(host.spawnSpecs) < 2 {
+		t.Fatalf("spawn specs = %d, want at least 2", len(host.spawnSpecs))
+	}
+	reviewWorkerID := host.spawnSpecs[len(host.spawnSpecs)-1].ID
+	if err := pm.RegisterWorker(reviewWorkerID, "container-"+reviewWorkerID); err != nil {
+		t.Fatalf("RegisterWorker reviewer: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch review): %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), reviewWorkerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := reviewCouncilTestArtifact(t, "B", 2, "pass", "converged", true, nil)
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask(reviewWorkerID, reviewTaskID); err != nil {
+		t.Fatalf("CompleteTask review: %v", err)
+	}
+
+	if err := s.onTaskCompleted(reviewTaskID); err != nil {
+		t.Fatalf("onTaskCompleted(review): %v", err)
+	}
+
+	if !slices.Equal(host.killedWorkers, []string{"w-seat-a", reviewWorkerID}) {
+		t.Fatalf("killed workers = %v, want [w-seat-a %s]", host.killedWorkers, reviewWorkerID)
+	}
+}
+
+func TestApplyCouncilTurnResult_KillsReservedSeatWorkersWhenCouncilConverges(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	seats := newCouncilSeats()
+	seats[0].WorkerID = "w-seat-a"
+	idleSince := time.Now().UTC()
+	seats[0].IdleSince = &idleSince
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_council_seat_cleanup",
+			Lineage: "feat-council-seat-cleanup",
+			Title:   "Council seat cleanup",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       2,
+			CouncilTurnsCompleted: 1,
+			CouncilSeats:          seats,
+			CouncilTurns: []CouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.CouncilTurnArtifact{
+					Seat: "A",
+					Turn: 1,
+					CandidatePlan: &adapter.PlanArtifact{
+						Title: "Cleanup plan",
+						Tasks: []adapter.PlanArtifactTask{{ID: "t1", Title: "Task", Prompt: "Do work", Complexity: "medium"}},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-seat-cleanup"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-seat-a", Role: plannerTaskRole, Provider: "anthropic", Model: "sonnet"}); err != nil {
+		t.Fatalf("SpawnWorker seat A: %v", err)
+	}
+	if err := pm.RegisterWorker("w-seat-a", "container-w-seat-a"); err != nil {
+		t.Fatalf("RegisterWorker seat A: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-seat-b", Role: plannerTaskRole, Provider: "openai", Model: "gpt-5.4"}); err != nil {
+		t.Fatalf("SpawnWorker seat B: %v", err)
+	}
+	if err := pm.RegisterWorker("w-seat-b", "container-w-seat-b"); err != nil {
+		t.Fatalf("RegisterWorker seat B: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	task := pool.Task{ID: councilTaskID(planID, 2), PlanID: planID, WorkerID: "w-seat-b", Role: plannerTaskRole}
+	artifact := &adapter.CouncilTurnArtifact{
+		Seat:             "B",
+		Turn:             2,
+		Stance:           "converged",
+		AdoptedPriorPlan: true,
+		CandidatePlan: &adapter.PlanArtifact{
+			Title: "Cleanup plan",
+			Tasks: []adapter.PlanArtifactTask{{ID: "t1", Title: "Task", Prompt: "Do work", Complexity: "medium"}},
+		},
+		Summary: "converged",
+	}
+
+	if err := s.applyCouncilTurnResult(task, bundle, artifact, bundle.Plan); err != nil {
+		t.Fatalf("applyCouncilTurnResult: %v", err)
+	}
+
+	if !slices.Equal(host.killedWorkers, []string{"w-seat-a", "w-seat-b"}) {
+		t.Fatalf("killed workers = %v, want [w-seat-a w-seat-b]", host.killedWorkers)
+	}
+}
+
+func TestOnResearchTaskCompleted_KillsWorker(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID: "plan_research_cleanup",
+			Mode:   "research",
+			Title:  "Research cleanup",
+			State:  planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			State: planStatePlanning,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-research-worker-cleanup"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-research", Role: "researcher", Provider: "anthropic", Model: "sonnet"}); err != nil {
+		t.Fatalf("SpawnWorker research: %v", err)
+	}
+	if err := pm.RegisterWorker("w-research", "container-w-research"); err != nil {
+		t.Fatalf("RegisterWorker research: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	task := pool.Task{
+		ID:       "research_plan_research_cleanup",
+		PlanID:   planID,
+		WorkerID: "w-research",
+		Result:   &pool.TaskResult{Summary: "done"},
+	}
+	if err := s.onResearchTaskCompleted(task); err != nil {
+		t.Fatalf("onResearchTaskCompleted: %v", err)
+	}
+
+	if !slices.Equal(host.killedWorkers, []string{"w-research"}) {
+		t.Fatalf("killed workers = %v, want [w-research]", host.killedWorkers)
 	}
 }
 

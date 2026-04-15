@@ -553,6 +553,7 @@ func (s *Scheduler) onResearchTaskCompleted(task pool.Task) error {
 	if s.notify != nil {
 		s.notify(pool.Notification{Type: "research_complete", ID: task.PlanID})
 	}
+	s.killWorkerIDs(task.WorkerID)
 	return nil
 }
 
@@ -809,6 +810,30 @@ func (s *Scheduler) killWorkerForDiscardedWorktree(workerID, taskID string) {
 			return
 		}
 		s.logf("kill worker %s after discarding worktree for task %s: %v", workerID, taskID, err)
+	}
+}
+
+func (s *Scheduler) killWorkerIDs(workerIDs ...string) {
+	if s == nil || s.pm == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(workerIDs))
+	for _, workerID := range workerIDs {
+		workerID = strings.TrimSpace(workerID)
+		if workerID == "" {
+			continue
+		}
+		if _, ok := seen[workerID]; ok {
+			continue
+		}
+		seen[workerID] = struct{}{}
+		if err := s.pm.KillWorker(workerID); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "not found") {
+				continue
+			}
+			s.logf("kill worker %s: %v", workerID, err)
+		}
 	}
 }
 

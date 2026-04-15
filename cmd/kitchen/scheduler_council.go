@@ -93,6 +93,18 @@ func (s *Scheduler) councilSeatWorkerUsable(worker pool.Worker, task pool.Task) 
 	return s.seatWorkerMatchesRoute(worker, task)
 }
 
+func councilSeatWorkerIDs(seats [2]CouncilSeatRecord) []string {
+	workerIDs := make([]string, 0, len(seats))
+	for _, seat := range seats {
+		workerID := strings.TrimSpace(seat.WorkerID)
+		if workerID == "" {
+			continue
+		}
+		workerIDs = append(workerIDs, workerID)
+	}
+	return workerIDs
+}
+
 func (s *Scheduler) enqueueCouncilTurn(bundle StoredPlan) error {
 	if s == nil || s.pm == nil || s.plans == nil {
 		return nil
@@ -227,6 +239,7 @@ func (s *Scheduler) handleCouncilArtifactFailure(task pool.Task, bundle StoredPl
 
 func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, artifact *adapter.CouncilTurnArtifact, planned PlanRecord) error {
 	previousLineage := strings.TrimSpace(bundle.Plan.Lineage)
+	previousSeats := bundle.Execution.CouncilSeats
 	now := time.Now().UTC()
 	bundle.Plan = planned
 	bundle.Execution.CouncilTurnsCompleted = artifact.Turn
@@ -339,6 +352,7 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_ready", ID: task.PlanID, Message: bundle.Plan.Title})
 		}
+		s.killWorkerIDs(append(councilSeatWorkerIDs(previousSeats), task.WorkerID)...)
 		if canAutoApproveCouncil(bundle.Execution) && s.activatePlan != nil && len(pendingQuestionsForPlan(s.pm, task.PlanID)) == 0 {
 			return s.activatePlan(task.PlanID)
 		}
@@ -347,6 +361,7 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_ready", ID: task.PlanID, Message: bundle.Plan.Title})
 		}
+		s.killWorkerIDs(append(councilSeatWorkerIDs(previousSeats), task.WorkerID)...)
 		if canAutoApproveCouncil(bundle.Execution) && s.activatePlan != nil && len(pendingQuestionsForPlan(s.pm, task.PlanID)) == 0 {
 			return s.activatePlan(task.PlanID)
 		}
@@ -355,6 +370,7 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		if s.notify != nil {
 			s.notify(pool.Notification{Type: "plan_rejected", ID: task.PlanID, Message: bundle.Plan.Title})
 		}
+		s.killWorkerIDs(append(councilSeatWorkerIDs(previousSeats), task.WorkerID)...)
 		return nil
 	default:
 		return nil

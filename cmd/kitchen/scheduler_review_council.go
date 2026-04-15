@@ -108,6 +108,29 @@ func (s *Scheduler) reviewCouncilSeatWorkerUsable(worker pool.Worker, task pool.
 	return s.seatWorkerMatchesRoute(worker, task)
 }
 
+func reviewCouncilSeatWorkerIDs(seats [2]CouncilSeatRecord, exclude ...string) []string {
+	excluded := make(map[string]struct{}, len(exclude))
+	for _, workerID := range exclude {
+		workerID = strings.TrimSpace(workerID)
+		if workerID == "" {
+			continue
+		}
+		excluded[workerID] = struct{}{}
+	}
+	workerIDs := make([]string, 0, len(seats))
+	for _, seat := range seats {
+		workerID := strings.TrimSpace(seat.WorkerID)
+		if workerID == "" {
+			continue
+		}
+		if _, ok := excluded[workerID]; ok {
+			continue
+		}
+		workerIDs = append(workerIDs, workerID)
+	}
+	return workerIDs
+}
+
 func (s *Scheduler) enqueueReviewCouncilTurn(bundle StoredPlan) error {
 	if s == nil || s.pm == nil || s.plans == nil {
 		return nil
@@ -224,6 +247,7 @@ func (s *Scheduler) handleReviewCouncilArtifactFailure(task pool.Task, bundle St
 
 func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPlan, artifact *adapter.ReviewCouncilTurnArtifact) error {
 	normalizeReviewCouncilArtifact(artifact)
+	previousSeats := bundle.Execution.ReviewCouncilSeats
 	now := time.Now().UTC()
 	bundle.Execution.ReviewCouncilTurnsCompleted = artifact.Turn
 	bundle.Execution.ReviewCouncilTurns = append(bundle.Execution.ReviewCouncilTurns, ReviewCouncilTurnRecord{
@@ -418,6 +442,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
 			}
 		}
+		s.killWorkerIDs(reviewCouncilSeatWorkerIDs(previousSeats, task.WorkerID)...)
 		if err := s.cleanupReviewCouncilTask(task, bundle.Plan.Lineage); err != nil {
 			return err
 		}
@@ -430,6 +455,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			s.notify(pool.Notification{Type: "plan_review_council_rejected", ID: task.PlanID, Message: bundle.Plan.Title})
 			s.notify(pool.Notification{Type: "plan_impl_review_failed", ID: task.PlanID, Message: bundle.Plan.Title})
 		}
+		s.killWorkerIDs(reviewCouncilSeatWorkerIDs(previousSeats, task.WorkerID)...)
 		return s.cleanupReviewCouncilTask(task, bundle.Plan.Lineage)
 	default:
 		return nil
