@@ -201,6 +201,10 @@ func runWorkerAgent(cfg *config) {
 		kitchenToken = cfg.BrokerToken
 	}
 	client := newKitchenClient(kitchenAddr, kitchenToken)
+	var bc *brokerClient
+	if cfg.hasBroker() {
+		bc = newBrokerClient(cfg)
+	}
 
 	ad, err := adapter.New(adapterName, cfg.HostWorkspace, func(c *adapter.Config) {
 		if skipPermsFlag := os.Getenv("MITTENS_SKIP_PERMS_FLAG"); skipPermsFlag != "" {
@@ -247,7 +251,7 @@ func runWorkerAgent(cfg *config) {
 	go heartbeatLoop(ctx, cancel, client, workerID, state)
 
 	// 3. Task loop — when it returns, cancel stops the heartbeat.
-	taskLoop(ctx, client, ad, workerID, state)
+	taskLoop(ctx, client, ad, workerID, state, bc, cfg)
 }
 
 func registerWithRetries(client *kitchenClient, workerID, containerName string) error {
@@ -285,7 +289,7 @@ func heartbeatLoop(ctx context.Context, cancel context.CancelFunc, client *kitch
 	}
 }
 
-func taskLoop(ctx context.Context, client *kitchenClient, ad adapter.Adapter, workerID string, state *workerAgentState) {
+func taskLoop(ctx context.Context, client *kitchenClient, ad adapter.Adapter, workerID string, state *workerAgentState, bc *brokerClient, cfg *config) {
 	pollBackoff := workerAgentPollInterval
 	var consecutiveFailStart time.Time
 
@@ -362,7 +366,7 @@ func taskLoop(ctx context.Context, client *kitchenClient, ad adapter.Adapter, wo
 		}
 
 		logInfo("worker: %s executing task %s", workerID, task.ID)
-		stopWorker := executeTask(client, ad, workerID, task, state)
+		stopWorker := executeTask(client, ad, workerID, task, state, bc, cfg)
 		lastTaskRole = task.Role
 		if stopWorker {
 			logWarn("worker: %s stopping after terminal authentication failure", workerID)
@@ -371,7 +375,9 @@ func taskLoop(ctx context.Context, client *kitchenClient, ad adapter.Adapter, wo
 	}
 }
 
-func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, task *pool.Task, state *workerAgentState) bool {
+var attemptAuthRefreshFunc = attemptAuthRefresh
+
+func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, task *pool.Task, state *workerAgentState, bc *brokerClient, cfg *config) bool {
 	state.setCurrentTask(task.ID)
 	defer state.clearCurrentTask()
 	defer state.clearActivity()
@@ -403,18 +409,7 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		councilArtifact       *adapter.CouncilTurnArtifact
 		reviewCouncilArtifact *adapter.ReviewCouncilTurnArtifact
 	)
-	switch {
-	case expectsCouncilTurn:
-		councilArtifact, result, err = adapter.ExecuteForCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
-			logInfo("adapter retry: %s", msg)
-		})
-	case expectsReviewCouncilTurn:
-		reviewCouncilArtifact, result, err = adapter.ExecuteForReviewCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
-			logInfo("adapter retry: %s", msg)
-		})
-	default:
-		result, err = ad.Execute(ctx, prompt, priorContext)
-	}
+	councilArtifact, reviewCouncilArtifact, result, err = runTaskExecution(ctx, ad, expectsCouncilTurn, expectsReviewCouncilTurn, prompt, priorContext)
 	if err != nil {
 		if result.Output != "" {
 			writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
@@ -438,6 +433,44 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 
 		logWarn("worker: %s task %s failed: %s", workerID, task.ID, redactFailureMessage(err.Error()))
 		report := classifyTaskFailure(err)
+		if report.FailureClass == "auth" && !report.StopWorker && bc != nil && cfg != nil {
+			logInfo("worker: %s attempting auth refresh before retry", workerID)
+			if attemptAuthRefreshFunc(bc, cfg) {
+				logInfo("worker: %s auth refreshed, retrying task %s", workerID, task.ID)
+				if cleanErr := ad.ForceClean(); cleanErr != nil {
+					logWarn("worker: auth retry force clean: %v", cleanErr)
+				}
+				councilArtifact, reviewCouncilArtifact, result, err = runTaskExecution(ctx, ad, expectsCouncilTurn, expectsReviewCouncilTurn, prompt, priorContext)
+				if err == nil {
+					writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
+
+					handover := adapter.ExtractHandover(task.ID, result.Output)
+					if handover != nil {
+						if data, marshalErr := json.Marshal(handover); marshalErr == nil {
+							writeTeamFileAtomic(state.teamDir, teamHandoverFile, data)
+						}
+					}
+
+					if expectsCouncilTurn {
+						if data, marshalErr := json.MarshalIndent(councilArtifact, "", "  "); marshalErr == nil {
+							writeTeamFileAtomic(state.teamDir, teamPlanFile, data)
+						}
+					}
+
+					_ = reviewCouncilArtifact
+					reportCompleteWithRetries(client, workerID, task.ID)
+					logInfo("worker: %s completed task %s after auth retry", workerID, task.ID)
+					if clearErr := ad.ClearSession(); clearErr != nil {
+						logWarn("worker: clear session: %v", clearErr)
+					}
+					return false
+				}
+				logWarn("worker: %s retry after auth refresh also failed: %s", workerID, redactFailureMessage(err.Error()))
+				report = classifyTaskFailure(err)
+			} else {
+				logWarn("worker: %s auth refresh failed or timed out", workerID)
+			}
+		}
 		writeTeamFileAtomic(state.teamDir, teamErrorFile, []byte(report.Error))
 		reportFailWithRetries(client, workerID, task.ID, report)
 		if err := ad.ClearSession(); err != nil {
@@ -473,6 +506,24 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		logWarn("worker: clear session: %v", err)
 	}
 	return false
+}
+
+func runTaskExecution(ctx context.Context, ad adapter.Adapter, expectsCouncilTurn, expectsReviewCouncilTurn bool, prompt, priorContext string) (*adapter.CouncilTurnArtifact, *adapter.ReviewCouncilTurnArtifact, adapter.Result, error) {
+	switch {
+	case expectsCouncilTurn:
+		councilArtifact, result, err := adapter.ExecuteForCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
+			logInfo("adapter retry: %s", msg)
+		})
+		return councilArtifact, nil, result, err
+	case expectsReviewCouncilTurn:
+		reviewCouncilArtifact, result, err := adapter.ExecuteForReviewCouncilTurn(ctx, ad, prompt, priorContext, func(msg string) {
+			logInfo("adapter retry: %s", msg)
+		})
+		return nil, reviewCouncilArtifact, result, err
+	default:
+		result, err := ad.Execute(ctx, prompt, priorContext)
+		return nil, nil, result, err
+	}
 }
 
 func adapterHasCouncilTurnPrompt(prompt string) bool {

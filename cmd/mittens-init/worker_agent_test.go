@@ -774,7 +774,7 @@ func TestTaskLoop_RecycleForcesCleanAndContinuesPolling(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	taskLoop(ctx, client, ad, "w-1", state)
+	taskLoop(ctx, client, ad, "w-1", state, nil, nil)
 
 	if ad.forceCleans != 1 {
 		t.Fatalf("forceCleans = %d, want 1", ad.forceCleans)
@@ -854,7 +854,7 @@ func TestExecuteTask_RegularTaskStillReportsComplete(t *testing.T) {
 		Status: pool.TaskDispatched,
 	}
 
-	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, nil, nil)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -877,7 +877,7 @@ func TestExecuteTask_GenericPlannerTaskStillReportsComplete(t *testing.T) {
 	}
 	teamDir := t.TempDir()
 
-	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir})
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir}, nil, nil)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -913,7 +913,7 @@ func TestExecuteTask_PlannerTaskWritesCouncilArtifactAndCompletes(t *testing.T) 
 	}
 	teamDir := t.TempDir()
 
-	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir})
+	executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir}, nil, nil)
 
 	if len(ad.prompts) != 1 {
 		t.Fatalf("execute count = %d, want 1", len(ad.prompts))
@@ -962,7 +962,7 @@ func TestExecuteTask_PlannerTaskMissingArtifactReportsFail(t *testing.T) {
 	}
 	teamDir := t.TempDir()
 
-	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir})
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: teamDir}, nil, nil)
 	if stopWorker {
 		t.Fatal("stopWorker = true, want false")
 	}
@@ -1003,7 +1003,7 @@ func TestExecuteTask_ReviewCouncilTaskMissingArtifactReportsFail(t *testing.T) {
 		Status: pool.TaskDispatched,
 	}
 
-	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, nil, nil)
 	if stopWorker {
 		t.Fatal("stopWorker = true, want false")
 	}
@@ -1034,7 +1034,7 @@ func TestExecuteTask_AuthErrorStopsWorkerAndReportsResetMessage(t *testing.T) {
 		Status: pool.TaskDispatched,
 	}
 
-	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, nil, nil)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1063,7 +1063,7 @@ func TestExecuteTask_CouncilExitCodeAuthOutputReportsStructuredAuthFailure(t *te
 		Status: pool.TaskDispatched,
 	}
 
-	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()})
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, nil, nil)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1084,6 +1084,145 @@ func TestExecuteTask_CouncilExitCodeAuthOutputReportsStructuredAuthFailure(t *te
 	}
 	if got := m.failedDetails[0].AuthMode; got != "soft" {
 		t.Fatalf("auth mode = %q, want soft", got)
+	}
+}
+
+func TestExecuteTask_SoftAuthErrorRetriesOnceAfterRefresh(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		results: []adapter.Result{
+			{},
+			{Output: "done after refresh\n<handover><summary>ok</summary></handover>"},
+		},
+		errs: []error{
+			errors.New(`execute claude (exit 1): Invalid authentication credentials`),
+			nil,
+		},
+	}
+	task := &pool.Task{
+		ID:     "t-auth-soft",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	orig := attemptAuthRefreshFunc
+	attemptAuthRefreshFunc = func(bc *brokerClient, cfg *config) bool { return true }
+	defer func() { attemptAuthRefreshFunc = orig }()
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, &brokerClient{}, &config{})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+	if ad.calls != 2 {
+		t.Fatalf("adapter calls = %d, want 2", ad.calls)
+	}
+	if ad.forceCleans != 1 {
+		t.Fatalf("forceCleans = %d, want 1", ad.forceCleans)
+	}
+	if len(m.completed) != 1 || m.completed[0] != "t-auth-soft" {
+		t.Fatalf("completed = %v, want [t-auth-soft]", m.completed)
+	}
+	if len(m.failed) != 0 {
+		t.Fatalf("failed = %v, want none", m.failed)
+	}
+}
+
+func TestExecuteTask_HardAuthErrorDoesNotRetry(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{err: errors.New("execute codex (exit 1): refresh_token_reused\nPlease log out and sign in again.")}
+	task := &pool.Task{
+		ID:     "t-auth-hard",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	attempted := false
+	orig := attemptAuthRefreshFunc
+	attemptAuthRefreshFunc = func(bc *brokerClient, cfg *config) bool {
+		attempted = true
+		return true
+	}
+	defer func() { attemptAuthRefreshFunc = orig }()
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, &brokerClient{}, &config{})
+
+	if !stopWorker {
+		t.Fatal("stopWorker = false, want true")
+	}
+	if attempted {
+		t.Fatal("attemptAuthRefresh should not run for hard auth failure")
+	}
+}
+
+func TestExecuteTask_NonAuthErrorDoesNotRetry(t *testing.T) {
+	client := newKitchenClient(newMockLeaderServer(t).srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{err: errors.New("disk full")}
+	task := &pool.Task{
+		ID:     "t-regular-fail",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	attempted := false
+	orig := attemptAuthRefreshFunc
+	attemptAuthRefreshFunc = func(bc *brokerClient, cfg *config) bool {
+		attempted = true
+		return true
+	}
+	defer func() { attemptAuthRefreshFunc = orig }()
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, &brokerClient{}, &config{})
+
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+	if attempted {
+		t.Fatal("attemptAuthRefresh should not run for non-auth failure")
+	}
+	if ad.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", ad.calls)
+	}
+}
+
+func TestExecuteTask_RetryFailureReportsRetryError(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{
+		errs: []error{
+			errors.New(`execute claude (exit 1): Invalid authentication credentials`),
+			errors.New("retry still failed in a different way"),
+		},
+	}
+	task := &pool.Task{
+		ID:     "t-auth-retry-fail",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	orig := attemptAuthRefreshFunc
+	attemptAuthRefreshFunc = func(bc *brokerClient, cfg *config) bool { return true }
+	defer func() { attemptAuthRefreshFunc = orig }()
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, &brokerClient{}, &config{})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "retry still failed in a different way") {
+		t.Fatalf("failedErrors = %v, want retry failure", m.failedErrors)
+	}
+	if len(m.failedClasses) != 1 || m.failedClasses[0] != "" {
+		t.Fatalf("failedClasses = %v, want generic failure", m.failedClasses)
+	}
+	if ad.calls != 2 {
+		t.Fatalf("adapter calls = %d, want 2", ad.calls)
 	}
 }
 

@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	credSyncInterval     = 5 * time.Second
-	refreshThresholdMS   = 300000 // trigger proactive refresh when <5 min remain
+	credSyncInterval      = 5 * time.Second
+	refreshThresholdMS    = 300000 // trigger proactive refresh when <5 min remain
 	refreshPendingTimeout = 60 * time.Second // safety timeout for refresh-pending state
+	expiredRefreshCooldown = 60 * time.Second
 )
 
 // shouldAcceptPull decides whether a pull from broker should overwrite local creds.
@@ -63,12 +64,12 @@ func runCredsyncMain() {
 		_ = os.MkdirAll(cfg.LogDir, 0755)
 		logPath = cfg.LogDir + "/credsync.log"
 	}
-	runCredSync(bc, credFile, logPath, credSyncSource(cfg))
+	runCredSync(bc, credFile, logPath, cfg.AIBinary, credSyncSource(cfg))
 }
 
 // runCredSync is the credential sync daemon main loop.
 // Runs as the main function of a forked child process: pushes refreshed tokens up and pulls newer tokens down.
-func runCredSync(bc *brokerClient, credFile, logPath, source string) {
+func runCredSync(bc *brokerClient, credFile, logPath, binary, source string) {
 	log := newCredLogger(bc, logPath, source)
 
 	log.write("started (broker: %s)", bc.baseURL)
@@ -98,6 +99,7 @@ func runCredSync(bc *brokerClient, credFile, logPath, source string) {
 	var refreshPending bool
 	var refreshOrigExp int64
 	var refreshTriggeredAt time.Time
+	var lastExpiredRefreshAttempt time.Time
 
 	for range ticker.C {
 		// --- Push: detect local file changes ---
@@ -161,12 +163,39 @@ func runCredSync(bc *brokerClient, credFile, logPath, source string) {
 				if action == "refresh" {
 					log.event("refresh-trigger", "expires in %dms", remaining)
 					refreshOrigExp = curExp
-					triggerTokenRefresh(credFile, log)
-					lastHash = computeFileHash(credFile)
-					refreshPending = true
-					refreshTriggeredAt = time.Now()
+					if triggerRefreshProbe(binary, credFile, log, log.write) {
+						lastHash = computeFileHash(credFile)
+						if err := pushFreshCreds(bc, credFile); err != nil {
+							log.event("refresh-push-fail", "failed to push refreshed credentials: %v", err)
+						} else {
+							log.event("refresh-probe-ok", "CLI refreshed credentials via probe")
+							refreshPending = true
+							refreshTriggeredAt = time.Now()
+						}
+					} else {
+						log.event("refresh-probe-fail", "CLI probe did not produce fresh credentials")
+					}
 				} else {
 					log.event("refresh-wait", "another container is handling proactive refresh")
+				}
+			} else if remaining <= 0 && time.Since(lastExpiredRefreshAttempt) > expiredRefreshCooldown {
+				lastExpiredRefreshAttempt = time.Now()
+				action := brokerRefreshRequest(bc)
+				if action == "refresh" {
+					log.event("expired-refresh-trigger", "token expired %dms ago", -remaining)
+					if triggerRefreshProbe(binary, credFile, log, log.write) {
+						lastHash = computeFileHash(credFile)
+						if err := pushFreshCreds(bc, credFile); err != nil {
+							log.event("expired-refresh-push-fail", "failed to push refreshed credentials: %v", err)
+						} else {
+							log.event("expired-refresh-ok", "recovered expired credentials via probe")
+						}
+					} else {
+						log.event("expired-refresh-fail", "CLI probe did not recover expired credentials")
+						lastExpiredRefreshAttempt = time.Time{}
+					}
+				} else {
+					log.event("expired-refresh-wait", "another container is handling expired credential refresh")
 				}
 			}
 		}
@@ -213,7 +242,7 @@ func brokerRefreshRequest(bc *brokerClient) string {
 }
 
 // triggerTokenRefresh triggers proactive token refresh by faking an early expiry.
-func triggerTokenRefresh(credFile string, log *credLogger) {
+func triggerTokenRefresh(credFile string, log credEventLogger) {
 	data, err := os.ReadFile(credFile)
 	if err != nil {
 		return
