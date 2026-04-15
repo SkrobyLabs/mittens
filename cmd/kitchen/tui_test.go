@@ -28,8 +28,10 @@ func forceColors(t *testing.T) {
 }
 
 type fakeKitchenTUIBackend struct {
-	deletedPlanID             string
-	deleteCalls               int
+	deletedPlanID                 string
+	deleteCalls                   int
+	deletedPlanAndLineageID       string
+	deletePlanAndLineageCalls     int
 	plans                     []PlanRecord
 	questions                 []pool.Question
 	submitPlanID              string
@@ -155,6 +157,11 @@ func (b *fakeKitchenTUIBackend) CancelPlan(planID string) error {
 func (b *fakeKitchenTUIBackend) DeletePlan(planID string) error {
 	b.deleteCalls++
 	b.deletedPlanID = planID
+	return nil
+}
+func (b *fakeKitchenTUIBackend) DeletePlanAndLineageBranch(planID string) error {
+	b.deletePlanAndLineageCalls++
+	b.deletedPlanAndLineageID = planID
 	return nil
 }
 func (b *fakeKitchenTUIBackend) CancelTask(taskID string) error {
@@ -3716,5 +3723,217 @@ func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
 		if strings.Contains(ansi.Strip(line), "Active Plan") && strings.Contains(line, "48;5;") {
 			t.Fatalf("active (plain) plan row should have no background color; line = %q", line)
 		}
+	}
+}
+
+// TestKitchenTUIDeleteKeyNoLineageDeletesImmediately verifies that D on a plan
+// with no lineage still deletes immediately without opening a confirmation menu.
+func TestKitchenTUIDeleteKeyNoLineageDeletesImmediately(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:  backend,
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_delete", Title: "Delete me"}},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	got := updatedModel.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q after D on no-lineage plan, want none (should delete immediately)", got.inputMode)
+	}
+	if cmd == nil {
+		t.Fatal("expected delete command for no-lineage plan")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "deleted plan_delete" {
+		t.Fatalf("action status = %q", action.status)
+	}
+	if backend.deleteCalls != 1 || backend.deletedPlanID != "plan_delete" {
+		t.Fatalf("backend delete = calls=%d id=%q", backend.deleteCalls, backend.deletedPlanID)
+	}
+}
+
+// TestKitchenTUIDeleteKeyLineageOpensConfirmMenu verifies that D on a plan
+// with a non-empty lineage opens the delete confirmation menu instead of
+// deleting immediately.
+func TestKitchenTUIDeleteKeyLineageOpensConfirmMenu(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:  backend,
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Title: "With lineage", Lineage: "my-feature"}},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	got := updatedModel.(kitchenTUIModel)
+
+	if got.inputMode != kitchenTUIInputDeleteConfirm {
+		t.Fatalf("inputMode = %q, want delete-confirm", got.inputMode)
+	}
+	if cmd != nil {
+		t.Fatal("D on lineage plan should not queue a command (opens menu, no immediate delete)")
+	}
+	if backend.deleteCalls != 0 {
+		t.Fatal("DeletePlan should not be called when menu is opened")
+	}
+	if backend.deletePlanAndLineageCalls != 0 {
+		t.Fatal("DeletePlanAndLineageBranch should not be called when menu is opened")
+	}
+}
+
+// TestKitchenTUIDeleteConfirmEscCancels verifies that pressing Esc while the
+// delete confirmation menu is active returns to normal navigation without
+// deleting anything.
+func TestKitchenTUIDeleteConfirmEscCancels(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:   backend,
+		leftMode:  kitchenTUILeftPlans,
+		inputMode: kitchenTUIInputDeleteConfirm,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Title: "With lineage", Lineage: "my-feature"}},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := updatedModel.(kitchenTUIModel)
+
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q after esc, want none", got.inputMode)
+	}
+	if cmd != nil {
+		t.Fatal("esc should not queue any command")
+	}
+	if backend.deleteCalls != 0 || backend.deletePlanAndLineageCalls != 0 {
+		t.Fatal("no delete should occur on esc")
+	}
+}
+
+// TestKitchenTUIDeleteConfirmPlanOnlyTriggerDeletePlan verifies that selecting
+// option 0 (Delete plan only) triggers the normal DeletePlan path.
+func TestKitchenTUIDeleteConfirmPlanOnlyTriggerDeletePlan(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:               backend,
+		leftMode:              kitchenTUILeftPlans,
+		inputMode:             kitchenTUIInputDeleteConfirm,
+		deleteConfirmSelected: 0,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Title: "With lineage", Lineage: "my-feature"}},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updatedModel.(kitchenTUIModel)
+
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q after enter, want none", got.inputMode)
+	}
+	if cmd == nil {
+		t.Fatal("expected delete command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "deleted plan_lin" {
+		t.Fatalf("action status = %q", action.status)
+	}
+	if backend.deleteCalls != 1 || backend.deletedPlanID != "plan_lin" {
+		t.Fatalf("DeletePlan: calls=%d id=%q", backend.deleteCalls, backend.deletedPlanID)
+	}
+	if backend.deletePlanAndLineageCalls != 0 {
+		t.Fatal("DeletePlanAndLineageBranch should not be called for plan-only delete")
+	}
+}
+
+// TestKitchenTUIDeleteConfirmPlanAndBranchTriggersCombinedPath verifies that
+// selecting option 1 (Delete plan and lineage branch) triggers the combined
+// DeletePlanAndLineageBranch path.
+func TestKitchenTUIDeleteConfirmPlanAndBranchTriggersCombinedPath(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:               backend,
+		leftMode:              kitchenTUILeftPlans,
+		inputMode:             kitchenTUIInputDeleteConfirm,
+		deleteConfirmSelected: 1,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Title: "With lineage", Lineage: "my-feature"}},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updatedModel.(kitchenTUIModel)
+
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q after enter, want none", got.inputMode)
+	}
+	if cmd == nil {
+		t.Fatal("expected delete+branch command")
+	}
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "deleted plan_lin and lineage branch" {
+		t.Fatalf("action status = %q", action.status)
+	}
+	if backend.deletePlanAndLineageCalls != 1 || backend.deletedPlanAndLineageID != "plan_lin" {
+		t.Fatalf("DeletePlanAndLineageBranch: calls=%d id=%q", backend.deletePlanAndLineageCalls, backend.deletedPlanAndLineageID)
+	}
+	if backend.deleteCalls != 0 {
+		t.Fatal("DeletePlan should not be called when DeletePlanAndLineageBranch is used")
+	}
+}
+
+// TestKitchenTUIDeleteConfirmInputBarSuppressed verifies that the input bar is
+// not rendered while the delete confirmation menu is active.
+func TestKitchenTUIDeleteConfirmInputBarSuppressed(t *testing.T) {
+	model := kitchenTUIModel{
+		inputMode: kitchenTUIInputDeleteConfirm,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Lineage: "my-feature"}},
+		},
+	}
+
+	bar := model.renderInputBar()
+	if bar != "" {
+		t.Fatalf("renderInputBar() = %q, want empty while delete confirm menu is active", bar)
+	}
+}
+
+// TestKitchenTUIDeleteConfirmFooterHints verifies that the footer shows the
+// correct navigation hints while the delete confirmation menu is active.
+func TestKitchenTUIDeleteConfirmFooterHints(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:  kitchenTUILeftPlans,
+		inputMode: kitchenTUIInputDeleteConfirm,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_lin", Lineage: "my-feature"}},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "↑/↓ navigate") || !strings.Contains(footer, "enter select") || !strings.Contains(footer, "esc cancel") {
+		t.Fatalf("delete confirm footer missing expected hints: %q", footer)
 	}
 }

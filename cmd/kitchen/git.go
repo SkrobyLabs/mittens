@@ -600,6 +600,25 @@ func (g *GitManager) discardChildLocked(lineage, taskID string) error {
 	return nil
 }
 
+func (g *GitManager) DeleteLineageBranch(lineage string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return err
+	}
+	branch := lineageBranchName(lineage)
+	exists, err := g.branchExists(branch)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	_, err = runGit(g.repoPath, "branch", "-D", branch)
+	return err
+}
+
 func (g *GitManager) branchExists(branch string) (bool, error) {
 	_, err := runGit(g.repoPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	if err == nil {

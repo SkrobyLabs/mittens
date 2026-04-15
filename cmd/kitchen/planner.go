@@ -923,6 +923,28 @@ func (k *Kitchen) DeletePlan(planID string) error {
 	return nil
 }
 
+func (k *Kitchen) DeletePlanAndLineageBranch(planID string) error {
+	if k == nil || k.planStore == nil {
+		return fmt.Errorf("kitchen plan store not configured")
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if err := k.DeletePlan(planID); err != nil {
+		return err
+	}
+	if lineage == "" {
+		return nil
+	}
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		return err
+	}
+	return gitMgr.DeleteLineageBranch(lineage)
+}
+
 func planTaskIDsForDeletion(bundle StoredPlan, tasks []pool.Task) []string {
 	ids := make(map[string]struct{}, len(bundle.Execution.ActiveTaskIDs)+len(bundle.Execution.CompletedTaskIDs)+len(bundle.Execution.FailedTaskIDs))
 	for _, taskID := range bundle.Execution.ActiveTaskIDs {

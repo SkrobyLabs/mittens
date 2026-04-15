@@ -279,6 +279,11 @@ func (c *kitchenAPIClient) DeletePlan(planID string) (map[string]any, error) {
 	return resp, c.request(http.MethodDelete, "/v1/plans/"+url.PathEscape(planID)+"/purge", nil, &resp)
 }
 
+func (c *kitchenAPIClient) DeletePlanAndLineageBranch(planID string) (map[string]any, error) {
+	var resp map[string]any
+	return resp, c.request(http.MethodDelete, "/v1/plans/"+url.PathEscape(planID)+"/purge-with-lineage", nil, &resp)
+}
+
 func (c *kitchenAPIClient) CancelTask(taskID string) (map[string]any, error) {
 	var resp map[string]any
 	return resp, c.request(http.MethodDelete, "/v1/tasks/"+url.PathEscape(taskID), nil, &resp)

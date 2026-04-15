@@ -36,6 +36,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("DELETE /v1/tasks/{id}", k.withAPIAuth(token, k.handleCancelTask))
 	mux.HandleFunc("DELETE /v1/plans/{id}", k.withAPIAuth(token, k.handleCancelPlan))
 	mux.HandleFunc("DELETE /v1/plans/{id}/purge", k.withAPIAuth(token, k.handleDeletePlan))
+	mux.HandleFunc("DELETE /v1/plans/{id}/purge-with-lineage", k.withAPIAuth(token, k.handleDeletePlanAndLineageBranch))
 	mux.HandleFunc("POST /v1/plans/{id}/replan", k.withAPIAuth(token, k.handleReplanPlan))
 	mux.HandleFunc("POST /v1/plans/{id}/review", k.withAPIAuth(token, k.handleRequestReview))
 	mux.HandleFunc("POST /v1/plans/{id}/remediate-review", k.withAPIAuth(token, k.handleRemediateReview))
@@ -406,6 +407,14 @@ func (k *Kitchen) handleCancelPlan(w http.ResponseWriter, r *http.Request) {
 
 func (k *Kitchen) handleDeletePlan(w http.ResponseWriter, r *http.Request) {
 	if err := k.DeletePlan(r.PathValue("id")); err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (k *Kitchen) handleDeletePlanAndLineageBranch(w http.ResponseWriter, r *http.Request) {
+	if err := k.DeletePlanAndLineageBranch(r.PathValue("id")); err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}

@@ -40,6 +40,7 @@ type kitchenTUIBackend interface {
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
 	DeletePlan(planID string) error
+	DeletePlanAndLineageBranch(planID string) error
 	CancelTask(taskID string) error
 	RetryTask(taskID string, requireFreshWorker bool) error
 	FixConflicts(taskID string) (string, error)
@@ -148,6 +149,10 @@ func (b *kitchenAPIBackend) CancelPlan(planID string) error {
 }
 func (b *kitchenAPIBackend) DeletePlan(planID string) error {
 	_, err := b.client.DeletePlan(planID)
+	return err
+}
+func (b *kitchenAPIBackend) DeletePlanAndLineageBranch(planID string) error {
+	_, err := b.client.DeletePlanAndLineageBranch(planID)
 	return err
 }
 func (b *kitchenAPIBackend) CancelTask(taskID string) error {
@@ -373,6 +378,11 @@ func (b *kitchenLocalBackend) DeletePlan(planID string) error {
 		return k.DeletePlan(planID)
 	})
 }
+func (b *kitchenLocalBackend) DeletePlanAndLineageBranch(planID string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.DeletePlanAndLineageBranch(planID)
+	})
+}
 
 func (b *kitchenLocalBackend) CancelTask(taskID string) error {
 	return b.withKitchen(func(k *Kitchen) error {
@@ -527,8 +537,9 @@ const (
 	kitchenTUIInputRefine    kitchenTUIInputMode = "refine"
 	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
 	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
-	kitchenTUIInputMergeMenu kitchenTUIInputMode = "merge-menu"
-	kitchenTUIInputRemediate kitchenTUIInputMode = "remediate-review"
+	kitchenTUIInputMergeMenu     kitchenTUIInputMode = "merge-menu"
+	kitchenTUIInputRemediate     kitchenTUIInputMode = "remediate-review"
+	kitchenTUIInputDeleteConfirm kitchenTUIInputMode = "delete-confirm"
 
 	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
 	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
@@ -575,8 +586,9 @@ type kitchenTUIModel struct {
 	selectedTask      int
 	selectedQuestion  int
 	selectedOption    int
-	mergeMenuSelected int
-	remediateSelected int
+	mergeMenuSelected    int
+	remediateSelected    int
+	deleteConfirmSelected int
 	leftMode          kitchenTUILeftMode
 	taskPaneMode      kitchenTUITaskPaneMode
 	detail            *PlanDetail
@@ -750,6 +762,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.inputMode == kitchenTUIInputRemediate {
 			return m.updateRemediateMenuInput(msg)
+		}
+		if m.inputMode == kitchenTUIInputDeleteConfirm {
+			return m.updateDeleteConfirmInput(msg)
 		}
 		if m.inputMode != kitchenTUIInputNone {
 			return m.updateInput(msg)
@@ -981,6 +996,11 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if plan := m.selectedPlanItem(); plan != nil {
+				if strings.TrimSpace(plan.Record.Lineage) != "" {
+					m.inputMode = kitchenTUIInputDeleteConfirm
+					m.deleteConfirmSelected = 0
+					return m, nil
+				}
 				nextPlanID := m.nextPlanSelectionAfterDeletion()
 				return m, m.actionCmd(func() (string, string, error) {
 					err := m.backend.DeletePlan(plan.Record.PlanID)
@@ -1203,6 +1223,51 @@ func (m kitchenTUIModel) updateRemediateMenuInput(msg tea.KeyMsg) (tea.Model, te
 			err := m.backend.RemediateReview(plan.Record.PlanID, includeNits)
 			return "queued remediation for " + scope, plan.Record.PlanID, err
 		})
+	}
+	return m, nil
+}
+
+var kitchenTUIDeleteConfirmOptions = []string{
+	"Delete plan only",
+	"Delete plan and lineage branch",
+}
+
+func (m kitchenTUIModel) updateDeleteConfirmInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode = kitchenTUIInputNone
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.deleteConfirmSelected > 0 {
+			m.deleteConfirmSelected--
+		}
+		return m, nil
+	case "down", "j":
+		if m.deleteConfirmSelected < len(kitchenTUIDeleteConfirmOptions)-1 {
+			m.deleteConfirmSelected++
+		}
+		return m, nil
+	case "enter":
+		plan := m.selectedPlanItem()
+		m.inputMode = kitchenTUIInputNone
+		if plan == nil {
+			return m, nil
+		}
+		nextPlanID := m.nextPlanSelectionAfterDeletion()
+		switch m.deleteConfirmSelected {
+		case 0:
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.DeletePlan(plan.Record.PlanID)
+				return "deleted " + plan.Record.PlanID, nextPlanID, err
+			})
+		case 1:
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.DeletePlanAndLineageBranch(plan.Record.PlanID)
+				return "deleted " + plan.Record.PlanID + " and lineage branch", nextPlanID, err
+			})
+		}
 	}
 	return m, nil
 }
@@ -2001,6 +2066,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputRemediate:
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputDeleteConfirm:
+			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		default:
 			return []string{"esc cancel", "ctrl+c quit"}
 		}
@@ -2357,6 +2424,10 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 		lines = append(lines, m.renderRemediationMenuLines(innerWidth)...)
 		lines = append(lines, "")
 		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+	} else if m.inputMode == kitchenTUIInputDeleteConfirm {
+		lines = append(lines, m.renderDeleteConfirmLines(innerWidth)...)
+		lines = append(lines, "")
+		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 	} else {
 		lines = m.renderPlanDetailLines(innerWidth)
 	}
@@ -2399,6 +2470,22 @@ func (m kitchenTUIModel) renderRemediationMenuLines(innerWidth int) []string {
 	}
 	for i, option := range kitchenTUIRemediationOptions {
 		if i == m.remediateSelected {
+			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
+			continue
+		}
+		lines = append(lines, truncate("  "+option, innerWidth))
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderDeleteConfirmLines(innerWidth int) []string {
+	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Delete Plan"),
+		"Choose what to delete.",
+	}
+	for i, option := range kitchenTUIDeleteConfirmOptions {
+		if i == m.deleteConfirmSelected {
 			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
 			continue
 		}
@@ -2538,6 +2625,12 @@ func (m kitchenTUIModel) measureCurrentRightPane() ([]string, int, int) {
 		}
 		if m.inputMode == kitchenTUIInputMergeMenu {
 			lines := append([]string(nil), m.renderMergeMenuLines(innerWidth)...)
+			lines = append(lines, "")
+			lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+			return lines, innerWidth, height
+		}
+		if m.inputMode == kitchenTUIInputDeleteConfirm {
+			lines := append([]string(nil), m.renderDeleteConfirmLines(innerWidth)...)
 			lines = append(lines, "")
 			lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 			return lines, innerWidth, height
@@ -3040,7 +3133,7 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 
 func (m kitchenTUIModel) renderInputBar() string {
 	// Multiple-choice answer mode doesn't use the input bar
-	if m.inputMode == kitchenTUIInputMergeMenu || m.inputMode == kitchenTUIInputRemediate || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
+	if m.inputMode == kitchenTUIInputMergeMenu || m.inputMode == kitchenTUIInputRemediate || m.inputMode == kitchenTUIInputDeleteConfirm || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
 		return ""
 	}
 	label := "Input"
