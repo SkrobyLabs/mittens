@@ -1148,7 +1148,7 @@ func (k *Kitchen) CancelTask(taskID string) error {
 	if err != nil {
 		return err
 	}
-	active, completed, failed := summarizePlanTasks(k.pm.Tasks(), planID)
+	active, completed, failed := summarizeRelevantPlanTasks(k.pm.Tasks(), bundle)
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
@@ -1184,7 +1184,7 @@ func (k *Kitchen) RetryTask(taskID string, requireFreshWorker bool) error {
 	if err != nil {
 		return err
 	}
-	active, completed, failed := summarizePlanTasks(k.pm.Tasks(), planID)
+	active, completed, failed := summarizeRelevantPlanTasks(k.pm.Tasks(), bundle)
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
@@ -1405,7 +1405,7 @@ func (k *Kitchen) enqueueLineageFixMergeTask(activePlanID string, bundle StoredP
 	if err != nil {
 		return "", err
 	}
-	active, completed, failed := summarizePlanTasks(k.pm.Tasks(), activePlanID)
+	active, completed, failed := summarizeRelevantPlanTasks(k.pm.Tasks(), bundle)
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed

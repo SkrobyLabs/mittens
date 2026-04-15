@@ -510,8 +510,11 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	if err := s.git.MergeChild(bundle.Plan.Lineage, taskID); err != nil {
 		return s.onTaskMergeFailed(*task, bundle.Plan.Lineage, err)
 	}
-	if err := s.git.DiscardChild(bundle.Plan.Lineage, taskID); err != nil {
+	if err := s.syncPlanExecution(task.PlanID); err != nil {
 		return err
+	}
+	if err := s.git.DiscardChild(bundle.Plan.Lineage, taskID); err != nil {
+		s.logf("discard child worktree %s/%s after completion: %v", bundle.Plan.Lineage, taskID, err)
 	}
 	// Kitchen workers are single-use: the container's bind mount is
 	// pinned to this task's child worktree with this task's child
@@ -520,7 +523,7 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	// a fresh worktree forked from the updated lineage head instead
 	// of inheriting a stale cwd and the previous child branch.
 	s.killWorkerForDiscardedWorktree(task.WorkerID, taskID)
-	return s.syncPlanExecution(task.PlanID)
+	return nil
 }
 
 func (s *Scheduler) onResearchTaskCompleted(task pool.Task) error {
@@ -1131,12 +1134,11 @@ func (s *Scheduler) dispatchReadyTaskToWorker(workerID string) error {
 	return nil
 }
 
-// reconcilePlanExecutionOnStartup walks each plan referenced by tasks
-// currently in the pool and re-syncs its execution record. Covers
-// the recovery case where a completion handler partially applied
-// state (e.g. advanced the lineage ref) but crashed before
-// syncPlanExecution ran, leaving the plan's activeTaskIDs pointing
-// at an already-completed task.
+// reconcilePlanExecutionOnStartup re-syncs plan execution records that
+// show evidence of partially-applied task progress. This covers the
+// recovery case where completion handling advanced git state but crashed
+// before syncPlanExecution ran, leaving the plan marked active without
+// the follow-up review or completion transition persisted.
 func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 	if s == nil || s.pm == nil || s.plans == nil {
 		return nil
@@ -1154,6 +1156,37 @@ func (s *Scheduler) reconcilePlanExecutionOnStartup() error {
 		}
 		switch bundle.Execution.State {
 		case planStateReviewing, planStateImplementationReview, planStateWaitingOnDependency:
+			continue
+		}
+		if err := s.syncPlanExecution(planID); err != nil {
+			s.logf("startup sync %s: %v", planID, err)
+		}
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return err
+	}
+	for _, plan := range plans {
+		planID := strings.TrimSpace(plan.PlanID)
+		if planID == "" || seen[planID] {
+			continue
+		}
+		bundle, err := s.plans.Get(planID)
+		if err != nil {
+			continue
+		}
+		switch bundle.Execution.State {
+		case planStateReviewing, planStateImplementationReview, planStateWaitingOnDependency:
+			continue
+		}
+		if bundle.Execution.State != planStateActive {
+			continue
+		}
+		if len(bundle.Execution.ActiveTaskIDs) == 0 &&
+			len(bundle.Execution.CompletedTaskIDs) == 0 &&
+			len(bundle.Execution.FailedTaskIDs) == 0 &&
+			!bundle.Execution.ImplReviewRequested &&
+			!bundle.Execution.AutoRemediationActive {
 			continue
 		}
 		if err := s.syncPlanExecution(planID); err != nil {
@@ -1294,7 +1327,7 @@ func (s *Scheduler) recoverOrphanedPlansOnStartup() error {
 			s.logf("startup: load active plan %s: %v", plan.PlanID, err)
 			continue
 		}
-		active, completed, failed := summarizePlanTasks(tasks, plan.PlanID)
+		active, completed, failed := summarizeRelevantPlanTasks(tasks, bundle)
 		if len(active) != 0 || len(completed) != 0 || len(failed) != 0 {
 			continue
 		}
@@ -1797,7 +1830,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	}
 	wasCompleted := bundle.Execution.State == planStateCompleted
 
-	active, completed, failed := summarizePlanTasks(s.pm.Tasks(), planID)
+	active, completed, failed := summarizeRelevantPlanTasks(s.pm.Tasks(), bundle)
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
@@ -1996,9 +2029,13 @@ func implementationReviewComplexityForPlan(plan PlanRecord) Complexity {
 	return maxLevel
 }
 
-func summarizePlanTasks(tasks []pool.Task, planID string) (active []string, completed []string, failed []string) {
+func summarizeRelevantPlanTasks(tasks []pool.Task, bundle StoredPlan) (active []string, completed []string, failed []string) {
+	planID := bundle.Plan.PlanID
 	for _, task := range tasks {
 		if task.PlanID != planID {
+			continue
+		}
+		if !taskCountsTowardExecution(task, bundle) {
 			continue
 		}
 		switch task.Status {
@@ -2016,4 +2053,20 @@ func summarizePlanTasks(tasks []pool.Task, planID string) (active []string, comp
 	sort.Strings(completed)
 	sort.Strings(failed)
 	return active, completed, failed
+}
+
+func taskCountsTowardExecution(task pool.Task, bundle StoredPlan) bool {
+	state := bundle.Execution.State
+	if task.Role == plannerTaskRole {
+		switch state {
+		case planStatePlanning, planStateReviewing, planStatePendingApproval:
+			return true
+		default:
+			return false
+		}
+	}
+	if isReviewCouncilTask(task) {
+		return state == planStateImplementationReview
+	}
+	return true
 }

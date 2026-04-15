@@ -587,7 +587,7 @@ func (s *Scheduler) ensureAutoRemediationTask(bundle *StoredPlan, recovered bool
 	if err != nil {
 		return err
 	}
-	active, completed, failed := summarizePlanTasks(s.pm.Tasks(), bundle.Plan.PlanID)
+	active, completed, failed := summarizeRelevantPlanTasks(s.pm.Tasks(), latest)
 	latest.Plan.State = planStateActive
 	latest.Execution.State = planStateActive
 	latest.Execution.ActiveTaskIDs = active
