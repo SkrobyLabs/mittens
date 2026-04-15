@@ -36,6 +36,7 @@ type kitchenTUIBackend interface {
 	RefineResearch(planID, clarification string) error
 	ExtendCouncil(planID string, turns int) error
 	RequestReview(planID string) error
+	SteerImplementation(planID, note string) error
 	RemediateReview(planID string, includeNits bool) error
 	ApprovePlan(planID string) error
 	CancelPlan(planID string) error
@@ -133,6 +134,10 @@ func (b *kitchenAPIBackend) ExtendCouncil(planID string, turns int) error {
 }
 func (b *kitchenAPIBackend) RequestReview(planID string) error {
 	_, err := b.client.RequestReview(planID)
+	return err
+}
+func (b *kitchenAPIBackend) SteerImplementation(planID, note string) error {
+	_, err := b.client.SteerImplementation(planID, note)
 	return err
 }
 func (b *kitchenAPIBackend) RemediateReview(planID string, includeNits bool) error {
@@ -355,6 +360,11 @@ func (b *kitchenLocalBackend) RequestReview(planID string) error {
 		return k.RequestReview(planID)
 	})
 }
+func (b *kitchenLocalBackend) SteerImplementation(planID, note string) error {
+	return b.withKitchen(func(k *Kitchen) error {
+		return k.SteerImplementation(planID, note)
+	})
+}
 func (b *kitchenLocalBackend) RemediateReview(planID string, includeNits bool) error {
 	return b.withKitchen(func(k *Kitchen) error {
 		return k.RemediateReview(planID, includeNits)
@@ -531,15 +541,16 @@ type kitchenTUILeftMode string
 type kitchenTUITaskPaneMode string
 
 const (
-	kitchenTUIInputNone      kitchenTUIInputMode = ""
-	kitchenTUIInputSubmit    kitchenTUIInputMode = "submit"
-	kitchenTUIInputPromote   kitchenTUIInputMode = "promote"
-	kitchenTUIInputRefine    kitchenTUIInputMode = "refine"
-	kitchenTUIInputReplan    kitchenTUIInputMode = "replan"
-	kitchenTUIInputAnswer    kitchenTUIInputMode = "answer"
-	kitchenTUIInputMergeMenu     kitchenTUIInputMode = "merge-menu"
-	kitchenTUIInputRemediate     kitchenTUIInputMode = "remediate-review"
-	kitchenTUIInputDeleteConfirm kitchenTUIInputMode = "delete-confirm"
+	kitchenTUIInputNone                kitchenTUIInputMode = ""
+	kitchenTUIInputSubmit              kitchenTUIInputMode = "submit"
+	kitchenTUIInputPromote             kitchenTUIInputMode = "promote"
+	kitchenTUIInputRefine              kitchenTUIInputMode = "refine"
+	kitchenTUIInputSteerImplementation kitchenTUIInputMode = "steer-implementation"
+	kitchenTUIInputReplan              kitchenTUIInputMode = "replan"
+	kitchenTUIInputAnswer              kitchenTUIInputMode = "answer"
+	kitchenTUIInputMergeMenu           kitchenTUIInputMode = "merge-menu"
+	kitchenTUIInputRemediate           kitchenTUIInputMode = "remediate-review"
+	kitchenTUIInputDeleteConfirm       kitchenTUIInputMode = "delete-confirm"
 
 	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
 	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
@@ -574,45 +585,46 @@ func taskHasConflictInfo(t kitchenTUITaskItem) bool {
 }
 
 type kitchenTUIModel struct {
-	backend           kitchenTUIBackend
-	repoPath          string
-	width             int
-	height            int
-	status            tuiStatusSnapshot
-	plans             []kitchenTUIPlanItem
-	tasks             []kitchenTUITaskItem
-	questions         []pool.Question
-	selectedPlan      int
-	selectedTask      int
-	selectedQuestion  int
-	selectedOption    int
-	mergeMenuSelected    int
-	remediateSelected    int
-	deleteConfirmSelected int
-	leftMode          kitchenTUILeftMode
-	taskPaneMode      kitchenTUITaskPaneMode
-	detail            *PlanDetail
-	taskLog           []pool.WorkerActivityRecord
-	taskOutput        string
-	taskOutputLoading bool
-	rightPaneOffsets  map[string]int
-	input             textinput.Model
-	inputMode         kitchenTUIInputMode
-	submitImplReview           bool
-	submitResearch             bool
-	submitDependsOn            []string
-	submitSelecting            bool
-	submitPrevLeft             kitchenTUILeftMode
-	submitProviderOverrideMode bool
-	submitProviderOverrides    PlanProviderOverrides
+	backend                     kitchenTUIBackend
+	repoPath                    string
+	width                       int
+	height                      int
+	status                      tuiStatusSnapshot
+	plans                       []kitchenTUIPlanItem
+	tasks                       []kitchenTUITaskItem
+	questions                   []pool.Question
+	selectedPlan                int
+	selectedTask                int
+	selectedQuestion            int
+	selectedOption              int
+	mergeMenuSelected           int
+	remediateSelected           int
+	deleteConfirmSelected       int
+	leftMode                    kitchenTUILeftMode
+	taskPaneMode                kitchenTUITaskPaneMode
+	detail                      *PlanDetail
+	taskLog                     []pool.WorkerActivityRecord
+	taskOutput                  string
+	taskOutputLoading           bool
+	rightPaneOffsets            map[string]int
+	input                       textinput.Model
+	inputMode                   kitchenTUIInputMode
+	submitImplReview            bool
+	submitResearch              bool
+	submitDependsOn             []string
+	submitSelecting             bool
+	submitPrevLeft              kitchenTUILeftMode
+	submitProviderOverrideMode  bool
+	submitProviderOverrides     PlanProviderOverrides
 	submitProviderOverrideFocus int // 0=planner,1=council_a,2=council_b,3=implementer
-	promotePlanID     string
-	refinePlanID      string
-	flash             string
-	flashUntil        time.Time
-	errText           string
-	loading           bool
-	pendingSelectedID string
+	promotePlanID               string
+	refinePlanID                string
+	steerImplementationPlanID   string
+	flash                       string
+	flashUntil                  time.Time
+	errText                     string
+	loading                     bool
+	pendingSelectedID           string
 }
 
 func runKitchenTUI(repoPath string) error {
@@ -831,19 +843,19 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-				if m.leftMode == kitchenTUILeftQuestions {
-					planID := ""
-					if plan := m.selectedPlanItem(); plan != nil {
-						planID = strings.TrimSpace(plan.Record.PlanID)
-					}
-					count := 0
-					if planID != "" {
-						for _, q := range m.questions {
-							if questionBelongsToPlan(planID, q) {
-								count++
-							}
+			if m.leftMode == kitchenTUILeftQuestions {
+				planID := ""
+				if plan := m.selectedPlanItem(); plan != nil {
+					planID = strings.TrimSpace(plan.Record.PlanID)
+				}
+				count := 0
+				if planID != "" {
+					for _, q := range m.questions {
+						if questionBelongsToPlan(planID, q) {
+							count++
 						}
 					}
+				}
 				if m.selectedQuestion < count-1 {
 					m.selectedQuestion++
 					(&m).resetCurrentRightPaneOffset()
@@ -1039,6 +1051,19 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					err := m.backend.RequestReview(plan.Record.PlanID)
 					return "review requested " + plan.Record.PlanID, plan.Record.PlanID, err
 				})
+			}
+			return m, nil
+		case "s":
+			if m.leftMode != kitchenTUILeftPlans {
+				return m, nil
+			}
+			if plan := m.selectedPlanItem(); plan != nil {
+				if !m.canSteerImplementationSelectedPlan() {
+					m.flash = "selected plan cannot be steered"
+					m.flashUntil = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+				m.openSteerImplementationInput(plan.Record.PlanID)
 			}
 			return m, nil
 		case "M":
@@ -1447,6 +1472,30 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return "refinement submitted " + planID, planID, nil
 			})
+		case kitchenTUIInputSteerImplementation:
+			planID := strings.TrimSpace(m.steerImplementationPlanID)
+			if planID == "" {
+				if plan := m.selectedPlanItem(); plan != nil {
+					planID = strings.TrimSpace(plan.Record.PlanID)
+				}
+			}
+			if planID == "" {
+				m.closeInput()
+				return m, nil
+			}
+			if value == "" {
+				m.errText = "implementation guidance must not be empty"
+				return m, nil
+			}
+			note := value
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				err := m.backend.SteerImplementation(planID, note)
+				if err != nil {
+					return "", "", err
+				}
+				return "implementation guidance queued " + planID, planID, nil
+			})
 		case kitchenTUIInputReplan:
 			plan := m.selectedPlanItem()
 			if plan == nil {
@@ -1576,6 +1625,11 @@ func (m *kitchenTUIModel) openRefineInput(planID string) {
 	m.openInput(kitchenTUIInputRefine, "Refine research", "Additional clarification or focus area...")
 }
 
+func (m *kitchenTUIModel) openSteerImplementationInput(planID string) {
+	m.steerImplementationPlanID = strings.TrimSpace(planID)
+	m.openInput(kitchenTUIInputSteerImplementation, "Implementation guidance", "Keep normal mittens builds verbose; only quiet kitchen serve background image builds.")
+}
+
 func (m *kitchenTUIModel) closeInput() {
 	if m.inputMode == kitchenTUIInputSubmit {
 		m.finishSubmitDependencySelection()
@@ -1586,6 +1640,7 @@ func (m *kitchenTUIModel) closeInput() {
 	m.submitResearch = false
 	m.promotePlanID = ""
 	m.refinePlanID = ""
+	m.steerImplementationPlanID = ""
 	m.input.Blur()
 	m.input.SetValue("")
 }
@@ -1872,6 +1927,22 @@ func (m kitchenTUIModel) canRequestReviewSelectedPlan() bool {
 	}
 }
 
+func (m kitchenTUIModel) canSteerImplementationSelectedPlan() bool {
+	progress := m.selectedPlanProgress()
+	if progress == nil {
+		return false
+	}
+	if progress.AutoRemediationActive {
+		return false
+	}
+	switch strings.TrimSpace(progress.State) {
+	case planStateCompleted, planStateImplementationReviewFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m kitchenTUIModel) selectedPlanProgress() *PlanProgress {
 	if plan := m.selectedPlanItem(); plan != nil && plan.Progress != nil {
 		return plan.Progress
@@ -2053,6 +2124,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			return []string{"enter promote", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputRefine:
 			return []string{"enter refine", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputSteerImplementation:
+			return []string{"enter queue-guidance", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputReplan:
 			return []string{"enter replan", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputAnswer:
@@ -2098,6 +2171,9 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 		if m.canRequestReviewSelectedPlan() {
 			actions = append(actions, "v review")
+		}
+		if m.canSteerImplementationSelectedPlan() {
+			actions = append(actions, "s steer-impl")
 		}
 		if m.canCancelSelectedPlan() {
 			actions = append(actions, "C cancel")
@@ -3159,6 +3235,8 @@ func (m kitchenTUIModel) renderInputBar() string {
 		label = "Promote research"
 	case kitchenTUIInputRefine:
 		label = "Refine research"
+	case kitchenTUIInputSteerImplementation:
+		label = "Implementation guidance"
 	case kitchenTUIInputReplan:
 		label = "Replan"
 	case kitchenTUIInputAnswer:

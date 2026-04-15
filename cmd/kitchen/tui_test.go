@@ -28,52 +28,55 @@ func forceColors(t *testing.T) {
 }
 
 type fakeKitchenTUIBackend struct {
-	deletedPlanID                 string
-	deleteCalls                   int
-	deletedPlanAndLineageID       string
-	deletePlanAndLineageCalls     int
-	plans                     []PlanRecord
-	questions                 []pool.Question
-	submitPlanID              string
-	submittedIdea              string
-	submittedResearchTopic     string
-	submittedImplReview        bool
-	submittedAnchorRef         string
-	submittedDependsOn         []string
-	submittedOverrides         *PlanProviderOverrides
-	promotedResearchPlanID    string
-	promotedLineage           string
-	promotedAuto              bool
-	promotedImplReview        bool
-	promotePlanID             string
-	requestedReviewPlanID     string
-	requestReviewCalls        int
-	remediatedReviewPlanID    string
-	remediateIncludeNits      bool
-	remediateReviewCalls      int
-	retriedTaskID             string
-	retriedRequireFreshWorker bool
-	retryCalls                int
-	answeredQuestionID        string
-	answeredQuestionAnswer    string
-	taskOutputs               map[string]string
-	taskOutputErr             error
-	taskOutputCalls           int
-	mergeCheckedLineage       string
-	mergeCheckCalls           int
-	mergedLineage             string
-	mergeCalls                int
-	fixMergeLineage           string
-	fixMergeCalls             int
-	reappliedLineage          string
-	reapplyCalls              int
-	cancelledPlanID           string
-	cancelPlanCalls           int
-	cancelledTaskID           string
-	cancelTaskCalls           int
-	refinedPlanID             string
-	refinedClarification      string
-	refineCalls               int
+	deletedPlanID               string
+	deleteCalls                 int
+	deletedPlanAndLineageID     string
+	deletePlanAndLineageCalls   int
+	plans                       []PlanRecord
+	questions                   []pool.Question
+	submitPlanID                string
+	submittedIdea               string
+	submittedResearchTopic      string
+	submittedImplReview         bool
+	submittedAnchorRef          string
+	submittedDependsOn          []string
+	submittedOverrides          *PlanProviderOverrides
+	promotedResearchPlanID      string
+	promotedLineage             string
+	promotedAuto                bool
+	promotedImplReview          bool
+	promotePlanID               string
+	requestedReviewPlanID       string
+	requestReviewCalls          int
+	steeredImplementationPlanID string
+	steeredImplementationNote   string
+	steerImplementationCalls    int
+	remediatedReviewPlanID      string
+	remediateIncludeNits        bool
+	remediateReviewCalls        int
+	retriedTaskID               string
+	retriedRequireFreshWorker   bool
+	retryCalls                  int
+	answeredQuestionID          string
+	answeredQuestionAnswer      string
+	taskOutputs                 map[string]string
+	taskOutputErr               error
+	taskOutputCalls             int
+	mergeCheckedLineage         string
+	mergeCheckCalls             int
+	mergedLineage               string
+	mergeCalls                  int
+	fixMergeLineage             string
+	fixMergeCalls               int
+	reappliedLineage            string
+	reapplyCalls                int
+	cancelledPlanID             string
+	cancelPlanCalls             int
+	cancelledTaskID             string
+	cancelTaskCalls             int
+	refinedPlanID               string
+	refinedClarification        string
+	refineCalls                 int
 }
 
 func (b *fakeKitchenTUIBackend) Label() string                      { return "test" }
@@ -140,6 +143,12 @@ func (b *fakeKitchenTUIBackend) ExtendCouncil(planID string, turns int) error { 
 func (b *fakeKitchenTUIBackend) RequestReview(planID string) error {
 	b.requestReviewCalls++
 	b.requestedReviewPlanID = planID
+	return nil
+}
+func (b *fakeKitchenTUIBackend) SteerImplementation(planID, note string) error {
+	b.steerImplementationCalls++
+	b.steeredImplementationPlanID = planID
+	b.steeredImplementationNote = note
 	return nil
 }
 func (b *fakeKitchenTUIBackend) RemediateReview(planID string, includeNits bool) error {
@@ -1606,6 +1615,127 @@ func TestKitchenTUIRefineBlankClarificationRejectsLocally(t *testing.T) {
 	}
 }
 
+func TestKitchenTUISteerImplementationKeyOpensInput(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record: PlanRecord{PlanID: "plan_impl", Title: "Implementation steer", State: planStateCompleted},
+				Progress: &PlanProgress{
+					State: planStateCompleted,
+				},
+			},
+		},
+		input: textinput.New(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputSteerImplementation {
+		t.Fatalf("inputMode = %q, want steer-implementation", got.inputMode)
+	}
+	if got.steerImplementationPlanID != "plan_impl" {
+		t.Fatalf("steerImplementationPlanID = %q, want plan_impl", got.steerImplementationPlanID)
+	}
+}
+
+func TestKitchenTUISteerImplementationKeyDoesNotOpenOnNonEligiblePlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record: PlanRecord{PlanID: "plan_impl", Title: "Implementation steer", State: planStateActive},
+				Progress: &PlanProgress{
+					State: planStateActive,
+				},
+			},
+		},
+		input: textinput.New(),
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	got := updated.(kitchenTUIModel)
+	if cmd != nil {
+		t.Fatal("expected no command for non-eligible plan")
+	}
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+	if got.flash != "selected plan cannot be steered" {
+		t.Fatalf("flash = %q, want steering not available message", got.flash)
+	}
+}
+
+func TestKitchenTUISteerImplementationCallsBackend(t *testing.T) {
+	backend := &fakeKitchenTUIBackend{}
+	model := kitchenTUIModel{
+		backend:                   backend,
+		inputMode:                 kitchenTUIInputSteerImplementation,
+		steerImplementationPlanID: "plan_impl",
+		plans: []kitchenTUIPlanItem{
+			{
+				Record: PlanRecord{PlanID: "plan_impl", Title: "Implementation steer", State: planStateCompleted},
+				Progress: &PlanProgress{
+					State: planStateCompleted,
+				},
+			},
+		},
+	}
+	model.input = textInputWithValue("Keep normal mittens startup builds verbose.")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected steer-implementation command")
+	}
+	got := updated.(kitchenTUIModel)
+	if got.inputMode != kitchenTUIInputNone {
+		t.Fatalf("inputMode = %q, want none", got.inputMode)
+	}
+
+	msg := cmd()
+	action, ok := msg.(kitchenTUIActionMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want kitchenTUIActionMsg", msg)
+	}
+	if action.err != nil {
+		t.Fatalf("action err = %v", action.err)
+	}
+	if action.status != "implementation guidance queued plan_impl" {
+		t.Fatalf("action status = %q", action.status)
+	}
+	if action.selectedPlanID != "plan_impl" {
+		t.Fatalf("selectedPlanID = %q, want plan_impl", action.selectedPlanID)
+	}
+	if backend.steerImplementationCalls != 1 {
+		t.Fatalf("steerImplementationCalls = %d, want 1", backend.steerImplementationCalls)
+	}
+	if backend.steeredImplementationPlanID != "plan_impl" {
+		t.Fatalf("steeredImplementationPlanID = %q, want plan_impl", backend.steeredImplementationPlanID)
+	}
+	if backend.steeredImplementationNote != "Keep normal mittens startup builds verbose." {
+		t.Fatalf("steeredImplementationNote = %q", backend.steeredImplementationNote)
+	}
+}
+
+func TestKitchenTUIFooterShowsSteerImplementationForEligiblePlan(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{
+				Record: PlanRecord{PlanID: "plan_impl", Title: "Implementation steer", State: planStateCompleted},
+				Progress: &PlanProgress{
+					State: planStateCompleted,
+				},
+			},
+		},
+	}
+
+	footer := model.renderFooter()
+	if !strings.Contains(footer, "s steer-impl") {
+		t.Fatalf("footer = %q, want steer implementation action", footer)
+	}
+}
+
 func TestKitchenTUIViewDoesNotShowSubmitBarAfterInputClosed(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{}
 	model := kitchenTUIModel{
@@ -1737,11 +1867,11 @@ func TestKitchenTUIManualRemediationFallsBackToDetailProgress(t *testing.T) {
 		detail: &PlanDetail{
 			Plan: PlanRecord{PlanID: "plan_fix_review", Title: "Fix review", State: planStateCompleted},
 			Progress: PlanProgress{
-				PlanID:                 "plan_fix_review",
-				State:                  planStateCompleted,
-				ImplReviewRequested:    true,
-				ImplReviewStatus:       planReviewStatusPassed,
-				ImplReviewFollowups:    []string{"[minor] add a regression test"},
+				PlanID:              "plan_fix_review",
+				State:               planStateCompleted,
+				ImplReviewRequested: true,
+				ImplReviewStatus:    planReviewStatusPassed,
+				ImplReviewFollowups: []string{"[minor] add a regression test"},
 			},
 		},
 	}
