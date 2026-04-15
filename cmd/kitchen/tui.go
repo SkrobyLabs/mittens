@@ -1081,7 +1081,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 var kitchenTUIMergeMenuOptions = []string{
 	"Check merge",
-	"Execute merge",
+	"Squash-merge into base",
 	"Fix conflicts",
 	"Reapply on base",
 }

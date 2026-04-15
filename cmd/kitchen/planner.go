@@ -1176,7 +1176,7 @@ func (k *Kitchen) enqueueLineageFixMergeTask(activePlanID string, bundle StoredP
 
 func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, planTitle string) string {
 	var sb strings.Builder
-	sb.WriteString("You are catching the Kitchen lineage branch up to the base branch so a later merge will be a trivial fast-forward.\n\n")
+	sb.WriteString("You are catching the Kitchen lineage branch up to the base branch so conflicts are resolved before the operator squash-merges the lineage into base.\n\n")
 	sb.WriteString("## Context\n")
 	sb.WriteString("- Lineage: `")
 	sb.WriteString(lineage)
