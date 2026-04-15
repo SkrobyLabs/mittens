@@ -12,10 +12,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 
 	"github.com/SkrobyLabs/mittens/pkg/adapter"
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
+
+// forceColors enables ANSI-256 color output for the duration of a test and
+// restores the previous profile when the test finishes.
+func forceColors(t *testing.T) {
+	t.Helper()
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(orig) })
+}
 
 type fakeKitchenTUIBackend struct {
 	deletedPlanID             string
@@ -3513,5 +3523,198 @@ func TestKitchenTUIFooterShowsMergeMenuHints(t *testing.T) {
 	footer = model.renderFooter()
 	if !strings.Contains(footer, "↑/↓ navigate") || !strings.Contains(footer, "enter select") {
 		t.Fatalf("merge menu footer missing navigation hints: %q", footer)
+	}
+}
+
+// TestNeedsUserAttentionPredicate verifies the attention predicate for operator-actionable states.
+func TestNeedsUserAttentionPredicate(t *testing.T) {
+	cases := []struct {
+		name string
+		plan kitchenTUIPlanItem
+		want bool
+	}{
+		{
+			name: "pending_approval needs attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStatePendingApproval}},
+			want: true,
+		},
+		{
+			name: "planning_failed needs attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStatePlanningFailed}},
+			want: true,
+		},
+		{
+			name: "implementation_review_failed needs attention via progress",
+			plan: kitchenTUIPlanItem{
+				Record:   PlanRecord{State: planStateCompleted},
+				Progress: &PlanProgress{State: planStateCompleted, ImplReviewRequested: true, ImplReviewStatus: planReviewStatusFailed},
+			},
+			want: true,
+		},
+		{
+			name: "research_complete needs attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateResearchComplete}},
+			want: true,
+		},
+		{
+			name: "completed with lineage needs attention (merge-ready)",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateCompleted, Lineage: "my-feature"}},
+			want: true,
+		},
+		{
+			name: "completed in research mode needs attention (promotable)",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateCompleted, Mode: "research"}},
+			want: true,
+		},
+		{
+			name: "completed without lineage or research mode does not need attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateCompleted}},
+			want: false,
+		},
+		{
+			name: "active does not need attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateActive}},
+			want: false,
+		},
+		{
+			name: "planning does not need attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStatePlanning}},
+			want: false,
+		},
+		{
+			name: "waiting_on_dependency does not need attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateWaitingOnDependency}},
+			want: false,
+		},
+		{
+			name: "merged does not need attention",
+			plan: kitchenTUIPlanItem{Record: PlanRecord{State: planStateMerged}},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := needsUserAttention(tc.plan); got != tc.want {
+				t.Fatalf("needsUserAttention() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderSelectableRowAttentionStyle verifies unselected attention rows use amber background (color 94).
+func TestRenderSelectableRowAttentionStyle(t *testing.T) {
+	forceColors(t)
+	rows := renderSelectableRow(false, true, "primary text", "secondary text")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	// Amber background is ANSI 256-color code 94.
+	if !strings.Contains(rows[0], "94m") {
+		t.Fatalf("primary row missing amber background (94m): %q", rows[0])
+	}
+	if !strings.Contains(rows[1], "94m") {
+		t.Fatalf("secondary row missing amber background (94m): %q", rows[1])
+	}
+	// Must not use the selection purple (62).
+	if strings.Contains(rows[0], "62m") || strings.Contains(rows[1], "62m") {
+		t.Fatalf("attention row should not use selection purple (62m)")
+	}
+	// Text content must be preserved.
+	if !strings.Contains(ansi.Strip(rows[0]), "primary text") {
+		t.Fatalf("primary text missing from row: %q", rows[0])
+	}
+}
+
+// TestRenderSelectableRowSelectedOverridesAttention verifies that selected takes priority over attention.
+func TestRenderSelectableRowSelectedOverridesAttention(t *testing.T) {
+	forceColors(t)
+	rows := renderSelectableRow(true, true, "primary text", "secondary text")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	// Must use selection purple (62), not amber (94).
+	if !strings.Contains(rows[0], "62m") {
+		t.Fatalf("selected+attention primary row missing purple (62m): %q", rows[0])
+	}
+	if strings.Contains(rows[0], "94m") {
+		t.Fatalf("selected+attention primary row should not use amber (94m): %q", rows[0])
+	}
+}
+
+// TestRenderSelectableRowNoAttentionUnhighlighted verifies non-attention unselected rows have no background color.
+func TestRenderSelectableRowNoAttentionUnhighlighted(t *testing.T) {
+	forceColors(t)
+	rows := renderSelectableRow(false, false, "plain primary", "plain secondary")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	// No background color codes (48;5;) should appear.
+	for _, row := range rows {
+		if strings.Contains(row, "48;5;") {
+			t.Fatalf("plain row should have no background color, got: %q", row)
+		}
+	}
+	if ansi.Strip(rows[0]) != "plain primary" {
+		t.Fatalf("primary text = %q, want plain primary", ansi.Strip(rows[0]))
+	}
+}
+
+// TestRenderPlansPaneHighlightsAttentionRows verifies that attention plans render with amber style
+// and non-attention plans remain unstyled in the plans pane.
+func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
+	forceColors(t)
+	model := kitchenTUIModel{
+		leftMode:     kitchenTUILeftPlans,
+		selectedPlan: 0,
+		plans: []kitchenTUIPlanItem{
+			// Index 0: selected — should use purple regardless of attention.
+			{Record: PlanRecord{PlanID: "plan_a", Title: "Pending Approval Plan", State: planStatePendingApproval}},
+			// Index 1: not selected, needs attention — amber.
+			{Record: PlanRecord{PlanID: "plan_b", Title: "Planning Failed Plan", State: planStatePlanningFailed}},
+			// Index 2: not selected, no attention — plain.
+			{Record: PlanRecord{PlanID: "plan_c", Title: "Active Plan", State: planStateActive}},
+		},
+	}
+
+	pane := model.renderPlansPane(120, 20)
+
+	// The pane must contain all three plan titles (after stripping ANSI).
+	stripped := ansi.Strip(pane)
+	for _, title := range []string{"Pending Approval Plan", "Planning Failed Plan", "Active Plan"} {
+		if !strings.Contains(stripped, title) {
+			t.Fatalf("plans pane missing title %q: %q", title, stripped)
+		}
+	}
+
+	// plan_b row (planning_failed, unselected) should have amber (94m).
+	// Split raw pane by newline and find lines containing plan_b's title text.
+	foundAmber := false
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Planning Failed Plan") && strings.Contains(line, "94m") {
+			foundAmber = true
+			break
+		}
+	}
+	if !foundAmber {
+		t.Fatalf("planning_failed plan row should have amber (94m) highlight; pane = %q", pane)
+	}
+
+	// plan_a row (selected) should use purple (62m), not amber (94m).
+	foundPurpleSelected := false
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Pending Approval Plan") && strings.Contains(line, "62m") {
+			foundPurpleSelected = true
+			break
+		}
+	}
+	if !foundPurpleSelected {
+		t.Fatalf("selected plan row should have purple (62m); pane = %q", pane)
+	}
+
+	// plan_c row (active, unselected) should have no background color.
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Active Plan") && strings.Contains(line, "48;5;") {
+			t.Fatalf("active (plain) plan row should have no background color; line = %q", line)
+		}
 	}
 }

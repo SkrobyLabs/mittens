@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.0.0
 	github.com/charmbracelet/x/ansi v0.4.2
 	github.com/creack/pty v1.1.24
+	github.com/muesli/termenv v0.15.3-0.20240618155329-98d742f6907a
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/sys v0.28.0
 	golang.org/x/term v0.27.0
@@ -31,7 +32,6 @@ require (
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/muesli/termenv v0.15.3-0.20240618155329-98d742f6907a // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/sync v0.8.0 // indirect

@@ -2261,7 +2261,7 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 			secondary += " [dep]"
 		}
 		secondary = truncate(secondary, innerWidth)
-		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, primary, secondary)...)
+		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, needsUserAttention(plan), primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, listLineBudget))
 }
@@ -2285,7 +2285,7 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 		marker := rowMarker(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks)
 		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 6), task.Title), innerWidth)
 		secondary := truncate("    "+task.ID+" · "+task.Kind, innerWidth)
-		lines = append(lines, renderSelectableRow(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks, primary, secondary)...)
+		lines = append(lines, renderSelectableRow(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks, false, primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, visibleLineBudget))
 }
@@ -2329,7 +2329,7 @@ func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
 		}
 		primary := truncate(fmt.Sprintf("%s %d. %s", marker, i+1, text), innerWidth) + suffix
 		secondary := truncate(fmt.Sprintf("    id: %s  task: %s", q.ID, q.TaskID), innerWidth)
-		lines = append(lines, renderSelectableRow(selected, primary, secondary)...)
+		lines = append(lines, renderSelectableRow(selected, false, primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, listLineBudget))
 }
@@ -3477,6 +3477,25 @@ func planDisplayState(plan kitchenTUIPlanItem) string {
 	return firstNonEmpty(plan.Record.State, "-")
 }
 
+func needsUserAttention(plan kitchenTUIPlanItem) bool {
+	switch planDisplayState(plan) {
+	case planStatePendingApproval, planStatePlanningFailed, planStateImplementationReviewFailed, planStateResearchComplete:
+		return true
+	case planStateCompleted:
+		// Merge-ready: has a lineage branch and review hasn't failed.
+		if strings.TrimSpace(plan.Record.Lineage) != "" {
+			return true
+		}
+		// Promotable research plan waiting on operator.
+		if strings.TrimSpace(plan.Record.Mode) == "research" {
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 func implementationReviewFailed(progress *PlanProgress) bool {
 	return progress != nil &&
 		progress.ImplReviewRequested &&
@@ -3681,10 +3700,15 @@ func pendingQuestionSummaryForPlan(planID string, questions []pool.Question) str
 	return strings.Join(ids, ", ")
 }
 
-func renderSelectableRow(selected bool, primary, secondary string) []string {
+func renderSelectableRow(selected bool, attention bool, primary, secondary string) []string {
 	if selected {
 		main := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
 		sub := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("252"))
+		return []string{main.Render(primary), sub.Render(secondary)}
+	}
+	if attention {
+		main := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("230")).Bold(true)
+		sub := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("252"))
 		return []string{main.Render(primary), sub.Render(secondary)}
 	}
 	return []string{
