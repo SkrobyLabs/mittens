@@ -29,6 +29,8 @@ clipboard-sync.exe
 .tmp_gomodcache/*
 .tmp_gocache/*
 .cache/*
+.codex-gocache/*
+.codex-gomodcache/*
 .gocache/*
 .gomodcache/*
 .gotmp/*

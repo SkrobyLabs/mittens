@@ -43,8 +43,8 @@ func ExecuteForCouncilTurn(ctx context.Context, ad Adapter, prompt, priorContext
 		if err != nil {
 			return nil, result, err
 		}
-		if result.ExitCode != 0 {
-			return nil, result, adapterExitError(result)
+		if err := ResultError(result); err != nil {
+			return nil, result, err
 		}
 
 		artifact, err := ExtractCouncilTurnArtifact(result.Output)
@@ -74,8 +74,8 @@ func ExecuteForReviewCouncilTurn(ctx context.Context, ad Adapter, prompt, priorC
 		if err != nil {
 			return nil, result, err
 		}
-		if result.ExitCode != 0 {
-			return nil, result, adapterExitError(result)
+		if err := ResultError(result); err != nil {
+			return nil, result, err
 		}
 
 		artifact, err := ExtractReviewCouncilTurnArtifact(result.Output)
@@ -95,6 +95,16 @@ func ExecuteForReviewCouncilTurn(ctx context.Context, ad Adapter, prompt, priorC
 	return nil, Result{}, fmt.Errorf("unreachable extraction retry state")
 }
 
+func ResultError(result Result) error {
+	if result.ExitCode != 0 {
+		return adapterExitError(result)
+	}
+	if msg, ok := LikelyAuthenticationFailureOutput(result.Output); ok {
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
 func adapterExitError(result Result) error {
 	if result.ExitCode == 0 {
 		return nil
@@ -103,6 +113,30 @@ func adapterExitError(result Result) error {
 		return fmt.Errorf("adapter exited with code %d: %s", result.ExitCode, msg)
 	}
 	return fmt.Errorf("adapter exited with code %d", result.ExitCode)
+}
+
+func LikelyAuthenticationFailureOutput(output string) (string, bool) {
+	msg := strings.TrimSpace(output)
+	if msg == "" {
+		return "", false
+	}
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.HasPrefix(lower, "failed to authenticate"):
+		return msg, true
+	case strings.HasPrefix(lower, "invalid authentication credentials"):
+		return msg, true
+	case strings.HasPrefix(lower, "authentication failure:"):
+		return msg, true
+	case strings.HasPrefix(lower, "api error: 401"):
+		return msg, true
+	case strings.Contains(lower, `"type":"authentication_error"`):
+		return msg, true
+	case strings.Contains(lower, `"type": "authentication_error"`):
+		return msg, true
+	default:
+		return "", false
+	}
 }
 
 func buildExtractionRetryPrompt(prompt, output string, err error) string {

@@ -1087,6 +1087,42 @@ func TestExecuteTask_CouncilExitCodeAuthOutputReportsStructuredAuthFailure(t *te
 	}
 }
 
+func TestExecuteTask_SuccessOutputAuthBannerReportsStructuredAuthFailure(t *testing.T) {
+	m := newMockLeaderServer(t)
+	client := newKitchenClient(m.srv.Listener.Addr().String(), "")
+	ad := &fakeAdapter{result: adapter.Result{
+		Output: `Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}`,
+	}}
+	task := &pool.Task{
+		ID:     "t-auth-output",
+		Prompt: "implement change",
+		Status: pool.TaskDispatched,
+	}
+
+	stopWorker := executeTask(client, ad, "w-1", task, &workerAgentState{teamDir: t.TempDir()}, nil, nil)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stopWorker {
+		t.Fatal("stopWorker = true, want false")
+	}
+	if len(m.completed) != 0 {
+		t.Fatalf("completed = %v, want none", m.completed)
+	}
+	if len(m.failed) != 1 || m.failed[0] != "t-auth-output" {
+		t.Fatalf("failed = %v, want [t-auth-output]", m.failed)
+	}
+	if len(m.failedClasses) != 1 || m.failedClasses[0] != "auth" {
+		t.Fatalf("failedClasses = %v, want [auth]", m.failedClasses)
+	}
+	if len(m.failedErrors) != 1 || !strings.Contains(m.failedErrors[0], "Invalid authentication credentials") {
+		t.Fatalf("failedErrors = %v, want auth message", m.failedErrors)
+	}
+	if len(m.failedDetails) != 1 || !m.failedDetails[0].Signals.AuthFailure {
+		t.Fatalf("failedDetails = %+v, want authFailure signal", m.failedDetails)
+	}
+}
+
 func TestExecuteTask_SoftAuthErrorRetriesOnceAfterRefresh(t *testing.T) {
 	m := newMockLeaderServer(t)
 	client := newKitchenClient(m.srv.Listener.Addr().String(), "")

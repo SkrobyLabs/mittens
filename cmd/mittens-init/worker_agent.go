@@ -410,6 +410,11 @@ func executeTask(client *kitchenClient, ad adapter.Adapter, workerID string, tas
 		reviewCouncilArtifact *adapter.ReviewCouncilTurnArtifact
 	)
 	councilArtifact, reviewCouncilArtifact, result, err = runTaskExecution(ctx, ad, expectsCouncilTurn, expectsReviewCouncilTurn, prompt, priorContext)
+	if err == nil {
+		if resultErr := adapter.ResultError(result); resultErr != nil {
+			err = resultErr
+		}
+	}
 	if err != nil {
 		if result.Output != "" {
 			writeTeamFileAtomic(state.teamDir, teamResultFile, []byte(result.Output))
