@@ -392,6 +392,140 @@ func TestKitchenMergeLineageBlocksFailedImplementationReview(t *testing.T) {
 	}
 }
 
+func TestKitchenMergeLineageIgnoresHistoricalCouncilFailuresOnCompletedPlan(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_ignore_historical_council_failures",
+			Lineage: "parser-errors",
+			Title:   "Ignore historical council failures",
+			State:   planStateCompleted,
+			Anchor:  anchor,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateCompleted,
+			Branch:                lineageBranchName("parser-errors"),
+			Anchor:                anchor,
+			CompletedAt:           &completedAt,
+			CouncilTurnsCompleted: 3,
+			CouncilFinalDecision:  councilConverged,
+			CompletedTaskIDs:      []string{planTaskRuntimeID("plan_merge_ignore_historical_council_failures", "t1")},
+			FailedTaskIDs:         []string{"council_plan_merge_ignore_historical_council_failures_t1", "council_plan_merge_ignore_historical_council_failures_t3"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         "council_plan_merge_ignore_historical_council_failures_t1",
+		PlanID:     planID,
+		Prompt:     "planner turn 1",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask planner t1: %v", err)
+	}
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-plan-a", Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker planner t1: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-plan-a", "container-plan-a"); err != nil {
+		t.Fatalf("RegisterWorker planner t1: %v", err)
+	}
+	if err := k.pm.DispatchTask("council_plan_merge_ignore_historical_council_failures_t1", "w-plan-a"); err != nil {
+		t.Fatalf("DispatchTask planner t1: %v", err)
+	}
+	if err := k.pm.FailTask("w-plan-a", "council_plan_merge_ignore_historical_council_failures_t1", "old planning failure"); err != nil {
+		t.Fatalf("FailTask planner t1: %v", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         "council_plan_merge_ignore_historical_council_failures_t3",
+		PlanID:     planID,
+		Prompt:     "planner turn 3",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask planner t3: %v", err)
+	}
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-plan-b", Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker planner t3: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-plan-b", "container-plan-b"); err != nil {
+		t.Fatalf("RegisterWorker planner t3: %v", err)
+	}
+	if err := k.pm.DispatchTask("council_plan_merge_ignore_historical_council_failures_t3", "w-plan-b"); err != nil {
+		t.Fatalf("DispatchTask planner t3: %v", err)
+	}
+	if err := k.pm.FailTask("w-plan-b", "council_plan_merge_ignore_historical_council_failures_t3", "superseded planning failure"); err != nil {
+		t.Fatalf("FailTask planner t3: %v", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:         planTaskRuntimeID(planID, "t1"),
+		PlanID:     planID,
+		Prompt:     "implement",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask implementer: %v", err)
+	}
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-impl", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker implementer: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-impl", "container-impl"); err != nil {
+		t.Fatalf("RegisterWorker implementer: %v", err)
+	}
+	if err := k.pm.DispatchTask(planTaskRuntimeID(planID, "t1"), "w-impl"); err != nil {
+		t.Fatalf("DispatchTask implementer: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-impl", planTaskRuntimeID(planID, "t1")); err != nil {
+		t.Fatalf("CompleteTask implementer: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	resp, err := k.MergeLineage("parser-errors")
+	if err != nil {
+		t.Fatalf("MergeLineage: %v", err)
+	}
+	if resp["status"] != "merged" {
+		t.Fatalf("merge response = %+v", resp)
+	}
+}
+
 func TestKitchenReapplyLineageUpdatesPlanAnchor(t *testing.T) {
 	k := newTestKitchen(t)
 

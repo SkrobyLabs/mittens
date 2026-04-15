@@ -311,6 +311,28 @@ func (k *Kitchen) blockingTasksForPlan(planID string) []string {
 	if k == nil || k.pm == nil {
 		return nil
 	}
+	if k.planStore != nil {
+		if bundle, err := k.planStore.Get(planID); err == nil {
+			active, _, failed := summarizeRelevantPlanTasks(k.pm.Tasks(), bundle)
+			blocked := make([]string, 0, len(active)+len(failed))
+			for _, taskID := range active {
+				if task, ok := k.pm.Task(taskID); ok {
+					blocked = append(blocked, fmt.Sprintf("%s=%s", task.ID, task.Status))
+					continue
+				}
+				blocked = append(blocked, fmt.Sprintf("%s=%s", taskID, pool.TaskQueued))
+			}
+			for _, taskID := range failed {
+				if task, ok := k.pm.Task(taskID); ok {
+					blocked = append(blocked, fmt.Sprintf("%s=%s", task.ID, task.Status))
+					continue
+				}
+				blocked = append(blocked, fmt.Sprintf("%s=%s", taskID, pool.TaskFailed))
+			}
+			sort.Strings(blocked)
+			return blocked
+		}
+	}
 
 	var blocked []string
 	for _, task := range k.pm.Tasks() {
