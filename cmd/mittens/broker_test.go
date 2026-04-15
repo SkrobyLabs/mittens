@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -192,6 +193,27 @@ func TestBroker_PUT_MissingExpiresAt(t *testing.T) {
 	}
 }
 
+func TestBroker_PUT_CodexChatGPTTokens(t *testing.T) {
+	b, client := startBroker(t, "")
+	b.Name = "codex"
+
+	payload := fmt.Sprintf(`{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","last_refresh":"2026-04-15T22:09:13Z","tokens":{"access_token":%q,"id_token":%q,"refresh_token":"rt"}}`,
+		brokerTestJWT(1777154953), brokerTestJWT(1776294552))
+
+	resp, err := client.Do(putReq(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT codex chatgpt tokens: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if got := expiresAtForProvider("codex", b.Credentials()); got != 1777154953000 {
+		t.Fatalf("expiresAt(stored) = %d, want %d", got, int64(1777154953000))
+	}
+}
+
 func TestBroker_ConcurrentPUTs(t *testing.T) {
 	seed := `{"accessToken":"seed","expiresAt":0}`
 	b, client := startBroker(t, seed)
@@ -216,6 +238,12 @@ func TestBroker_ConcurrentPUTs(t *testing.T) {
 	if exp := expiresAt(final); exp != 100 {
 		t.Errorf("after concurrent PUTs: expiresAt = %d, want 100", exp)
 	}
+}
+
+func brokerTestJWT(exp int64) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp)))
+	return header + "." + payload + ".sig"
 }
 
 func TestBroker_Credentials(t *testing.T) {

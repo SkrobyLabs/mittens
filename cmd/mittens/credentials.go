@@ -21,8 +21,9 @@ type CredentialStore interface {
 // CredentialManager coordinates credential extraction, staging, and persistence
 // across multiple credential stores.
 type CredentialManager struct {
-	stores  []CredentialStore
-	tmpFile string
+	stores       []CredentialStore
+	tmpFile      string
+	providerName string
 }
 
 // NewCredentialManager creates a manager with the platform credential stores.
@@ -44,7 +45,7 @@ func NewCredentialManager(provider *Provider) *CredentialManager {
 		})
 	}
 
-	return &CredentialManager{stores: stores}
+	return &CredentialManager{stores: stores, providerName: provider.Name}
 }
 
 // Stores returns the underlying credential stores for use by the broker.
@@ -68,7 +69,7 @@ func (m *CredentialManager) Setup() error {
 		return nil // no credentials available; caller decides how to proceed
 	}
 
-	best, label := freshestCredential(sources)
+	best, label := freshestCredentialForProvider(m.providerName, sources)
 
 	tmp, err := os.CreateTemp("", "mittens-cred.*.json")
 	if err != nil {
@@ -130,6 +131,10 @@ func expiresAt(jsonData string) int64 {
 	return credutil.ExpiresAtString(jsonData)
 }
 
+func expiresAtForProvider(providerName, jsonData string) int64 {
+	return credutil.ExpiresAtForProvider(providerName, []byte(jsonData))
+}
+
 // credentialSource pairs raw JSON with a human-readable label.
 type credentialSource struct {
 	json  string
@@ -138,16 +143,20 @@ type credentialSource struct {
 
 // freshestCredential picks the source with the highest expiresAt timestamp.
 func freshestCredential(sources []credentialSource) (string, string) {
+	return freshestCredentialForProvider("", sources)
+}
+
+func freshestCredentialForProvider(providerName string, sources []credentialSource) (string, string) {
 	if len(sources) == 0 {
 		return "", ""
 	}
 
 	bestJSON := sources[0].json
 	bestLabel := sources[0].label
-	bestExp := expiresAt(sources[0].json)
+	bestExp := expiresAtForProvider(providerName, sources[0].json)
 
 	for _, s := range sources[1:] {
-		exp := expiresAt(s.json)
+		exp := expiresAtForProvider(providerName, s.json)
 		if exp > bestExp {
 			bestJSON = s.json
 			bestLabel = s.label

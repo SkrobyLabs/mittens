@@ -192,7 +192,7 @@ func (b *HostBroker) Serve() error {
 		_ = os.Chmod(b.sockPath, 0666)
 	}
 
-	seedExp := expiresAt(b.creds)
+	seedExp := expiresAtForProvider(b.Name, b.creds)
 	b.blog("listening on %s (seed expiresAt: %d, stores: %d)", b.ln.Addr(), seedExp, len(b.stores))
 
 	// Start bidirectional host sync loop.
@@ -250,7 +250,7 @@ func (b *HostBroker) handleGet(w http.ResponseWriter) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	b.dblog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
+	b.dblog("GET → 200 (expiresAt: %d, %d bytes)", expiresAtForProvider(b.Name, data), len(data))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, data)
@@ -290,7 +290,7 @@ func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incoming := string(body)
-	incomingExp := expiresAt(incoming)
+	incomingExp := expiresAtForProvider(b.Name, incoming)
 	if incomingExp == 0 {
 		b.blog("PUT → 400 (missing/invalid expiresAt, %d bytes, keys: %s)", len(body), jsonKeys(incoming))
 		http.Error(w, "invalid credentials: missing or invalid expiresAt", http.StatusBadRequest)
@@ -298,7 +298,7 @@ func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	currentExp := expiresAt(b.creds)
+	currentExp := expiresAtForProvider(b.Name, b.creds)
 	if incomingExp > currentExp {
 		b.creds = incoming
 		b.mu.Unlock()
@@ -344,7 +344,7 @@ func (b *HostBroker) pullFromHost() {
 		if err != nil || data == "" {
 			continue
 		}
-		exp := expiresAt(data)
+		exp := expiresAtForProvider(b.Name, data)
 		if exp > bestExp {
 			bestJSON = data
 			bestExp = exp
@@ -356,7 +356,7 @@ func (b *HostBroker) pullFromHost() {
 	}
 
 	b.mu.Lock()
-	currentExp := expiresAt(b.creds)
+	currentExp := expiresAtForProvider(b.Name, b.creds)
 	if bestExp > currentExp {
 		b.creds = bestJSON
 		b.mu.Unlock()
