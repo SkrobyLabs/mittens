@@ -126,19 +126,23 @@ func TestParseDaemonStartupLine(t *testing.T) {
 
 func TestCleanupSupervisedDaemonRemovesStaleFiles(t *testing.T) {
 	paths := newKitchenTestPaths(t)
+	project, err := paths.Project("/tmp/example-repo")
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
 	provider := "codex"
 	if err := os.MkdirAll(runtimeSupervisorDir(paths), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	pidPath := supervisedRuntimePIDPath(paths, provider)
-	socketPath := supervisedRuntimeSocketPath(paths, provider)
+	pidPath := supervisedRuntimePIDPath(paths, project, provider)
+	socketPath := supervisedRuntimeSocketPath(paths, project, provider)
 	if err := os.WriteFile(pidPath, []byte("0\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile pid: %v", err)
 	}
 	if err := os.WriteFile(socketPath, []byte("stale"), 0o644); err != nil {
 		t.Fatalf("WriteFile socket: %v", err)
 	}
-	if err := cleanupSupervisedDaemon(paths, provider); err != nil {
+	if err := cleanupSupervisedDaemon(paths, project, provider); err != nil {
 		t.Fatalf("cleanupSupervisedDaemon: %v", err)
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
@@ -146,6 +150,81 @@ func TestCleanupSupervisedDaemonRemovesStaleFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Fatalf("socket file still exists, stat err=%v", err)
+	}
+}
+
+func TestSupervisedRuntimePathsAreProjectScoped(t *testing.T) {
+	paths := newKitchenTestPaths(t)
+	projectA, err := paths.Project("/tmp/repo-a")
+	if err != nil {
+		t.Fatalf("Project repo-a: %v", err)
+	}
+	projectB, err := paths.Project("/tmp/repo-b")
+	if err != nil {
+		t.Fatalf("Project repo-b: %v", err)
+	}
+	provider := "claude"
+
+	sockA := supervisedRuntimeSocketPath(paths, projectA, provider)
+	sockB := supervisedRuntimeSocketPath(paths, projectB, provider)
+	if sockA == sockB {
+		t.Fatalf("socket paths collide: %q", sockA)
+	}
+
+	pidA := supervisedRuntimePIDPath(paths, projectA, provider)
+	pidB := supervisedRuntimePIDPath(paths, projectB, provider)
+	if pidA == pidB {
+		t.Fatalf("pid paths collide: %q", pidA)
+	}
+}
+
+func TestCleanupSupervisedDaemonDoesNotRemoveOtherProjectFiles(t *testing.T) {
+	paths := newKitchenTestPaths(t)
+	projectA, err := paths.Project("/tmp/repo-a")
+	if err != nil {
+		t.Fatalf("Project repo-a: %v", err)
+	}
+	projectB, err := paths.Project("/tmp/repo-b")
+	if err != nil {
+		t.Fatalf("Project repo-b: %v", err)
+	}
+	provider := "claude"
+
+	if err := os.MkdirAll(runtimeSupervisorDir(paths), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Write stale files for both projects.
+	for _, p := range []ProjectPaths{projectA, projectB} {
+		pid := supervisedRuntimePIDPath(paths, p, provider)
+		sock := supervisedRuntimeSocketPath(paths, p, provider)
+		if err := os.WriteFile(pid, []byte("0\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile pid %s: %v", p.Key, err)
+		}
+		if err := os.WriteFile(sock, []byte("stale"), 0o644); err != nil {
+			t.Fatalf("WriteFile sock %s: %v", p.Key, err)
+		}
+	}
+
+	// Clean up only project A.
+	if err := cleanupSupervisedDaemon(paths, projectA, provider); err != nil {
+		t.Fatalf("cleanupSupervisedDaemon: %v", err)
+	}
+
+	// Project A files must be gone.
+	if _, err := os.Stat(supervisedRuntimePIDPath(paths, projectA, provider)); !os.IsNotExist(err) {
+		t.Fatal("project A pid file still exists after cleanup")
+	}
+	if _, err := os.Stat(supervisedRuntimeSocketPath(paths, projectA, provider)); !os.IsNotExist(err) {
+		t.Fatal("project A socket file still exists after cleanup")
+	}
+
+	// Project B files must be untouched.
+	if _, err := os.Stat(supervisedRuntimePIDPath(paths, projectB, provider)); err != nil {
+		t.Fatalf("project B pid file missing after cleanup of A: %v", err)
+	}
+	if _, err := os.Stat(supervisedRuntimeSocketPath(paths, projectB, provider)); err != nil {
+		t.Fatalf("project B socket file missing after cleanup of A: %v", err)
 	}
 }
 

@@ -113,12 +113,12 @@ func runtimeSupervisorDir(paths KitchenPaths) string {
 	return filepath.Join(paths.HomeDir, "runtime")
 }
 
-func supervisedRuntimeSocketPath(paths KitchenPaths, provider string) string {
-	return filepath.Join(runtimeSupervisorDir(paths), provider+".sock")
+func supervisedRuntimeSocketPath(paths KitchenPaths, project ProjectPaths, provider string) string {
+	return filepath.Join(runtimeSupervisorDir(paths), project.Key+"-"+provider+".sock")
 }
 
-func supervisedRuntimePIDPath(paths KitchenPaths, provider string) string {
-	return filepath.Join(runtimeSupervisorDir(paths), provider+".pid")
+func supervisedRuntimePIDPath(paths KitchenPaths, project ProjectPaths, provider string) string {
+	return filepath.Join(runtimeSupervisorDir(paths), project.Key+"-"+provider+".pid")
 }
 
 func resolveMittensBinary() (string, error) {
@@ -132,9 +132,9 @@ func resolveMittensBinary() (string, error) {
 	return exec.LookPath("mittens")
 }
 
-func cleanupSupervisedDaemon(paths KitchenPaths, provider string) error {
-	pidPath := supervisedRuntimePIDPath(paths, provider)
-	socketPath := supervisedRuntimeSocketPath(paths, provider)
+func cleanupSupervisedDaemon(paths KitchenPaths, project ProjectPaths, provider string) error {
+	pidPath := supervisedRuntimePIDPath(paths, project, provider)
+	socketPath := supervisedRuntimeSocketPath(paths, project, provider)
 
 	data, err := os.ReadFile(pidPath)
 	if err == nil {
@@ -165,7 +165,7 @@ func startSupervisedDaemon(paths KitchenPaths, project ProjectPaths, provider, m
 	if err := os.MkdirAll(runtimeSupervisorDir(paths), 0o755); err != nil {
 		return nil, err
 	}
-	if err := cleanupSupervisedDaemon(paths, provider); err != nil {
+	if err := cleanupSupervisedDaemon(paths, project, provider); err != nil {
 		return nil, err
 	}
 
@@ -175,8 +175,8 @@ func startSupervisedDaemon(paths KitchenPaths, project ProjectPaths, provider, m
 		provider:    provider,
 		mittensPath: mittensPath,
 		out:         out,
-		socketPath:  supervisedRuntimeSocketPath(paths, provider),
-		pidPath:     supervisedRuntimePIDPath(paths, provider),
+		socketPath:  supervisedRuntimeSocketPath(paths, project, provider),
+		pidPath:     supervisedRuntimePIDPath(paths, project, provider),
 	}
 	if err := state.start(); err != nil {
 		return nil, err
@@ -200,7 +200,7 @@ func (d *supervisedDaemon) startLocked() error {
 	if strings.TrimSpace(d.mittensPath) == "" {
 		return fmt.Errorf("mittens binary path must not be empty")
 	}
-	if err := cleanupSupervisedDaemon(d.paths, d.provider); err != nil {
+	if err := cleanupSupervisedDaemon(d.paths, d.project, d.provider); err != nil {
 		return err
 	}
 
