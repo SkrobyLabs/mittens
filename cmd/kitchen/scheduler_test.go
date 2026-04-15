@@ -5642,6 +5642,79 @@ func TestRecoverReviewCouncilPlansOnStartup_RevivesCanceledTask(t *testing.T) {
 	}
 }
 
+func TestRecoverReviewCouncilPlansOnStartup_RequeuesMissingActiveTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_ir_missing_active_recover",
+			Lineage: "feat-ir-missing-active-recover",
+			Title:   "Impl review missing active recovery",
+			State:   planStateImplementationReview,
+		},
+		Execution: ExecutionRecord{
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ActiveTaskIDs:               []string{reviewCouncilTaskID("plan_ir_missing_active_recover", 2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-ir-missing-active-recover"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	reviewTaskID := reviewCouncilTaskID(planID, 2)
+	if _, ok := pm.Task(reviewTaskID); ok {
+		t.Fatalf("review task %q unexpectedly exists before recovery", reviewTaskID)
+	}
+
+	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverReviewCouncilPlansOnStartup: %v", err)
+	}
+
+	task, ok := pm.Task(reviewTaskID)
+	if !ok {
+		t.Fatalf("review task %q not found", reviewTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("review task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateImplementationReview {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateImplementationReview)
+	}
+	if bundle.Execution.State != planStateImplementationReview {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateImplementationReview)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != reviewTaskID {
+		t.Fatalf("active task ids = %+v, want [%q]", bundle.Execution.ActiveTaskIDs, reviewTaskID)
+	}
+}
+
 func TestApplyReviewCouncilTurnResult_ActionableFailStartsAutoRemediation(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
