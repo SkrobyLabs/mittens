@@ -90,7 +90,7 @@ func (s *Scheduler) councilSeatWorkerUsable(worker pool.Worker, task pool.Task) 
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
 		return false
 	}
-	return s.seatWorkerMatchesRoute(worker, task)
+	return s.workerWorkspaceCompatible(worker, task) && s.seatWorkerMatchesRoute(worker, task)
 }
 
 func councilSeatWorkerIDs(seats [2]CouncilSeatRecord) []string {
@@ -490,6 +490,9 @@ func (s *Scheduler) workerCanRunTaskWithoutCouncilAffinity(worker pool.Worker, t
 	workerRole := strings.TrimSpace(worker.Role)
 	taskRole := strings.TrimSpace(task.Role)
 	if workerRole != "" && workerRole != "general" && taskRole != "" && workerRole != taskRole {
+		return false
+	}
+	if !s.workerWorkspaceCompatible(worker, task) {
 		return false
 	}
 	resolution := s.routeResolutionForTask(task)

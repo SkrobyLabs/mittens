@@ -57,12 +57,13 @@ type Event struct {
 // Typed payload structs for events that carry data.
 
 type WorkerSpawnedData struct {
-	ContainerID string `json:"containerId,omitempty"`
-	Provider    string `json:"provider,omitempty"`
-	Model       string `json:"model,omitempty"`
-	Adapter     string `json:"adapter,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Token       string `json:"token,omitempty"`
+	ContainerID   string `json:"containerId,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Adapter       string `json:"adapter,omitempty"`
+	Role          string `json:"role,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	Token         string `json:"token,omitempty"`
 }
 
 type TaskCreatedData struct {
@@ -175,17 +176,18 @@ func Apply(pm *PoolManager, e Event) error {
 		if e.Data != nil {
 			json.Unmarshal(e.Data, &d)
 		}
-		pm.workers[e.WorkerID] = &Worker{
-			ID:          e.WorkerID,
-			ContainerID: d.ContainerID,
-			Provider:    d.Provider,
-			Model:       d.Model,
-			Adapter:     d.Adapter,
-			Role:        d.Role,
-			Token:       d.Token,
-			Status:      WorkerSpawning,
-			SpawnedAt:   e.Timestamp,
-		}
+			pm.workers[e.WorkerID] = &Worker{
+				ID:            e.WorkerID,
+				ContainerID:   d.ContainerID,
+				Provider:      d.Provider,
+				Model:         d.Model,
+				Adapter:       d.Adapter,
+				Role:          d.Role,
+				WorkspacePath: d.WorkspacePath,
+				Token:         d.Token,
+				Status:        WorkerSpawning,
+				SpawnedAt:     e.Timestamp,
+			}
 
 	case EventWorkerReady:
 		w := pm.workers[e.WorkerID]

@@ -99,6 +99,7 @@ type Worker struct {
 	Model           string          `json:"model,omitempty"`
 	Adapter         string          `json:"adapter,omitempty"`
 	Role            string          `json:"role,omitempty"`
+	WorkspacePath   string          `json:"workspacePath,omitempty"`
 	Token           string          `json:"-"` // per-worker auth token (never serialised to clients)
 	Status          string          `json:"status"`
 	CurrentTaskID   string          `json:"currentTaskId,omitempty"`

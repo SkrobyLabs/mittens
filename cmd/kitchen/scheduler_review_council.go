@@ -105,7 +105,7 @@ func (s *Scheduler) reviewCouncilSeatWorkerUsable(worker pool.Worker, task pool.
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
 		return false
 	}
-	return s.seatWorkerMatchesRoute(worker, task)
+	return s.workerWorkspaceCompatible(worker, task) && s.seatWorkerMatchesRoute(worker, task)
 }
 
 func reviewCouncilSeatWorkerIDs(seats [2]CouncilSeatRecord, exclude ...string) []string {

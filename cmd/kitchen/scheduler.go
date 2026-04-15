@@ -1468,6 +1468,9 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	} else if workerRole != taskRole {
 		return false
 	}
+	if !s.workerWorkspaceCompatible(worker, task) {
+		return false
+	}
 	resolution := s.routeResolutionForTask(task)
 	if routeResolutionUnavailable(resolution) {
 		return false
@@ -1482,6 +1485,58 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 		}
 	}
 	return false
+}
+
+func (s *Scheduler) workerWorkspaceCompatible(worker pool.Worker, task pool.Task) bool {
+	actual := strings.TrimSpace(worker.WorkspacePath)
+	expected, exact, ok := s.expectedWorkspaceForTask(task)
+	if !ok {
+		return actual == ""
+	}
+	if actual == "" {
+		return true
+	}
+	if _, err := os.Stat(actual); err != nil {
+		return false
+	}
+	actual = filepath.Clean(actual)
+	expected = filepath.Clean(expected)
+	if exact {
+		return actual == expected
+	}
+	return pathWithinBase(actual, expected)
+}
+
+func (s *Scheduler) expectedWorkspaceForTask(task pool.Task) (path string, exact bool, ok bool) {
+	if s == nil || s.git == nil || s.plans == nil || strings.TrimSpace(task.PlanID) == "" {
+		return "", false, false
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return "", false, false
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if lineage == "" {
+		return "", false, false
+	}
+	lineageDir := filepath.Join(s.git.worktreeBase, lineage)
+	switch task.Role {
+	case lineageFixMergeRole:
+		return filepath.Join(lineageDir, "fix-merge-"+task.ID), true, true
+	default:
+		return lineageDir, false, true
+	}
+}
+
+func pathWithinBase(path, base string) bool {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func routeResolutionUnavailable(resolution RouteResolution) bool {

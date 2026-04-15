@@ -245,15 +245,16 @@ func (pm *PoolManager) SpawnWorker(spec WorkerSpec) (*Worker, error) {
 		Timestamp: time.Now(),
 		Type:      EventWorkerSpawned,
 		WorkerID:  wid,
-		Data: marshalData(WorkerSpawnedData{
-			ContainerID: containerID,
-			Provider:    spec.Provider,
-			Model:       spec.Model,
-			Adapter:     spec.Adapter,
-			Role:        spec.Role,
-			Token:       workerToken,
-		}),
-	}
+			Data: marshalData(WorkerSpawnedData{
+				ContainerID:   containerID,
+				Provider:      spec.Provider,
+				Model:         spec.Model,
+				Adapter:       spec.Adapter,
+				Role:          spec.Role,
+				WorkspacePath: spec.WorkspacePath,
+				Token:         workerToken,
+			}),
+		}
 	if _, err := pm.wal.Append(e); err != nil {
 		// Clean up orphaned container before returning.
 		if pm.hostAPI != nil {
