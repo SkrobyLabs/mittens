@@ -37,6 +37,7 @@ const (
 	planHistoryImplReviewRequested         = "impl_review_requested"
 	planHistoryImplReviewPassed            = "impl_review_passed"
 	planHistoryImplReviewFailed            = "impl_review_failed"
+	planHistoryImplementationSteered       = "implementation_steered"
 	planHistoryManualReviewRemediation     = "manual_review_remediation_requested"
 	planHistoryAutoRemediationRequested    = "auto_remediation_requested"
 	planHistoryAutoRemediationRecovered    = "auto_remediation_recovered"
@@ -170,6 +171,8 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Implementation review passed"
 	case planHistoryImplReviewFailed:
 		return "Implementation review failed"
+	case planHistoryImplementationSteered:
+		return "Implementation steered"
 	case planHistoryManualReviewRemediation:
 		return "Manual review remediation requested"
 	case planHistoryAutoRemediationRequested:

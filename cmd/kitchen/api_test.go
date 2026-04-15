@@ -636,6 +636,55 @@ func TestKitchenAPIRemediateReviewEndpoint(t *testing.T) {
 	}
 }
 
+func TestKitchenAPISteerImplementationEndpoint(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_api_impl_steer",
+			Lineage: "api-impl-steer",
+			Title:   "API implementation steer",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			CompletedAt: &now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/steer-implementation", map[string]any{
+		"note": "Keep standard mittens startup build output visible.",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("steer-implementation status = %d, want 200", resp.StatusCode)
+	}
+	var detail PlanDetail
+	decodeResponse(t, resp, &detail)
+	if detail.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", detail.Execution.State, planStateActive)
+	}
+	if len(detail.Execution.ImplementationSteeringNotes) != 1 {
+		t.Fatalf("ImplementationSteeringNotes = %+v, want 1 note", detail.Execution.ImplementationSteeringNotes)
+	}
+	if detail.Execution.ImplementationSteeringNotes[0].Note != "Keep standard mittens startup build output visible." {
+		t.Fatalf("note = %+v", detail.Execution.ImplementationSteeringNotes[0])
+	}
+}
+
 func TestKitchenAPIRetryTaskEndpoint(t *testing.T) {
 	k := newTestKitchen(t)
 	taskID, planID := seedFailedImplementationTask(t, k)

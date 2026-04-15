@@ -30,6 +30,7 @@ func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux.HandleFunc("GET /v1/plans/{id}/evidence", k.withAPIAuth(token, k.handlePlanEvidence))
 	mux.HandleFunc("POST /v1/plans/{id}/extend", k.withAPIAuth(token, k.handleExtendCouncil))
 	mux.HandleFunc("POST /v1/plans/{id}/steer", k.withAPIAuth(token, k.handleSteerPlan))
+	mux.HandleFunc("POST /v1/plans/{id}/steer-implementation", k.withAPIAuth(token, k.handleSteerImplementation))
 	mux.HandleFunc("GET /v1/tasks/{id}/activity", k.withAPIAuth(token, k.handleTaskActivity))
 	mux.HandleFunc("GET /v1/tasks/{id}/output", k.withAPIAuth(token, k.handleTaskOutput))
 	mux.HandleFunc("POST /v1/tasks/{id}/retry", k.withAPIAuth(token, k.handleRetryTask))
@@ -253,6 +254,26 @@ func (k *Kitchen) handleSteerPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	planID := r.PathValue("id")
 	if err := k.SteerPlan(planID, req.Note); err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	detail, err := k.PlanDetail(planID)
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, detail)
+}
+
+func (k *Kitchen) handleSteerImplementation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Note string `json:"note"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	planID := r.PathValue("id")
+	if err := k.SteerImplementation(planID, req.Note); err != nil {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}

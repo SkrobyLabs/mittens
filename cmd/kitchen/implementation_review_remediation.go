@@ -12,8 +12,9 @@ import (
 const AutoRemediationHardCap = 2
 
 const (
-	manualReviewRemediationDecisionMinor    = "manual_minor"
-	manualReviewRemediationDecisionMinorNit = "manual_minor_nits"
+	manualReviewRemediationDecisionMinor         = "manual_minor"
+	manualReviewRemediationDecisionMinorNit      = "manual_minor_nits"
+	manualReviewRemediationDecisionOperatorSteer = "manual_operator_steer"
 )
 
 func newAutoRemediationSourceRecord(decision, taskID string, artifact *adapter.ReviewCouncilTurnArtifact) *AutoRemediationSourceRecord {
@@ -136,6 +137,7 @@ func maxImplementationTaskComplexity(plan PlanRecord) Complexity {
 
 func buildAutoRemediationPrompt(bundle StoredPlan, source *AutoRemediationSourceRecord) string {
 	var b strings.Builder
+	operatorNotes := implementationSteeringNotesForTask(bundle.Execution, strings.TrimSpace(bundle.Execution.AutoRemediationPlanTaskID))
 	b.WriteString("You are fixing implementation-review findings for an existing Kitchen plan.\n\n")
 	b.WriteString("## Plan\n")
 	b.WriteString("- Title: `")
@@ -166,6 +168,14 @@ func buildAutoRemediationPrompt(bundle StoredPlan, source *AutoRemediationSource
 		if strings.TrimSpace(source.Summary) != "" {
 			b.WriteString("- Summary: ")
 			b.WriteString(strings.TrimSpace(source.Summary))
+			b.WriteString("\n")
+		}
+	}
+	if len(operatorNotes) > 0 {
+		b.WriteString("\n## Operator Guidance\n")
+		for _, note := range operatorNotes {
+			b.WriteString("- ")
+			b.WriteString(strings.TrimSpace(note))
 			b.WriteString("\n")
 		}
 	}
@@ -227,15 +237,35 @@ func buildAutoRemediationPrompt(bundle StoredPlan, source *AutoRemediationSource
 	}
 
 	b.WriteString("\n## Requirements\n")
-	if reviewRemediationMode(source) == reviewRemediationModeManual {
+	if reviewRemediationMode(source) == reviewRemediationModeManual && len(findings) > 0 {
 		b.WriteString("- Fix the requested lower-severity follow-up findings directly.\n")
-	} else {
+	} else if len(findings) > 0 {
 		b.WriteString("- Fix the review findings directly.\n")
+	}
+	if len(operatorNotes) > 0 {
+		b.WriteString("- Apply the operator guidance as required implementation direction.\n")
 	}
 	b.WriteString("- Keep the changes scoped; do not perform unrelated refactors.\n")
 	b.WriteString("- Update or add tests when needed to prove the findings are resolved.\n")
 	b.WriteString("- Leave the lineage branch in a state ready for implementation review again.\n")
 	return b.String()
+}
+
+func implementationSteeringNotesForTask(exec ExecutionRecord, planTaskID string) []string {
+	planTaskID = strings.TrimSpace(planTaskID)
+	if planTaskID == "" {
+		return nil
+	}
+	notes := make([]string, 0, len(exec.ImplementationSteeringNotes))
+	for _, item := range exec.ImplementationSteeringNotes {
+		if strings.TrimSpace(item.AppliedTaskID) != planTaskID {
+			continue
+		}
+		if note := strings.TrimSpace(item.Note); note != "" {
+			notes = append(notes, note)
+		}
+	}
+	return notes
 }
 
 func autoRemediationPlanTask(bundle StoredPlan, attempt int) PlanTask {
@@ -338,6 +368,39 @@ func manualReviewRemediationSource(bundle StoredPlan, includeNits bool) (string,
 		}
 		source.Findings = append(source.Findings, filterReviewFindings(turn.Artifact.Findings, filter)...)
 		source.Disagreements = append(source.Disagreements, filterReviewDisagreements(turn.Artifact.Disagreements, filter)...)
+	}
+	return taskID, source
+}
+
+func latestReviewCouncilArtifact(bundle StoredPlan) (string, *adapter.ReviewCouncilTurnArtifact) {
+	for i := len(bundle.Execution.ReviewCouncilTurns) - 1; i >= 0; i-- {
+		turn := bundle.Execution.ReviewCouncilTurns[i]
+		if turn.Artifact == nil {
+			continue
+		}
+		taskID := reviewCouncilTaskIDForCycle(bundle.Plan.PlanID, currentReviewCouncilCycle(bundle.Execution), turn.Turn)
+		return taskID, turn.Artifact
+	}
+	return "", nil
+}
+
+func implementationSteeringRemediationSource(bundle StoredPlan) (string, *AutoRemediationSourceRecord) {
+	taskID, latest := latestReviewCouncilArtifact(bundle)
+	if latest == nil {
+		source := &AutoRemediationSourceRecord{
+			Decision: manualReviewRemediationDecisionOperatorSteer,
+			Verdict:  strings.TrimSpace(bundle.Execution.ImplReviewStatus),
+		}
+		if strings.TrimSpace(bundle.Execution.ImplReviewStatus) == planReviewStatusFailed && len(bundle.Execution.ImplReviewFindings) > 0 {
+			source.Summary = strings.Join(bundle.Execution.ImplReviewFindings, "; ")
+		}
+		return "", source
+	}
+	source := newAutoRemediationSourceRecord(manualReviewRemediationDecisionOperatorSteer, taskID, latest)
+	if strings.TrimSpace(bundle.Execution.State) != planStateImplementationReviewFailed &&
+		strings.TrimSpace(bundle.Execution.ImplReviewStatus) != planReviewStatusFailed {
+		source.Findings = nil
+		source.Disagreements = nil
 	}
 	return taskID, source
 }

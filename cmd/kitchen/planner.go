@@ -893,6 +893,87 @@ func (k *Kitchen) RemediateReview(planID string, includeNits bool) error {
 	return k.scheduler.ensureAutoRemediationTask(&bundle, false)
 }
 
+func (k *Kitchen) SteerImplementation(planID, note string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
+		return fmt.Errorf("kitchen is not fully configured")
+	}
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return fmt.Errorf("plan ID must not be empty")
+	}
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return fmt.Errorf("implementation steering note must not be empty")
+	}
+
+	k.councilExtendMu.Lock()
+	defer k.councilExtendMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	state := strings.TrimSpace(bundle.Execution.State)
+	if state == "" {
+		state = strings.TrimSpace(bundle.Plan.State)
+	}
+	switch state {
+	case planStateCompleted, planStateImplementationReviewFailed:
+	default:
+		return fmt.Errorf("invalid plan state %q for implementation steering; must be completed or implementation_review_failed", state)
+	}
+	if bundle.Execution.AutoRemediationActive {
+		return fmt.Errorf("plan %s already has implementation remediation in progress", planID)
+	}
+
+	sourceTaskID, source := implementationSteeringRemediationSource(bundle)
+	planTaskID := nextManualReviewRemediationPlanTaskID(bundle.Plan)
+	runtimeTaskID := planTaskRuntimeID(planID, planTaskID)
+	now := time.Now().UTC()
+
+	bundle.Execution.ImplementationSteeringNotes = append(bundle.Execution.ImplementationSteeringNotes, ImplementationSteeringNote{
+		Note:          note,
+		AppliedTaskID: planTaskID,
+		OccurredAt:    now,
+	})
+	bundle.Execution.AutoRemediationAttempt = 0
+	bundle.Execution.AutoRemediationActive = true
+	bundle.Execution.AutoRemediationPlanTaskID = planTaskID
+	bundle.Execution.AutoRemediationTaskID = runtimeTaskID
+	bundle.Execution.AutoRemediationSourceTaskID = sourceTaskID
+	bundle.Execution.AutoRemediationSource = source
+	bundle.Execution.ImplReviewStatus = ""
+	bundle.Execution.ImplReviewFindings = nil
+	bundle.Execution.ImplReviewFollowups = nil
+	bundle.Execution.ImplReviewedAt = nil
+	bundle.Execution.ReviewCouncilMaxTurns = 0
+	bundle.Execution.ReviewCouncilTurnsCompleted = 0
+	bundle.Execution.ReviewCouncilAwaitingAnswers = false
+	bundle.Execution.ReviewCouncilFinalDecision = ""
+	bundle.Execution.ReviewCouncilSeats = [2]CouncilSeatRecord{}
+	bundle.Execution.ReviewCouncilTurns = nil
+	bundle.Execution.ReviewCouncilWarnings = nil
+	bundle.Execution.ReviewCouncilUnresolvedDisagreements = nil
+	bundle.Execution.RejectedBy = ""
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedAt = nil
+	bundle.Plan.State = planStateActive
+	bundle.Execution.State = planStateActive
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:     planHistoryImplementationSteered,
+		TaskID:   runtimeTaskID,
+		Summary:  "Implementation steering queued on existing lineage.",
+		Findings: []string{note},
+	})
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		return err
+	}
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	return k.scheduler.ensureAutoRemediationTask(&bundle, false)
+}
+
 func (k *Kitchen) CancelPlan(planID string) error {
 	if k == nil || k.planStore == nil {
 		return fmt.Errorf("kitchen plan store not configured")

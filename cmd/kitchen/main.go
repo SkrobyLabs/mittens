@@ -83,6 +83,7 @@ func newRootCommand() *cobra.Command {
 	var replanReason string
 	var remediateIncludeNits bool
 	var steerFile string
+	var steerImplementationFile string
 	var retrySameWorker bool
 	var mergeNoCommit bool
 	var researchFile string
@@ -466,6 +467,51 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	steerCmd.Flags().StringVar(&steerFile, "file", "", "read the steering note from a file path or '-' for stdin")
+
+	steerImplementationCmd := &cobra.Command{
+		Use:   "steer-implementation PLAN_ID [--file PATH|-] [NOTE]",
+		Short: "Queue implementation guidance on the existing lineage without a full replan",
+		Args:  cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			planID := ""
+			if len(args) > 0 {
+				planID = strings.TrimSpace(args[0])
+			}
+			if planID == "" {
+				return fmt.Errorf("plan ID must not be empty")
+			}
+			noteArgs := args[1:]
+			note, err := resolveSubmitIdea(cmd, noteArgs, steerImplementationFile)
+			if err != nil {
+				return err
+			}
+			if client, ok, err := openKitchenAPIClient("."); err != nil {
+				return err
+			} else if ok {
+				detail, err := client.SteerImplementation(planID, note)
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), detail)
+			}
+
+			k, closeFn, err := openKitchen(".")
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			if err := k.SteerImplementation(planID, note); err != nil {
+				return err
+			}
+			detail, err := k.PlanDetail(planID)
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), detail)
+		},
+	}
+	steerImplementationCmd.Flags().StringVar(&steerImplementationFile, "file", "", "read the implementation steering note from a file path or '-' for stdin")
 
 	remediateReviewCmd := &cobra.Command{
 		Use:   "remediate-review PLAN_ID",
@@ -1251,6 +1297,7 @@ func newRootCommand() *cobra.Command {
 		replanCmd,
 		reviewCmd,
 		steerCmd,
+		steerImplementationCmd,
 		remediateReviewCmd,
 		cancelCmd,
 		deleteCmd,

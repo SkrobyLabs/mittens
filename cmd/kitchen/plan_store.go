@@ -76,23 +76,23 @@ type PlanProviderOverrides struct {
 }
 
 type PlanRecord struct {
-	PlanID           string                 `json:"planId"`
-	PlannerID        string                 `json:"plannerId,omitempty"`
-	Source           string                 `json:"source,omitempty"`
-	Mode             string                 `json:"mode,omitempty"`
-	Anchor           PlanAnchor             `json:"anchor,omitempty"`
-	Lineage          string                 `json:"lineage"`
-	Title            string                 `json:"title"`
-	Summary          string                 `json:"summary,omitempty"`
-	Ownership        PlanOwnership          `json:"ownership,omitempty"`
-	Tasks            []PlanTask             `json:"tasks,omitempty"`
-	DependsOn        []string               `json:"dependsOn,omitempty"`
-	State            string                 `json:"state,omitempty"`
-	ResearchPlanID   string                 `json:"researchPlanId,omitempty"`
-	ResearchContext  string                 `json:"researchContext,omitempty"`
+	PlanID            string                 `json:"planId"`
+	PlannerID         string                 `json:"plannerId,omitempty"`
+	Source            string                 `json:"source,omitempty"`
+	Mode              string                 `json:"mode,omitempty"`
+	Anchor            PlanAnchor             `json:"anchor,omitempty"`
+	Lineage           string                 `json:"lineage"`
+	Title             string                 `json:"title"`
+	Summary           string                 `json:"summary,omitempty"`
+	Ownership         PlanOwnership          `json:"ownership,omitempty"`
+	Tasks             []PlanTask             `json:"tasks,omitempty"`
+	DependsOn         []string               `json:"dependsOn,omitempty"`
+	State             string                 `json:"state,omitempty"`
+	ResearchPlanID    string                 `json:"researchPlanId,omitempty"`
+	ResearchContext   string                 `json:"researchContext,omitempty"`
 	ProviderOverrides *PlanProviderOverrides `json:"providerOverrides,omitempty"`
-	CreatedAt        time.Time              `json:"createdAt"`
-	UpdatedAt        time.Time              `json:"updatedAt"`
+	CreatedAt         time.Time              `json:"createdAt"`
+	UpdatedAt         time.Time              `json:"updatedAt"`
 }
 
 type ExecutionRecord struct {
@@ -126,6 +126,7 @@ type ExecutionRecord struct {
 	CouncilWarnings                      []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
 	CouncilUnresolvedDisagreements       []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
 	SteeringNotes                        []SteeringNote                `json:"steeringNotes,omitempty"`
+	ImplementationSteeringNotes          []ImplementationSteeringNote  `json:"implementationSteeringNotes,omitempty"`
 	ReviewCouncilMaxTurns                int                           `json:"reviewCouncilMaxTurns,omitempty"`
 	ReviewCouncilCycle                   int                           `json:"reviewCouncilCycle,omitempty"`
 	ReviewCouncilTurnsCompleted          int                           `json:"reviewCouncilTurnsCompleted,omitempty"`
@@ -185,6 +186,12 @@ type SteeringNote struct {
 	Note        string    `json:"note"`
 	AppliedTurn int       `json:"appliedTurn,omitempty"`
 	OccurredAt  time.Time `json:"occurredAt"`
+}
+
+type ImplementationSteeringNote struct {
+	Note          string    `json:"note"`
+	AppliedTaskID string    `json:"appliedTaskId,omitempty"`
+	OccurredAt    time.Time `json:"occurredAt"`
 }
 
 type AffinityRecord struct {

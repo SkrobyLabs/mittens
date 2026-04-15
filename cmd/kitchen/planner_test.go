@@ -1247,6 +1247,147 @@ func TestRemediateReviewQueuesManualRemediationTask(t *testing.T) {
 	}
 }
 
+func TestSteerImplementationOnCompletedPlanQueuesManualRemediationTask(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_impl_steer_completed",
+			Lineage: "impl-steer-completed",
+			Title:   "Implementation steering",
+			State:   planStateCompleted,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+				TimeoutMinutes:   15,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			CompletedAt: &now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerImplementation(planID, "Keep normal mittens builds verbose; only quiet kitchen serve background image builds."); err != nil {
+		t.Fatalf("SteerImplementation: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if !bundle.Execution.AutoRemediationActive {
+		t.Fatal("expected implementation steering remediation to be active")
+	}
+	if len(bundle.Execution.ImplementationSteeringNotes) != 1 {
+		t.Fatalf("ImplementationSteeringNotes = %+v, want 1 note", bundle.Execution.ImplementationSteeringNotes)
+	}
+	note := bundle.Execution.ImplementationSteeringNotes[0]
+	if note.Note != "Keep normal mittens builds verbose; only quiet kitchen serve background image builds." {
+		t.Fatalf("note = %q", note.Note)
+	}
+	if note.AppliedTaskID != bundle.Execution.AutoRemediationPlanTaskID {
+		t.Fatalf("AppliedTaskID = %q, want %q", note.AppliedTaskID, bundle.Execution.AutoRemediationPlanTaskID)
+	}
+	task, ok := k.pm.Task(bundle.Execution.AutoRemediationTaskID)
+	if !ok {
+		t.Fatalf("expected remediation task %q to be queued", bundle.Execution.AutoRemediationTaskID)
+	}
+	if !strings.Contains(task.Prompt, "## Operator Guidance") {
+		t.Fatalf("task prompt missing operator guidance:\n%s", task.Prompt)
+	}
+	if !strings.Contains(task.Prompt, "Keep normal mittens builds verbose; only quiet kitchen serve background image builds.") {
+		t.Fatalf("task prompt missing steering note:\n%s", task.Prompt)
+	}
+}
+
+func TestSteerImplementationOnFailedReviewIncludesExistingFindings(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	now := time.Now().UTC()
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_impl_steer_failed",
+			Lineage: "impl-steer-failed",
+			Title:   "Implementation steering after failed review",
+			State:   planStateImplementationReviewFailed,
+			Tasks: []PlanTask{{
+				ID:               "t1",
+				Title:            "Implement",
+				Prompt:           "implement",
+				Complexity:       ComplexityMedium,
+				ReviewComplexity: ComplexityMedium,
+				TimeoutMinutes:   15,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:               planStateImplementationReviewFailed,
+			ImplReviewRequested: true,
+			ImplReviewStatus:    planReviewStatusFailed,
+			ImplReviewFindings:  []string{"[major] cmd/mittens/app.go:482 scope - Keep normal mittens builds verbose."},
+			ImplReviewedAt:      &now,
+			ReviewCouncilCycle:  1,
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "B",
+				Turn: 2,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "B",
+					Turn:    2,
+					Stance:  "converged",
+					Verdict: pool.ReviewFail,
+					Summary: "scoping bug",
+					Findings: []adapter.ReviewFinding{{
+						ID:          "f1",
+						File:        "cmd/mittens/app.go",
+						Line:        482,
+						Category:    "scope",
+						Description: "Keep normal mittens builds verbose.",
+						Severity:    pool.SeverityMajor,
+					}},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerImplementation(planID, "Only quiet daemon/background image builds."); err != nil {
+		t.Fatalf("SteerImplementation: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.AutoRemediationSource == nil {
+		t.Fatal("expected remediation source")
+	}
+	if got := bundle.Execution.AutoRemediationSource.Decision; got != manualReviewRemediationDecisionOperatorSteer {
+		t.Fatalf("source decision = %q, want %q", got, manualReviewRemediationDecisionOperatorSteer)
+	}
+	task, ok := k.pm.Task(bundle.Execution.AutoRemediationTaskID)
+	if !ok {
+		t.Fatalf("expected remediation task %q to be queued", bundle.Execution.AutoRemediationTaskID)
+	}
+	if !strings.Contains(task.Prompt, "Keep normal mittens builds verbose.") {
+		t.Fatalf("task prompt missing failed-review finding:\n%s", task.Prompt)
+	}
+	if !strings.Contains(task.Prompt, "Only quiet daemon/background image builds.") {
+		t.Fatalf("task prompt missing operator note:\n%s", task.Prompt)
+	}
+}
+
 func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
 	k := newTestKitchen(t)
 	attachTestScheduler(t, k)
