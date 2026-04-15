@@ -125,6 +125,7 @@ type ExecutionRecord struct {
 	CouncilTurns                         []CouncilTurnRecord           `json:"councilTurns,omitempty"`
 	CouncilWarnings                      []adapter.CouncilDisagreement `json:"councilWarnings,omitempty"`
 	CouncilUnresolvedDisagreements       []adapter.CouncilDisagreement `json:"councilUnresolvedDisagreements,omitempty"`
+	SteeringNotes                        []SteeringNote                `json:"steeringNotes,omitempty"`
 	ReviewCouncilMaxTurns                int                           `json:"reviewCouncilMaxTurns,omitempty"`
 	ReviewCouncilCycle                   int                           `json:"reviewCouncilCycle,omitempty"`
 	ReviewCouncilTurnsCompleted          int                           `json:"reviewCouncilTurnsCompleted,omitempty"`
@@ -178,6 +179,12 @@ type AutoRemediationSourceRecord struct {
 	Strengths       []string                      `json:"strengths,omitempty"`
 	SeatMemo        string                        `json:"seatMemo,omitempty"`
 	RejectedReasons []string                      `json:"rejectedReasons,omitempty"`
+}
+
+type SteeringNote struct {
+	Note        string    `json:"note"`
+	AppliedTurn int       `json:"appliedTurn,omitempty"`
+	OccurredAt  time.Time `json:"occurredAt"`
 }
 
 type AffinityRecord struct {

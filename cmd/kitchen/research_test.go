@@ -488,14 +488,14 @@ func TestRefineResearchNonResearchPlanFails(t *testing.T) {
 
 func TestBuildCouncilTurnPromptWithoutResearchContext(t *testing.T) {
 	// Verify that a normal plan (no research context) doesn't include the Prior Research section.
-	prompt := adapter.BuildCouncilTurnPrompt("Build a parser", nil, "A", 1, "Build a parser")
+	prompt := adapter.BuildCouncilTurnPrompt("Build a parser", nil, "A", 1, "Build a parser", "")
 	if strings.Contains(prompt, "Prior Research") {
 		t.Fatal("prompt without research context should not contain 'Prior Research' section")
 	}
 }
 
 func TestBuildCouncilTurnPromptWithResearchContext(t *testing.T) {
-	prompt := adapter.BuildCouncilTurnPrompt("Build a parser", nil, "A", 1, "Build a parser", "The existing parser uses recursive descent.")
+	prompt := adapter.BuildCouncilTurnPrompt("Build a parser", nil, "A", 1, "Build a parser", "", "The existing parser uses recursive descent.")
 	if !strings.Contains(prompt, "Prior Research") {
 		t.Fatal("prompt with research context should contain 'Prior Research' section")
 	}

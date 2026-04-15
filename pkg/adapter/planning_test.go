@@ -31,7 +31,7 @@ func TestBuildPlannerPrompt(t *testing.T) {
 }
 
 func TestBuildCouncilTurnPrompt(t *testing.T) {
-	prompt := BuildCouncilTurnPrompt("Refine the parser plan.", nil, "A", 2, "Operator wants a safer rollout.")
+	prompt := BuildCouncilTurnPrompt("Refine the parser plan.", nil, "A", 2, "Operator wants a safer rollout.", "")
 	if !strings.Contains(prompt, "Produce a full candidate plan each turn") {
 		t.Fatal("council prompt missing candidate-plan guidance")
 	}
@@ -55,6 +55,32 @@ func TestBuildCouncilTurnPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildCouncilTurnPromptWithSteeringNotes(t *testing.T) {
+	prompt := BuildCouncilTurnPrompt("Plan the feature.", nil, "B", 3, "Build it safely.", "Focus on the happy path first.")
+	if !strings.Contains(prompt, "Operator Steering") {
+		t.Fatal("prompt with steering notes should contain '### Operator Steering' section")
+	}
+	if !strings.Contains(prompt, "Focus on the happy path first.") {
+		t.Fatal("prompt should contain the steering note text")
+	}
+	// Operator Steering should appear after Operator Intent.
+	idxIntent := strings.Index(prompt, "### Operator Intent")
+	idxSteering := strings.Index(prompt, "### Operator Steering")
+	if idxIntent == -1 || idxSteering == -1 {
+		t.Fatalf("prompt missing Operator Intent or Operator Steering:\n%s", prompt)
+	}
+	if !(idxIntent < idxSteering) {
+		t.Fatal("Operator Steering should appear after Operator Intent")
+	}
+}
+
+func TestBuildCouncilTurnPromptNoSteeringSection(t *testing.T) {
+	prompt := BuildCouncilTurnPrompt("Plan the feature.", nil, "A", 1, "Summary.", "")
+	if strings.Contains(prompt, "Operator Steering") {
+		t.Fatal("prompt without steering notes should not contain '### Operator Steering' section")
+	}
+}
+
 func TestBuildCouncilTurnPrompt_PriorArtifactPlacement(t *testing.T) {
 	prior := []CouncilTurnArtifact{
 		{
@@ -70,7 +96,7 @@ func TestBuildCouncilTurnPrompt_PriorArtifactPlacement(t *testing.T) {
 		},
 	}
 
-	prompt := BuildCouncilTurnPrompt("Refine the parser plan.", prior, "B", 2, "Operator wants a safer rollout.")
+	prompt := BuildCouncilTurnPrompt("Refine the parser plan.", prior, "B", 2, "Operator wants a safer rollout.", "")
 	inlineRule := "- Prefer fewer, larger, self-contained tasks. Split only when parallelism genuinely pays off"
 	idxRules := strings.Index(prompt, "### Council Rules")
 	idxInline := strings.Index(prompt, inlineRule)

@@ -50,7 +50,9 @@ func TestKitchenEndToEndMultiLineageDispatchesIndependentWorktrees(t *testing.T)
 	if err != nil {
 		t.Fatalf("SubmitIdea(planB): %v", err)
 	}
-	completePlannerSpawn(t, k, runtime, plannerSpawns[0], adapter.PlanArtifact{
+	// Plan A required 2 council turns (w-1 + w-2); plan B's planner is the 3rd spawn.
+	plannerSpawnsAll := waitForSpawnByRole(t, runtime, plannerTaskRole, 3)
+	completePlannerSpawn(t, k, runtime, plannerSpawnsAll[2], adapter.PlanArtifact{
 		Title:   "Lineage two",
 		Summary: "Single implementation task for lineage two.",
 		Tasks: []adapter.PlanArtifactTask{{

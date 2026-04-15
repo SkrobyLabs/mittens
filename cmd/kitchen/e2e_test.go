@@ -627,6 +627,11 @@ func completePlannerSpawn(t *testing.T, k *Kitchen, runtime *fakeRuntimeDaemon, 
 		waitFor(t, 3*time.Second, func() bool {
 			for _, candidate := range runtime.Spawns() {
 				if candidate.Role == plannerTaskRole && !handled[candidate.ID] {
+					// Skip dead workers (token cleared on death); they belong to
+					// a previous plan's council and must not be reused here.
+					if w, ok := k.pm.Worker(candidate.ID); !ok || w.Token == "" {
+						continue
+					}
 					next = candidate
 					return true
 				}

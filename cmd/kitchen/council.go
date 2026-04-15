@@ -215,7 +215,21 @@ func buildCouncilTurnPrompt(bundle StoredPlan, turn int) (string, error) {
 	if idea == "" {
 		idea = strings.TrimSpace(bundle.Plan.Title)
 	}
-	return adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary, bundle.Plan.ResearchContext), nil
+	steeringNotes := formatSteeringNotes(bundle.Execution.SteeringNotes, turn)
+	return adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary, steeringNotes, bundle.Plan.ResearchContext), nil
+}
+
+// formatSteeringNotes formats steering notes applicable to the given council turn
+// into a single string for inclusion in the prompt. Notes with AppliedTurn==0 or
+// AppliedTurn>=turn are included so older notes from prior steers are visible too.
+func formatSteeringNotes(notes []SteeringNote, turn int) string {
+	var relevant []string
+	for _, n := range notes {
+		if n.AppliedTurn == 0 || n.AppliedTurn >= turn {
+			relevant = append(relevant, strings.TrimSpace(n.Note))
+		}
+	}
+	return strings.Join(relevant, "\n\n")
 }
 
 func marshalCouncilTurns(turns []CouncilTurnRecord) string {

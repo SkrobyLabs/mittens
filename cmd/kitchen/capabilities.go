@@ -15,15 +15,15 @@ func kitchenCapabilityMetadata() map[string]any {
 		},
 		"sections": map[string]any{
 			"cli": map[string]any{
-				"version":   4,
+				"version":   5,
 				"stability": "beta",
 			},
 			"api": map[string]any{
-				"version":   4,
+				"version":   5,
 				"stability": "beta",
 			},
 			"planning": map[string]any{
-				"version":   1,
+				"version":   2,
 				"stability": "beta",
 			},
 			"git": map[string]any{
@@ -145,6 +145,11 @@ func kitchenCapabilities() map[string]any {
 				"target":  "lineage",
 				"effects": []string{"merge_base_into_lineage", "update_active_plan_anchor"},
 			},
+			"steer": map[string]any{
+				"inputs":      []string{"inline", "file", "stdin"},
+				"description": "Append directional guidance to a planning council in reviewing or pending_approval state",
+				"validStates": []string{"reviewing", "pending_approval"},
+			},
 			"retry": map[string]any{
 				"target": "task",
 				"options": map[string]any{
@@ -173,6 +178,7 @@ func kitchenCapabilities() map[string]any {
 				"planDelete":     "/v1/plans/{id}/purge",
 				"planHistory":    "/v1/plans/{id}/history",
 				"planEvidence":   "/v1/plans/{id}/evidence",
+				"planSteer":      "/v1/plans/{id}/steer",
 				"taskOutput":     "/v1/tasks/{id}/output",
 				"taskRetry":      "/v1/tasks/{id}/retry",
 				"questions":      "/v1/questions",
@@ -217,6 +223,14 @@ func kitchenCapabilities() map[string]any {
 			"automaticReviewRefinement": true,
 			"plannerQuestions":          true,
 			"researchMode":              true,
+			"councilSteering": map[string]any{
+				"description":    "Append directional guidance to a planning council without replanning",
+				"validStates":    []string{"reviewing", "pending_approval"},
+				"hardCap":        CouncilHardCap,
+				"persistedAs":    "steeringNotes",
+				"promptSection":  "Operator Steering",
+				"historyEvent":   planHistoryCouncilSteered,
+			},
 			"reviewCouncil": map[string]any{
 				"name":        "review_council",
 				"description": "Two-seat review council for plan-level implementation reviews, converges on verdict agreement",

@@ -1306,6 +1306,202 @@ func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
 	}
 }
 
+func TestSteerPlanFromPendingApproval(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_steer_pending",
+			Lineage: "steer-pending",
+			Title:   "Steer from pending approval",
+			State:   planStatePendingApproval,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStatePendingApproval,
+			CouncilMaxTurns:       2,
+			CouncilTurnsCompleted: 2,
+			CouncilFinalDecision:  councilConverged,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerPlan(planID, "Focus on the happy path first."); err != nil {
+		t.Fatalf("SteerPlan: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	if bundle.Execution.CouncilMaxTurns != 3 {
+		t.Fatalf("CouncilMaxTurns = %d, want 3", bundle.Execution.CouncilMaxTurns)
+	}
+	if bundle.Execution.CouncilFinalDecision != "" {
+		t.Fatalf("CouncilFinalDecision = %q, want empty", bundle.Execution.CouncilFinalDecision)
+	}
+	if len(bundle.Execution.SteeringNotes) != 1 {
+		t.Fatalf("SteeringNotes = %+v, want 1 note", bundle.Execution.SteeringNotes)
+	}
+	if bundle.Execution.SteeringNotes[0].Note != "Focus on the happy path first." {
+		t.Fatalf("SteeringNotes[0].Note = %q", bundle.Execution.SteeringNotes[0].Note)
+	}
+	if bundle.Execution.SteeringNotes[0].AppliedTurn != 3 {
+		t.Fatalf("SteeringNotes[0].AppliedTurn = %d, want 3", bundle.Execution.SteeringNotes[0].AppliedTurn)
+	}
+	// History must record the steer event.
+	var steeredEntry *PlanHistoryEntry
+	for i := range bundle.Execution.History {
+		if bundle.Execution.History[i].Type == planHistoryCouncilSteered {
+			steeredEntry = &bundle.Execution.History[i]
+			break
+		}
+	}
+	if steeredEntry == nil {
+		t.Fatal("expected council_steered history entry")
+	}
+	if !strings.Contains(steeredEntry.Summary, "Focus on the happy path first.") {
+		t.Fatalf("history summary = %q, want to contain the note", steeredEntry.Summary)
+	}
+	// Next council task must be enqueued.
+	taskID := councilTaskID(planID, 3)
+	if _, ok := k.pm.Task(taskID); !ok {
+		t.Fatalf("expected council task %s to be enqueued", taskID)
+	}
+}
+
+func TestSteerPlanFromReviewing(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_steer_reviewing",
+			Lineage: "steer-reviewing",
+			Title:   "Steer while reviewing",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 1,
+			CouncilFinalDecision:  "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerPlan(planID, "Prefer a single task unless parallelism is needed."); err != nil {
+		t.Fatalf("SteerPlan: %v", err)
+	}
+
+	bundle, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	// State must remain reviewing.
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	// CouncilMaxTurns must not change.
+	if bundle.Execution.CouncilMaxTurns != 4 {
+		t.Fatalf("CouncilMaxTurns = %d, want 4 (unchanged)", bundle.Execution.CouncilMaxTurns)
+	}
+	if len(bundle.Execution.SteeringNotes) != 1 {
+		t.Fatalf("SteeringNotes = %+v, want 1 note", bundle.Execution.SteeringNotes)
+	}
+	if bundle.Execution.SteeringNotes[0].AppliedTurn != 2 {
+		t.Fatalf("SteeringNotes[0].AppliedTurn = %d, want 2", bundle.Execution.SteeringNotes[0].AppliedTurn)
+	}
+	var steeredEntry *PlanHistoryEntry
+	for i := range bundle.Execution.History {
+		if bundle.Execution.History[i].Type == planHistoryCouncilSteered {
+			steeredEntry = &bundle.Execution.History[i]
+			break
+		}
+	}
+	if steeredEntry == nil {
+		t.Fatal("expected council_steered history entry")
+	}
+}
+
+func TestSteerPlanInvalidState(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_steer_invalid",
+			Lineage: "steer-invalid",
+			Title:   "Steer invalid state",
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{State: planStateActive},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerPlan(planID, "some guidance"); err == nil || !strings.Contains(err.Error(), "invalid plan state") {
+		t.Fatalf("SteerPlan err = %v, want invalid state error", err)
+	}
+}
+
+func TestSteerPlanBlockedByAwaitingAnswers(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_steer_blocked",
+			Lineage: "steer-blocked",
+			Title:   "Steer blocked by questions",
+			State:   planStateReviewing,
+		},
+		Execution: ExecutionRecord{
+			State:                  planStateReviewing,
+			CouncilMaxTurns:        4,
+			CouncilTurnsCompleted:  1,
+			CouncilAwaitingAnswers: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerPlan(planID, "some guidance"); err == nil || !strings.Contains(err.Error(), "blocking council questions") {
+		t.Fatalf("SteerPlan err = %v, want blocking questions error", err)
+	}
+}
+
+func TestSteerPlanAtHardCap(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_steer_hardcap",
+			Lineage: "steer-hardcap",
+			Title:   "Steer at hard cap",
+			State:   planStatePendingApproval,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStatePendingApproval,
+			CouncilMaxTurns:       CouncilHardCap,
+			CouncilTurnsCompleted: CouncilHardCap,
+			CouncilFinalDecision:  councilConverged,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	if err := k.SteerPlan(planID, "some guidance"); err == nil || !strings.Contains(err.Error(), "hard cap") {
+		t.Fatalf("SteerPlan err = %v, want hard cap error", err)
+	}
+}
+
 func TestRetryTaskPreservesAutoRemediationStateForRemediationTask(t *testing.T) {
 	k := newTestKitchen(t)
 	planID, err := k.planStore.Create(StoredPlan{

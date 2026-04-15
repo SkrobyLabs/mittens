@@ -695,6 +695,72 @@ func (k *Kitchen) ExtendCouncil(planID string, turns int) error {
 	return k.scheduler.enqueueCouncilTurn(bundle)
 }
 
+func (k *Kitchen) SteerPlan(planID, note string) error {
+	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
+		return fmt.Errorf("kitchen is not fully configured")
+	}
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return fmt.Errorf("plan ID must not be empty")
+	}
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return fmt.Errorf("steering note must not be empty")
+	}
+
+	k.councilExtendMu.Lock()
+	defer k.councilExtendMu.Unlock()
+
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	state := strings.TrimSpace(bundle.Execution.State)
+	if state == "" {
+		state = strings.TrimSpace(bundle.Plan.State)
+	}
+	switch state {
+	case planStateReviewing, planStatePendingApproval:
+		// eligible states
+	default:
+		return fmt.Errorf("invalid plan state %q for steering; must be reviewing or pending_approval", state)
+	}
+
+	if bundle.Execution.CouncilAwaitingAnswers {
+		return fmt.Errorf("plan %s has blocking council questions that must be answered before steering", planID)
+	}
+
+	nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
+	bundle.Execution.SteeringNotes = append(bundle.Execution.SteeringNotes, SteeringNote{
+		Note:        note,
+		AppliedTurn: nextTurn,
+		OccurredAt:  time.Now().UTC(),
+	})
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryCouncilSteered,
+		TaskID:  councilTaskID(planID, nextTurn),
+		Summary: fmt.Sprintf("Operator steering note added for turn %d: %s", nextTurn, note),
+	})
+
+	if state == planStatePendingApproval {
+		if bundle.Execution.CouncilTurnsCompleted >= CouncilHardCap {
+			return fmt.Errorf("plan %s cannot be steered: council is at the hard cap of %d turns", planID, CouncilHardCap)
+		}
+		bundle.Execution.CouncilMaxTurns++
+		bundle.Execution.CouncilFinalDecision = ""
+		bundle.Execution.CouncilWarnings = nil
+		bundle.Execution.CouncilUnresolvedDisagreements = nil
+		bundle.Execution.RejectedBy = ""
+		bundle.Plan.State = planStateReviewing
+		bundle.Execution.State = planStateReviewing
+		bundle.Execution.ActiveTaskIDs = nil
+		return k.scheduler.enqueueCouncilTurn(bundle)
+	}
+
+	// State is reviewing: persist the note so the next council turn picks it up.
+	return k.planStore.UpdateExecution(planID, bundle.Execution)
+}
+
 func (k *Kitchen) RequestReview(planID string) error {
 	if k == nil || k.planStore == nil || k.pm == nil || k.scheduler == nil {
 		return fmt.Errorf("kitchen is not fully configured")

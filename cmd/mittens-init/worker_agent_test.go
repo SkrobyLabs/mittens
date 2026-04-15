@@ -908,7 +908,7 @@ func TestExecuteTask_PlannerTaskWritesCouncilArtifactAndCompletes(t *testing.T) 
 	task := &pool.Task{
 		ID:     "t-plan",
 		Role:   "planner",
-		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, ""),
+		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, "", ""),
 		Status: pool.TaskDispatched,
 	}
 	teamDir := t.TempDir()
@@ -957,7 +957,7 @@ func TestExecuteTask_PlannerTaskMissingArtifactReportsFail(t *testing.T) {
 	task := &pool.Task{
 		ID:     "t-plan",
 		Role:   "planner",
-		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, ""),
+		Prompt: adapter.BuildCouncilTurnPrompt("Plan this change", nil, "A", 1, "", ""),
 		Status: pool.TaskDispatched,
 	}
 	teamDir := t.TempDir()

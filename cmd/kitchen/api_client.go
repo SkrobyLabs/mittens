@@ -127,6 +127,11 @@ func (c *kitchenAPIClient) PromoteResearch(planID, lineage string, auto, implRev
 	return resp, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/promote", req, &resp)
 }
 
+func (c *kitchenAPIClient) SteerPlan(planID, note string) (PlanDetail, error) {
+	var detail PlanDetail
+	return detail, c.request(http.MethodPost, "/v1/plans/"+url.PathEscape(planID)+"/steer", map[string]any{"note": note}, &detail)
+}
+
 func (c *kitchenAPIClient) RefineResearch(planID, clarification string) (map[string]any, error) {
 	req := map[string]any{
 		"clarification": clarification,

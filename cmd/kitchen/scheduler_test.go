@@ -1311,6 +1311,10 @@ func TestSchedulerOnTaskCompletedMergesAndKillsWorker(t *testing.T) {
 			Lineage: "parser-errors",
 			Title:   "Parser error handling",
 			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State: planStateActive,
 		},
 	})
 	if err != nil {
@@ -2188,6 +2192,10 @@ func TestSchedulerOnTaskCompletedEmitsPlanCompletedNotification(t *testing.T) {
 			Lineage: "parser-errors",
 			Title:   "Parser error handling",
 			Anchor:  PlanAnchor{Commit: strings.TrimSpace(head)},
+			State:   planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State: planStateActive,
 		},
 	})
 	if err != nil {

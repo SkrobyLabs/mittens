@@ -20,6 +20,7 @@ const (
 	planHistoryCouncilRejected             = "council_rejected"
 	planHistoryCouncilSeatRehydrated       = "council_seat_rehydrated"
 	planHistoryCouncilExtended             = "council_extended"
+	planHistoryCouncilSteered              = "council_steered"
 	planHistoryReviewCouncilStarted        = "review_council_started"
 	planHistoryReviewCouncilTurnCompleted  = "review_council_turn_completed"
 	planHistoryReviewCouncilWaitingAnswers = "review_council_waiting_answers"
@@ -141,6 +142,8 @@ func planHistoryEntryLabel(entryType string) string {
 		return "Council seat rehydrated"
 	case planHistoryCouncilExtended:
 		return "Council extended"
+	case planHistoryCouncilSteered:
+		return "Council steered"
 	case planHistoryReviewCouncilStarted:
 		return "Review council started"
 	case planHistoryReviewCouncilTurnCompleted:

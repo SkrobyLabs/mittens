@@ -251,7 +251,7 @@ func BuildPlannerPrompt(taskPrompt, priorContext string) string {
 	return b.String()
 }
 
-func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string, researchContext ...string) string {
+func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat string, turn int, summary string, steeringNotes string, researchContext ...string) string {
 	var b strings.Builder
 	b.WriteString("## Planner Council Turn\n\n")
 	b.WriteString("You are one seat in a two-seat planner council. Produce a full candidate plan each turn, integrating any improvements over the prior seat's plan.\n\n")
@@ -268,6 +268,12 @@ func BuildCouncilTurnPrompt(idea string, prior []CouncilTurnArtifact, seat strin
 	if strings.TrimSpace(summary) != "" {
 		b.WriteString("### Operator Intent\n\n")
 		b.WriteString(strings.TrimSpace(summary))
+		b.WriteString("\n\n")
+	}
+	if strings.TrimSpace(steeringNotes) != "" {
+		b.WriteString("### Operator Steering\n\n")
+		b.WriteString("The operator has added the following directional guidance. Incorporate this into your plan:\n\n")
+		b.WriteString(strings.TrimSpace(steeringNotes))
 		b.WriteString("\n\n")
 	}
 	if strings.TrimSpace(idea) != "" {

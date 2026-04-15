@@ -503,6 +503,67 @@ func TestKitchenAPIRequestReviewEndpoint(t *testing.T) {
 	}
 }
 
+func TestKitchenAPISteerEndpoint(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_api_steer",
+			Lineage: "api-steer",
+			Title:   "API steer test",
+			State:   planStatePendingApproval,
+		},
+		Execution: ExecutionRecord{
+			State:                 planStatePendingApproval,
+			CouncilMaxTurns:       2,
+			CouncilTurnsCompleted: 2,
+			CouncilFinalDecision:  councilConverged,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/plans/"+planID+"/steer", map[string]any{
+		"note": "Keep it simple.",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("steer status = %d, want 200", resp.StatusCode)
+	}
+	var detail PlanDetail
+	decodeResponse(t, resp, &detail)
+	if detail.Plan.PlanID != planID {
+		t.Fatalf("plan id = %q, want %q", detail.Plan.PlanID, planID)
+	}
+	if detail.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", detail.Execution.State, planStateReviewing)
+	}
+	if len(detail.Execution.SteeringNotes) != 1 || detail.Execution.SteeringNotes[0].Note != "Keep it simple." {
+		t.Fatalf("SteeringNotes = %+v, want 1 note 'Keep it simple.'", detail.Execution.SteeringNotes)
+	}
+}
+
+func TestKitchenAPISteerEndpointInvalidState(t *testing.T) {
+	k := newTestKitchen(t)
+	attachTestScheduler(t, k)
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan:      PlanRecord{PlanID: "plan_api_steer_inv", Lineage: "api-steer-inv", Title: "Bad state", State: planStateActive},
+		Execution: ExecutionRecord{State: planStateActive},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	apiRequestExpectStatus(t, server, http.MethodPost, "/v1/plans/"+planID+"/steer",
+		map[string]any{"note": "some note"}, http.StatusBadRequest)
+}
+
 func TestKitchenAPIRemediateReviewEndpoint(t *testing.T) {
 	k := newTestKitchen(t)
 	attachTestScheduler(t, k)
