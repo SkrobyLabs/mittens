@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,13 +23,20 @@ import (
 const supervisedRuntimeReadyTimeout = 5 * time.Second
 
 type supervisedDaemon struct {
+	mu          sync.RWMutex
+	paths       KitchenPaths
+	project     ProjectPaths
 	provider    string
+	mittensPath string
+	out         io.Writer
 	socketPath  string
 	pidPath     string
 	brokerToken string
 	poolToken   string
 	cmd         *exec.Cmd
 	waitCh      chan error
+	client      pool.RuntimeAPI
+	restartFn   func() error
 }
 
 func supervisedPoolSession(project ProjectPaths) string {
@@ -160,45 +169,78 @@ func startSupervisedDaemon(paths KitchenPaths, project ProjectPaths, provider, m
 		return nil, err
 	}
 
-	socketPath := supervisedRuntimeSocketPath(paths, provider)
-	pidPath := supervisedRuntimePIDPath(paths, provider)
-	cmd := exec.Command(mittensPath, "daemon", "--socket", socketPath, "--provider", provider)
-	cmd.Env = append(os.Environ(),
-		"MITTENS_POOL_SESSION="+supervisedPoolSession(project),
-		"MITTENS_POOL_STATE_DIR="+supervisedPoolStateDir(project),
-	)
-	cmd.Stdout = out
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-
 	state := &supervisedDaemon{
-		provider:   provider,
-		socketPath: socketPath,
-		pidPath:    pidPath,
-		cmd:        cmd,
-		waitCh:     make(chan error, 1),
+		paths:       paths,
+		project:     project,
+		provider:    provider,
+		mittensPath: mittensPath,
+		out:         out,
+		socketPath:  supervisedRuntimeSocketPath(paths, provider),
+		pidPath:     supervisedRuntimePIDPath(paths, provider),
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
-		_ = terminateProcess(cmd.Process.Pid, 3*time.Second)
-		return nil, err
-	}
-	go func() {
-		state.waitCh <- cmd.Wait()
-	}()
-	go streamDaemonOutput(stderr, out, state)
-
-	ctx, cancel := context.WithTimeout(context.Background(), supervisedRuntimeReadyTimeout)
-	defer cancel()
-	if err := waitForSupervisedDaemonReady(ctx, state); err != nil {
-		_ = state.Stop()
+	if err := state.start(); err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+func (d *supervisedDaemon) start() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.startLocked()
+}
+
+func (d *supervisedDaemon) startLocked() error {
+	if d == nil {
+		return fmt.Errorf("supervised daemon not configured")
+	}
+	if d.restartFn != nil {
+		return d.restartFn()
+	}
+	if strings.TrimSpace(d.mittensPath) == "" {
+		return fmt.Errorf("mittens binary path must not be empty")
+	}
+	if err := cleanupSupervisedDaemon(d.paths, d.provider); err != nil {
+		return err
+	}
+
+	cmd := exec.Command(d.mittensPath, "daemon", "--socket", d.socketPath, "--provider", d.provider)
+	cmd.Env = append(os.Environ(),
+		"MITTENS_POOL_SESSION="+supervisedPoolSession(d.project),
+		"MITTENS_POOL_STATE_DIR="+supervisedPoolStateDir(d.project),
+	)
+	cmd.Stdout = d.out
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	waitCh := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(d.pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		_ = terminateProcess(cmd.Process.Pid, 3*time.Second)
+		return err
+	}
+	d.cmd = cmd
+	d.waitCh = waitCh
+	d.brokerToken = ""
+	d.poolToken = ""
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	go streamDaemonOutput(stderr, d.out, d)
+
+	ctx, cancel := context.WithTimeout(context.Background(), supervisedRuntimeReadyTimeout)
+	defer cancel()
+	if err := waitForSupervisedDaemonReady(ctx, d); err != nil {
+		_ = terminateProcess(cmd.Process.Pid, 3*time.Second)
+		_ = os.Remove(d.pidPath)
+		_ = os.Remove(d.socketPath)
+		return err
+	}
+	d.client = newRuntimeClient(d.socketPath, d.brokerToken, d.poolToken)
+	return nil
 }
 
 func streamDaemonOutput(r io.Reader, out io.Writer, state *supervisedDaemon) {
@@ -252,7 +294,7 @@ func (d *supervisedDaemon) RuntimeClient() pool.RuntimeAPI {
 	if d == nil {
 		return nil
 	}
-	return newRuntimeClient(d.socketPath, d.brokerToken, d.poolToken)
+	return d
 }
 
 func (d *supervisedDaemon) HostPool() []PoolKey {
@@ -263,7 +305,13 @@ func (d *supervisedDaemon) HostPool() []PoolKey {
 }
 
 func (d *supervisedDaemon) Stop() error {
-	if d == nil || d.cmd == nil || d.cmd.Process == nil {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cmd == nil || d.cmd.Process == nil {
+		d.client = nil
 		return nil
 	}
 	pid := d.cmd.Process.Pid
@@ -281,7 +329,184 @@ func (d *supervisedDaemon) Stop() error {
 	if rmErr := os.Remove(d.socketPath); rmErr != nil && !os.IsNotExist(rmErr) && err == nil {
 		err = rmErr
 	}
+	d.client = nil
 	return err
+}
+
+func (d *supervisedDaemon) currentClient() pool.RuntimeAPI {
+	if d == nil {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.client
+}
+
+func (d *supervisedDaemon) restartIfUnavailable(err error) error {
+	if d == nil || !isSupervisedRuntimeUnavailableError(err) {
+		return err
+	}
+	if restartErr := d.start(); restartErr != nil {
+		return fmt.Errorf("%w (restart: %v)", err, restartErr)
+	}
+	return nil
+}
+
+func isSupervisedRuntimeUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "dial unix") &&
+		(strings.Contains(msg, "no such file or directory") || strings.Contains(msg, "connection refused"))
+}
+
+func (d *supervisedDaemon) SpawnWorker(ctx context.Context, spec pool.WorkerSpec) (string, string, error) {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return "", "", err
+		}
+		client = d.currentClient()
+	}
+	name, id, err := client.SpawnWorker(ctx, spec)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return "", "", restartErr
+	}
+	if err == nil {
+		return name, id, nil
+	}
+	return d.currentClient().SpawnWorker(ctx, spec)
+}
+
+func (d *supervisedDaemon) KillWorker(ctx context.Context, workerID string) error {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return err
+		}
+		client = d.currentClient()
+	}
+	err := client.KillWorker(ctx, workerID)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return restartErr
+	}
+	if err == nil {
+		return nil
+	}
+	return d.currentClient().KillWorker(ctx, workerID)
+}
+
+func (d *supervisedDaemon) ListContainers(ctx context.Context, sessionID string) ([]pool.ContainerInfo, error) {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return nil, err
+		}
+		client = d.currentClient()
+	}
+	containers, err := client.ListContainers(ctx, sessionID)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return nil, restartErr
+	}
+	if err == nil {
+		return containers, nil
+	}
+	return d.currentClient().ListContainers(ctx, sessionID)
+}
+
+func (d *supervisedDaemon) RecycleWorker(ctx context.Context, workerID string) error {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return err
+		}
+		client = d.currentClient()
+	}
+	err := client.RecycleWorker(ctx, workerID)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return restartErr
+	}
+	if err == nil {
+		return nil
+	}
+	return d.currentClient().RecycleWorker(ctx, workerID)
+}
+
+func (d *supervisedDaemon) GetWorkerActivity(ctx context.Context, workerID string) (*pool.WorkerActivity, error) {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return nil, err
+		}
+		client = d.currentClient()
+	}
+	activity, err := client.GetWorkerActivity(ctx, workerID)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return nil, restartErr
+	}
+	if err == nil {
+		return activity, nil
+	}
+	return d.currentClient().GetWorkerActivity(ctx, workerID)
+}
+
+func (d *supervisedDaemon) GetWorkerTranscript(ctx context.Context, workerID string) ([]pool.WorkerActivityRecord, error) {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return nil, err
+		}
+		client = d.currentClient()
+	}
+	transcript, err := client.GetWorkerTranscript(ctx, workerID)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return nil, restartErr
+	}
+	if err == nil {
+		return transcript, nil
+	}
+	return d.currentClient().GetWorkerTranscript(ctx, workerID)
+}
+
+func (d *supervisedDaemon) SubscribeEvents(ctx context.Context) (<-chan pool.RuntimeEvent, error) {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return nil, err
+		}
+		client = d.currentClient()
+	}
+	events, err := client.SubscribeEvents(ctx)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return nil, restartErr
+	}
+	if err == nil {
+		return events, nil
+	}
+	return d.currentClient().SubscribeEvents(ctx)
+}
+
+func (d *supervisedDaemon) SubmitAssignment(ctx context.Context, workerID string, assignment pool.Assignment) error {
+	client := d.currentClient()
+	if client == nil {
+		if err := d.start(); err != nil {
+			return err
+		}
+		client = d.currentClient()
+	}
+	err := client.SubmitAssignment(ctx, workerID, assignment)
+	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
+		return restartErr
+	}
+	if err == nil {
+		return nil
+	}
+	return d.currentClient().SubmitAssignment(ctx, workerID, assignment)
 }
 
 func terminateProcess(pid int, grace time.Duration) error {

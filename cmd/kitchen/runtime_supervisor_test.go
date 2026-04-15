@@ -2,12 +2,84 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
+
+type supervisedRuntimeStub struct {
+	listFn         func(context.Context, string) ([]pool.ContainerInfo, error)
+	spawnFn        func(context.Context, pool.WorkerSpec) (string, string, error)
+	killFn         func(context.Context, string) error
+	recycleFn      func(context.Context, string) error
+	activityFn     func(context.Context, string) (*pool.WorkerActivity, error)
+	transcriptFn   func(context.Context, string) ([]pool.WorkerActivityRecord, error)
+	subscribeFn    func(context.Context) (<-chan pool.RuntimeEvent, error)
+	submitAssignFn func(context.Context, string, pool.Assignment) error
+}
+
+func (s *supervisedRuntimeStub) SpawnWorker(ctx context.Context, spec pool.WorkerSpec) (string, string, error) {
+	if s.spawnFn != nil {
+		return s.spawnFn(ctx, spec)
+	}
+	return "", "", nil
+}
+
+func (s *supervisedRuntimeStub) KillWorker(ctx context.Context, workerID string) error {
+	if s.killFn != nil {
+		return s.killFn(ctx, workerID)
+	}
+	return nil
+}
+
+func (s *supervisedRuntimeStub) ListContainers(ctx context.Context, sessionID string) ([]pool.ContainerInfo, error) {
+	if s.listFn != nil {
+		return s.listFn(ctx, sessionID)
+	}
+	return nil, nil
+}
+
+func (s *supervisedRuntimeStub) RecycleWorker(ctx context.Context, workerID string) error {
+	if s.recycleFn != nil {
+		return s.recycleFn(ctx, workerID)
+	}
+	return nil
+}
+
+func (s *supervisedRuntimeStub) GetWorkerActivity(ctx context.Context, workerID string) (*pool.WorkerActivity, error) {
+	if s.activityFn != nil {
+		return s.activityFn(ctx, workerID)
+	}
+	return nil, nil
+}
+
+func (s *supervisedRuntimeStub) GetWorkerTranscript(ctx context.Context, workerID string) ([]pool.WorkerActivityRecord, error) {
+	if s.transcriptFn != nil {
+		return s.transcriptFn(ctx, workerID)
+	}
+	return nil, nil
+}
+
+func (s *supervisedRuntimeStub) SubscribeEvents(ctx context.Context) (<-chan pool.RuntimeEvent, error) {
+	if s.subscribeFn != nil {
+		return s.subscribeFn(ctx)
+	}
+	ch := make(chan pool.RuntimeEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (s *supervisedRuntimeStub) SubmitAssignment(ctx context.Context, workerID string, assignment pool.Assignment) error {
+	if s.submitAssignFn != nil {
+		return s.submitAssignFn(ctx, workerID, assignment)
+	}
+	return nil
+}
 
 func TestNormalizeServeProvider(t *testing.T) {
 	tests := []struct {
@@ -158,6 +230,66 @@ func TestConfiguredServeProvidersIncludesCouncilSeatOnlyProviders(t *testing.T) 
 	}
 	if len(providers) != 2 || providers[0] != "claude" || providers[1] != "codex" {
 		t.Fatalf("providers = %v, want [claude codex]", providers)
+	}
+}
+
+func TestSupervisedDaemonListContainersRestartsOnUnavailableSocket(t *testing.T) {
+	unavailable := errors.New(`list containers: Get "http://runtime/v1/workers?sessionId=kitchen-test": dial unix /tmp/claude.sock: connect: no such file or directory`)
+	healthy := &supervisedRuntimeStub{
+		listFn: func(_ context.Context, sessionID string) ([]pool.ContainerInfo, error) {
+			if sessionID != "kitchen-test" {
+				t.Fatalf("sessionID = %q, want kitchen-test", sessionID)
+			}
+			return []pool.ContainerInfo{{WorkerID: "w-1", ContainerID: "c-1", State: "running", Status: pool.WorkerIdle}}, nil
+		},
+	}
+	d := &supervisedDaemon{
+		client: &supervisedRuntimeStub{
+			listFn: func(context.Context, string) ([]pool.ContainerInfo, error) {
+				return nil, unavailable
+			},
+		},
+	}
+	restarts := 0
+	d.restartFn = func() error {
+		restarts++
+		d.client = healthy
+		return nil
+	}
+
+	containers, err := d.ListContainers(context.Background(), "kitchen-test")
+	if err != nil {
+		t.Fatalf("ListContainers: %v", err)
+	}
+	if restarts != 1 {
+		t.Fatalf("restart count = %d, want 1", restarts)
+	}
+	if len(containers) != 1 || containers[0].WorkerID != "w-1" {
+		t.Fatalf("containers = %+v, want worker w-1", containers)
+	}
+}
+
+func TestSupervisedDaemonListContainersDoesNotRestartOnNonSocketError(t *testing.T) {
+	expected := errors.New("list containers: HTTP 403: forbidden")
+	d := &supervisedDaemon{
+		client: &supervisedRuntimeStub{
+			listFn: func(context.Context, string) ([]pool.ContainerInfo, error) {
+				return nil, expected
+			},
+		},
+	}
+	restarts := 0
+	d.restartFn = func() error {
+		restarts++
+		return nil
+	}
+
+	_, err := d.ListContainers(context.Background(), "kitchen-test")
+	if !errors.Is(err, expected) {
+		t.Fatalf("ListContainers error = %v, want %v", err, expected)
+	}
+	if restarts != 0 {
+		t.Fatalf("restart count = %d, want 0", restarts)
 	}
 }
 
