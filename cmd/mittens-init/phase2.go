@@ -240,6 +240,7 @@ func copyConfigFiles(cfg *config) {
 	for _, file := range []string{cfg.AISettingsFile, "settings.local.json", cfg.AIProjectFile, "statusline.sh"} {
 		copyIfExists(staging+"/"+file, cfg.AIDir+"/"+file)
 	}
+	normalizeEmptyJSONObjectFile(cfg.AIDir + "/" + cfg.AISettingsFile)
 
 	// Make statusline executable if copied.
 	if _, err := os.Stat(cfg.AIDir + "/statusline.sh"); err == nil {
@@ -324,7 +325,9 @@ func copyGitConfig(cfg *config) {
 
 func copyUserPrefs(cfg *config) {
 	if cfg.AIPrefsFile != "" {
-		copyIfExists(cfg.ConfigMount+"/"+cfg.AIPrefsFile, cfg.AIHome+"/"+cfg.AIPrefsFile)
+		dst := cfg.AIHome + "/" + cfg.AIPrefsFile
+		copyIfExists(cfg.ConfigMount+"/"+cfg.AIPrefsFile, dst)
+		normalizeEmptyJSONObjectFile(dst)
 	}
 }
 
@@ -550,6 +553,20 @@ func ensureJSONFile(path string) {
 	if _, err := os.Stat(path); err != nil {
 		os.WriteFile(path, []byte("{}\n"), 0644)
 	}
+}
+
+func normalizeEmptyJSONObjectFile(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(string(data)) != "" {
+		return
+	}
+	_ = os.WriteFile(path, []byte("{}\n"), 0644)
 }
 
 // setJSONKey sets a top-level key in a JSON settings file.

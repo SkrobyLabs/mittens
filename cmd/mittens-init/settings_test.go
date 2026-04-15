@@ -92,6 +92,42 @@ func TestReadWriteJSONFile(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmptyJSONObjectFileRewritesEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	normalizeEmptyJSONObjectFile(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{}\n" {
+		t.Fatalf("file contents = %q, want %q", string(data), "{}\n")
+	}
+}
+
+func TestNormalizeEmptyJSONObjectFilePreservesNonEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prefs.json")
+	if err := os.WriteFile(path, []byte("{\"existing\":true}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	normalizeEmptyJSONObjectFile(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{\"existing\":true}\n" {
+		t.Fatalf("file contents changed: %q", string(data))
+	}
+}
+
 func TestCredExpiresAt(t *testing.T) {
 	tests := []struct {
 		name     string
