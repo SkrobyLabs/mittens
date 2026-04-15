@@ -831,20 +831,19 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.leftMode == kitchenTUILeftQuestions {
-				planID := ""
-				if plan := m.selectedPlanItem(); plan != nil {
-					planID = strings.TrimSpace(plan.Record.PlanID)
-				}
-				count := 0
-				if planID != "" {
-					prefix := planID + "-"
-					for _, q := range m.questions {
-						if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
-							count++
+				if m.leftMode == kitchenTUILeftQuestions {
+					planID := ""
+					if plan := m.selectedPlanItem(); plan != nil {
+						planID = strings.TrimSpace(plan.Record.PlanID)
+					}
+					count := 0
+					if planID != "" {
+						for _, q := range m.questions {
+							if questionBelongsToPlan(planID, q) {
+								count++
+							}
 						}
 					}
-				}
 				if m.selectedQuestion < count-1 {
 					m.selectedQuestion++
 					(&m).resetCurrentRightPaneOffset()
@@ -1739,10 +1738,9 @@ func (m kitchenTUIModel) selectedQuestionItem() *pool.Question {
 	if planID == "" {
 		return nil
 	}
-	prefix := planID + "-"
 	var filtered []pool.Question
 	for _, q := range m.questions {
-		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+		if questionBelongsToPlan(planID, q) {
 			filtered = append(filtered, q)
 		}
 	}
@@ -2371,15 +2369,18 @@ func (m kitchenTUIModel) renderQuestionsPane(width, height int) string {
 	}
 	var filtered []pool.Question
 	if planID != "" {
-		prefix := planID + "-"
 		for _, q := range m.questions {
-			if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+			if questionBelongsToPlan(planID, q) {
 				filtered = append(filtered, q)
 			}
 		}
 	}
 
 	if len(filtered) == 0 {
+		if elsewhere := pendingQuestionsOutsidePlan(planID, m.questions); elsewhere > 0 {
+			message := fmt.Sprintf("No pending questions for selected plan.\n\n%d pending on other plan(s). Use the [n?] badges in Plans to find them.", elsewhere)
+			return paneBox(width, height, title+"\n\n"+message)
+		}
 		return paneBox(width, height, title+"\n\nNo pending questions.")
 	}
 
@@ -3766,10 +3767,9 @@ func pendingQuestionCountForPlan(planID string, questions []pool.Question) int {
 	if strings.TrimSpace(planID) == "" {
 		return 0
 	}
-	prefix := strings.TrimSpace(planID) + "-"
 	count := 0
 	for _, q := range questions {
-		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+		if questionBelongsToPlan(planID, q) {
 			count++
 		}
 	}
@@ -3781,9 +3781,8 @@ func pendingQuestionSummaryForPlan(planID string, questions []pool.Question) str
 		return "-"
 	}
 	var ids []string
-	prefix := strings.TrimSpace(planID) + "-"
 	for _, q := range questions {
-		if strings.HasPrefix(strings.TrimSpace(q.TaskID), prefix) {
+		if questionBelongsToPlan(planID, q) {
 			ids = append(ids, q.ID)
 		}
 	}
@@ -3791,6 +3790,35 @@ func pendingQuestionSummaryForPlan(planID string, questions []pool.Question) str
 		return "-"
 	}
 	return strings.Join(ids, ", ")
+}
+
+func questionBelongsToPlan(planID string, q pool.Question) bool {
+	return taskIDBelongsToPlan(planID, q.TaskID)
+}
+
+func taskIDBelongsToPlan(planID, taskID string) bool {
+	planID = strings.TrimSpace(planID)
+	taskID = strings.TrimSpace(taskID)
+	if planID == "" || taskID == "" {
+		return false
+	}
+	if strings.HasPrefix(taskID, planID+"-") {
+		return true
+	}
+	if taskID == "research_"+planID {
+		return true
+	}
+	if councilTurnNumberFromTaskID(planID, taskID) > 0 {
+		return true
+	}
+	return reviewCouncilTurnNumberFromTaskID(planID, taskID) > 0
+}
+
+func pendingQuestionsOutsidePlan(planID string, questions []pool.Question) int {
+	if strings.TrimSpace(planID) == "" {
+		return len(questions)
+	}
+	return max(0, len(questions)-pendingQuestionCountForPlan(planID, questions))
 }
 
 func renderSelectableRow(selected bool, attention bool, primary, secondary string) []string {

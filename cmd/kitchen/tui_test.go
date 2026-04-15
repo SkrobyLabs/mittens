@@ -3175,8 +3175,8 @@ func TestKitchenTUIRenderQuestionsPaneScoping(t *testing.T) {
 		},
 		selectedPlan: 0, // plan_alpha is selected
 		questions: []pool.Question{
-			{ID: "qa1", TaskID: "plan_alpha-t1", Question: "Alpha question one"},
-			{ID: "qb1", TaskID: "plan_beta-t1", Question: "Beta question one"},
+			{ID: "qa1", TaskID: "review_council_plan_alpha_r3_t2", Question: "Alpha question one"},
+			{ID: "qb1", TaskID: "review_council_plan_beta_r2_t1", Question: "Beta question one"},
 		},
 	}
 
@@ -3190,6 +3190,51 @@ func TestKitchenTUIRenderQuestionsPaneScoping(t *testing.T) {
 	}
 	if strings.Contains(pane, "qb1") {
 		t.Fatalf("questions pane should not show other plan's question ID, got: %q", pane)
+	}
+}
+
+func TestKitchenTUIRenderQuestionsPaneEmptyStateMentionsOtherPlans(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftQuestions,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_alpha", Title: "Alpha"}},
+			{Record: PlanRecord{PlanID: "plan_beta", Title: "Beta"}},
+		},
+		selectedPlan: 0,
+		questions: []pool.Question{
+			{ID: "qb1", TaskID: "review_council_plan_beta_r2_t1", Question: "Beta question one"},
+		},
+	}
+
+	pane := model.renderQuestionsPane(120, 20)
+
+	if !strings.Contains(pane, "No pending questions for selected plan.") {
+		t.Fatalf("questions pane missing selected-plan empty state: %q", pane)
+	}
+	if !strings.Contains(pane, "1 pending on other plan(s).") {
+		t.Fatalf("questions pane missing cross-plan pending count: %q", pane)
+	}
+	if !strings.Contains(pane, "Use the [n?] badges in Plans to find them.") {
+		t.Fatalf("questions pane missing guidance for finding other pending questions: %q", pane)
+	}
+}
+
+func TestKitchenTUIRenderPlansPaneShowsBadgeForReviewCouncilQuestion(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftPlans,
+		plans: []kitchenTUIPlanItem{
+			{Record: PlanRecord{PlanID: "plan_alpha", Title: "Alpha"}},
+			{Record: PlanRecord{PlanID: "plan_beta", Title: "Beta"}},
+		},
+		questions: []pool.Question{
+			{ID: "qa1", TaskID: "review_council_plan_alpha_r3_t2", Question: "Alpha question one"},
+		},
+	}
+
+	pane := model.renderPlansPane(120, 20)
+
+	if !strings.Contains(pane, "[1?]") {
+		t.Fatalf("plans pane missing pending-question badge for review council task: %q", pane)
 	}
 }
 
