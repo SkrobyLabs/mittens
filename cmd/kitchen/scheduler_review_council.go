@@ -805,7 +805,7 @@ func (s *Scheduler) recoverReviewCouncilPlansOnStartup() error {
 			nextTaskID = reviewCouncilTaskIDForExecution(bundle.Plan.PlanID, bundle.Execution, nextTurn)
 			task, exists = s.pm.Task(nextTaskID)
 		}
-		missingRecordedActiveTask := containsString(bundle.Execution.ActiveTaskIDs, nextTaskID) && !exists
+			missingRecordedActiveTask := contains(bundle.Execution.ActiveTaskIDs, nextTaskID) && !exists
 		if bundle.Execution.ReviewCouncilFinalDecision == "" &&
 			bundle.Execution.ReviewCouncilTurnsCompleted < bundle.Execution.ReviewCouncilMaxTurns &&
 			!bundle.Execution.ReviewCouncilAwaitingAnswers &&
