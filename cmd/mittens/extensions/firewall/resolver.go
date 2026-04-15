@@ -172,8 +172,8 @@ func parseFirewallDomains(content string) ([]string, error) {
 
 // fileExists reports whether path exists on disk.
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // mountFirewall adds docker args to mount a firewall config file and enable
