@@ -248,11 +248,15 @@ func (a *App) runtimeWorkerView(workerID string) (*pool.RuntimeWorker, error) {
 	}
 
 	status := runtimeWorkerStatus(record, container, hasContainer, activity)
-	// Persist dead state so subsequent reads short-circuit and so other
-	// consumers (status listings, reconcile loops) don't have to
-	// recompute the transition each time.
-	if status == pool.WorkerDead && record.Status != pool.WorkerDead {
-		if err := a.markRuntimeWorkerDead(record.ID); err != nil {
+	// Persist derived lifecycle status so the runtime worker record does not
+	// stay frozen at the original spawn-time value after the daemon has enough
+	// information to reconcile it.
+	if status != record.Status && record.CurrentAssignment == nil {
+		record.Status = status
+		if status == pool.WorkerDead {
+			record.CurrentAssignment = nil
+		}
+		if err := a.saveRuntimeWorkerRecord(record); err != nil {
 			return nil, err
 		}
 	}

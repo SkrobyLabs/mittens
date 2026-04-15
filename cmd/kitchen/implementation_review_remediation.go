@@ -237,7 +237,9 @@ func buildAutoRemediationPrompt(bundle StoredPlan, source *AutoRemediationSource
 	}
 
 	b.WriteString("\n## Requirements\n")
-	if reviewRemediationMode(source) == reviewRemediationModeManual && len(findings) > 0 {
+	if len(findings) > 0 && strings.TrimSpace(source.Decision) == manualReviewRemediationDecisionOperatorSteer {
+		b.WriteString("- Address the implementation review findings directly.\n")
+	} else if reviewRemediationMode(source) == reviewRemediationModeManual && len(findings) > 0 {
 		b.WriteString("- Fix the requested lower-severity follow-up findings directly.\n")
 	} else if len(findings) > 0 {
 		b.WriteString("- Fix the review findings directly.\n")

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/SkrobyLabs/mittens/pkg/pool"
@@ -59,5 +61,59 @@ func TestRuntimeWorkerStatusDeadRecordSticks(t *testing.T) {
 	got := runtimeWorkerStatus(record, pool.ContainerInfo{ContainerID: "cid-1", State: "running"}, true, nil)
 	if got != pool.WorkerDead {
 		t.Fatalf("status = %q, want %q (dead must not un-flip)", got, pool.WorkerDead)
+	}
+}
+
+func TestRuntimeWorkerViewPersistsDerivedIdleStatus(t *testing.T) {
+	tmp := t.TempDir()
+	dockerDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(dockerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dockerPath := filepath.Join(dockerDir, "docker")
+	script := `#!/bin/sh
+case "$1" in
+  ps)
+    printf 'cid-1\tmittens-kitchen-test-w-1\trunning\tUp 10 seconds\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write docker stub: %v", err)
+	}
+	t.Setenv("PATH", dockerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	app := &App{
+		poolSession:  "kitchen-test",
+		poolStateDir: filepath.Join(tmp, "pool-state"),
+	}
+	if err := os.MkdirAll(app.poolStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveRuntimeWorkerRecord(runtimeWorkerRecord{
+		ID:          "w-1",
+		ContainerID: "cid-1",
+		Status:      pool.WorkerSpawning,
+	}); err != nil {
+		t.Fatalf("saveRuntimeWorkerRecord: %v", err)
+	}
+
+	view, err := app.runtimeWorkerView("w-1")
+	if err != nil {
+		t.Fatalf("runtimeWorkerView: %v", err)
+	}
+	if view.Status != pool.WorkerIdle {
+		t.Fatalf("view status = %q, want %q", view.Status, pool.WorkerIdle)
+	}
+
+	record, err := app.loadRuntimeWorkerRecord("w-1")
+	if err != nil {
+		t.Fatalf("loadRuntimeWorkerRecord: %v", err)
+	}
+	if record.Status != pool.WorkerIdle {
+		t.Fatalf("persisted status = %q, want %q", record.Status, pool.WorkerIdle)
 	}
 }

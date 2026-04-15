@@ -1386,6 +1386,12 @@ func TestSteerImplementationOnFailedReviewIncludesExistingFindings(t *testing.T)
 	if !strings.Contains(task.Prompt, "Only quiet daemon/background image builds.") {
 		t.Fatalf("task prompt missing operator note:\n%s", task.Prompt)
 	}
+	if strings.Contains(task.Prompt, "lower-severity follow-up findings") {
+		t.Fatalf("task prompt used minor-follow-up wording for operator steer:\n%s", task.Prompt)
+	}
+	if !strings.Contains(task.Prompt, "Address the implementation review findings directly.") {
+		t.Fatalf("task prompt missing operator-steer requirement wording:\n%s", task.Prompt)
+	}
 }
 
 func TestExtendCouncilClearsAutoRemediationState(t *testing.T) {
