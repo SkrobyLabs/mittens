@@ -538,6 +538,30 @@ func TestKitchenTUISubmitModeToggleSwitchesToResearch(t *testing.T) {
 	}
 }
 
+func TestKitchenTUICtrlROpensResearchSubmit(t *testing.T) {
+	repo := initGitRepo(t)
+	model := kitchenTUIModel{
+		repoPath: repo,
+		input:    textinput.New(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	got := updated.(kitchenTUIModel)
+
+	if got.inputMode != kitchenTUIInputSubmit {
+		t.Fatalf("inputMode = %q, want submit", got.inputMode)
+	}
+	if !got.submitResearch {
+		t.Fatal("submitResearch = false, want true after ctrl+r from main view")
+	}
+	if got.input.Prompt != "Submit research: " {
+		t.Fatalf("prompt = %q, want research prompt", got.input.Prompt)
+	}
+	if strings.Contains(got.input.Value(), "[ref=") {
+		t.Fatalf("submit input value = %q, want anchor prefix stripped in research mode", got.input.Value())
+	}
+}
+
 func TestKitchenTUISubmitResearchCallsBackend(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{submitPlanID: "plan_research_new"}
 	model := kitchenTUIModel{

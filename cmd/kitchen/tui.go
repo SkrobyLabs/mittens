@@ -740,6 +740,10 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode != kitchenTUIInputNone {
 			return m.updateInput(msg)
 		}
+		if msg.Type == tea.KeyCtrlR {
+			m.openResearchInput()
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -1243,6 +1247,13 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// while the override picker is visible.
 	}
 
+	if msg.Type == tea.KeyCtrlR && m.inputMode == kitchenTUIInputSubmit {
+		m.submitResearch = !m.submitResearch
+		m.submitProviderOverrideMode = false
+		m.refreshSubmitInputPresentation()
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		if m.inputMode == kitchenTUIInputSubmit && m.submitProviderOverrideMode {
@@ -1251,13 +1262,6 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.closeInput()
 		return m, nil
-	case "ctrl+r":
-		if m.inputMode == kitchenTUIInputSubmit {
-			m.submitResearch = !m.submitResearch
-			m.submitProviderOverrideMode = false
-			m.refreshSubmitInputPresentation()
-			return m, nil
-		}
 	case "tab":
 		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.submitImplReview = !m.submitImplReview
@@ -1440,6 +1444,13 @@ func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitProviderOverrides = PlanProviderOverrides{}
 	m.submitProviderOverrideFocus = 0
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+	m.refreshSubmitInputPresentation()
+}
+
+func (m *kitchenTUIModel) openResearchInput() {
+	m.openSubmitInput()
+	m.submitResearch = true
+	m.submitProviderOverrideMode = false
 	m.refreshSubmitInputPresentation()
 }
 
@@ -1928,7 +1939,7 @@ func (m kitchenTUIModel) footerActions() []string {
 		}
 	}
 
-	actions := []string{"n submit"}
+	actions := []string{"n submit", "ctrl+r research"}
 	if m.leftMode == kitchenTUILeftTasks {
 		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canCancelSelectedTask() {
