@@ -1004,7 +1004,7 @@ func newRootCommand() *cobra.Command {
 				}
 			}
 			if !cmd.Flags().Changed("broker-addr") {
-				if picked, err := pickAvailableAddr(brokerAddr, 20); err == nil {
+				if picked, err := pickAvailableAddr(brokerAddr, 20, serveAddr); err == nil {
 					brokerAddr = picked
 				}
 			}
@@ -1237,12 +1237,13 @@ func notImplemented(feature string) error {
 
 // pickAvailableAddr probes ports starting at the port in base and walks
 // upward by 1 until it finds one it can bind, up to maxTries candidates.
+// Ports in exclude are skipped even if free.
 // Used for default --addr / --broker-addr only, so that a second
 // `kitchen serve` on the same host doesn't fail with EADDRINUSE. There
 // is an inherent TOCTOU window between probe-close and actual-bind; if
 // another process races us, the caller's net.Listen will surface the
 // collision.
-func pickAvailableAddr(base string, maxTries int) (string, error) {
+func pickAvailableAddr(base string, maxTries int, exclude ...string) (string, error) {
 	host, portStr, err := net.SplitHostPort(base)
 	if err != nil {
 		return "", fmt.Errorf("parse %q: %w", base, err)
@@ -1254,8 +1255,15 @@ func pickAvailableAddr(base string, maxTries int) (string, error) {
 	if maxTries <= 0 {
 		maxTries = 1
 	}
+	excluded := make(map[string]struct{}, len(exclude))
+	for _, e := range exclude {
+		excluded[e] = struct{}{}
+	}
 	for i := 0; i < maxTries; i++ {
 		candidate := net.JoinHostPort(host, strconv.Itoa(port+i))
+		if _, skip := excluded[candidate]; skip {
+			continue
+		}
 		ln, err := net.Listen("tcp", candidate)
 		if err == nil {
 			_ = ln.Close()
