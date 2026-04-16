@@ -115,6 +115,9 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 	if a.Provider.ContainerHostname != "" {
 		args = append(args, "--hostname", a.Provider.ContainerHostname)
 	}
+	logDir := filepath.Join(homeDir(), ".mittens", "logs")
+	ensureDir(logDir)
+	args = append(args, "-v", logDir+":/mnt/mittens-logs")
 	if _, ok := spec.Environment["MITTENS_SKIP_PERMS_FLAG"]; !ok && a.Provider.SkipPermsFlag != "" {
 		args = append(args, "-e", "MITTENS_SKIP_PERMS_FLAG="+a.Provider.SkipPermsFlag)
 	}
@@ -319,6 +322,7 @@ func (a *App) buildWorkerInitConfig(provider *Provider, containerName, workspace
 		ProviderName:  provider.Name,
 		ContainerName: containerName,
 		HostWorkspace: workspacePath,
+		LogDir:        "/mnt/mittens-logs",
 		Broker: initcfg.BrokerConfig{
 			Token: a.brokerToken,
 		},

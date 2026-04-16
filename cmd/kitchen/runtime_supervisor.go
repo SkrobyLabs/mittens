@@ -21,6 +21,7 @@ import (
 )
 
 const supervisedRuntimeReadyTimeout = 5 * time.Second
+const supervisedRuntimeHealthTimeout = 250 * time.Millisecond
 
 type supervisedDaemon struct {
 	mu          sync.RWMutex
@@ -342,6 +343,58 @@ func (d *supervisedDaemon) currentClient() pool.RuntimeAPI {
 	return d.client
 }
 
+func (d *supervisedDaemon) runtimeHealthy() bool {
+	if d == nil {
+		return false
+	}
+
+	d.mu.RLock()
+	client := d.client
+	pidPath := strings.TrimSpace(d.pidPath)
+	socketPath := strings.TrimSpace(d.socketPath)
+	d.mu.RUnlock()
+
+	if client == nil {
+		return false
+	}
+	if pidPath == "" || socketPath == "" {
+		return true
+	}
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return false
+	}
+	pid, err := strconvAtoi(strings.TrimSpace(string(data)))
+	if err != nil || !processAlive(pid) {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), supervisedRuntimeHealthTimeout)
+	defer cancel()
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func (d *supervisedDaemon) ensureClient() (pool.RuntimeAPI, error) {
+	if d == nil {
+		return nil, fmt.Errorf("supervised daemon not configured")
+	}
+	if client := d.currentClient(); client != nil && d.runtimeHealthy() {
+		return client, nil
+	}
+	if err := d.start(); err != nil {
+		return nil, err
+	}
+	return d.currentClient(), nil
+}
+
 func (d *supervisedDaemon) restartIfUnavailable(err error) error {
 	if d == nil || !isSupervisedRuntimeUnavailableError(err) {
 		return err
@@ -366,12 +419,9 @@ func isSupervisedRuntimeUnavailableError(err error) bool {
 }
 
 func (d *supervisedDaemon) SpawnWorker(ctx context.Context, spec pool.WorkerSpec) (string, string, error) {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return "", "", err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return "", "", err
 	}
 	name, id, err := client.SpawnWorker(ctx, spec)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
@@ -384,14 +434,11 @@ func (d *supervisedDaemon) SpawnWorker(ctx context.Context, spec pool.WorkerSpec
 }
 
 func (d *supervisedDaemon) KillWorker(ctx context.Context, workerID string) error {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return err
 	}
-	err := client.KillWorker(ctx, workerID)
+	err = client.KillWorker(ctx, workerID)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
 		return restartErr
 	}
@@ -402,12 +449,9 @@ func (d *supervisedDaemon) KillWorker(ctx context.Context, workerID string) erro
 }
 
 func (d *supervisedDaemon) ListContainers(ctx context.Context, sessionID string) ([]pool.ContainerInfo, error) {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return nil, err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return nil, err
 	}
 	containers, err := client.ListContainers(ctx, sessionID)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
@@ -420,14 +464,11 @@ func (d *supervisedDaemon) ListContainers(ctx context.Context, sessionID string)
 }
 
 func (d *supervisedDaemon) RecycleWorker(ctx context.Context, workerID string) error {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return err
 	}
-	err := client.RecycleWorker(ctx, workerID)
+	err = client.RecycleWorker(ctx, workerID)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
 		return restartErr
 	}
@@ -438,12 +479,9 @@ func (d *supervisedDaemon) RecycleWorker(ctx context.Context, workerID string) e
 }
 
 func (d *supervisedDaemon) GetWorkerActivity(ctx context.Context, workerID string) (*pool.WorkerActivity, error) {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return nil, err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return nil, err
 	}
 	activity, err := client.GetWorkerActivity(ctx, workerID)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
@@ -456,12 +494,9 @@ func (d *supervisedDaemon) GetWorkerActivity(ctx context.Context, workerID strin
 }
 
 func (d *supervisedDaemon) GetWorkerTranscript(ctx context.Context, workerID string) ([]pool.WorkerActivityRecord, error) {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return nil, err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return nil, err
 	}
 	transcript, err := client.GetWorkerTranscript(ctx, workerID)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
@@ -474,12 +509,9 @@ func (d *supervisedDaemon) GetWorkerTranscript(ctx context.Context, workerID str
 }
 
 func (d *supervisedDaemon) SubscribeEvents(ctx context.Context) (<-chan pool.RuntimeEvent, error) {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return nil, err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return nil, err
 	}
 	events, err := client.SubscribeEvents(ctx)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
@@ -492,14 +524,11 @@ func (d *supervisedDaemon) SubscribeEvents(ctx context.Context) (<-chan pool.Run
 }
 
 func (d *supervisedDaemon) SubmitAssignment(ctx context.Context, workerID string, assignment pool.Assignment) error {
-	client := d.currentClient()
-	if client == nil {
-		if err := d.start(); err != nil {
-			return err
-		}
-		client = d.currentClient()
+	client, err := d.ensureClient()
+	if err != nil {
+		return err
 	}
-	err := client.SubmitAssignment(ctx, workerID, assignment)
+	err = client.SubmitAssignment(ctx, workerID, assignment)
 	if restartErr := d.restartIfUnavailable(err); restartErr != nil {
 		return restartErr
 	}

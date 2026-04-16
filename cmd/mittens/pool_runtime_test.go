@@ -115,6 +115,9 @@ esac
 	if !argPairExists(runArgs, "-v", workspace+":"+workspace) {
 		t.Fatalf("docker run args missing workspace mount: %v", runArgs)
 	}
+	if !argPairExists(runArgs, "-v", filepath.Join(home, ".mittens", "logs")+":/mnt/mittens-logs") {
+		t.Fatalf("docker run args missing log dir mount: %v", runArgs)
+	}
 	if got := poolEnvValue(runArgs, "MITTENS_WORKER_ID"); got != "w-1" {
 		t.Fatalf("MITTENS_WORKER_ID = %q, want %q", got, "w-1")
 	}
@@ -174,6 +177,9 @@ esac
 	}
 	if cfg.ContainerName != "mittens-kitchen-workspace-123-w-1" {
 		t.Fatalf("init config containerName = %q, want %q", cfg.ContainerName, "mittens-kitchen-workspace-123-w-1")
+	}
+	if cfg.LogDir != "/mnt/mittens-logs" {
+		t.Fatalf("init config logDir = %q, want %q", cfg.LogDir, "/mnt/mittens-logs")
 	}
 	if !cfg.Flags.PrintMode || !cfg.Flags.Yolo || !cfg.Flags.NoNotify {
 		t.Fatalf("init config flags = %+v, want print/yolo/noNotify enabled", cfg.Flags)

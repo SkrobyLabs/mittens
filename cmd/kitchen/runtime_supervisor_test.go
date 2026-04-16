@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -345,6 +347,103 @@ func TestSupervisedDaemonListContainersRestartsOnUnavailableSocket(t *testing.T)
 	}
 	if len(containers) != 1 || containers[0].WorkerID != "w-1" {
 		t.Fatalf("containers = %+v, want worker w-1", containers)
+	}
+}
+
+func TestSupervisedDaemonSpawnWorkerRestartsWhenHealthCheckFails(t *testing.T) {
+	tmp := t.TempDir()
+	pidPath := filepath.Join(tmp, "daemon.pid")
+	if err := os.WriteFile(pidPath, []byte("999999\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile pid: %v", err)
+	}
+
+	healthy := &supervisedRuntimeStub{
+		spawnFn: func(_ context.Context, spec pool.WorkerSpec) (string, string, error) {
+			if spec.ID != "w-1" {
+				t.Fatalf("spec.ID = %q, want w-1", spec.ID)
+			}
+			return "worker-1", "container-1", nil
+		},
+	}
+	d := &supervisedDaemon{
+		pidPath:    pidPath,
+		socketPath: filepath.Join(tmp, "runtime.sock"),
+		client: &supervisedRuntimeStub{
+			spawnFn: func(context.Context, pool.WorkerSpec) (string, string, error) {
+				t.Fatal("stale client should not be used")
+				return "", "", nil
+			},
+		},
+	}
+	restarts := 0
+	d.restartFn = func() error {
+		restarts++
+		d.client = healthy
+		return nil
+	}
+
+	name, id, err := d.SpawnWorker(context.Background(), pool.WorkerSpec{ID: "w-1"})
+	if err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if restarts != 1 {
+		t.Fatalf("restart count = %d, want 1", restarts)
+	}
+	if name != "worker-1" || id != "container-1" {
+		t.Fatalf("spawn result = (%q, %q), want (worker-1, container-1)", name, id)
+	}
+}
+
+func TestSupervisedDaemonListContainersRestartsWhenSocketRefusesConnections(t *testing.T) {
+	tmp := t.TempDir()
+	socketPath := filepath.Join(tmp, "runtime.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen unix: %v", err)
+	}
+	_ = ln.Close()
+
+	pidPath := filepath.Join(tmp, "daemon.pid")
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile pid: %v", err)
+	}
+
+	healthy := &supervisedRuntimeStub{
+		listFn: func(_ context.Context, sessionID string) ([]pool.ContainerInfo, error) {
+			if sessionID != "kitchen-test" {
+				t.Fatalf("sessionID = %q, want kitchen-test", sessionID)
+			}
+			return []pool.ContainerInfo{{WorkerID: "w-2", ContainerID: "c-2", State: "running", Status: pool.WorkerIdle}}, nil
+		},
+	}
+	d := &supervisedDaemon{
+		pidPath:    pidPath,
+		socketPath: socketPath,
+		client: &supervisedRuntimeStub{
+			listFn: func(context.Context, string) ([]pool.ContainerInfo, error) {
+				t.Fatal("stale client should not be used")
+				return nil, nil
+			},
+		},
+	}
+	restarts := 0
+	d.restartFn = func() error {
+		restarts++
+		d.client = healthy
+		d.pidPath = ""
+		d.socketPath = ""
+		return nil
+	}
+
+	containers, err := d.ListContainers(context.Background(), "kitchen-test")
+	if err != nil {
+		t.Fatalf("ListContainers: %v", err)
+	}
+	if restarts != 1 {
+		t.Fatalf("restart count = %d, want 1", restarts)
+	}
+	if len(containers) != 1 || containers[0].WorkerID != "w-2" {
+		t.Fatalf("containers = %+v, want worker w-2", containers)
 	}
 }
 
