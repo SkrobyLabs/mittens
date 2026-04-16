@@ -2321,7 +2321,8 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	}
 	wasCompleted := bundle.Execution.State == planStateCompleted
 
-	active, completed, failed := summarizeRelevantPlanTasks(s.pm.Tasks(), bundle)
+	tasks := s.pm.Tasks()
+	active, completed, failed := summarizeRelevantPlanTasks(tasks, bundle)
 	bundle.Execution.ActiveTaskIDs = active
 	bundle.Execution.CompletedTaskIDs = completed
 	bundle.Execution.FailedTaskIDs = failed
@@ -2341,27 +2342,34 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		return s.plans.UpdateExecution(planID, bundle.Execution)
 	}
 
+	canceledTrackedTask := hasCanceledPlanTrackedTask(tasks, bundle)
 	if len(active) == 0 && len(failed) == 0 {
-		if bundle.Execution.AutoRemediationActive {
-			if strings.TrimSpace(bundle.Execution.AutoRemediationTaskID) != "" && containsTrimmedString(completed, bundle.Execution.AutoRemediationTaskID) {
-				completeAutoRemediationState(&bundle.Execution)
-			} else {
-				bundle.Plan.State = planStateActive
-				bundle.Execution.State = planStateActive
-				bundle.Execution.CompletedAt = nil
-				if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
-					return err
+		if canceledTrackedTask {
+			bundle.Plan.State = planStateActive
+			bundle.Execution.State = planStateActive
+			bundle.Execution.CompletedAt = nil
+		} else {
+			if bundle.Execution.AutoRemediationActive {
+				if strings.TrimSpace(bundle.Execution.AutoRemediationTaskID) != "" && containsTrimmedString(completed, bundle.Execution.AutoRemediationTaskID) {
+					completeAutoRemediationState(&bundle.Execution)
+				} else {
+					bundle.Plan.State = planStateActive
+					bundle.Execution.State = planStateActive
+					bundle.Execution.CompletedAt = nil
+					if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+						return err
+					}
+					return s.plans.UpdateExecution(planID, bundle.Execution)
 				}
-				return s.plans.UpdateExecution(planID, bundle.Execution)
 			}
+			if shouldEnqueueImplementationReview(bundle.Execution) {
+				return s.enqueueImplementationReview(bundle)
+			}
+			now := time.Now().UTC()
+			bundle.Plan.State = planStateCompleted
+			bundle.Execution.State = planStateCompleted
+			bundle.Execution.CompletedAt = &now
 		}
-		if shouldEnqueueImplementationReview(bundle.Execution) {
-			return s.enqueueImplementationReview(bundle)
-		}
-		now := time.Now().UTC()
-		bundle.Plan.State = planStateCompleted
-		bundle.Execution.State = planStateCompleted
-		bundle.Execution.CompletedAt = &now
 	} else if len(active) == 0 && len(failed) > 0 {
 		if allTasksAreConflictFailed(s.pm.Tasks(), failed) {
 			bundle.Plan.State = planStateActive
@@ -2392,6 +2400,24 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		s.notify(pool.Notification{Type: "plan_completed", ID: planID, Message: title})
 	}
 	return nil
+}
+
+func hasCanceledPlanTrackedTask(tasks []pool.Task, bundle StoredPlan) bool {
+	if strings.TrimSpace(bundle.Execution.State) != planStateActive {
+		return false
+	}
+	for _, task := range tasks {
+		if task.PlanID != bundle.Plan.PlanID || task.Status != pool.TaskCanceled {
+			continue
+		}
+		if task.Role == plannerTaskRole || isReviewCouncilTask(task) || isLineageMergeTask(task) {
+			continue
+		}
+		if _, _, _, ok := recoveredPlanTask(bundle.Plan, task.ID); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldEnqueueImplementationReview(exec ExecutionRecord) bool {

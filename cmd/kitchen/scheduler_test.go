@@ -5002,6 +5002,272 @@ func TestRunRecoverySuite_RequeuesMissingActiveLineageFixMergeTask(t *testing.T)
 	}
 }
 
+func TestHandleNotification_TaskCanceledKeepsLineageFixMergePlanActive(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan_fix_merge_cancel_recover"
+	fixTaskID := planTaskRuntimeID(planID, "fix-merge-123")
+	planID, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "feat-fix-merge-cancel-recover",
+			Title:   "Lineage fix-merge cancel recovery",
+			State:   planStateActive,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: "HEAD",
+			},
+			Tasks: []PlanTask{
+				{
+					ID:               "t1",
+					Title:            "Implement",
+					Prompt:           "implement change",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+				{
+					ID:               "fix-merge-123",
+					Title:            "Fix merge conflicts",
+					Prompt:           "resolve merge conflicts",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateActive,
+			ActiveTaskIDs:    []string{fixTaskID},
+			CompletedTaskIDs: []string{planTaskRuntimeID(planID, "t1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-fix-merge-cancel-recover"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	t1TaskID := planTaskRuntimeID(planID, "t1")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         t1TaskID,
+		PlanID:     planID,
+		Prompt:     "implement change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask t1: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-t1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker t1: %v", err)
+	}
+	if err := pm.RegisterWorker("w-t1", "container-w-t1"); err != nil {
+		t.Fatalf("RegisterWorker t1: %v", err)
+	}
+	if err := pm.DispatchTask(t1TaskID, "w-t1"); err != nil {
+		t.Fatalf("DispatchTask t1: %v", err)
+	}
+	if err := pm.CompleteTask("w-t1", t1TaskID); err != nil {
+		t.Fatalf("CompleteTask t1: %v", err)
+	}
+
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:                 fixTaskID,
+		PlanID:             planID,
+		Prompt:             "resolve merge conflicts",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               lineageFixMergeRole,
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	k := &Kitchen{pm: pm, planStore: store}
+	if err := k.CancelTask(fixTaskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	s.handleNotification(pool.Notification{Type: "task_canceled", ID: fixTaskID})
+
+	task, ok := pm.Task(fixTaskID)
+	if !ok {
+		t.Fatalf("task %q not found", fixTaskID)
+	}
+	if task.Status != pool.TaskCanceled {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskCanceled)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 0 {
+		t.Fatalf("active task ids = %+v, want empty", bundle.Execution.ActiveTaskIDs)
+	}
+	if len(bundle.Execution.CompletedTaskIDs) != 1 || bundle.Execution.CompletedTaskIDs[0] != t1TaskID {
+		t.Fatalf("completed task ids = %+v, want [%q]", bundle.Execution.CompletedTaskIDs, t1TaskID)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	}
+}
+
+func TestRunRecoverySuite_KeepsActivePlanWithCanceledLineageFixMergeTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan_restart_fix_merge_cancel_recovery"
+	fixTaskID := planTaskRuntimeID(planID, "fix-merge-123")
+	planID, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "feat-restart-fix-merge-cancel-recovery",
+			Title:   "Restart keeps canceled fix-merge retryable",
+			State:   planStateActive,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: "HEAD",
+			},
+			Tasks: []PlanTask{
+				{
+					ID:               "t1",
+					Title:            "Implement",
+					Prompt:           "implement change",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+				{
+					ID:               "fix-merge-123",
+					Title:            "Fix merge conflicts",
+					Prompt:           "resolve merge conflicts",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateActive,
+			ActiveTaskIDs:    []string{fixTaskID},
+			CompletedTaskIDs: []string{planTaskRuntimeID(planID, "t1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-restart-fix-merge-cancel-recovery"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	t1TaskID := planTaskRuntimeID(planID, "t1")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         t1TaskID,
+		PlanID:     planID,
+		Prompt:     "implement change",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask t1: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-t1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker t1: %v", err)
+	}
+	if err := pm.RegisterWorker("w-t1", "container-w-t1"); err != nil {
+		t.Fatalf("RegisterWorker t1: %v", err)
+	}
+	if err := pm.DispatchTask(t1TaskID, "w-t1"); err != nil {
+		t.Fatalf("DispatchTask t1: %v", err)
+	}
+	if err := pm.CompleteTask("w-t1", t1TaskID); err != nil {
+		t.Fatalf("CompleteTask t1: %v", err)
+	}
+
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:                 fixTaskID,
+		PlanID:             planID,
+		Prompt:             "resolve merge conflicts",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               lineageFixMergeRole,
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	k := &Kitchen{pm: pm, planStore: store}
+	if err := k.CancelTask(fixTaskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	if err := s.runRecoverySuite(); err != nil {
+		t.Fatalf("runRecoverySuite: %v", err)
+	}
+
+	task, ok := pm.Task(fixTaskID)
+	if !ok {
+		t.Fatalf("task %q not found", fixTaskID)
+	}
+	if task.Status != pool.TaskCanceled {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskCanceled)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 0 {
+		t.Fatalf("active task ids = %+v, want empty", bundle.Execution.ActiveTaskIDs)
+	}
+	if len(bundle.Execution.CompletedTaskIDs) != 1 || bundle.Execution.CompletedTaskIDs[0] != t1TaskID {
+		t.Fatalf("completed task ids = %+v, want [%q]", bundle.Execution.CompletedTaskIDs, t1TaskID)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

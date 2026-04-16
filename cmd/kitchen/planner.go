@@ -1199,8 +1199,17 @@ func (k *Kitchen) RetryTask(taskID string, requireFreshWorker bool) error {
 	if !ok {
 		return fmt.Errorf("task %s not found", taskID)
 	}
-	if err := k.pm.ReviveFailedTask(taskID, requireFreshWorker); err != nil {
-		return err
+	switch task.Status {
+	case pool.TaskFailed:
+		if err := k.pm.ReviveFailedTask(taskID, requireFreshWorker); err != nil {
+			return err
+		}
+	case pool.TaskCanceled:
+		if err := k.pm.ReviveCanceledTask(taskID, requireFreshWorker); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("task %s is not retryable (status: %s)", taskID, task.Status)
 	}
 	planID := strings.TrimSpace(task.PlanID)
 	if planID == "" || k.planStore == nil {

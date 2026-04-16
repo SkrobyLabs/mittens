@@ -743,6 +743,79 @@ func TestKitchenAPIRetryTaskEndpointSupportsSameWorker(t *testing.T) {
 	}
 }
 
+func TestKitchenAPIRetryTaskEndpointAcceptsCanceledTask(t *testing.T) {
+	k := newTestKitchen(t)
+	planID := "plan_retry_canceled_fix_merge"
+	taskID := planTaskRuntimeID(planID, "fix-merge-123")
+	if _, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "retry-canceled-fix-merge",
+			Title:   "Retry canceled fix merge",
+			State:   planStateActive,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: "HEAD",
+			},
+			Tasks: []PlanTask{
+				{
+					ID:               "t1",
+					Title:            "Implement",
+					Prompt:           "implement",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+				{
+					ID:               "fix-merge-123",
+					Title:            "Fix merge conflicts",
+					Prompt:           "resolve merge conflicts",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateActive,
+			ActiveTaskIDs:    []string{taskID},
+			CompletedTaskIDs: []string{planTaskRuntimeID(planID, "t1")},
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:                 taskID,
+		PlanID:             planID,
+		Prompt:             "resolve merge conflicts",
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               lineageFixMergeRole,
+		RequireFreshWorker: true,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if err := k.CancelTask(taskID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	server := httptest.NewServer(k.NewAPIHandler(""))
+	defer server.Close()
+
+	resp := apiRequest(t, server, http.MethodPost, "/v1/tasks/"+taskID+"/retry", map[string]any{})
+	var payload map[string]any
+	decodeResponse(t, resp, &payload)
+	if payload["status"] != "retried" || payload["taskId"] != taskID || payload["requireFreshWorker"] != true {
+		t.Fatalf("retry payload = %+v", payload)
+	}
+
+	task, ok := k.pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.Status != pool.TaskQueued || !task.RequireFreshWorker {
+		t.Fatalf("task = %+v, want queued with fresh-worker requirement", task)
+	}
+}
+
 func TestKitchenAPIRetryTaskEndpointRejectsNonFailedTask(t *testing.T) {
 	k := newTestKitchen(t)
 	bundle, err := k.SubmitIdea("Add typed parser errors", "", false, false)

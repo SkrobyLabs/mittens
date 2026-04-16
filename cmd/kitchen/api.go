@@ -428,7 +428,7 @@ func (k *Kitchen) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if task.Status != pool.TaskFailed {
+		if task.Status != pool.TaskFailed && task.Status != pool.TaskCanceled {
 			writeAPIJSON(w, http.StatusConflict, map[string]any{
 				"error":         "task_not_failed",
 				"taskId":        taskID,
