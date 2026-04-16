@@ -149,15 +149,15 @@ func (k *Kitchen) OpenPlanProgressWithLimit(historyLimit int) ([]PlanProgress, e
 
 	progress := make([]PlanProgress, 0, len(plans))
 	for _, plan := range plans {
-		switch plan.State {
-		case planStateCompleted, planStateMerged, planStateClosed:
-			continue
-		}
 		detail, err := k.PlanDetail(plan.PlanID)
 		if err != nil {
 			return nil, err
 		}
-		if detail.Plan.State == planStateRejected && !canExtendReviewCouncil(detail.Plan.State, detail.Execution) {
+		switch strings.TrimSpace(detail.Progress.State) {
+		case planStateCompleted, planStateMerged, "cancelled":
+			continue
+		}
+		if detail.Progress.State == planStateRejected && !canExtendReviewCouncil(detail.Progress.State, detail.Execution) {
 			continue
 		}
 		detail.Progress.History, detail.Progress.HistoryTotal, detail.Progress.HistoryIncluded, detail.Progress.HistoryTruncated = windowPlanProgressHistory(detail.History, historyLimit)
@@ -183,12 +183,17 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 		pendingQuestionIDs = append(pendingQuestionIDs, q.ID)
 	}
 	sort.Strings(pendingQuestionIDs)
+	var tasks []pool.Task
+	if k != nil && k.pm != nil {
+		tasks = k.pm.Tasks()
+	}
+	projection := projectPlan(bundle, tasks, len(pendingQuestionIDs))
 
 	progress := PlanProgress{
 		PlanID:                 planID,
 		Lineage:                bundle.Plan.Lineage,
 		Title:                  bundle.Plan.Title,
-		State:                  bundle.Execution.State,
+		State:                  projection.State,
 		DependsOn:              append([]string(nil), bundle.Plan.DependsOn...),
 		ImplReviewRequested:    bundle.Execution.ImplReviewRequested,
 		ImplReviewStatus:       bundle.Execution.ImplReviewStatus,
@@ -211,9 +216,9 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 		ReviewCouncilFinalDecision:  bundle.Execution.ReviewCouncilFinalDecision,
 		PendingQuestions:            len(pendingQuestionIDs),
 		PendingQuestionIDs:          pendingQuestionIDs,
-		ActiveTaskIDs:               append([]string(nil), bundle.Execution.ActiveTaskIDs...),
-		CompletedTaskIDs:            append([]string(nil), bundle.Execution.CompletedTaskIDs...),
-		FailedTaskIDs:               append([]string(nil), bundle.Execution.FailedTaskIDs...),
+		ActiveTaskIDs:               append([]string(nil), projection.ActiveTaskIDs...),
+		CompletedTaskIDs:            append([]string(nil), projection.CompletedTaskIDs...),
+		FailedTaskIDs:               append([]string(nil), projection.FailedTaskIDs...),
 	}
 	sort.Strings(progress.ActiveTaskIDs)
 	sort.Strings(progress.CompletedTaskIDs)
@@ -225,7 +230,7 @@ func (k *Kitchen) planProgress(bundle StoredPlan) (PlanProgress, error) {
 	progress.History = append([]PlanHistoryEntry(nil), bundle.Execution.History...)
 	progress.HistoryTotal = len(progress.History)
 	progress.HistoryIncluded = len(progress.History)
-	progress.Phase = planPhase(bundle, progress.PendingQuestions)
+	progress.Phase = projection.Phase
 	return progress, nil
 }
 
@@ -289,7 +294,8 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 	if hasCouncilState(bundle.Execution) && cycleCount == 0 {
 		cycleCount = 1
 	}
-	if cycleCount > 0 && (bundle.Execution.State == planStatePlanning || bundle.Execution.State == planStateReviewing) {
+	projection := projectPlanForKitchen(k, bundle)
+	if cycleCount > 0 && (projection.State == planStatePlanning || projection.State == planStateReviewing) {
 		nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
 		if nextTurn > cycleCount && nextTurn <= bundle.Execution.CouncilMaxTurns {
 			cycleCount = nextTurn
@@ -309,7 +315,7 @@ func (k *Kitchen) planCycles(bundle StoredPlan) []PlanCycleProgress {
 
 	reviewTurns := maxObservedReviewCouncilTurn(bundle, tasks)
 	reviewCycle := currentReviewCouncilCycle(bundle.Execution)
-	if bundle.Execution.State == planStateImplementationReview && reviewTurns == 0 {
+	if projection.State == planStateImplementationReview && reviewTurns == 0 {
 		reviewTurns = 1
 	}
 	for i := 1; i <= reviewTurns; i++ {
@@ -422,33 +428,5 @@ func initialPlannerRuntimeID(planID string) string {
 }
 
 func planPhase(bundle StoredPlan, pendingQuestions int) string {
-	switch bundle.Execution.State {
-	case planStatePlanning:
-		return "planning"
-	case planStateReviewing:
-		return "reviewing"
-	case planStateImplementationReview:
-		return "reviewing_implementation"
-	case planStatePendingApproval:
-		if pendingQuestions > 0 {
-			return "awaiting_questions"
-		}
-		return "awaiting_approval"
-	case planStateActive:
-		if bundle.Execution.AutoRemediationActive {
-			if reviewRemediationMode(bundle.Execution.AutoRemediationSource) == reviewRemediationModeManual {
-				return "remediating_review_findings"
-			}
-			return "auto_remediating_implementation_review"
-		}
-		return "executing"
-	case planStateMerging:
-		return "merging"
-	case planStateWaitingOnDependency:
-		return "waiting_on_dependency"
-	case "":
-		return bundle.Plan.State
-	default:
-		return bundle.Execution.State
-	}
+	return projectPlan(bundle, nil, pendingQuestions).Phase
 }

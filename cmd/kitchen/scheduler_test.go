@@ -2591,16 +2591,37 @@ func TestSchedulerRespectsMaxWorkersPerLineage(t *testing.T) {
 	if err := s.onTaskFailed(task1ID, FailureEnvironment); err != nil {
 		t.Fatalf("onTaskFailed(t1): %v", err)
 	}
+	spawnsBeforeRecovery := len(host.spawnSpecs)
 	if err := s.schedule(); err != nil {
 		t.Fatalf("schedule(after free capacity): %v", err)
 	}
 
 	secondTask, ok = pm.Task(task2ID)
-	if !ok || secondTask.Status != pool.TaskDispatched {
-		t.Fatalf("second task = %+v, want dispatched once lineage capacity frees", secondTask)
+	if !ok {
+		t.Fatalf("task %q not found after capacity free", task2ID)
 	}
-	if secondTask.WorkerID != "w-1" && secondTask.WorkerID != "w-2" {
-		t.Fatalf("second task worker = %q, want one of the idle implementers", secondTask.WorkerID)
+	if secondTask.Status != pool.TaskQueued {
+		t.Fatalf("second task status = %q, want queued until fresh lineage worker registers", secondTask.Status)
+	}
+	if len(host.spawnSpecs) != spawnsBeforeRecovery+1 {
+		t.Fatalf("spawn specs = %d, want exactly one fresh worker spawn after lineage capacity frees", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[len(host.spawnSpecs)-1].WorkspacePath == "" {
+		t.Fatal("fresh lineage worker spawn should have an explicit workspace")
+	}
+	if err := pm.RegisterWorker("w-3", "container-w-3"); err != nil {
+		t.Fatalf("RegisterWorker w-3: %v", err)
+	}
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule(dispatch after fresh worker register): %v", err)
+	}
+
+	secondTask, ok = pm.Task(task2ID)
+	if !ok || secondTask.Status != pool.TaskDispatched {
+		t.Fatalf("second task = %+v, want dispatched once fresh lineage worker registers", secondTask)
+	}
+	if secondTask.WorkerID != "w-3" {
+		t.Fatalf("second task worker = %q, want fresh lineage worker w-3", secondTask.WorkerID)
 	}
 }
 

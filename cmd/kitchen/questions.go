@@ -175,7 +175,8 @@ func (k *Kitchen) autoApproveReadyPlan(planID string) error {
 	if err != nil {
 		return err
 	}
-	if !bundle.Execution.AutoApproved || bundle.Execution.State != planStatePendingApproval {
+	projection := projectPlanForKitchen(k, bundle)
+	if !bundle.Execution.AutoApproved || projection.State != planStatePendingApproval {
 		return nil
 	}
 	if bundle.Execution.CouncilFinalDecision != "" && !canAutoApproveCouncil(bundle.Execution) {
@@ -192,7 +193,7 @@ func (k *Kitchen) queueCouncilResumeIfReady(planID string) error {
 	if err != nil {
 		return err
 	}
-	if bundle.Execution.State == planStateImplementationReview {
+	if projectPlanForKitchen(k, bundle).State == planStateImplementationReview {
 		return k.queueReviewCouncilResumeIfReady(planID)
 	}
 	return k.queuePlannerCouncilResumeIfReady(planID)
@@ -210,7 +211,7 @@ func (k *Kitchen) queuePlannerCouncilResumeIfReady(planID string) error {
 	if err != nil {
 		return err
 	}
-	if bundle.Execution.State != planStateReviewing || !bundle.Execution.CouncilAwaitingAnswers {
+	if projectPlanForKitchen(k, bundle).State != planStateReviewing || !bundle.Execution.CouncilAwaitingAnswers {
 		return nil
 	}
 	if len(pendingCouncilQuestionsForPlan(k.pm, planID)) > 0 {
@@ -261,7 +262,7 @@ func (k *Kitchen) queueReviewCouncilResumeIfReady(planID string) error {
 	if err != nil {
 		return err
 	}
-	if bundle.Execution.State != planStateImplementationReview || !bundle.Execution.ReviewCouncilAwaitingAnswers {
+	if projectPlanForKitchen(k, bundle).State != planStateImplementationReview || !bundle.Execution.ReviewCouncilAwaitingAnswers {
 		return nil
 	}
 	if len(pendingReviewCouncilQuestionsForPlan(k.pm, planID)) > 0 {

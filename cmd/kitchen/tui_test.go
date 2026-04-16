@@ -2571,6 +2571,31 @@ func TestRenderPlanDetailLinesShowsAutoRemediationVisibility(t *testing.T) {
 	}
 }
 
+func TestKitchenTUICanExtendSelectedPlanUsesProjectedState(t *testing.T) {
+	model := kitchenTUIModel{
+		detail: &PlanDetail{
+			Plan: PlanRecord{
+				PlanID: "plan_extend_projected",
+				State:  planStateCompleted,
+			},
+			Execution: ExecutionRecord{
+				State:                       planStateCompleted,
+				RejectedBy:                  rejectedByReviewCouncil,
+				ReviewCouncilMaxTurns:       2,
+				ReviewCouncilTurnsCompleted: 2,
+				ReviewCouncilFinalDecision:  reviewCouncilReject,
+			},
+			Progress: PlanProgress{
+				State: planStateImplementationReviewFailed,
+			},
+		},
+	}
+
+	if !model.canExtendSelectedPlan() {
+		t.Fatal("expected extend to remain available from projected implementation review failure state")
+	}
+}
+
 func TestRenderTaskLogLinesHighlightsHeader(t *testing.T) {
 	model := kitchenTUIModel{
 		tasks: []kitchenTUITaskItem{{

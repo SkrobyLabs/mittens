@@ -1574,18 +1574,28 @@ func (k *Kitchen) ListPlans(includeCompleted bool) ([]PlanRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	if includeCompleted {
-		return plans, nil
+	var tasks []pool.Task
+	if k.pm != nil {
+		tasks = k.pm.Tasks()
 	}
-
 	filtered := make([]PlanRecord, 0, len(plans))
 	for _, plan := range plans {
-		switch plan.State {
-		case planStateCompleted, planStateMerged, planStateClosed, planStateRejected:
-			continue
-		default:
-			filtered = append(filtered, plan)
+		bundle, err := k.planStore.Get(plan.PlanID)
+		if err != nil {
+			return nil, err
 		}
+		pendingQuestions := 0
+		if k.pm != nil {
+			pendingQuestions = len(pendingQuestionsForPlan(k.pm, plan.PlanID))
+		}
+		plan.State = projectPlan(bundle, tasks, pendingQuestions).State
+		if !includeCompleted {
+			switch plan.State {
+			case planStateCompleted, planStateMerged, planStateClosed, planStateRejected, "cancelled":
+				continue
+			}
+		}
+		filtered = append(filtered, plan)
 	}
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].UpdatedAt.After(filtered[j].UpdatedAt)

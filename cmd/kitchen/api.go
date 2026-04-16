@@ -154,9 +154,10 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
+	projection := projectPlanForKitchen(k, *bundle)
 	resp := map[string]any{
 		"planId":  bundle.Plan.PlanID,
-		"state":   bundle.Execution.State,
+		"state":   projection.State,
 		"lineage": bundle.Plan.Lineage,
 	}
 	resp["councilMaxTurns"] = bundle.Execution.CouncilMaxTurns
@@ -191,9 +192,10 @@ func (k *Kitchen) handleSubmitQuick(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
+	projection := projectPlanForKitchen(k, *bundle)
 	writeAPIJSON(w, http.StatusCreated, map[string]any{
 		"planId":  bundle.Plan.PlanID,
-		"state":   bundle.Execution.State,
+		"state":   projection.State,
 		"lineage": bundle.Plan.Lineage,
 		"source":  bundle.Plan.Source,
 	})
@@ -211,9 +213,10 @@ func (k *Kitchen) handleSubmitResearch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
+	projection := projectPlanForKitchen(k, *bundle)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"planId": bundle.Plan.PlanID,
-		"state":  bundle.Execution.State,
+		"state":  projection.State,
 		"mode":   bundle.Plan.Mode,
 	})
 }
@@ -236,9 +239,10 @@ func (k *Kitchen) handlePromoteResearch(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
+	projection := projectPlanForKitchen(k, *bundle)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"planId":          bundle.Plan.PlanID,
-		"state":           bundle.Execution.State,
+		"state":           projection.State,
 		"lineage":         bundle.Plan.Lineage,
 		"researchPlanId":  bundle.Plan.ResearchPlanID,
 		"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
@@ -257,9 +261,10 @@ func (k *Kitchen) handleRefineResearch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, apiErrorStatus(err), err.Error())
 		return
 	}
+	projection := projectPlanForKitchen(k, *bundle)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"planId": bundle.Plan.PlanID,
-		"state":  bundle.Execution.State,
+		"state":  projection.State,
 		"mode":   bundle.Plan.Mode,
 	})
 }
@@ -524,8 +529,8 @@ func (k *Kitchen) handleApprovePlan(w http.ResponseWriter, r *http.Request) {
 	// Re-read the plan to return the actual resulting state, which may
 	// be "active" or "waiting_on_dependency".
 	resultState := planStateActive
-	if bundle, err := k.planStore.Get(planID); err == nil {
-		resultState = bundle.Execution.State
+	if detail, err := k.PlanDetail(planID); err == nil {
+		resultState = detail.Progress.State
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]string{"status": resultState})
 }

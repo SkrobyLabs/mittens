@@ -751,13 +751,13 @@ func runKitchenTUI(repoPath string) error {
 	ta.SetWidth(80)
 	ta.SetHeight(6)
 	model := kitchenTUIModel{
-		backend:        backend,
-		repoPath:       repoPath,
-		input:          input,
-		submitTextarea: ta,
-		loading:        true,
-		leftMode:       kitchenTUILeftPlans,
-		taskPaneMode:   kitchenTUITaskPaneDetail,
+		backend:          backend,
+		repoPath:         repoPath,
+		input:            input,
+		submitTextarea:   ta,
+		loading:          true,
+		leftMode:         kitchenTUILeftPlans,
+		taskPaneMode:     kitchenTUITaskPaneDetail,
 		rightPaneOffsets: map[string]int{},
 	}
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
@@ -2193,7 +2193,8 @@ func (m kitchenTUIModel) canExtendSelectedPlan() bool {
 	if m.detail == nil {
 		return false
 	}
-	return canExtendCouncil(m.detail.Plan.State, m.detail.Execution) || canExtendReviewCouncil(m.detail.Plan.State, m.detail.Execution)
+	state := detailDisplayState(m.detail)
+	return canExtendCouncil(state, m.detail.Execution) || canExtendReviewCouncil(state, m.detail.Execution)
 }
 
 func (m kitchenTUIModel) canRequestReviewSelectedPlan() bool {
@@ -3080,7 +3081,7 @@ func (m kitchenTUIModel) pageScrollDelta() int {
 
 func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 	detail := *m.detail
-	state := firstNonEmpty(planDisplayState(kitchenTUIPlanItem{Record: detail.Plan, Progress: &detail.Progress}), detail.Execution.State, detail.Plan.State)
+	state := firstNonEmpty(detailDisplayState(&detail), detail.Execution.State, detail.Plan.State)
 	lines := []string{
 		lipgloss.NewStyle().Bold(true).Render(detail.Plan.Title),
 		fmt.Sprintf("Plan ID: %s", detail.Plan.PlanID),
@@ -3145,7 +3146,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			}
 		}
 	}
-	if detail.Execution.State == planStateImplementationReview || hasReviewCouncilState(detail.Execution) {
+	if state == planStateImplementationReview || state == planStateImplementationReviewFailed || hasReviewCouncilState(detail.Execution) {
 		activeTurn := detail.Execution.ReviewCouncilTurnsCompleted + 1
 		for _, cycle := range detail.Progress.Cycles {
 			if cycle.ImplReviewTaskID != "" && cycle.Index > activeTurn {
@@ -3163,7 +3164,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			activeSeat = reviewCouncilSeatForTurn(activeTurn)
 		}
 		status := firstNonEmpty(strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision), "reviewing")
-		if detail.Execution.State == planStateImplementationReviewFailed && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
+		if state == planStateImplementationReviewFailed && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
 			status = "failed"
 		}
 		reviewLabel := fmt.Sprintf("Review Council: turn %d/%d · Seat %s [%s]", max(1, activeTurn), max(1, detail.Execution.ReviewCouncilMaxTurns), activeSeat, status)
@@ -3178,7 +3179,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 			}
 			trajectory = append(trajectory, fmt.Sprintf("%s: %s", firstNonEmpty(turn.Seat, reviewCouncilSeatForTurn(turn.Turn)), verdict))
 		}
-		if detail.Execution.State == planStateImplementationReview && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
+		if state == planStateImplementationReview && strings.TrimSpace(detail.Execution.ReviewCouncilFinalDecision) == "" {
 			trajectory = append(trajectory, fmt.Sprintf("%s: -", activeSeat))
 		}
 		lines = append(lines,
@@ -3234,7 +3235,7 @@ func (m kitchenTUIModel) renderPlanDetailLines(innerWidth int) []string {
 				lines = append(lines, renderCouncilTurnDiffLines(prev, turn.Artifact.CandidatePlan, innerWidth, 12)...)
 			}
 		}
-		switch detail.Plan.State {
+		switch state {
 		case planStateRejected:
 			lines = appendCouncilDisagreements(lines, "Unresolved disagreements:", detail.Execution.CouncilUnresolvedDisagreements, innerWidth)
 		case planStatePendingApproval:
@@ -3410,7 +3411,7 @@ func summarizeImplementationReviewStatus(detail *PlanDetail, task kitchenTUITask
 		case planReviewStatusFailed:
 			return "failed"
 		}
-		switch detail.Execution.State {
+		switch detailDisplayState(detail) {
 		case planStateCompleted:
 			if detail.Progress.ImplReviewRequested {
 				return "approved"
@@ -4021,6 +4022,16 @@ func planDisplayState(plan kitchenTUIPlanItem) string {
 		return plan.Progress.State
 	}
 	return firstNonEmpty(plan.Record.State, "-")
+}
+
+func detailDisplayState(detail *PlanDetail) string {
+	if detail == nil {
+		return ""
+	}
+	return planDisplayState(kitchenTUIPlanItem{
+		Record:   detail.Plan,
+		Progress: &detail.Progress,
+	})
 }
 
 func needsUserAttention(plan kitchenTUIPlanItem) bool {

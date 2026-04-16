@@ -147,9 +147,10 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			projection := projectPlanForKitchen(k, *bundle)
 			resp := map[string]any{
 				"planId":          bundle.Plan.PlanID,
-				"state":           bundle.Execution.State,
+				"state":           projection.State,
 				"lineage":         bundle.Plan.Lineage,
 				"councilMaxTurns": bundle.Execution.CouncilMaxTurns,
 			}
@@ -326,11 +327,11 @@ func newRootCommand() *cobra.Command {
 			if err := k.ApprovePlan(args[0]); err != nil {
 				return err
 			}
-			bundle, err := k.GetPlan(args[0])
+			detail, err := k.PlanDetail(args[0])
 			if err != nil {
 				return err
 			}
-			return writeJSON(cmd.OutOrStdout(), map[string]string{"status": bundle.Execution.State})
+			return writeJSON(cmd.OutOrStdout(), map[string]string{"status": detail.Progress.State})
 		},
 	}
 
@@ -1200,9 +1201,10 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			projection := projectPlanForKitchen(k, *bundle)
 			return writeJSON(cmd.OutOrStdout(), map[string]any{
 				"planId": bundle.Plan.PlanID,
-				"state":  bundle.Execution.State,
+				"state":  projection.State,
 				"mode":   bundle.Plan.Mode,
 			})
 		},
@@ -1241,9 +1243,10 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			projection := projectPlanForKitchen(k, *bundle)
 			return writeJSON(cmd.OutOrStdout(), map[string]any{
 				"planId":          bundle.Plan.PlanID,
-				"state":           bundle.Execution.State,
+				"state":           projection.State,
 				"lineage":         bundle.Plan.Lineage,
 				"researchPlanId":  bundle.Plan.ResearchPlanID,
 				"councilMaxTurns": bundle.Execution.CouncilMaxTurns,

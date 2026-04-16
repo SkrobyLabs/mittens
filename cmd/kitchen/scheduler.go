@@ -2319,70 +2319,30 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	if err != nil {
 		return err
 	}
-	wasCompleted := bundle.Execution.State == planStateCompleted
+	wasCompleted := executionStateHint(bundle) == planStateCompleted
 
 	tasks := s.pm.Tasks()
-	active, completed, failed := summarizeRelevantPlanTasks(tasks, bundle)
-	bundle.Execution.ActiveTaskIDs = active
-	bundle.Execution.CompletedTaskIDs = completed
-	bundle.Execution.FailedTaskIDs = failed
-	switch bundle.Execution.State {
-	case planStatePlanning,
-		planStateReviewing,
-		planStatePendingApproval,
-		planStateMerging,
-		planStateImplementationReview,
-		planStateResearchComplete,
-		planStatePlanningFailed,
-		planStateImplementationReviewFailed,
-		planStateMerged,
-		planStateClosed,
-		planStateRejected,
-		planStateWaitingOnDependency:
-		return s.plans.UpdateExecution(planID, bundle.Execution)
+	if bundle.Execution.AutoRemediationActive {
+		active, completed, failed := summarizeRelevantPlanTasks(tasks, bundle)
+		if len(active) == 0 && len(failed) == 0 && strings.TrimSpace(bundle.Execution.AutoRemediationTaskID) != "" && containsTrimmedString(completed, bundle.Execution.AutoRemediationTaskID) {
+			completeAutoRemediationState(&bundle.Execution)
+		}
 	}
 
-	canceledTrackedTask := hasCanceledPlanTrackedTask(tasks, bundle)
-	if len(active) == 0 && len(failed) == 0 {
-		if canceledTrackedTask {
-			bundle.Plan.State = planStateActive
-			bundle.Execution.State = planStateActive
-			bundle.Execution.CompletedAt = nil
-		} else {
-			if bundle.Execution.AutoRemediationActive {
-				if strings.TrimSpace(bundle.Execution.AutoRemediationTaskID) != "" && containsTrimmedString(completed, bundle.Execution.AutoRemediationTaskID) {
-					completeAutoRemediationState(&bundle.Execution)
-				} else {
-					bundle.Plan.State = planStateActive
-					bundle.Execution.State = planStateActive
-					bundle.Execution.CompletedAt = nil
-					if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
-						return err
-					}
-					return s.plans.UpdateExecution(planID, bundle.Execution)
-				}
-			}
-			if shouldEnqueueImplementationReview(bundle.Execution) {
-				return s.enqueueImplementationReview(bundle)
-			}
-			now := time.Now().UTC()
-			bundle.Plan.State = planStateCompleted
-			bundle.Execution.State = planStateCompleted
-			bundle.Execution.CompletedAt = &now
-		}
-	} else if len(active) == 0 && len(failed) > 0 {
-		if allTasksAreConflictFailed(s.pm.Tasks(), failed) {
-			bundle.Plan.State = planStateActive
-			bundle.Execution.State = planStateActive
-			bundle.Execution.CompletedAt = nil
-		} else {
-			bundle.Plan.State = planStateImplementationFailed
-			bundle.Execution.State = planStateImplementationFailed
-			bundle.Execution.CompletedAt = nil
-		}
+	projection := projectPlan(bundle, tasks, len(pendingQuestionsForPlan(s.pm, planID)))
+	bundle.Execution.ActiveTaskIDs = projection.ActiveTaskIDs
+	bundle.Execution.CompletedTaskIDs = projection.CompletedTaskIDs
+	bundle.Execution.FailedTaskIDs = projection.FailedTaskIDs
+	if projection.State == planStateImplementationReview && executionStateHint(bundle) != planStateImplementationReview && shouldProjectImplementationReview(bundle.Execution) {
+		return s.enqueueImplementationReview(bundle)
+	}
+
+	bundle.Plan.State = projectedPersistentPlanState(projection.State)
+	bundle.Execution.State = projectedPersistentExecutionState(projection.State)
+	if projection.State == planStateCompleted {
+		now := time.Now().UTC()
+		bundle.Execution.CompletedAt = &now
 	} else {
-		bundle.Plan.State = planStateActive
-		bundle.Execution.State = planStateActive
 		bundle.Execution.CompletedAt = nil
 	}
 
@@ -2584,7 +2544,12 @@ func summarizeRelevantPlanTasks(tasks []pool.Task, bundle StoredPlan) (active []
 }
 
 func taskCountsTowardExecution(task pool.Task, bundle StoredPlan) bool {
-	state := bundle.Execution.State
+	switch task.Status {
+	case pool.TaskCompleted, pool.TaskFailed, pool.TaskCanceled:
+	default:
+		return true
+	}
+	state := executionStateHint(bundle)
 	if isLineageMergeTask(task) {
 		return state == planStateMerging
 	}
