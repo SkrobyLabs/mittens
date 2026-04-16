@@ -187,7 +187,7 @@ kitchen submit "Add typed parser errors"           # submit an idea
 kitchen plans                                       # see active plans
 kitchen approve PLAN_ID                             # approve a plan for execution
 kitchen status                                      # queue, workers, progress
-kitchen merge --squash parser-errors                # merge completed lineage
+kitchen merge parser-errors                         # merge completed lineage
 ```
 
 ### How It Works

@@ -50,9 +50,17 @@ cmd/
   kitchen/                   # Kitchen orchestrator binary
     main.go                  # CLI entry point (cobra commands)
     kitchen.go               # Kitchen struct initialization
-    api.go                   # 22 HTTP API endpoints
+    api.go                   # HTTP API endpoints
+    api_client.go            # HTTP API client (used by CLI to reach a running server)
     scheduler.go             # deterministic task scheduler with timeout enforcement
-    planner.go               # plan lifecycle (submit, approve, reject, replan, evidence)
+    scheduler_council.go     # council-phase scheduling logic
+    scheduler_review_council.go # review council scheduling logic
+    planner.go               # plan lifecycle (submit, quick, research, approve, reject, replan)
+    council.go               # planner council multi-seat discussion logic
+    council_diff.go          # council diff/convergence analysis
+    review_council.go        # review council logic
+    review_findings.go       # review findings extraction and scoring
+    implementation_review_remediation.go # post-review remediation task queuing
     plan_store.go            # atomic JSON plan persistence
     lineage.go               # lineage state management
     broker.go                # WorkerBroker — worker↔Kitchen task delivery
@@ -62,16 +70,22 @@ cmd/
     git.go                   # lineage branches, child worktrees, merge-back, orphan cleanup
     runtime.go               # runtime event forwarding, recycle bridge
     runtime_client.go        # Unix socket client for Mittens daemon RuntimeAPI
+    runtime_mux.go           # multi-provider runtime multiplexer
+    runtime_supervisor.go    # supervised child daemon lifecycle management
+    runtime_lock.go          # exclusive runtime lock
+    runtime_metadata.go      # daemon discovery metadata
+    serve_metadata.go        # project-scoped server metadata (URL, PID, token)
     config.go                # Kitchen config, paths, concurrency limits
     capabilities.go          # machine-readable capability metadata
+    configure.go             # interactive setup wizard for routing/models
     history.go               # planning/review timeline tracking
     progress.go              # plan progress and phase detection
-    operations.go            # status snapshots, merges, worktree cleanup
+    operations.go            # status snapshots, merges, reapply, worktree cleanup
+    commit_msg.go            # LLM-assisted squash commit message generation
     questions.go             # operator question routing
     events.go                # notification formatting for SSE
     notify.go                # notification subscription management
-    runtime_lock.go          # exclusive runtime lock
-    runtime_metadata.go      # daemon discovery metadata
+    tui.go                   # interactive terminal UI
   shim/                      # Windows WSL shim
 pkg/
   pool/                      # reusable scheduler/state machine (extracted from internal/pool)
@@ -86,9 +100,10 @@ pkg/
     reaper.go                # worker health monitoring (heartbeat timeout)
     recovery.go              # WAL replay and state recovery
   adapter/                   # provider-agnostic AI execution
-    adapter.go               # Adapter interface (Execute, ClearSession, ForceClean)
+    adapter.go               # Adapter interface (Execute, ClearSession, ForceClean, Healthy)
     claude.go                # Claude Code adapter (NDJSON streaming)
     codex.go                 # OpenAI Codex adapter
+    gemini.go                # Google Gemini CLI adapter
 examples/
   redis-extension/           # example external extension (Python subprocess protocol)
 ```

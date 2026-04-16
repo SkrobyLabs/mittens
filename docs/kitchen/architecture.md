@@ -35,6 +35,26 @@ criteria, review complexity).
 Planners are stateless between runs except for affinity metadata tracked by
 Kitchen. Multiple planners can run concurrently on different lineages.
 
+### Quick Plans
+
+`POST /v1/quick` (CLI: API-only) creates a single-task plan that bypasses the
+council entirely. The plan activates immediately — no approval gate unless
+`auto=false` is set. On task failure, it retries automatically up to
+`maxRetries` times rather than entering `implementation_failed`. Quick plans
+support a `dependsOn` field for cross-plan sequencing.
+
+### Research Plans
+
+`POST /v1/research` (CLI: `kitchen research`) spawns a read-only researcher
+worker. The worker investigates the topic in the codebase without modifying
+any files and emits a structured research report. The plan enters
+`research_complete` when the report is produced.
+
+`POST /v1/plans/{id}/promote` (CLI: `kitchen promote`) converts a
+`research_complete` plan into a new full council-planned implementation, with
+the research output injected as context for the planner. `refine-research`
+queues a follow-up researcher turn before promotion.
+
 ### Council Planning
 
 Planning uses a multi-seat council model. Each plan starts with a council of
@@ -49,6 +69,19 @@ When `--impl-review` is passed to `kitchen submit`, a post-implementation
 adversarial review is requested. After all implementation tasks complete, a
 reviewer worker critiques the result before the plan reaches the `completed`
 state. The plan enters `implementation_review` state during this phase.
+
+`kitchen remediate-review PLAN_ID` queues a follow-up remediation task after
+a review has passed. `--include-nits` includes minor findings in the
+remediation prompt.
+
+### Implementation Steering
+
+`kitchen steer-implementation PLAN_ID NOTE` queues a lightweight steering task
+on the existing lineage without a full replan. Use this to nudge an active
+implementation mid-flight without discarding completed work.
+
+`kitchen steer PLAN_ID NOTE` appends directional guidance to an in-progress
+planning council to influence the plan still being generated.
 
 ### Plan Store
 
@@ -235,7 +268,25 @@ planning → pending_approval → active → [implementation_review →] complet
 The `--auto` flag on `kitchen submit` skips `pending_approval` for
 trusted/low-risk work.
 
-Additional states: `planning_failed`, `rejected`, `reviewing`, `implementation_review_failed`, `closed`.
+Full state set:
+
+| State | Description |
+|-------|-------------|
+| `planning` | Council or researcher worker is running |
+| `reviewing` | Pre-approval adversarial review is running |
+| `planning_failed` | Planning or review worker failed |
+| `pending_approval` | Awaiting operator approval |
+| `waiting_on_dependency` | Approved but blocked on a `dependsOn` plan |
+| `active` | Implementation tasks are executing |
+| `merging` | A lineage merge is in progress (visible as a kitchen task) |
+| `implementation_failed` | All implementation retries exhausted |
+| `implementation_review` | Post-implementation adversarial review is running |
+| `implementation_review_failed` | Post-implementation review failed |
+| `completed` | All tasks done (and review passed, if requested) |
+| `merged` | Lineage squash-merged into base |
+| `research_complete` | Research worker finished; awaiting `promote` |
+| `closed` | Manually closed |
+| `rejected` | Rejected by operator |
 
 ## Concurrency Limits
 

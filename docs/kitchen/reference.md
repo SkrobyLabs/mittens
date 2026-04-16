@@ -127,14 +127,22 @@ For snapshot-history behavior and overrides, see [Operations](./operations.md).
 
 ```bash
 kitchen submit [--lineage LINEAGE] [--auto] [--impl-review] [--file PATH|-] [IDEA]
+kitchen research [--file PATH|-] [TOPIC]
+kitchen promote PLAN_ID [--lineage LINEAGE] [--auto] [--impl-review|--no-impl-review]
 ```
 
-Input modes:
+`submit` starts the full council planning flow.
 
-- inline idea argument
+`research` spawns a read-only researcher worker to investigate a topic and produce a structured report. The resulting plan enters `research_complete` state. Use `promote` to convert it into an implementation plan.
+
+`promote` creates a new council-planned implementation from a completed research plan. The `--impl-review` flag defaults to true; pass `--no-impl-review` to skip post-implementation review.
+
+Input modes (shared by `submit` and `research`):
+
+- inline argument
 - `--file PATH`
 - `--file -` or piped stdin
-- `$VISUAL` / `$EDITOR` fallback when no idea is provided
+- `$VISUAL` / `$EDITOR` fallback when no argument is provided
 
 Examples:
 
@@ -143,6 +151,8 @@ kitchen submit "Add typed parser errors"
 kitchen submit --lineage parser-errors --impl-review "Add typed parser errors"
 kitchen submit --file docs/kitchen/design.md
 cat notes.md | kitchen submit --lineage tui
+kitchen research "How does the router select a provider?"
+kitchen promote PLAN_ID --lineage parser-errors
 ```
 
 ### Plan inspection
@@ -170,7 +180,16 @@ kitchen reject PLAN_ID
 kitchen replan PLAN_ID [--reason TEXT]
 kitchen cancel PLAN_ID
 kitchen delete PLAN_ID
+kitchen review PLAN_ID
+kitchen remediate-review PLAN_ID [--include-nits]
+kitchen steer PLAN_ID [--file PATH|-] [NOTE]
+kitchen steer-implementation PLAN_ID [--file PATH|-] [NOTE]
 ```
+
+- `review` — trigger a manual implementation review on a completed plan
+- `remediate-review` — queue a follow-up remediation task from a passed review; `--include-nits` includes minor findings
+- `steer` — append directional guidance to an in-progress planning council
+- `steer-implementation` — queue lightweight implementation guidance on the existing lineage without a full replan
 
 ### Questions
 
@@ -189,6 +208,7 @@ kitchen capabilities [--cli]
 kitchen lineages
 kitchen merge-check LINEAGE
 kitchen merge [--no-commit] LINEAGE
+kitchen reapply LINEAGE
 kitchen fix-merge LINEAGE
 kitchen retry TASK_ID [--same-worker]
 kitchen clean
@@ -202,7 +222,8 @@ Notes:
 - `status` returns JSON and embeds open-plan snapshot history
 - `config` returns the effective Kitchen config plus resolved paths
 - `capabilities` returns machine-readable feature metadata for automation
-- `merge --no-commit` previews a lineage merge without moving the base branch
+- `merge [--no-commit] LINEAGE` squash-merges the lineage into its base; `--no-commit` previews without moving the base branch
+- `reapply LINEAGE` merges the base branch into the lineage to absorb upstream changes
 - `fix-merge` queues a worker to resolve lineage→base merge conflicts
 - `retry` re-queues a failed task; `--same-worker` allows reuse of an existing idle worker
 - `clean` removes orphaned completed worktrees
@@ -278,9 +299,9 @@ If `kitchen serve` is started with a token, clients can authenticate with:
 - `X-Kitchen-Token: <token>`
 - `Authorization: Bearer <token>`
 
-### Ideas and plans
+### Ideas, quick plans, and research
 
-`POST /v1/ideas`
+`POST /v1/ideas` — start a full council planning flow
 
 Request:
 
@@ -293,7 +314,46 @@ Request:
 }
 ```
 
-Endpoints:
+`POST /v1/quick` — create a single-task plan that activates immediately, bypassing the council. Auto-retries on failure.
+
+Request:
+
+```json
+{
+  "prompt": "Fix the failing lint check",
+  "title": "Fix lint",
+  "lineage": "fix-lint",
+  "complexity": "low",
+  "maxRetries": 3,
+  "dependsOn": ["plan_abc123"]
+}
+```
+
+`POST /v1/research` — spawn a read-only researcher worker to investigate a topic. Plan enters `research_complete` when done.
+
+Request:
+
+```json
+{ "topic": "How does the complexity router select a provider?" }
+```
+
+`POST /v1/plans/{id}/promote` — promote a `research_complete` plan into a full council-planned implementation.
+
+Request:
+
+```json
+{ "lineage": "my-feature", "auto": false, "implReview": true }
+```
+
+`POST /v1/plans/{id}/refine-research` — queue a follow-up research turn with a clarification note.
+
+Request:
+
+```json
+{ "clarification": "Focus specifically on the fallback path" }
+```
+
+### Plans
 
 - `GET /v1/plans`
 - `GET /v1/plans/{id}`
@@ -303,10 +363,15 @@ Endpoints:
 - `POST /v1/plans/{id}/approve`
 - `POST /v1/plans/{id}/reject`
 - `POST /v1/plans/{id}/replan`
+- `POST /v1/plans/{id}/review` — trigger a manual implementation review
+- `POST /v1/plans/{id}/remediate-review` — queue a remediation task from a passed review; optional body `{"includeNits": true}`
+- `POST /v1/plans/{id}/steer` — append directional guidance to an in-progress planning council; body `{"note": "..."}`
+- `POST /v1/plans/{id}/steer-implementation` — queue lightweight implementation guidance without a full replan; body `{"note": "..."}`
 - `POST /v1/plans/{id}/affinity/invalidate`
 - `POST /v1/plans/{id}/extend`
 - `DELETE /v1/plans/{id}` — cancel plan
 - `DELETE /v1/plans/{id}/purge` — permanently delete plan and tasks
+- `DELETE /v1/plans/{id}/purge-with-lineage` — permanently delete plan, tasks, and lineage branch
 
 ### Tasks
 
@@ -359,6 +424,7 @@ Compatibility rules:
 - `GET /v1/lineages`
 - `GET /v1/lineages/{name}/merge-check`
 - `POST /v1/lineages/{name}/merge`
+- `POST /v1/lineages/{name}/reapply` — merge base branch into lineage to absorb upstream changes
 - `POST /v1/lineages/{name}/fix-merge` — queue a worker to resolve lineage→base merge conflicts
 
 Merge request body:

@@ -163,6 +163,28 @@ Override values:
 - `0`: suppress embedded history
 - `-1` or omitted: use the configured Kitchen default
 
+## Reapply
+
+Merge the base branch into a lineage to absorb upstream changes (e.g., after
+another lineage has been merged into `main`):
+
+```bash
+kitchen reapply LINEAGE
+```
+
+Via API:
+
+```http
+POST /v1/lineages/{name}/reapply
+```
+
+Behavior:
+
+- Checks whether the base branch is already an ancestor of the lineage (no-op if already up-to-date)
+- Merges base into the lineage branch in a temporary worktree and fast-forwards on success
+- Returns `{"upToDate": true}` if no rebase was needed, or the new lineage HEAD on success
+- Returns conflict file list on failure — use `kitchen fix-merge LINEAGE` to queue a resolver worker
+
 ## Worktree Cleanup
 
 Remove orphaned worktrees from completed or failed lineages:
