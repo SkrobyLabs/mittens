@@ -34,6 +34,17 @@ func TestConfigureMenuOrdering(t *testing.T) {
 	if seatItems[len(seatItems)-1].Value != configureActionBack {
 		t.Fatalf("councilSeatMenuItems last = %+v, want back", seatItems[len(seatItems)-1])
 	}
+
+	rootItems := routingRoleOptions(DefaultKitchenConfig())
+	if len(rootItems) < 3 {
+		t.Fatalf("routingRoleOptions = %+v, want worker limits entry", rootItems)
+	}
+	if rootItems[0].Value != configureActionModels {
+		t.Fatalf("routingRoleOptions first = %+v, want shared models", rootItems[0])
+	}
+	if rootItems[1].Value != configureActionWorkers {
+		t.Fatalf("routingRoleOptions second = %+v, want worker limits", rootItems[1])
+	}
 }
 
 func TestConfigureProviderAliasesRoundTrip(t *testing.T) {
@@ -114,5 +125,13 @@ func TestApplyCouncilSeatSelectionsPreserveInheritanceSparsity(t *testing.T) {
 	clearCouncilSeatProviderPolicy(&cfg, "A")
 	if _, ok := cfg.CouncilSeatProviders["A"]; ok {
 		t.Fatalf("seat policy after clear = %+v, want removed", cfg.CouncilSeatProviders["A"])
+	}
+}
+
+func TestWorkerLimitMenuLabelIncludesConfiguredMax(t *testing.T) {
+	cfg := DefaultKitchenConfig()
+	cfg.Concurrency.MaxWorkersTotal = 17
+	if got := workerLimitMenuLabel(cfg); got != "worker limits (max=17)" {
+		t.Fatalf("workerLimitMenuLabel = %q, want worker limits (max=17)", got)
 	}
 }

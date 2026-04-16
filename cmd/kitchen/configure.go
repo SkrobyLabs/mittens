@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -83,19 +84,20 @@ type policySlotValues struct {
 }
 
 type providerPolicyEditorValues struct {
-	Primary      policySlotValues
-	FallbackOne  policySlotValues
-	FallbackTwo  policySlotValues
+	Primary     policySlotValues
+	FallbackOne policySlotValues
+	FallbackTwo policySlotValues
 }
 
 const (
-	configureSaveAndExit = "__save_and_exit__"
-	configureActionBack  = "back"
-	configureActionModels = "models"
-	configureActionEdit  = "edit"
-	configureActionClear = "clear"
-	configureActionSeatA = "seat:A"
-	configureActionSeatB = "seat:B"
+	configureSaveAndExit   = "__save_and_exit__"
+	configureActionBack    = "back"
+	configureActionModels  = "models"
+	configureActionWorkers = "workers"
+	configureActionEdit    = "edit"
+	configureActionClear   = "clear"
+	configureActionSeatA   = "seat:A"
+	configureActionSeatB   = "seat:B"
 )
 
 func complexityMenuValue(c Complexity) string {
@@ -363,6 +365,12 @@ func runConfigure() error {
 			}
 			continue
 		}
+		if selection == configureActionWorkers {
+			if err := runConfigureWorkers(&cfg); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := runConfigureRole(&cfg, selection); err != nil {
 			return err
 		}
@@ -396,6 +404,26 @@ func runConfigureModels(cfg *KitchenConfig) error {
 		if err := runConfigureProviderModels(cfg, selection); err != nil {
 			return err
 		}
+	}
+}
+
+func runConfigureWorkers(cfg *KitchenConfig) error {
+	value := strconv.Itoa(cfg.Concurrency.MaxWorkersTotal)
+	for {
+		if err := huh.NewInput().
+			Title("Maximum workers").
+			Description("Set the total worker cap Kitchen may run at once across all lineages and roles.").
+			Value(&value).
+			Run(); err != nil {
+			return err
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed <= 0 {
+			fmt.Fprintln(os.Stderr, "maximum workers must be a positive integer")
+			continue
+		}
+		cfg.Concurrency.MaxWorkersTotal = parsed
+		return nil
 	}
 }
 
@@ -542,6 +570,7 @@ func runConfigureCouncilSeat(cfg *KitchenConfig, seat string) error {
 func routingRoleOptions(cfg KitchenConfig) []configureMenuItem {
 	items := []configureMenuItem{
 		{Label: "shared models", Value: configureActionModels},
+		{Label: workerLimitMenuLabel(cfg), Value: configureActionWorkers},
 	}
 	for _, role := range configurableKitchenRoles() {
 		items = append(items, configureMenuItem{
@@ -551,6 +580,10 @@ func routingRoleOptions(cfg KitchenConfig) []configureMenuItem {
 	}
 	items = append(items, configureMenuItem{Label: "Save and exit", Value: configureSaveAndExit})
 	return items
+}
+
+func workerLimitMenuLabel(cfg KitchenConfig) string {
+	return fmt.Sprintf("worker limits (max=%d)", cfg.Concurrency.MaxWorkersTotal)
 }
 
 func routingRoleMenuLabel(cfg KitchenConfig, role string) string {
