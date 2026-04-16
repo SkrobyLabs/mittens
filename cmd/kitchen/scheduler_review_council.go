@@ -246,12 +246,26 @@ func (s *Scheduler) handleReviewCouncilArtifactFailure(task pool.Task, bundle St
 	return s.applyReviewCouncilTurnResult(task, bundle, artifact)
 }
 
+func upsertReviewCouncilTurnRecord(records []ReviewCouncilTurnRecord, record ReviewCouncilTurnRecord) []ReviewCouncilTurnRecord {
+	for i := range records {
+		if records[i].Turn != record.Turn {
+			continue
+		}
+		if !records[i].OccurredAt.IsZero() {
+			record.OccurredAt = records[i].OccurredAt
+		}
+		records[i] = record
+		return records
+	}
+	return append(records, record)
+}
+
 func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPlan, artifact *adapter.ReviewCouncilTurnArtifact) error {
 	normalizeReviewCouncilArtifact(artifact)
 	previousSeats := bundle.Execution.ReviewCouncilSeats
 	now := time.Now().UTC()
-	bundle.Execution.ReviewCouncilTurnsCompleted = artifact.Turn
-	bundle.Execution.ReviewCouncilTurns = append(bundle.Execution.ReviewCouncilTurns, ReviewCouncilTurnRecord{
+	bundle.Execution.ReviewCouncilTurnsCompleted = max(bundle.Execution.ReviewCouncilTurnsCompleted, artifact.Turn)
+	bundle.Execution.ReviewCouncilTurns = upsertReviewCouncilTurnRecord(bundle.Execution.ReviewCouncilTurns, ReviewCouncilTurnRecord{
 		Seat:       artifact.Seat,
 		Turn:       artifact.Turn,
 		Artifact:   artifact,
@@ -272,11 +286,13 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 		seat.PoolKey = PoolKey{Provider: worker.Provider, Model: worker.Model, Adapter: worker.Adapter}
 	}
 	bundle.Execution.ReviewCouncilSeats[idx] = seat
-	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+	bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryReviewCouncilTurnCompleted,
 		Cycle:   artifact.Turn,
 		TaskID:  task.ID,
 		Summary: firstNonEmpty(strings.TrimSpace(artifact.Summary), "Review council turn completed."),
+	}, func(existing PlanHistoryEntry) bool {
+		return matchesPlanHistoryEntry(existing, planHistoryReviewCouncilTurnCompleted, task.ID, artifact.Turn)
 	})
 
 	decision, warnings := decideReviewCouncilNext(bundle, artifact)
@@ -289,11 +305,13 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 		bundle.Plan.State = planStateImplementationReview
 		bundle.Execution.State = planStateImplementationReview
 		bundle.Execution.ReviewCouncilAwaitingAnswers = true
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilWaitingAnswers,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Review council waiting for operator answers.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryReviewCouncilWaitingAnswers, task.ID, artifact.Turn)
 		})
 	case reviewCouncilContinue:
 		bundle.Plan.State = planStateImplementationReview
@@ -305,11 +323,13 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 		bundle.Execution.ReviewCouncilSeats = newReviewCouncilSeats()
 		bundle.Execution.ImplReviewedAt = &now
 		bundle.Execution.ActiveTaskIDs = nil
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilConverged,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: fmt.Sprintf("Review council converged on %s.", artifact.Verdict),
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryReviewCouncilConverged, task.ID, artifact.Turn)
 		})
 		if strings.TrimSpace(artifact.Verdict) == pool.ReviewPass {
 			passFindings := reviewCouncilFollowupStrings(bundle.Execution.ReviewCouncilTurns, reviewSeverityAtMost(pool.SeverityMinor))
@@ -319,7 +339,7 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			bundle.Execution.ImplReviewStatus = planReviewStatusPassed
 			bundle.Execution.ImplReviewFindings = nil
 			bundle.Execution.ImplReviewFollowups = passFindings
-			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 				Type:    planHistoryImplReviewPassed,
 				Cycle:   artifact.Turn,
 				TaskID:  task.ID,
@@ -327,6 +347,8 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Findings: append([]string(nil),
 					passFindings...,
 				),
+			}, func(existing PlanHistoryEntry) bool {
+				return matchesPlanHistoryEntry(existing, planHistoryImplReviewPassed, task.ID, artifact.Turn)
 			})
 		} else {
 			if handled, err := s.startAutoRemediationForReviewFailure(&bundle, task, reviewCouncilConverged, artifact); err != nil {
@@ -341,12 +363,14 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				if len(bundle.Execution.ImplReviewFindings) == 0 {
 					bundle.Execution.ImplReviewFindings = []string{"Implementation review failed."}
 				}
-				bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+				bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 					Type:     planHistoryImplReviewFailed,
 					Cycle:    artifact.Turn,
 					TaskID:   task.ID,
 					Verdict:  artifact.Verdict,
 					Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
+				}, func(existing PlanHistoryEntry) bool {
+					return matchesPlanHistoryEntry(existing, planHistoryImplReviewFailed, task.ID, artifact.Turn)
 				})
 			} else {
 				autoRemediationHandled = true
@@ -376,11 +400,13 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 				Summary:              artifact.Summary,
 			}
 		}
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryReviewCouncilRejected,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Review council rejected the implementation review.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryReviewCouncilRejected, task.ID, artifact.Turn)
 		})
 		if handled, err := s.startAutoRemediationForReviewFailure(&bundle, task, reviewCouncilReject, rejectArtifact); err != nil {
 			return err
@@ -401,12 +427,14 @@ func (s *Scheduler) applyReviewCouncilTurnResult(task pool.Task, bundle StoredPl
 			bundle.Execution.ImplReviewedAt = &now
 			bundle.Execution.ActiveTaskIDs = nil
 			bundle.Execution.CompletedAt = nil
-			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 				Type:     planHistoryImplReviewFailed,
 				Cycle:    artifact.Turn,
 				TaskID:   task.ID,
 				Verdict:  pool.ReviewFail,
 				Findings: append([]string(nil), bundle.Execution.ImplReviewFindings...),
+			}, func(existing PlanHistoryEntry) bool {
+				return matchesPlanHistoryEntry(existing, planHistoryImplReviewFailed, task.ID, artifact.Turn)
 			})
 		} else {
 			autoRemediationHandled = true

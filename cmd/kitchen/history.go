@@ -60,6 +60,28 @@ type PlanHistoryEntry struct {
 }
 
 func appendPlanHistory(ex ExecutionRecord, entry PlanHistoryEntry) ExecutionRecord {
+	entry = normalizePlanHistoryEntry(entry)
+	ex.History = append(ex.History, entry)
+	return ex
+}
+
+func upsertPlanHistory(ex ExecutionRecord, entry PlanHistoryEntry, match func(PlanHistoryEntry) bool) ExecutionRecord {
+	entry = normalizePlanHistoryEntry(entry)
+	for i := range ex.History {
+		if match == nil || !match(ex.History[i]) {
+			continue
+		}
+		if !ex.History[i].OccurredAt.IsZero() {
+			entry.OccurredAt = ex.History[i].OccurredAt
+		}
+		ex.History[i] = entry
+		return ex
+	}
+	ex.History = append(ex.History, entry)
+	return ex
+}
+
+func normalizePlanHistoryEntry(entry PlanHistoryEntry) PlanHistoryEntry {
 	entry.Type = strings.TrimSpace(entry.Type)
 	entry.TaskID = strings.TrimSpace(entry.TaskID)
 	entry.Verdict = strings.TrimSpace(entry.Verdict)
@@ -71,8 +93,13 @@ func appendPlanHistory(ex ExecutionRecord, entry PlanHistoryEntry) ExecutionReco
 		entry.Cycle = 0
 	}
 	entry.Findings = append([]string(nil), entry.Findings...)
-	ex.History = append(ex.History, entry)
-	return ex
+	return entry
+}
+
+func matchesPlanHistoryEntry(entry PlanHistoryEntry, entryType, taskID string, cycle int) bool {
+	return strings.TrimSpace(entry.Type) == strings.TrimSpace(entryType) &&
+		strings.TrimSpace(entry.TaskID) == strings.TrimSpace(taskID) &&
+		entry.Cycle == cycle
 }
 
 func plannerCycleForTask(planID, taskID string) int {

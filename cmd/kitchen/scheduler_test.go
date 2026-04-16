@@ -1802,6 +1802,134 @@ func TestRecoverCouncilPlansOnStartup_AdvancesCompletedActiveTask(t *testing.T) 
 	}
 }
 
+func TestOnTaskCompleted_ReplayingCouncilConvergenceDoesNotDuplicateArtifacts(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := PlanRecord{
+		PlanID:  "plan_council_converged_replay",
+		Lineage: "council-converged-replay",
+		Title:   "Council converged replay",
+		State:   planStateReviewing,
+		Tasks: []PlanTask{{
+			ID:               "t1",
+			Title:            "Implement feature",
+			Prompt:           "Do the work",
+			Complexity:       ComplexityMedium,
+			ReviewComplexity: ComplexityMedium,
+		}},
+	}
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: plan,
+		Execution: ExecutionRecord{
+			PlanID:                plan.PlanID,
+			State:                 planStateReviewing,
+			CouncilMaxTurns:       4,
+			CouncilTurnsCompleted: 1,
+			CouncilSeats:          newCouncilSeats(),
+			CouncilTurns: []CouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.CouncilTurnArtifact{
+					Seat:          "A",
+					Turn:          1,
+					Stance:        "propose",
+					CandidatePlan: planToArtifact(plan),
+					Summary:       "Initial council proposal.",
+				},
+			}},
+			ActiveTaskIDs: []string{councilTaskID(plan.PlanID, 2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-converged-replay"), "kitchen-test")
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         councilTaskID(planID, 2),
+		PlanID:     planID,
+		Prompt:     "converge on prior plan",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	workerID := "planner-converged-replay"
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, workerID); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+
+	raw, err := json.Marshal(adapter.CouncilTurnArtifact{
+		Seat:             "B",
+		Turn:             2,
+		Stance:           "converged",
+		AdoptedPriorPlan: true,
+		Summary:          "Converged on the prior plan.",
+	})
+	if err != nil {
+		t.Fatalf("Marshal artifact: %v", err)
+	}
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), workerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
+		t.Fatalf("WriteFile plan artifact: %v", err)
+	}
+	if err := pm.CompleteTask(workerID, taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.onTaskCompleted(taskID); err != nil {
+		t.Fatalf("onTaskCompleted first pass: %v", err)
+	}
+	if err := s.onTaskCompleted(taskID); err != nil {
+		t.Fatalf("onTaskCompleted replay: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.CouncilTurnsCompleted != 2 {
+		t.Fatalf("CouncilTurnsCompleted = %d, want 2", bundle.Execution.CouncilTurnsCompleted)
+	}
+	if len(bundle.Execution.CouncilTurns) != 2 {
+		t.Fatalf("CouncilTurns = %d, want 2", len(bundle.Execution.CouncilTurns))
+	}
+	if countPlanHistoryEntries(bundle.Execution.History, planHistoryCouncilTurnCompleted, taskID, 2) != 1 {
+		t.Fatalf("history = %+v, want one council_turn_completed for %s", bundle.Execution.History, taskID)
+	}
+	if countPlanHistoryEntries(bundle.Execution.History, planHistoryCouncilConverged, taskID, 2) != 1 {
+		t.Fatalf("history = %+v, want one council_converged for %s", bundle.Execution.History, taskID)
+	}
+}
+
 func mustTask(t *testing.T, pm *pool.PoolManager, taskID string) pool.Task {
 	t.Helper()
 	task, ok := pm.Task(taskID)
@@ -1809,6 +1937,16 @@ func mustTask(t *testing.T, pm *pool.PoolManager, taskID string) pool.Task {
 		t.Fatalf("task %q not found", taskID)
 	}
 	return *task
+}
+
+func countPlanHistoryEntries(history []PlanHistoryEntry, entryType, taskID string, cycle int) int {
+	count := 0
+	for _, entry := range history {
+		if matchesPlanHistoryEntry(entry, entryType, taskID, cycle) {
+			count++
+		}
+	}
+	return count
 }
 
 func completeCouncilTurnWithArtifact(t *testing.T, k *Kitchen, planID, taskID string, artifact adapter.CouncilTurnArtifact) {
@@ -6597,6 +6735,130 @@ func TestRecoverReviewCouncilPlansOnStartup_AdvancesCompletedActiveTask(t *testi
 	}
 	if task.Status != pool.TaskQueued {
 		t.Fatalf("review task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+}
+
+func TestOnTaskCompleted_ReplayingReviewCouncilConvergenceDoesNotDuplicateArtifacts(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := PlanRecord{
+		PlanID:  "plan_review_converged_replay",
+		Lineage: "review-converged-replay",
+		Title:   "Review converged replay",
+		State:   planStateImplementationReview,
+		Tasks: []PlanTask{{
+			ID:               "t1",
+			Title:            "Implement feature",
+			Prompt:           "Do the work",
+			Complexity:       ComplexityMedium,
+			ReviewComplexity: ComplexityMedium,
+		}},
+	}
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: plan,
+		Execution: ExecutionRecord{
+			PlanID:                      plan.PlanID,
+			State:                       planStateImplementationReview,
+			ImplReviewRequested:         true,
+			ReviewCouncilMaxTurns:       2,
+			ReviewCouncilTurnsCompleted: 1,
+			ReviewCouncilCycle:          1,
+			ReviewCouncilSeats:          newReviewCouncilSeats(),
+			ReviewCouncilTurns: []ReviewCouncilTurnRecord{{
+				Seat: "A",
+				Turn: 1,
+				Artifact: &adapter.ReviewCouncilTurnArtifact{
+					Seat:    "A",
+					Turn:    1,
+					Stance:  "propose",
+					Verdict: pool.ReviewPass,
+					Summary: "Initial review pass.",
+				},
+			}},
+			ActiveTaskIDs: []string{reviewCouncilTaskID(plan.PlanID, 2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-converged-replay"), "kitchen-test")
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         reviewCouncilTaskID(planID, 2),
+		PlanID:     planID,
+		Prompt:     "converge on prior verdict",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	workerID := "review-converged-replay"
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: "reviewer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, workerID); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), workerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := reviewCouncilTestArtifact(t, "B", 2, pool.ReviewPass, "converged", true, nil)
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile review result: %v", err)
+	}
+	if err := pm.CompleteTask(workerID, taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.onTaskCompleted(taskID); err != nil {
+		t.Fatalf("onTaskCompleted first pass: %v", err)
+	}
+	if err := s.onTaskCompleted(taskID); err != nil {
+		t.Fatalf("onTaskCompleted replay: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.ReviewCouncilTurnsCompleted != 2 {
+		t.Fatalf("ReviewCouncilTurnsCompleted = %d, want 2", bundle.Execution.ReviewCouncilTurnsCompleted)
+	}
+	if len(bundle.Execution.ReviewCouncilTurns) != 2 {
+		t.Fatalf("ReviewCouncilTurns = %d, want 2", len(bundle.Execution.ReviewCouncilTurns))
+	}
+	if countPlanHistoryEntries(bundle.Execution.History, planHistoryReviewCouncilTurnCompleted, taskID, 2) != 1 {
+		t.Fatalf("history = %+v, want one review_council_turn_completed for %s", bundle.Execution.History, taskID)
+	}
+	if countPlanHistoryEntries(bundle.Execution.History, planHistoryReviewCouncilConverged, taskID, 2) != 1 {
+		t.Fatalf("history = %+v, want one review_council_converged for %s", bundle.Execution.History, taskID)
+	}
+	if countPlanHistoryEntries(bundle.Execution.History, planHistoryImplReviewPassed, taskID, 2) != 1 {
+		t.Fatalf("history = %+v, want one impl_review_passed for %s", bundle.Execution.History, taskID)
 	}
 }
 

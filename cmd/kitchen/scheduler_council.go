@@ -243,8 +243,8 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 	previousSeats := bundle.Execution.CouncilSeats
 	now := time.Now().UTC()
 	bundle.Plan = planned
-	bundle.Execution.CouncilTurnsCompleted = artifact.Turn
-	bundle.Execution.CouncilTurns = append(bundle.Execution.CouncilTurns, CouncilTurnRecord{
+	bundle.Execution.CouncilTurnsCompleted = max(bundle.Execution.CouncilTurnsCompleted, artifact.Turn)
+	bundle.Execution.CouncilTurns = upsertCouncilTurnRecord(bundle.Execution.CouncilTurns, CouncilTurnRecord{
 		Seat:       artifact.Seat,
 		Turn:       artifact.Turn,
 		Artifact:   artifact,
@@ -265,11 +265,13 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		seat.PoolKey = PoolKey{Provider: worker.Provider, Model: worker.Model, Adapter: worker.Adapter}
 	}
 	bundle.Execution.CouncilSeats[idx] = seat
-	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+	bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryCouncilTurnCompleted,
 		Cycle:   artifact.Turn,
 		TaskID:  task.ID,
 		Summary: firstNonEmpty(strings.TrimSpace(artifact.Summary), strings.TrimSpace(bundle.Plan.Title)),
+	}, func(existing PlanHistoryEntry) bool {
+		return matchesPlanHistoryEntry(existing, planHistoryCouncilTurnCompleted, task.ID, artifact.Turn)
 	})
 
 	decision, warnings := decideCouncilNext(bundle, artifact)
@@ -281,11 +283,13 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		bundle.Plan.State = planStateReviewing
 		bundle.Execution.State = planStateReviewing
 		bundle.Execution.CouncilAwaitingAnswers = true
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryCouncilWaitingAnswers,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Council waiting for operator answers.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryCouncilWaitingAnswers, task.ID, artifact.Turn)
 		})
 	case councilContinue:
 		bundle.Plan.State = planStateReviewing
@@ -297,11 +301,13 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		bundle.Execution.CouncilWarnings = append([]adapter.CouncilDisagreement(nil), warnings...)
 		bundle.Execution.CouncilUnresolvedDisagreements = nil
 		bundle.Execution.CouncilSeats = newCouncilSeats()
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryCouncilConverged,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Council converged.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryCouncilConverged, task.ID, artifact.Turn)
 		})
 	case councilAutoConverged:
 		bundle.Plan.State = planStatePendingApproval
@@ -310,11 +316,13 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		bundle.Execution.CouncilWarnings = append([]adapter.CouncilDisagreement(nil), warnings...)
 		bundle.Execution.CouncilUnresolvedDisagreements = nil
 		bundle.Execution.CouncilSeats = newCouncilSeats()
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryCouncilAutoConverged,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Council auto-converged on structurally equal candidate.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryCouncilAutoConverged, task.ID, artifact.Turn)
 		})
 	case councilReject:
 		bundle.Plan.State = planStateRejected
@@ -324,11 +332,13 @@ func (s *Scheduler) applyCouncilTurnResult(task pool.Task, bundle StoredPlan, ar
 		bundle.Execution.CouncilUnresolvedDisagreements = append([]adapter.CouncilDisagreement(nil), artifact.Disagreements...)
 		bundle.Execution.RejectedBy = "council"
 		bundle.Execution.CouncilSeats = newCouncilSeats()
-		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		bundle.Execution = upsertPlanHistory(bundle.Execution, PlanHistoryEntry{
 			Type:    planHistoryCouncilRejected,
 			Cycle:   artifact.Turn,
 			TaskID:  task.ID,
 			Summary: "Council rejected the plan.",
+		}, func(existing PlanHistoryEntry) bool {
+			return matchesPlanHistoryEntry(existing, planHistoryCouncilRejected, task.ID, artifact.Turn)
 		})
 	}
 	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
@@ -398,6 +408,20 @@ func (s *Scheduler) seedCouncilQuestions(task pool.Task, questions []adapter.Cou
 		}
 	}
 	return nil
+}
+
+func upsertCouncilTurnRecord(records []CouncilTurnRecord, record CouncilTurnRecord) []CouncilTurnRecord {
+	for i := range records {
+		if records[i].Turn != record.Turn {
+			continue
+		}
+		if !records[i].OccurredAt.IsZero() {
+			record.OccurredAt = records[i].OccurredAt
+		}
+		records[i] = record
+		return records
+	}
+	return append(records, record)
 }
 
 func (s *Scheduler) recoverCouncilPlansOnStartup() error {
