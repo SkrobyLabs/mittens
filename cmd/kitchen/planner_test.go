@@ -144,6 +144,7 @@ func TestKitchenSubmitIdeaAndApprovePlan(t *testing.T) {
 	if activePlan, err := k.lineageMgr.ActivePlan(approved.Plan.Lineage); err != nil || activePlan != approved.Plan.PlanID {
 		t.Fatalf("active plan = %q, %v; want %q", activePlan, err, approved.Plan.PlanID)
 	}
+	assertLineageBranchExists(t, k, approved.Plan.Lineage)
 
 	tasks := k.pm.Tasks()
 	var implementationTask *pool.Task
@@ -622,6 +623,7 @@ func TestApproveWithUnmetDepsYieldsWaiting(t *testing.T) {
 	if got.Execution.ActivatedAt != nil {
 		t.Fatal("expected ActivatedAt to be nil")
 	}
+	assertLineageBranchExists(t, k, got.Plan.Lineage)
 	// Must not have enqueued implementation tasks.
 	runtimeID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
 	if _, ok := k.pm.Task(runtimeID); ok {
@@ -681,6 +683,7 @@ func TestApproveWithSatisfiedDepsActivatesNormally(t *testing.T) {
 	if got.Execution.ActivatedAt == nil {
 		t.Fatal("expected ActivatedAt to be set")
 	}
+	assertLineageBranchExists(t, k, got.Plan.Lineage)
 	// Implementation task should be enqueued.
 	runtimeID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
 	if _, ok := k.pm.Task(runtimeID); !ok {
@@ -851,6 +854,11 @@ func TestStartupRecoveryReattemptsWaitingPlans(t *testing.T) {
 
 	// Simulate scheduler startup recovery via activatePlan callback.
 	gitMgr, _ := k.gitManager()
+	if exists, err := gitMgr.branchExists(lineageBranchName("startup-lineage")); err != nil {
+		t.Fatalf("branchExists(before recovery): %v", err)
+	} else if exists {
+		t.Fatal("startup-lineage branch should not exist before recovery")
+	}
 	s := NewScheduler(k.pm, &schedulerHostAPI{}, k.router, gitMgr, k.planStore, k.lineageMgr, k.cfg.Concurrency, "kitchen-test")
 	s.activatePlan = k.ApprovePlan
 	s.recoverWaitingPlansOnStartup()
@@ -862,6 +870,7 @@ func TestStartupRecoveryReattemptsWaitingPlans(t *testing.T) {
 	if got.Execution.State != planStateActive {
 		t.Fatalf("state = %q, want %q after startup recovery", got.Execution.State, planStateActive)
 	}
+	assertLineageBranchExists(t, k, got.Plan.Lineage)
 }
 
 func TestReplanPreservesDependsOn(t *testing.T) {
@@ -1994,6 +2003,21 @@ func newTestKitchen(t *testing.T) *Kitchen {
 		repoPath:   repo,
 		paths:      paths,
 		project:    project,
+	}
+}
+
+func assertLineageBranchExists(t *testing.T, k *Kitchen, lineage string) {
+	t.Helper()
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	exists, err := gitMgr.branchExists(lineageBranchName(lineage))
+	if err != nil {
+		t.Fatalf("branchExists(%q): %v", lineage, err)
+	}
+	if !exists {
+		t.Fatalf("expected lineage branch %q to exist", lineageBranchName(lineage))
 	}
 }
 

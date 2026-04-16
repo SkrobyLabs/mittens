@@ -450,6 +450,9 @@ func (k *Kitchen) ApprovePlan(planID string) error {
 		bundle.Execution.Approved = true
 		bundle.Execution.ApprovedAt = &now
 	}
+	if err := k.ensurePlanLineageBranch(bundle.Plan); err != nil {
+		return err
+	}
 
 	depsMet, _ := k.planDependenciesMet(bundle.Plan)
 	if !depsMet {
@@ -478,6 +481,9 @@ func (k *Kitchen) ApprovePlan(planID string) error {
 // Called from ApprovePlan (when deps are met) and from recovery paths.
 func (k *Kitchen) activatePlanImpl(bundle StoredPlan) error {
 	planID := bundle.Plan.PlanID
+	if err := k.ensurePlanLineageBranch(bundle.Plan); err != nil {
+		return err
+	}
 
 	// Claim lineage. Waiting plans stay queued for a later retry if the
 	// lineage is still busy; fresh approvals surface the activation error.
@@ -539,6 +545,22 @@ func (k *Kitchen) activatePlanImpl(bundle StoredPlan) error {
 	}
 	k.sendNotify(pool.Notification{Type: "plan_approved", ID: planID, Message: bundle.Plan.Title})
 	return nil
+}
+
+func (k *Kitchen) ensurePlanLineageBranch(plan PlanRecord) error {
+	lineage := strings.TrimSpace(plan.Lineage)
+	if lineage == "" {
+		return nil
+	}
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		return err
+	}
+	anchor := strings.TrimSpace(plan.Anchor.Commit)
+	if anchor == "" {
+		anchor = "HEAD"
+	}
+	return gitMgr.CreateLineageBranch(lineage, anchor)
 }
 
 // planDependenciesMet returns true if all plans in DependsOn are merged.
