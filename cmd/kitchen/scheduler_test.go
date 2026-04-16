@@ -4012,6 +4012,115 @@ func TestRestoreCompletedPlanAfterLineageMergeAttemptMarksMergeTaskFailed(t *tes
 	}
 }
 
+func TestRestoreCompletedPlanAfterLineageMergeAttemptKeepsPlanActiveWhenFixMergeTaskIsRunning(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	branch, err := runGit(repo, "branch", "--show-current")
+	if err != nil {
+		t.Fatalf("branch --show-current: %v", err)
+	}
+	commit, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	anchor := PlanAnchor{Commit: strings.TrimSpace(commit), Branch: strings.TrimSpace(branch)}
+	planID := "plan_merge_restore_active_fix"
+	mergeTaskID := planTaskRuntimeID(planID, "merge-123")
+	fixTaskID := planTaskRuntimeID(planID, "fix-merge-456")
+	planID, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "parser-errors",
+			Title:   "Async merge rollback with active fix task",
+			State:   planStateActive,
+			Anchor:  anchor,
+			Tasks: []PlanTask{
+				{
+					ID:         "merge-123",
+					Title:      "Merge parser-errors into main",
+					Prompt:     "generate merge message",
+					Complexity: ComplexityMedium,
+				},
+				{
+					ID:         "fix-merge-456",
+					Title:      "Fix parser-errors merge conflicts",
+					Prompt:     "resolve merge conflicts",
+					Complexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateActive,
+			Branch:           lineageBranchName("parser-errors"),
+			Anchor:           anchor,
+			ActiveTaskIDs:    []string{fixTaskID},
+			CompletedTaskIDs: []string{mergeTaskID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-merge-restore-active-fix"), "kitchen-test")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         fixTaskID,
+		PlanID:     planID,
+		Prompt:     "resolve merge conflicts",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       lineageFixMergeRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask fix task: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-fix", Role: lineageFixMergeRole}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-fix", "container-w-fix"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(fixTaskID, "w-fix"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+
+	s := NewScheduler(pm, host, nil, nil, store, nil, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	if err := s.restoreCompletedPlanAfterLineageMergeAttempt(planID, mergeTaskID, "merge rollback"); err != nil {
+		t.Fatalf("restoreCompletedPlanAfterLineageMergeAttempt: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if !containsString(bundle.Execution.ActiveTaskIDs, fixTaskID) {
+		t.Fatalf("activeTaskIds = %+v, want running fix task %q", bundle.Execution.ActiveTaskIDs, fixTaskID)
+	}
+	if containsString(bundle.Execution.CompletedTaskIDs, mergeTaskID) {
+		t.Fatalf("completedTaskIds = %+v, want merge task removed", bundle.Execution.CompletedTaskIDs)
+	}
+	if !containsString(bundle.Execution.FailedTaskIDs, mergeTaskID) {
+		t.Fatalf("failedTaskIds = %+v, want merge task failed", bundle.Execution.FailedTaskIDs)
+	}
+	if bundle.Execution.CompletedAt != nil {
+		t.Fatalf("completedAt = %v, want nil while fix task is still active", bundle.Execution.CompletedAt)
+	}
+}
+
 func TestSyncPlanExecution_IgnoresHistoricalCouncilFailuresAfterApproval(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

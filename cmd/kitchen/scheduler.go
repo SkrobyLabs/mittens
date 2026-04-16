@@ -753,13 +753,28 @@ func (s *Scheduler) restoreCompletedPlanAfterLineageMergeAttempt(planID, taskID,
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	bundle.Plan.State = planStateCompleted
-	bundle.Execution.State = planStateCompleted
-	bundle.Execution.ActiveTaskIDs = nil
-	bundle.Execution.CompletedTaskIDs = removeTrimmedID(bundle.Execution.CompletedTaskIDs, taskID)
-	bundle.Execution.FailedTaskIDs = appendUniqueIDs(bundle.Execution.FailedTaskIDs, taskID)
-	bundle.Execution.CompletedAt = &now
+	active := append([]string(nil), bundle.Execution.ActiveTaskIDs...)
+	completed := append([]string(nil), bundle.Execution.CompletedTaskIDs...)
+	failed := append([]string(nil), bundle.Execution.FailedTaskIDs...)
+	if s.pm != nil {
+		active, completed, failed = summarizeRelevantPlanTasks(s.pm.Tasks(), bundle)
+	}
+	active = removeTrimmedID(active, taskID)
+	completed = removeTrimmedID(completed, taskID)
+	failed = appendUniqueIDs(failed, taskID)
+	bundle.Execution.ActiveTaskIDs = active
+	bundle.Execution.CompletedTaskIDs = completed
+	bundle.Execution.FailedTaskIDs = failed
+	if len(active) > 0 {
+		bundle.Plan.State = planStateActive
+		bundle.Execution.State = planStateActive
+		bundle.Execution.CompletedAt = nil
+	} else {
+		now := time.Now().UTC()
+		bundle.Plan.State = planStateCompleted
+		bundle.Execution.State = planStateCompleted
+		bundle.Execution.CompletedAt = &now
+	}
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryLineageMergeFailed,
 		TaskID:  taskID,
