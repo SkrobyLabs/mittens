@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -412,7 +413,9 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 		if err != nil {
 			continue
 		}
-		if bundle.Execution.State != planStateReviewing {
+		switch bundle.Execution.State {
+		case planStatePlanning, planStateReviewing:
+		default:
 			continue
 		}
 
@@ -428,6 +431,14 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 
 		nextTurn := bundle.Execution.CouncilTurnsCompleted + 1
 		nextTaskID := councilTaskID(bundle.Plan.PlanID, nextTurn)
+		if task, exists := s.pm.Task(nextTaskID); exists &&
+			task.Status == pool.TaskCompleted &&
+			slices.Contains(bundle.Execution.ActiveTaskIDs, nextTaskID) {
+			if err := s.onTaskCompleted(nextTaskID); err != nil {
+				return err
+			}
+			continue
+		}
 		if bundle.Execution.CouncilFinalDecision == "" &&
 			bundle.Execution.CouncilTurnsCompleted < bundle.Execution.CouncilMaxTurns &&
 			!bundle.Execution.CouncilAwaitingAnswers &&

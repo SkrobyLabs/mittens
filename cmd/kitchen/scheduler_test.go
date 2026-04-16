@@ -1684,6 +1684,124 @@ func TestSchedulerRecoverCouncilPlansSkipsAutoConvergedPlan(t *testing.T) {
 	}
 }
 
+func TestRecoverCouncilPlansOnStartup_AdvancesCompletedActiveTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_recover_completed_planner",
+			Lineage: "recover-completed-planner",
+			Title:   "Recover completed planner task",
+			State:   planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			PlanID:          "plan_recover_completed_planner",
+			State:           planStatePlanning,
+			CouncilMaxTurns: 4,
+			ActiveTaskIDs:   []string{councilTaskID("plan_recover_completed_planner", 1)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-recover-completed-planner"), "kitchen-test")
+	taskID, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         councilTaskID(planID, 1),
+		PlanID:     planID,
+		Prompt:     "plan something",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	workerID := "planner-recover-completed"
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: workerID, Role: plannerTaskRole}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker(workerID, "container-"+workerID); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, workerID); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+
+	artifact := adapter.CouncilTurnArtifact{
+		Seat:   "A",
+		Turn:   1,
+		Stance: "propose",
+		CandidatePlan: &adapter.PlanArtifact{
+			Title:   "Recovered candidate",
+			Summary: "Recovered summary",
+			Tasks: []adapter.PlanArtifactTask{{
+				ID:               "t1",
+				Title:            "Implement it",
+				Prompt:           "Do work",
+				Complexity:       string(ComplexityMedium),
+				ReviewComplexity: string(ComplexityMedium),
+			}},
+		},
+		Summary: "Recovered council turn.",
+	}
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), workerID)
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("Marshal artifact: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerPlanFile), raw, 0o644); err != nil {
+		t.Fatalf("WriteFile plan artifact: %v", err)
+	}
+	if err := pm.CompleteTask(workerID, taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.recoverCouncilPlansOnStartup(); err != nil {
+		t.Fatalf("recoverCouncilPlansOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Execution.CouncilTurnsCompleted != 1 {
+		t.Fatalf("CouncilTurnsCompleted = %d, want 1", bundle.Execution.CouncilTurnsCompleted)
+	}
+	if bundle.Execution.State != planStateReviewing {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateReviewing)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != councilTaskID(planID, 2) {
+		t.Fatalf("activeTaskIDs = %v, want [%s]", bundle.Execution.ActiveTaskIDs, councilTaskID(planID, 2))
+	}
+	if !slices.Contains(bundle.Execution.CompletedTaskIDs, taskID) {
+		t.Fatalf("CompletedTaskIDs = %v, want %s included", bundle.Execution.CompletedTaskIDs, taskID)
+	}
+	if _, exists := pm.Task(councilTaskID(planID, 2)); !exists {
+		t.Fatalf("expected turn 2 task %s to be enqueued", councilTaskID(planID, 2))
+	}
+}
+
 func mustTask(t *testing.T, pm *pool.PoolManager, taskID string) pool.Task {
 	t.Helper()
 	task, ok := pm.Task(taskID)
