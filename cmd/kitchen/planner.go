@@ -1978,6 +1978,21 @@ func appendUniqueIDs(existing []string, ids ...string) []string {
 	return result
 }
 
+func removeTrimmedID(existing []string, id string) []string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return append([]string(nil), existing...)
+	}
+	result := make([]string, 0, len(existing))
+	for _, item := range existing {
+		if strings.TrimSpace(item) == id {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
 func containsTrimmedString(items []string, want string) bool {
 	want = strings.TrimSpace(want)
 	if want == "" {

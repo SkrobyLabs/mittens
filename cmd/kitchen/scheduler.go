@@ -757,6 +757,8 @@ func (s *Scheduler) restoreCompletedPlanAfterLineageMergeAttempt(planID, taskID,
 	bundle.Plan.State = planStateCompleted
 	bundle.Execution.State = planStateCompleted
 	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedTaskIDs = removeTrimmedID(bundle.Execution.CompletedTaskIDs, taskID)
+	bundle.Execution.FailedTaskIDs = appendUniqueIDs(bundle.Execution.FailedTaskIDs, taskID)
 	bundle.Execution.CompletedAt = &now
 	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
 		Type:    planHistoryLineageMergeFailed,

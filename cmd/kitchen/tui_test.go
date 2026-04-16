@@ -3154,6 +3154,46 @@ func TestBuildTaskItemsPlacesLineageFixMergeTasksAfterReviewTimeline(t *testing.
 	}
 }
 
+func TestBuildTaskItemsShowsFailedStateForRolledBackMergeTask(t *testing.T) {
+	planID := "plan_merge_failed_task"
+	mergeTaskID := "merge-123"
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID: planID,
+			Tasks: []PlanTask{
+				{ID: mergeTaskID, Title: "Merge parser-errors into main", Complexity: ComplexityMedium},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:         planStateCompleted,
+			FailedTaskIDs: []string{planTaskRuntimeID(planID, mergeTaskID)},
+		},
+		Progress: PlanProgress{
+			FailedTaskIDs: []string{planTaskRuntimeID(planID, mergeTaskID)},
+		},
+	}
+	snapshot := tuiStatusSnapshot{
+		Queue: struct {
+			AliveWorkers     int                `json:"aliveWorkers"`
+			MaxWorkers       int                `json:"maxWorkers"`
+			PendingQuestions int                `json:"pendingQuestions"`
+			Tasks            []pool.TaskSummary `json:"tasks"`
+		}{
+			Tasks: []pool.TaskSummary{
+				{ID: planTaskRuntimeID(planID, mergeTaskID), Status: pool.TaskCompleted},
+			},
+		},
+	}
+
+	items := buildTaskItems(detail, snapshot)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one merge task", items)
+	}
+	if items[0].State != pool.TaskFailed {
+		t.Fatalf("task state = %q, want %q", items[0].State, pool.TaskFailed)
+	}
+}
+
 func TestBuildTaskItemsShowsResearchTaskWithoutPlannerCycle(t *testing.T) {
 	planID := "plan_research_task_items"
 	researchTaskID := "research_" + planID

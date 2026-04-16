@@ -3731,7 +3731,7 @@ func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, ta
 	runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
 	state := planTaskRuntimeState(detail, task.ID)
 	summary := taskSummaryByID[runtimeID]
-	if strings.TrimSpace(summary.Status) != "" {
+	if strings.TrimSpace(summary.Status) != "" && !shouldPreferPlanTrackedTaskState(task.ID, runtimeID, detail) {
 		state = summary.Status
 	}
 	return kitchenTUITaskItem{
@@ -3747,6 +3747,22 @@ func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, ta
 		Summary:     summarizeTaskHistory(detail.History, runtimeID),
 		HasConflict: summary.HasConflict,
 	}
+}
+
+func shouldPreferPlanTrackedTaskState(logicalTaskID, runtimeID string, detail PlanDetail) bool {
+	if !isLineageMergePlanTask(logicalTaskID) {
+		return false
+	}
+	if strings.TrimSpace(detail.Execution.State) == planStateMerging {
+		return false
+	}
+	if contains(detail.Progress.FailedTaskIDs, runtimeID) || contains(detail.Execution.FailedTaskIDs, runtimeID) {
+		return true
+	}
+	if contains(detail.Progress.CompletedTaskIDs, runtimeID) || contains(detail.Execution.CompletedTaskIDs, runtimeID) {
+		return true
+	}
+	return false
 }
 
 func buildResearchTaskItem(detail PlanDetail, taskSummaryByID map[string]pool.TaskSummary) kitchenTUITaskItem {

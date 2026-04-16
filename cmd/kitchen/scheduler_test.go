@@ -3806,6 +3806,74 @@ func TestSchedulerOnLineageMergeCompletedPromptsFallbackQuestion(t *testing.T) {
 	}
 }
 
+func TestRestoreCompletedPlanAfterLineageMergeAttemptMarksMergeTaskFailed(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	branch, err := runGit(repo, "branch", "--show-current")
+	if err != nil {
+		t.Fatalf("branch --show-current: %v", err)
+	}
+	commit, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	anchor := PlanAnchor{Commit: strings.TrimSpace(commit), Branch: strings.TrimSpace(branch)}
+	taskID := planTaskRuntimeID("plan_merge_restore_failed", "merge-123")
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_restore_failed",
+			Lineage: "parser-errors",
+			Title:   "Async merge rollback",
+			State:   planStateMerging,
+			Anchor:  anchor,
+			Tasks: []PlanTask{{
+				ID:         "merge-123",
+				Title:      "Merge parser-errors into main",
+				Prompt:     "generate merge message",
+				Complexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateMerging,
+			Branch:           lineageBranchName("parser-errors"),
+			Anchor:           anchor,
+			ActiveTaskIDs:    []string{taskID},
+			CompletedTaskIDs: []string{taskID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	s := NewScheduler(nil, nil, nil, nil, store, nil, DefaultKitchenConfig().Concurrency, "kitchen-test")
+	if err := s.restoreCompletedPlanAfterLineageMergeAttempt(planID, taskID, "merge rollback"); err != nil {
+		t.Fatalf("restoreCompletedPlanAfterLineageMergeAttempt: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
+	}
+	if containsString(bundle.Execution.CompletedTaskIDs, taskID) {
+		t.Fatalf("completedTaskIds = %+v, want merge task removed", bundle.Execution.CompletedTaskIDs)
+	}
+	if !containsString(bundle.Execution.FailedTaskIDs, taskID) {
+		t.Fatalf("failedTaskIds = %+v, want merge task failed", bundle.Execution.FailedTaskIDs)
+	}
+}
+
 func TestSyncPlanExecution_IgnoresHistoricalCouncilFailuresAfterApproval(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
