@@ -549,7 +549,7 @@ func TestGitManagerMergeLineageSyncsCheckedOutBaseWorktree(t *testing.T) {
 	}
 }
 
-func TestGitManagerMergeLineagePreservesDirtyOperatorWorktree(t *testing.T) {
+func TestGitManagerMergeLineageAutoStashesDirtyOperatorWorktree(t *testing.T) {
 	repo := initGitRepo(t)
 	worktrees := filepath.Join(t.TempDir(), "worktrees")
 
@@ -571,20 +571,48 @@ func TestGitManagerMergeLineagePreservesDirtyOperatorWorktree(t *testing.T) {
 		t.Fatalf("MergeChild: %v", err)
 	}
 
-	// Operator has uncommitted changes in the main repo.
+	// Operator has both staged and unstaged changes in the main repo.
 	writeFile(t, filepath.Join(repo, "README.md"), "operator edit\n")
+	mustRunGit(t, repo, "add", "README.md")
+	writeFile(t, filepath.Join(repo, "README.md"), "operator edit\noperator unstaged\n")
+	writeFile(t, filepath.Join(repo, "local.txt"), "untracked\n")
 
 	if err := gm.MergeLineage("adds-file", "main", "squash", ""); err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}
 
-	// Operator's edit must still be present (we did not reset over it).
+	// Merge result must be present in the checked-out worktree.
+	if _, err := os.Stat(filepath.Join(repo, "new.txt")); err != nil {
+		t.Fatalf("expected new.txt to appear after autostash merge, stat err = %v", err)
+	}
+
+	// Operator edits must be restored on top of the merged tree.
 	data, err := os.ReadFile(filepath.Join(repo, "README.md"))
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
-	if strings.TrimSpace(string(data)) != "operator edit" {
+	if strings.TrimSpace(string(data)) != "operator edit\noperator unstaged" {
 		t.Fatalf("operator edit lost: README.md = %q", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(repo, "local.txt")); err != nil {
+		t.Fatalf("untracked file lost after autostash merge: %v", err)
+	}
+	status, err := runGit(repo, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("git status: %v", err)
+	}
+	if !strings.Contains(status, "MM README.md") {
+		t.Fatalf("git status = %q, want staged+unstaged README.md change", status)
+	}
+	if !strings.Contains(status, "?? local.txt") {
+		t.Fatalf("git status = %q, want restored untracked file", status)
+	}
+	stashes, err := runGit(repo, "stash", "list")
+	if err != nil {
+		t.Fatalf("stash list: %v", err)
+	}
+	if strings.TrimSpace(stashes) != "" {
+		t.Fatalf("stash list = %q, want autostash cleaned up on success", stashes)
 	}
 }
 

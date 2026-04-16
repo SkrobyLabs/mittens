@@ -697,10 +697,11 @@ func (g *GitManager) updateBranchRef(branch, sha string) error {
 // symbolic ref for that branch in the main repo, also updates the
 // working tree and index so the operator's checkout stays in sync.
 // Plain `update-ref` would move the ref without touching the WT,
-// leaving phantom "deleted" entries in the operator's next
-// `git status` that get swept into unrelated commits. Dirty worktrees
-// are preserved (with a warning logged) so we never clobber
-// operator-in-flight work.
+// leaving phantom reverse changes in the operator's next
+// `git status` that can get swept into unrelated commits. Dirty
+// worktrees are temporarily stashed, the branch is advanced, and the
+// operator changes are reapplied on top. If reapply fails, the branch
+// is rolled back to the original SHA and the stash is kept.
 func (g *GitManager) advanceBranchToSHA(branch, sha string) error {
 	headRef, headErr := runGit(g.repoPath, "symbolic-ref", "--quiet", "HEAD")
 	isCheckedOut := false
@@ -720,14 +721,43 @@ func (g *GitManager) advanceBranchToSHA(branch, sha string) error {
 		return err
 	}
 	if dirty {
-		if err := g.updateBranchRef(branch, sha); err != nil {
+		originalSHA, err := runGit(g.repoPath, "rev-parse", "HEAD")
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "kitchen: branch %s advanced by merge, but the working tree has uncommitted changes; run `git reset --hard %s` when ready to sync\n", branch, branch)
-		return nil
+		return g.advanceCheckedOutBranchWithAutoStash(branch, strings.TrimSpace(originalSHA), sha)
 	}
 	_, err = runGit(g.repoPath, "reset", "--hard", sha)
 	return err
+}
+
+func (g *GitManager) advanceCheckedOutBranchWithAutoStash(branch, originalSHA, targetSHA string) error {
+	stashMsg := fmt.Sprintf("kitchen-autostash-%s", branch)
+	if _, err := runGit(g.repoPath, "stash", "push", "--include-untracked", "-m", stashMsg); err != nil {
+		return fmt.Errorf("autostash before advancing %s: %w", branch, err)
+	}
+	stashRef, err := runGit(g.repoPath, "stash", "list", "--format=%gd", "-n", "1")
+	if err != nil {
+		return fmt.Errorf("resolve autostash ref for %s: %w", branch, err)
+	}
+	stashRef = strings.TrimSpace(stashRef)
+	if stashRef == "" {
+		return fmt.Errorf("autostash before advancing %s produced no stash ref", branch)
+	}
+	if _, err := runGit(g.repoPath, "reset", "--hard", targetSHA); err != nil {
+		_, _ = runGit(g.repoPath, "stash", "apply", "--index", stashRef)
+		return fmt.Errorf("advance checked-out branch %s: %w", branch, err)
+	}
+	if _, err := runGit(g.repoPath, "stash", "pop", "--index", stashRef); err == nil {
+		return nil
+	} else {
+		mergeApplyErr := err
+		_, _ = runGit(g.repoPath, "reset", "--hard", originalSHA)
+		if _, restoreErr := runGit(g.repoPath, "stash", "apply", "--index", stashRef); restoreErr != nil {
+			return fmt.Errorf("advance checked-out branch %s: stash reapply failed after merge (%v) and rollback restore also failed (stash kept at %s): %v", branch, mergeApplyErr, stashRef, restoreErr)
+		}
+		return fmt.Errorf("advance checked-out branch %s: stash reapply failed after merge (%v); restored original branch state and kept %s", branch, mergeApplyErr, stashRef)
+	}
 }
 
 func (g *GitManager) mergeIntoTemp(targetBranch, sourceBranch string, squash bool, commitMsg string) (string, error) {

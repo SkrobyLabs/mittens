@@ -449,6 +449,92 @@ func TestKitchenMergeLineageBlocksLineageWithNoChanges(t *testing.T) {
 	}
 }
 
+func TestKitchenMergeLineageBlocksWhileAnotherPlanIsMerging(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	otherPlanID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_in_progress",
+			Lineage: "other-lineage",
+			Title:   "Other merge in progress",
+			State:   planStateMerging,
+			Anchor:  anchor,
+		},
+		Execution: ExecutionRecord{
+			State:         planStateMerging,
+			Branch:        lineageBranchName("other-lineage"),
+			Anchor:        anchor,
+			CompletedAt:   &completedAt,
+			ActiveTaskIDs: []string{planTaskRuntimeID("plan_merge_in_progress", "merge-20260416T000000")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create other plan: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("other-lineage", otherPlanID); err != nil {
+		t.Fatalf("ActivatePlan other: %v", err)
+	}
+
+	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
+	if err != nil {
+		t.Fatalf("SubmitIdea: %v", err)
+	}
+	completePlanningTask(t, k, bundle.Plan.PlanID, basicPlannedArtifact("Add parser error normalization"))
+	if err := k.ApprovePlan(bundle.Plan.PlanID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+
+	taskID := planTaskRuntimeID(bundle.Plan.PlanID, "t1")
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := k.pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := k.pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	poolStateDir := filepath.Join(k.project.PoolsDir, defaultPoolStateName)
+	workerStateDir := pool.WorkerStateDir(poolStateDir, "w-1")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte("done\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := k.pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch(bundle.Plan.Lineage, bundle.Plan.Anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree(bundle.Plan.Lineage, "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild(bundle.Plan.Lineage, "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	_, err = k.MergeLineage(bundle.Plan.Lineage)
+	if err == nil || !strings.Contains(err.Error(), "lineage merge already in progress") {
+		t.Fatalf("MergeLineage error = %v, want active merge gate", err)
+	}
+}
+
 func TestKitchenMergeLineageIgnoresHistoricalCouncilFailuresOnCompletedPlan(t *testing.T) {
 	k := newTestKitchen(t)
 	completedAt := time.Now().UTC()

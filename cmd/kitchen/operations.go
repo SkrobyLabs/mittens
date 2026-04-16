@@ -135,6 +135,11 @@ func (k *Kitchen) MergeLineageWithOptions(lineage string, allowFallback bool) (m
 	if activePlanID == "" {
 		return nil, fmt.Errorf("lineage %s has no active plan to merge", lineage)
 	}
+	if otherPlanID, otherLineage, err := k.activeMergingPlan(activePlanID); err != nil {
+		return nil, err
+	} else if otherPlanID != "" {
+		return nil, fmt.Errorf("lineage merge already in progress for plan %s (%s)", otherPlanID, otherLineage)
+	}
 	bundle, err := k.planStore.Get(activePlanID)
 	if err != nil {
 		return nil, err
@@ -207,6 +212,32 @@ func (k *Kitchen) enqueueLineageMergeTask(activePlanID string, bundle StoredPlan
 	}
 	k.sendNotify(pool.Notification{Type: "plan_merging", ID: activePlanID, Message: lineage})
 	return runtimeTaskID, nil
+}
+
+func (k *Kitchen) activeMergingPlan(excludePlanID string) (string, string, error) {
+	if k == nil || k.planStore == nil {
+		return "", "", nil
+	}
+	plans, err := k.planStore.List()
+	if err != nil {
+		return "", "", err
+	}
+	for _, plan := range plans {
+		if plan.PlanID == excludePlanID {
+			continue
+		}
+		if plan.State != planStateMerging {
+			continue
+		}
+		bundle, err := k.planStore.Get(plan.PlanID)
+		if err != nil {
+			return "", "", err
+		}
+		if bundle.Plan.State == planStateMerging || bundle.Execution.State == planStateMerging {
+			return plan.PlanID, plan.Lineage, nil
+		}
+	}
+	return "", "", nil
 }
 
 func (k *Kitchen) completeLineageMerge(planID, taskID, commitMsg, commitMessageSource string) error {
