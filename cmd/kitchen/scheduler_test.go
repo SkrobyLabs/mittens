@@ -4905,6 +4905,103 @@ func TestRunRecoverySuite_RequeuesImplementationReviewForTasklessActivePlan(t *t
 	}
 }
 
+func TestRunRecoverySuite_RequeuesMissingActiveLineageFixMergeTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan_restart_fix_merge_recovery"
+	fixTaskID := planTaskRuntimeID(planID, "fix-merge-20260416T182649")
+	planID, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Lineage: "feat-restart-fix-merge-recovery",
+			Title:   "Restart should recover missing fix-merge task",
+			State:   planStateActive,
+			Anchor: PlanAnchor{
+				Branch: "main",
+				Commit: "HEAD",
+			},
+			Tasks: []PlanTask{
+				{
+					ID:               "t1",
+					Title:            "Implement",
+					Prompt:           "implement change",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+				{
+					ID:               "fix-merge-20260416T182649",
+					Title:            "Fix merge conflicts",
+					Prompt:           "resolve merge conflicts",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateActive,
+			ActiveTaskIDs:    []string{fixTaskID},
+			CompletedTaskIDs: []string{planTaskRuntimeID(planID, "t1")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-restart-fix-merge-recovery"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if _, ok := pm.Task(fixTaskID); ok {
+		t.Fatalf("fix-merge task %q unexpectedly exists before recovery", fixTaskID)
+	}
+
+	if err := s.runRecoverySuite(); err != nil {
+		t.Fatalf("runRecoverySuite: %v", err)
+	}
+
+	task, ok := pm.Task(fixTaskID)
+	if !ok {
+		t.Fatalf("recovered fix-merge task %q not found", fixTaskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("fix-merge task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+	if task.Role != lineageFixMergeRole {
+		t.Fatalf("fix-merge task role = %q, want %q", task.Role, lineageFixMergeRole)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected recovered fix-merge task to require a fresh worker")
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != fixTaskID {
+		t.Fatalf("active task IDs = %+v, want [%s]", bundle.Execution.ActiveTaskIDs, fixTaskID)
+	}
+}
+
 func TestOnImplementationReviewCompleted_Pass(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

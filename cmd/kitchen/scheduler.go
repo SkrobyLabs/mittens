@@ -1464,6 +1464,9 @@ func (s *Scheduler) runRecoverySuite() error {
 	if err := s.replayDeferredTaskFailures(); err != nil {
 		return err
 	}
+	if err := s.recoverMissingActivePlanTasksOnStartup(); err != nil {
+		return err
+	}
 	// One-shot reconciliation of plan execution state against the
 	// pool's task map. Catches plans left with stale activeTaskIDs
 	// because a completion handler errored out before syncPlanExecution
@@ -1537,6 +1540,169 @@ func (s *Scheduler) replayDeferredTaskFailures() error {
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) recoverMissingActivePlanTasksOnStartup() error {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return nil
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return err
+	}
+	for _, plan := range plans {
+		bundle, err := s.plans.Get(plan.PlanID)
+		if err != nil {
+			continue
+		}
+		if bundle.Execution.State != planStateActive || bundle.Execution.AutoRemediationActive {
+			continue
+		}
+		if err := s.ensurePlanTrackedActiveTasks(&bundle, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) ensurePlanTrackedActiveTasks(bundle *StoredPlan, recovered bool) error {
+	if s == nil || s.pm == nil || s.plans == nil || bundle == nil {
+		return nil
+	}
+	if bundle.Execution.State != planStateActive || len(bundle.Execution.ActiveTaskIDs) == 0 {
+		return nil
+	}
+
+	changed := false
+	recoveredTaskIDs := make([]string, 0, len(bundle.Execution.ActiveTaskIDs))
+	for _, runtimeTaskID := range bundle.Execution.ActiveTaskIDs {
+		runtimeTaskID = strings.TrimSpace(runtimeTaskID)
+		if runtimeTaskID == "" {
+			continue
+		}
+		task, exists := s.pm.Task(runtimeTaskID)
+		if exists {
+			if task.Status == pool.TaskCanceled {
+				requireFresh, ok := recoveredPlanTaskFreshWorker(*bundle, runtimeTaskID)
+				if !ok {
+					continue
+				}
+				if err := s.pm.ReviveCanceledTask(runtimeTaskID, requireFresh); err != nil {
+					return err
+				}
+				changed = true
+				recoveredTaskIDs = append(recoveredTaskIDs, runtimeTaskID)
+			}
+			continue
+		}
+
+		spec, ok := recoveredPlanTaskSpec(*bundle, runtimeTaskID)
+		if !ok {
+			continue
+		}
+		if _, err := s.pm.EnqueueTask(spec); err != nil {
+			return err
+		}
+		changed = true
+		recoveredTaskIDs = append(recoveredTaskIDs, runtimeTaskID)
+	}
+
+	if !changed {
+		return nil
+	}
+
+	latest, err := s.plans.Get(bundle.Plan.PlanID)
+	if err != nil {
+		return err
+	}
+	active, completed, failed := summarizeRelevantPlanTasks(s.pm.Tasks(), latest)
+	latest.Plan.State = planStateActive
+	latest.Execution.State = planStateActive
+	latest.Execution.ActiveTaskIDs = active
+	latest.Execution.CompletedTaskIDs = completed
+	latest.Execution.FailedTaskIDs = failed
+	latest.Execution.CompletedAt = nil
+	if recovered {
+		for _, taskID := range recoveredTaskIDs {
+			latest.Execution = appendPlanHistory(latest.Execution, PlanHistoryEntry{
+				Type:    planHistoryManualRetried,
+				TaskID:  taskID,
+				Summary: "Recovered missing active task after scheduler restart.",
+			})
+		}
+	}
+	if err := s.plans.UpdatePlan(latest.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(latest.Plan.PlanID, latest.Execution); err != nil {
+		return err
+	}
+	*bundle = latest
+	return nil
+}
+
+func recoveredPlanTaskSpec(bundle StoredPlan, runtimeTaskID string) (pool.TaskSpec, bool) {
+	logicalTaskID, planTask, idx, ok := recoveredPlanTask(bundle.Plan, runtimeTaskID)
+	if !ok {
+		return pool.TaskSpec{}, false
+	}
+	deps := make([]string, 0, len(planTask.Dependencies))
+	for _, dep := range planTask.Dependencies {
+		depID := strings.TrimSpace(dep.Task)
+		if depID == "" {
+			continue
+		}
+		deps = append(deps, planTaskRuntimeID(bundle.Plan.PlanID, depID))
+	}
+	requireFresh, _ := recoveredPlanTaskFreshWorker(bundle, runtimeTaskID)
+	return pool.TaskSpec{
+		ID:                 runtimeTaskID,
+		PlanID:             bundle.Plan.PlanID,
+		Prompt:             planTask.Prompt,
+		Complexity:         string(planTask.Complexity),
+		Role:               recoveredPlanTaskRole(logicalTaskID),
+		Priority:           idx + 1,
+		DependsOn:          deps,
+		TimeoutMinutes:     planTask.TimeoutMinutes,
+		RequireFreshWorker: requireFresh,
+	}, true
+}
+
+func recoveredPlanTask(bundle PlanRecord, runtimeTaskID string) (string, PlanTask, int, bool) {
+	planID := strings.TrimSpace(bundle.PlanID)
+	prefix := planID + "-"
+	runtimeTaskID = strings.TrimSpace(runtimeTaskID)
+	if planID == "" || !strings.HasPrefix(runtimeTaskID, prefix) {
+		return "", PlanTask{}, 0, false
+	}
+	logicalTaskID := strings.TrimPrefix(runtimeTaskID, prefix)
+	for idx, task := range bundle.Tasks {
+		if strings.TrimSpace(task.ID) == logicalTaskID {
+			return logicalTaskID, task, idx, true
+		}
+	}
+	return "", PlanTask{}, 0, false
+}
+
+func recoveredPlanTaskRole(logicalTaskID string) string {
+	if strings.HasPrefix(strings.TrimSpace(logicalTaskID), "fix-merge-") {
+		return lineageFixMergeRole
+	}
+	return "implementer"
+}
+
+func recoveredPlanTaskFreshWorker(bundle StoredPlan, runtimeTaskID string) (bool, bool) {
+	logicalTaskID, _, _, ok := recoveredPlanTask(bundle.Plan, runtimeTaskID)
+	if !ok {
+		return false, false
+	}
+	logicalTaskID = strings.TrimSpace(logicalTaskID)
+	if strings.HasPrefix(logicalTaskID, "fix-merge-") ||
+		strings.HasPrefix(logicalTaskID, "conflict-fix-") ||
+		strings.HasPrefix(logicalTaskID, "review-fix-") {
+		return true, true
+	}
+	return false, true
 }
 
 func (s *Scheduler) recoverFailedTasksOnStartup() error {
