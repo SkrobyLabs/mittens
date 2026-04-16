@@ -2943,6 +2943,14 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 	}
 	if task.WorkerID != "" {
 		lines = append(lines, fmt.Sprintf("Worker: %s", task.WorkerID))
+		for _, w := range m.status.Workers {
+			if w.ID == task.WorkerID {
+				if w.Provider != "" || w.Model != "" {
+					lines = append(lines, fmt.Sprintf("AI: %s, %s", w.Provider, w.Model))
+				}
+				break
+			}
+		}
 	}
 	if task.Complexity != "" {
 		lines = append(lines, fmt.Sprintf("Complexity: %s", task.Complexity))
