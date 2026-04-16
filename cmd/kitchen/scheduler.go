@@ -1817,7 +1817,7 @@ func (s *Scheduler) workerWorkspaceCompatible(worker pool.Worker, task pool.Task
 		return actual == ""
 	}
 	if actual == "" {
-		return true
+		return false
 	}
 	if _, err := os.Stat(actual); err != nil {
 		return false

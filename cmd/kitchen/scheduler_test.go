@@ -1288,6 +1288,87 @@ func TestScheduleDoesNotReuseIdleWorkerFromDifferentLineageWorkspace(t *testing.
 	}
 }
 
+func TestScheduleDoesNotReuseIdleWorkerWithoutWorkspaceForLineageTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan-empty-workspace-check"
+	lineage := "expected-lineage"
+	if _, err := store.Create(StoredPlan{
+		Plan: PlanRecord{PlanID: planID, Title: "Empty workspace check", Lineage: lineage},
+		Execution: ExecutionRecord{
+			PlanID: planID,
+			State:  planStateActive,
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-empty-workspace-check"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:   "w-empty",
+		Role: "implementer",
+	}); err != nil {
+		t.Fatalf("SpawnWorker empty: %v", err)
+	}
+	if err := pm.RegisterWorker("w-empty", "container-w-empty"); err != nil {
+		t.Fatalf("RegisterWorker empty: %v", err)
+	}
+	if err := pm.Heartbeat("w-empty", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat empty: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	taskID := "plan-empty-workspace-check-t1"
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:       taskID,
+		PlanID:   planID,
+		Prompt:   "implement",
+		Priority: 1,
+		Role:     "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.WorkerID != "" {
+		t.Fatalf("task workerID = %q, want no empty-workspace dispatch", task.WorkerID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued pending fresh spawn", task.Status)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1 fresh worker", len(host.spawnSpecs))
+	}
+	expectedWorkspace := filepath.Join(paths.WorktreesDir, lineage, taskID)
+	if host.spawnSpecs[0].WorkspacePath != expectedWorkspace {
+		t.Fatalf("spawn workspace = %q, want %q", host.spawnSpecs[0].WorkspacePath, expectedWorkspace)
+	}
+}
+
 func TestSchedulerOnTaskCompletedMergesAndKillsWorker(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
