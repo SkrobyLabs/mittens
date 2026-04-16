@@ -15,6 +15,8 @@ import (
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
 
+const terminalOutputHint = "\n\nFormat your output for terminal display: use plain text; avoid markdown formatting (headers, bold, italics, tables, bullet lists) except for genuine code blocks or command output."
+
 const (
 	planStatePlanning                   = "planning"
 	planStateReviewing                  = "reviewing"
@@ -208,7 +210,8 @@ func buildResearchPrompt(topic string) string {
 		"- Identify relevant files, patterns, dependencies, and constraints\n" +
 		"- Note any risks, edge cases, or architectural considerations\n" +
 		"- Produce a structured research report\n\n" +
-		"When you are done, output your findings in a <research> tag block.\n"
+		"When you are done, output your findings in a <research> tag block.\n" +
+		terminalOutputHint
 }
 
 func buildResearchRefinementPrompt(originalTopic, priorFindings, clarification string) string {
@@ -229,7 +232,8 @@ func buildResearchRefinementPrompt(originalTopic, priorFindings, clarification s
 		"- Produce a complete, standalone research report (do not assume the reader has seen the prior findings)\n" +
 		"- Identify relevant files, patterns, dependencies, and constraints\n" +
 		"- Note any risks, edge cases, or architectural considerations\n\n" +
-		"When you are done, output your findings in a <research> tag block.\n"
+		"When you are done, output your findings in a <research> tag block.\n" +
+		terminalOutputHint
 	return prompt
 }
 
@@ -515,7 +519,7 @@ func (k *Kitchen) activatePlanImpl(bundle StoredPlan) error {
 		if _, err := k.pm.EnqueueTask(pool.TaskSpec{
 			ID:             runtimeTaskID,
 			PlanID:         planID,
-			Prompt:         task.Prompt,
+			Prompt:         task.Prompt + terminalOutputHint,
 			Complexity:     string(task.Complexity),
 			Priority:       i + 1,
 			DependsOn:      deps,
@@ -1495,6 +1499,7 @@ func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, plan
 	sb.WriteString(lineage)
 	sb.WriteString(" (conflict resolution)`.\n")
 	sb.WriteString("6. Do NOT touch the base branch, do not amend, do not rebase — a single resolution commit on your fix branch is enough. Kitchen fast-forwards the lineage branch onto your commit once the task completes; the base branch is left untouched and the operator still runs the normal `kitchen merge` to deliver the lineage.\n")
+	sb.WriteString(terminalOutputHint)
 	return sb.String()
 }
 
@@ -1517,6 +1522,7 @@ func buildConflictFixPrompt(originalPrompt string, info *pool.ConflictInfo) stri
 	sb.WriteString("\n```\n\n")
 	sb.WriteString("## Your job\n")
 	sb.WriteString("Re-implement the original task goal above. Your implementation MUST be compatible with the lineage changes shown in the diff. Do not revert or duplicate the lineage changes — work alongside them to achieve the original goal.")
+	sb.WriteString(terminalOutputHint)
 	return sb.String()
 }
 

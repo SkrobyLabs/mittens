@@ -216,7 +216,8 @@ func buildCouncilTurnPrompt(bundle StoredPlan, turn int) (string, error) {
 		idea = strings.TrimSpace(bundle.Plan.Title)
 	}
 	steeringNotes := formatSteeringNotes(bundle.Execution.SteeringNotes, turn)
-	return adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary, steeringNotes, bundle.Plan.ResearchContext), nil
+	prompt := adapter.BuildCouncilTurnPrompt(idea, prior, seat, turn, bundle.Plan.Summary, steeringNotes, bundle.Plan.ResearchContext)
+	return prompt + terminalOutputHint, nil
 }
 
 // formatSteeringNotes formats steering notes applicable to the given council turn
