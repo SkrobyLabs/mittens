@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -10,6 +12,22 @@ import (
 
 	"github.com/SkrobyLabs/mittens/pkg/pool"
 )
+
+func repoLineageHasPendingChanges(repoPath, baseBranch, lineageBranch string) (bool, error) {
+	mergeBase, err := runGit(repoPath, "merge-base", baseBranch, lineageBranch)
+	if err != nil {
+		return false, err
+	}
+	_, err = runGit(repoPath, "diff", "--quiet", strings.TrimSpace(mergeBase)+".."+lineageBranch)
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
+}
 
 func (k *Kitchen) StatusSnapshot() (map[string]any, error) {
 	return k.StatusSnapshotWithLimit(-1)
@@ -79,6 +97,11 @@ func (k *Kitchen) ResetProviderKey(key string) error {
 }
 
 func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
+	return k.MergeLineageWithOptions(lineage, false)
+}
+
+func (k *Kitchen) MergeLineageWithOptions(lineage string, allowFallback bool) (map[string]any, error) {
+	_ = allowFallback
 	if k == nil {
 		return nil, fmt.Errorf("kitchen not configured")
 	}
@@ -100,38 +123,150 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 		}
 	}
 
-	gitMgr, err := k.gitManager()
+	baseBranch := k.baseBranchForLineage(lineage)
+	lineageBranch := lineageBranchName(lineage)
+	hasChanges, err := repoLineageHasPendingChanges(k.repoPath, baseBranch, lineageBranch)
 	if err != nil {
 		return nil, err
 	}
-
-	baseBranch := k.baseBranchForLineage(lineage)
-	lineageBranch := lineageBranchName(lineage)
-	commitMsg := generateSquashCommitMessage(k.repoPath, lineageBranch, baseBranch)
-	if err := gitMgr.MergeLineage(lineage, baseBranch, "squash", commitMsg); err != nil {
+	if !hasChanges {
+		return nil, fmt.Errorf("lineage %s has no changes to merge into %s", lineage, baseBranch)
+	}
+	if activePlanID == "" {
+		return nil, fmt.Errorf("lineage %s has no active plan to merge", lineage)
+	}
+	bundle, err := k.planStore.Get(activePlanID)
+	if err != nil {
 		return nil, err
 	}
-
-	if activePlanID != "" {
-		if err := k.markPlanMerged(activePlanID); err != nil {
-			return nil, err
-		}
-		k.sendNotify(pool.Notification{Type: "plan_merged", ID: activePlanID, Message: lineage})
+	taskID, err := k.enqueueLineageMergeTask(activePlanID, bundle, lineage, baseBranch)
+	if err != nil {
+		return nil, err
 	}
-
-	// After a merge clears the lineage, scan all waiting plans whose
-	// dependencies may now be satisfied.
-	k.activateWaitingPlans()
-
-	resp := map[string]any{
-		"status":     "merged",
+	return map[string]any{
+		"status":     "merge_queued",
 		"baseBranch": baseBranch,
 		"mode":       "squash",
+		"planId":     activePlanID,
+		"newTaskId":  taskID,
+	}, nil
+}
+
+func (k *Kitchen) enqueueLineageMergeTask(activePlanID string, bundle StoredPlan, lineage, baseBranch string) (string, error) {
+	lineageBranch := lineageBranchName(lineage)
+	logicalTaskID := "merge-" + time.Now().UTC().Format("20060102T150405")
+	runtimeTaskID := planTaskRuntimeID(activePlanID, logicalTaskID)
+	prompt, _, err := buildSquashCommitMessageTaskPrompt(k.repoPath, lineageBranch, baseBranch, bundle.Plan.Title, bundle.Plan.Summary)
+	if err != nil {
+		return "", err
 	}
-	if activePlanID != "" {
-		resp["planId"] = activePlanID
+
+	planTask := PlanTask{
+		ID:               logicalTaskID,
+		Title:            fmt.Sprintf("Merge %s into %s", lineage, baseBranch),
+		Prompt:           prompt,
+		Complexity:       ComplexityMedium,
+		ReviewComplexity: ComplexityMedium,
 	}
-	return resp, nil
+	if err := k.planStore.AddTask(activePlanID, planTask); err != nil {
+		return "", fmt.Errorf("add merge task to plan: %w", err)
+	}
+	if _, err := k.pm.EnqueueTask(pool.TaskSpec{
+		ID:                 runtimeTaskID,
+		PlanID:             activePlanID,
+		Prompt:             prompt,
+		Complexity:         string(ComplexityMedium),
+		Priority:           1,
+		Role:               "implementer",
+		RequireFreshWorker: true,
+	}); err != nil {
+		return "", fmt.Errorf("enqueue lineage merge task: %w", err)
+	}
+
+	bundle, err = k.planStore.Get(activePlanID)
+	if err != nil {
+		return "", err
+	}
+	_, completed, failed := summarizeRelevantPlanTasks(k.pm.Tasks(), bundle)
+	bundle.Execution.ActiveTaskIDs = []string{runtimeTaskID}
+	bundle.Execution.CompletedTaskIDs = completed
+	bundle.Execution.FailedTaskIDs = failed
+	bundle.Plan.State = planStateMerging
+	bundle.Execution.State = planStateMerging
+	bundle.Execution.CompletedAt = nil
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeRequested,
+		TaskID:  runtimeTaskID,
+		Summary: fmt.Sprintf("Generating squash merge message for %s→%s.", lineage, baseBranch),
+	})
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return "", err
+	}
+	if err := k.planStore.UpdateExecution(activePlanID, bundle.Execution); err != nil {
+		return "", err
+	}
+	k.sendNotify(pool.Notification{Type: "plan_merging", ID: activePlanID, Message: lineage})
+	return runtimeTaskID, nil
+}
+
+func (k *Kitchen) completeLineageMerge(planID, taskID, commitMsg, commitMessageSource string) error {
+	if k == nil {
+		return fmt.Errorf("kitchen not configured")
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if lineage == "" {
+		return fmt.Errorf("plan %s has no lineage", planID)
+	}
+	baseBranch := k.baseBranchForLineage(lineage)
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		return err
+	}
+	if err := gitMgr.MergeLineage(lineage, baseBranch, "squash", commitMsg); err != nil {
+		return err
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeCompleted,
+		TaskID:  taskID,
+		Summary: fmt.Sprintf("Merged %s into %s using %s commit message.", lineage, baseBranch, firstNonEmpty(strings.TrimSpace(commitMessageSource), "generated")),
+	})
+	if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+		return err
+	}
+	if err := k.markPlanMerged(planID); err != nil {
+		return err
+	}
+	k.sendNotify(pool.Notification{Type: "plan_merged", ID: planID, Message: lineage})
+	k.activateWaitingPlans()
+	return nil
+}
+
+func (k *Kitchen) restoreCompletedPlanAfterMergeAttempt(planID, taskID, summary string) error {
+	if k == nil || k.planStore == nil {
+		return fmt.Errorf("kitchen not configured")
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	bundle.Plan.State = planStateCompleted
+	bundle.Execution.State = planStateCompleted
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedAt = &now
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeFailed,
+		TaskID:  taskID,
+		Summary: strings.TrimSpace(summary),
+	})
+	if err := k.planStore.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	return k.planStore.UpdateExecution(planID, bundle.Execution)
 }
 
 func (k *Kitchen) ReapplyLineage(lineage string) (map[string]any, error) {

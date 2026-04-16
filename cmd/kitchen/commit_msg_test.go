@@ -44,7 +44,10 @@ func TestGenerateSquashCommitMessage_Success(t *testing.T) {
 	}
 
 	lineageBranch := lineageBranchName("feat")
-	got := generateSquashCommitMessage(repo, lineageBranch, "main")
+	got, err := generateSquashCommitMessage(repo, lineageBranch, "main")
+	if err != nil {
+		t.Fatalf("generateSquashCommitMessage: %v", err)
+	}
 	if got != validCommitMsg {
 		t.Fatalf("got %q, want %q", got, validCommitMsg)
 	}
@@ -79,9 +82,16 @@ func TestGenerateSquashCommitMessage_ExecFailure(t *testing.T) {
 
 	lineageBranch := lineageBranchName("feat")
 	fallback := "Squash merge " + lineageBranch + " into main"
-	got := generateSquashCommitMessage(repo, lineageBranch, "main")
-	if got != fallback {
-		t.Fatalf("got %q, want fallback %q", got, fallback)
+	got, err := generateSquashCommitMessage(repo, lineageBranch, "main")
+	if got != "" {
+		t.Fatalf("got %q, want empty generated message on failure", got)
+	}
+	var fallbackRequired *squashCommitMessageFallbackRequired
+	if !errors.As(err, &fallbackRequired) {
+		t.Fatalf("err = %v, want fallback-required error", err)
+	}
+	if fallbackRequired.Fallback != fallback {
+		t.Fatalf("fallback = %q, want %q", fallbackRequired.Fallback, fallback)
 	}
 }
 
@@ -115,9 +125,16 @@ func TestGenerateSquashCommitMessage_Timeout(t *testing.T) {
 
 	lineageBranch := lineageBranchName("feat")
 	fallback := "Squash merge " + lineageBranch + " into main"
-	got := generateSquashCommitMessage(repo, lineageBranch, "main")
-	if got != fallback {
-		t.Fatalf("got %q, want fallback %q", got, fallback)
+	got, err := generateSquashCommitMessage(repo, lineageBranch, "main")
+	if got != "" {
+		t.Fatalf("got %q, want empty generated message on timeout", got)
+	}
+	var fallbackRequired *squashCommitMessageFallbackRequired
+	if !errors.As(err, &fallbackRequired) {
+		t.Fatalf("err = %v, want fallback-required error", err)
+	}
+	if fallbackRequired.Fallback != fallback {
+		t.Fatalf("fallback = %q, want %q", fallbackRequired.Fallback, fallback)
 	}
 }
 
@@ -165,15 +182,22 @@ func TestGenerateSquashCommitMessage_MalformedOutput(t *testing.T) {
 			claudeRunner = func(_ context.Context, _, _ string) (string, error) {
 				return tc.output, nil
 			}
-			got := generateSquashCommitMessage(repo, lineageBranch, "main")
-			if got != fallback {
-				t.Fatalf("output=%q: got %q, want fallback %q", tc.output, got, fallback)
+			got, err := generateSquashCommitMessage(repo, lineageBranch, "main")
+			if got != "" {
+				t.Fatalf("output=%q: got %q, want empty generated message on invalid output", tc.output, got)
+			}
+			var fallbackRequired *squashCommitMessageFallbackRequired
+			if !errors.As(err, &fallbackRequired) {
+				t.Fatalf("output=%q: err = %v, want fallback-required error", tc.output, err)
+			}
+			if fallbackRequired.Fallback != fallback {
+				t.Fatalf("output=%q: fallback = %q, want %q", tc.output, fallbackRequired.Fallback, fallback)
 			}
 		})
 	}
 }
 
-func TestIsValidCommitMessage(t *testing.T) {
+func TestValidateCommitMessage(t *testing.T) {
 	cases := []struct {
 		name  string
 		msg   string
@@ -218,9 +242,9 @@ func TestIsValidCommitMessage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isValidCommitMessage(tc.msg)
-			if got != tc.valid {
-				t.Fatalf("isValidCommitMessage(%q) = %v, want %v", strings.TrimSpace(tc.msg), got, tc.valid)
+			err := validateCommitMessage(tc.msg)
+			if (err == nil) != tc.valid {
+				t.Fatalf("validateCommitMessage(%q) err = %v, want valid=%v", strings.TrimSpace(tc.msg), err, tc.valid)
 			}
 		})
 	}

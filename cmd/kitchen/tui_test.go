@@ -199,7 +199,12 @@ func (b *fakeKitchenTUIBackend) MergeCheck(lineage string) (string, error) {
 func (b *fakeKitchenTUIBackend) MergeLineage(lineage string) (string, error) {
 	b.mergeCalls++
 	b.mergedLineage = lineage
-	return "merged squash into main", nil
+	return "merge queued squash into main task=plan_merge-merge-123", nil
+}
+func (b *fakeKitchenTUIBackend) MergeLineageAllowFallback(lineage string) (string, error) {
+	b.mergeCalls++
+	b.mergedLineage = lineage
+	return "merge queued squash into main task=plan_merge-merge-123", nil
 }
 func (b *fakeKitchenTUIBackend) FixLineageConflicts(lineage string) (string, error) {
 	b.fixMergeCalls++
@@ -3544,7 +3549,7 @@ func TestKitchenTUIMergeMenuDispatchesOtherActions(t *testing.T) {
 		{
 			name:       "merge",
 			selected:   1,
-			wantStatus: "merged squash into main",
+			wantStatus: "merge queued squash into main task=plan_merge-merge-123",
 			verify: func(t *testing.T) {
 				if backend.mergeCalls != 1 || backend.mergedLineage != "parser-errors" {
 					t.Fatalf("merge calls = %d lineage = %q", backend.mergeCalls, backend.mergedLineage)

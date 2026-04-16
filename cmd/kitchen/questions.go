@@ -42,6 +42,13 @@ func (k *Kitchen) AnswerQuestion(questionID, answer string) error {
 	if answer == "" {
 		return fmt.Errorf("answer must not be empty")
 	}
+	q := k.pm.GetQuestion(questionID)
+	if q == nil {
+		return fmt.Errorf("question %s not found", questionID)
+	}
+	if strings.TrimSpace(q.Category) == "lineage_merge" {
+		return k.answerLineageMergeQuestion(*q, answer)
+	}
 	planID, _ := k.planIDForQuestion(questionID)
 	if err := k.pm.AnswerQuestion(questionID, answer, "operator"); err != nil {
 		return err
@@ -53,6 +60,51 @@ func (k *Kitchen) AnswerQuestion(questionID, answer string) error {
 		return err
 	}
 	return k.autoApproveReadyPlan(planID)
+}
+
+func (k *Kitchen) answerLineageMergeQuestion(question pool.Question, answer string) error {
+	if k == nil || k.pm == nil {
+		return fmt.Errorf("kitchen pool manager not configured")
+	}
+	answer = strings.TrimSpace(answer)
+	task, ok := k.pm.Task(question.TaskID)
+	if !ok || strings.TrimSpace(task.PlanID) == "" {
+		return fmt.Errorf("question %s is not attached to an active merge task", question.ID)
+	}
+	planID := strings.TrimSpace(task.PlanID)
+	switch strings.ToLower(answer) {
+	case "continue with fallback commit message":
+		bundle, err := k.planStore.Get(planID)
+		if err != nil {
+			return err
+		}
+		fallback := fallbackSquashCommitMessage(lineageBranchName(bundle.Plan.Lineage), k.baseBranchForLineage(bundle.Plan.Lineage))
+		if err := k.completeLineageMerge(planID, question.TaskID, fallback, "fallback"); err != nil {
+			return err
+		}
+	case "do nothing":
+		if err := k.restoreCompletedPlanAfterMergeAttempt(planID, question.TaskID, "Operator declined fallback merge commit message."); err != nil {
+			return err
+		}
+		bundle, err := k.planStore.Get(planID)
+		if err != nil {
+			return err
+		}
+		bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+			Type:    planHistoryLineageMergeFallbackDeclined,
+			TaskID:  question.TaskID,
+			Summary: "Operator declined fallback merge commit message.",
+		})
+		if err := k.planStore.UpdateExecution(planID, bundle.Execution); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported lineage merge answer %q", answer)
+	}
+	if err := k.pm.AnswerQuestion(question.ID, answer, "operator"); err != nil {
+		return err
+	}
+	return k.recordQuestionAffinity(question.ID)
 }
 
 func (k *Kitchen) MarkUnhelpful(questionID string) error {

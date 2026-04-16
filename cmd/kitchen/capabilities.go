@@ -47,7 +47,7 @@ func kitchenCapabilities() map[string]any {
 		"meta": kitchenCapabilityMetadata(),
 		"cli": map[string]any{
 			"research": map[string]any{
-				"inputs": []string{"inline", "file", "stdin"},
+				"inputs":      []string{"inline", "file", "stdin"},
 				"description": "Submit a read-only research task that bypasses the planning council",
 			},
 			"promote": map[string]any{
@@ -224,12 +224,12 @@ func kitchenCapabilities() map[string]any {
 			"plannerQuestions":          true,
 			"researchMode":              true,
 			"councilSteering": map[string]any{
-				"description":    "Append directional guidance to a planning council without replanning",
-				"validStates":    []string{"reviewing", "pending_approval"},
-				"hardCap":        CouncilHardCap,
-				"persistedAs":    "steeringNotes",
-				"promptSection":  "Operator Steering",
-				"historyEvent":   planHistoryCouncilSteered,
+				"description":   "Append directional guidance to a planning council without replanning",
+				"validStates":   []string{"reviewing", "pending_approval"},
+				"hardCap":       CouncilHardCap,
+				"persistedAs":   "steeringNotes",
+				"promptSection": "Operator Steering",
+				"historyEvent":  planHistoryCouncilSteered,
 			},
 			"reviewCouncil": map[string]any{
 				"name":        "review_council",
@@ -240,7 +240,7 @@ func kitchenCapabilities() map[string]any {
 				},
 			},
 			"historyPersistence": true,
-			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "waiting_on_dependency", "active", "planning_failed", "implementation_review_failed", "completed", "merged", "closed", "rejected", "research_complete"},
+			"reviewStates":       []string{"planning", "reviewing", "pending_approval", "waiting_on_dependency", "active", "merging", "planning_failed", "implementation_review_failed", "completed", "merged", "closed", "rejected", "research_complete"},
 		},
 		"git": map[string]any{
 			"lineageMerge":      true,

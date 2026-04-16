@@ -351,9 +351,10 @@ func (c *kitchenAPIClient) ListLineages() ([]LineageState, error) {
 	return resp.Lineages, err
 }
 
-func (c *kitchenAPIClient) MergeLineage(lineage string, noCommit bool) (map[string]any, error) {
+func (c *kitchenAPIClient) MergeLineage(lineage string, noCommit, allowFallback bool) (map[string]any, error) {
 	req := map[string]any{
-		"noCommit": noCommit,
+		"noCommit":      noCommit,
+		"allowFallback": allowFallback,
 	}
 	var resp map[string]any
 	return resp, c.request(http.MethodPost, "/v1/lineages/"+url.PathEscape(lineage)+"/merge", req, &resp)

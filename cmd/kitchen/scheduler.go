@@ -36,6 +36,7 @@ type Scheduler struct {
 	kitchenAddr                      string
 	notify                           func(pool.Notification)
 	activatePlan                     func(string) error
+	activateWaitingPlans             func()
 	pendingSpawn                     map[string]string
 	reconcileInterval                time.Duration
 	reapInterval                     time.Duration
@@ -343,7 +344,7 @@ func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (boo
 		}
 		retryRoute := s.failedTaskRetryRoute(*task)
 		requireFreshWorker := action == authActionRecycleWorkerRetrySameProvider
-		if bundle.Plan.Lineage != "" {
+		if bundle.Plan.Lineage != "" && !isLineageMergeTask(*task) {
 			if err := s.git.DiscardChild(bundle.Plan.Lineage, task.ID); err != nil {
 				return true, err
 			}
@@ -370,7 +371,7 @@ func (s *Scheduler) retryAuthFailedTask(task *pool.Task, bundle StoredPlan) (boo
 		if err := s.applyAuthRouteCooldown(s.failedTaskRetryRoute(*task), rule.Cooldown); err != nil {
 			return true, err
 		}
-		if bundle.Plan.Lineage != "" {
+		if bundle.Plan.Lineage != "" && !isLineageMergeTask(*task) {
 			if err := s.git.DiscardChild(bundle.Plan.Lineage, task.ID); err != nil {
 				return true, err
 			}
@@ -482,6 +483,9 @@ func (s *Scheduler) onTaskCompleted(taskID string) error {
 	}
 	if task.Role == lineageFixMergeRole {
 		return s.onLineageFixMergeCompleted(*task)
+	}
+	if isLineageMergeTask(*task) {
+		return s.onLineageMergeCompleted(*task)
 	}
 	if isReviewCouncilTask(*task) {
 		return s.onReviewCouncilTurnCompleted(*task)
@@ -627,6 +631,188 @@ func (s *Scheduler) onLineageFixMergeCompleted(task pool.Task) error {
 	return s.syncPlanExecution(task.PlanID)
 }
 
+func (s *Scheduler) onLineageMergeCompleted(task pool.Task) error {
+	if s == nil || s.plans == nil {
+		return nil
+	}
+	bundle, err := s.plans.Get(task.PlanID)
+	if err != nil {
+		return err
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if lineage == "" {
+		return s.restoreCompletedPlanAfterLineageMergeAttempt(task.PlanID, task.ID, "Merge generation finished without a lineage to merge.")
+	}
+	output, err := s.pm.ReadTaskOutput(task.ID)
+	if err != nil {
+		return s.promptLineageMergeFallback(task, bundle, fmt.Sprintf("reading generated commit message failed: %v", err))
+	}
+	commitMsg, err := extractCommitMessageFromTaskOutput(output)
+	if err != nil {
+		return s.promptLineageMergeFallback(task, bundle, fmt.Sprintf("generated merge commit message was invalid: %v", err))
+	}
+	if err := s.completeLineageMergeWithMessage(task.PlanID, task.ID, commitMsg, "generated"); err != nil {
+		return s.restoreCompletedPlanAfterLineageMergeAttempt(task.PlanID, task.ID, fmt.Sprintf("Lineage merge failed: %v", err))
+	}
+	return nil
+}
+
+func (s *Scheduler) onLineageMergeFailed(task pool.Task, class FailureClass) error {
+	if s == nil || s.plans == nil {
+		return nil
+	}
+	if class == FailureAuth {
+		bundle, err := s.plans.Get(task.PlanID)
+		if err != nil {
+			return err
+		}
+		if handled, err := s.retryAuthFailedTask(&task, bundle); handled || err != nil {
+			return err
+		}
+	}
+	message := "lineage merge task failed"
+	if task.Result != nil && strings.TrimSpace(task.Result.Error) != "" {
+		message = strings.TrimSpace(task.Result.Error)
+	}
+	return s.restoreCompletedPlanAfterLineageMergeAttempt(task.PlanID, task.ID, "Lineage merge generation failed: "+message)
+}
+
+func (s *Scheduler) promptLineageMergeFallback(task pool.Task, bundle StoredPlan, reason string) error {
+	if s == nil || s.pm == nil || s.plans == nil {
+		return nil
+	}
+	if strings.TrimSpace(task.WorkerID) != "" {
+		if _, err := s.pm.AskQuestion(task.WorkerID, pool.Question{
+			TaskID:   task.ID,
+			Question: "Generated merge commit message failed validation. Continue with fallback commit message or do nothing?",
+			Category: "lineage_merge",
+			Options:  []string{"Do nothing", "Continue with fallback commit message"},
+			Blocking: true,
+			Context:  strings.TrimSpace(reason),
+		}); err != nil {
+			return err
+		}
+	}
+	bundle.Plan.State = planStateCompleted
+	bundle.Execution.State = planStateCompleted
+	bundle.Execution.ActiveTaskIDs = nil
+	now := time.Now().UTC()
+	bundle.Execution.CompletedAt = &now
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeFallbackPrompt,
+		TaskID:  task.ID,
+		Summary: strings.TrimSpace(reason),
+	})
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	return s.plans.UpdateExecution(task.PlanID, bundle.Execution)
+}
+
+func (s *Scheduler) completeLineageMergeWithMessage(planID, taskID, commitMsg, source string) error {
+	if s == nil || s.git == nil || s.plans == nil {
+		return fmt.Errorf("scheduler merge dependencies not configured")
+	}
+	bundle, err := s.plans.Get(planID)
+	if err != nil {
+		return err
+	}
+	lineage := strings.TrimSpace(bundle.Plan.Lineage)
+	if lineage == "" {
+		return fmt.Errorf("plan %s has no lineage", planID)
+	}
+	baseBranch := firstNonEmpty(strings.TrimSpace(bundle.Plan.Anchor.Branch), "main")
+	if err := s.git.MergeLineage(lineage, baseBranch, "squash", commitMsg); err != nil {
+		return err
+	}
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeCompleted,
+		TaskID:  taskID,
+		Summary: fmt.Sprintf("Merged %s into %s using %s commit message.", lineage, baseBranch, firstNonEmpty(strings.TrimSpace(source), "generated")),
+	})
+	if err := s.plans.UpdateExecution(planID, bundle.Execution); err != nil {
+		return err
+	}
+	if err := s.markPlanMerged(planID); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		s.notify(pool.Notification{Type: "plan_merged", ID: planID, Message: lineage})
+	}
+	if s.activateWaitingPlans != nil {
+		s.activateWaitingPlans()
+	}
+	return nil
+}
+
+func (s *Scheduler) restoreCompletedPlanAfterLineageMergeAttempt(planID, taskID, summary string) error {
+	if s == nil || s.plans == nil {
+		return fmt.Errorf("scheduler plans not configured")
+	}
+	bundle, err := s.plans.Get(planID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	bundle.Plan.State = planStateCompleted
+	bundle.Execution.State = planStateCompleted
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedAt = &now
+	bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+		Type:    planHistoryLineageMergeFailed,
+		TaskID:  taskID,
+		Summary: strings.TrimSpace(summary),
+	})
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	return s.plans.UpdateExecution(planID, bundle.Execution)
+}
+
+func (s *Scheduler) markPlanMerged(planID string) error {
+	if s == nil || s.plans == nil {
+		return fmt.Errorf("scheduler plans not configured")
+	}
+	bundle, err := s.plans.Get(planID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	var completed []string
+	var failed []string
+	if s.pm != nil {
+		for _, task := range s.pm.Tasks() {
+			if task.PlanID != planID {
+				continue
+			}
+			switch task.Status {
+			case pool.TaskCompleted:
+				completed = append(completed, task.ID)
+			default:
+				failed = append(failed, task.ID)
+			}
+		}
+		sort.Strings(completed)
+		sort.Strings(failed)
+	}
+	bundle.Plan.State = planStateMerged
+	bundle.Execution.State = planStateMerged
+	bundle.Execution.ActiveTaskIDs = nil
+	bundle.Execution.CompletedTaskIDs = completed
+	bundle.Execution.FailedTaskIDs = failed
+	bundle.Execution.CompletedAt = &now
+	if err := s.plans.UpdatePlan(bundle.Plan); err != nil {
+		return err
+	}
+	if err := s.plans.UpdateExecution(planID, bundle.Execution); err != nil {
+		return err
+	}
+	if s.lineages != nil {
+		return s.lineages.ClearActivePlan(bundle.Plan.Lineage, planID)
+	}
+	return nil
+}
+
 func (s *Scheduler) onTaskMergeFailed(task pool.Task, lineage string, mergeErr error) error {
 	class := FailureInfrastructure
 	if strings.Contains(strings.ToLower(mergeErr.Error()), "merge conflict") {
@@ -718,6 +904,9 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 	}
 	if task.Role == plannerTaskRole {
 		return s.onCouncilTurnFailed(*task, class)
+	}
+	if isLineageMergeTask(*task) {
+		return s.onLineageMergeFailed(*task, class)
 	}
 	if isReviewCouncilTask(*task) {
 		return s.onReviewCouncilTurnFailed(*task, class)
@@ -1223,7 +1412,43 @@ func (s *Scheduler) runRecoverySuite() error {
 	if err := s.recoverReviewCouncilPlansOnStartup(); err != nil {
 		return err
 	}
+	if err := s.recoverLineageMergePlansOnStartup(); err != nil {
+		return err
+	}
 	s.recoverWaitingPlansOnStartup()
+	return nil
+}
+
+func (s *Scheduler) recoverLineageMergePlansOnStartup() error {
+	if s == nil || s.plans == nil || s.pm == nil {
+		return nil
+	}
+	plans, err := s.plans.List()
+	if err != nil {
+		return err
+	}
+	for _, plan := range plans {
+		bundle, err := s.plans.Get(plan.PlanID)
+		if err != nil || bundle.Execution.State != planStateMerging {
+			continue
+		}
+		for _, taskID := range bundle.Execution.ActiveTaskIDs {
+			task, ok := s.pm.Task(taskID)
+			if !ok || !isLineageMergeTask(*task) {
+				continue
+			}
+			switch task.Status {
+			case pool.TaskCompleted:
+				if err := s.onTaskCompleted(taskID); err != nil {
+					return err
+				}
+			case pool.TaskFailed:
+				if err := s.onTaskFailed(taskID, s.taskFailureClass(task)); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -1838,6 +2063,7 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 	case planStatePlanning,
 		planStateReviewing,
 		planStatePendingApproval,
+		planStateMerging,
 		planStateImplementationFailed,
 		planStateImplementationReview,
 		planStateResearchComplete,
@@ -2014,7 +2240,7 @@ func (s *Scheduler) recoverAutoRemediationIntents() error {
 }
 
 func isPlanControlTask(task pool.Task) bool {
-	return task.Role == plannerTaskRole
+	return task.Role == plannerTaskRole || isLineageMergeTask(task)
 }
 
 func implementationReviewComplexityForPlan(plan PlanRecord) Complexity {
@@ -2062,6 +2288,9 @@ func summarizeRelevantPlanTasks(tasks []pool.Task, bundle StoredPlan) (active []
 
 func taskCountsTowardExecution(task pool.Task, bundle StoredPlan) bool {
 	state := bundle.Execution.State
+	if isLineageMergeTask(task) {
+		return state == planStateMerging
+	}
 	if task.Role == plannerTaskRole {
 		switch state {
 		case planStatePlanning, planStateReviewing, planStatePendingApproval:

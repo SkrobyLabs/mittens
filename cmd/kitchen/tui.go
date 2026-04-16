@@ -49,8 +49,22 @@ type kitchenTUIBackend interface {
 	AnswerQuestion(id, answer string) error
 	MergeCheck(lineage string) (string, error)
 	MergeLineage(lineage string) (string, error)
+	MergeLineageAllowFallback(lineage string) (string, error)
 	FixLineageConflicts(lineage string) (string, error)
 	ReapplyLineage(lineage string) (string, error)
+}
+
+type mergeFallbackPromptError struct {
+	Lineage  string
+	Reason   string
+	Fallback string
+}
+
+func (e *mergeFallbackPromptError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.Reason)
 }
 
 type tuiStatusSnapshot struct {
@@ -211,7 +225,18 @@ func (b *kitchenAPIBackend) FixLineageConflicts(lineage string) (string, error) 
 }
 
 func (b *kitchenAPIBackend) MergeLineage(lineage string) (string, error) {
-	resp, err := b.client.MergeLineage(lineage, false)
+	resp, err := b.client.MergeLineage(lineage, false, false)
+	if err != nil {
+		return "", err
+	}
+	if promptErr := mergeFallbackPromptFromResponse(lineage, resp); promptErr != nil {
+		return "", promptErr
+	}
+	return summarizeMerge(resp), nil
+}
+
+func (b *kitchenAPIBackend) MergeLineageAllowFallback(lineage string) (string, error) {
+	resp, err := b.client.MergeLineage(lineage, false, true)
 	if err != nil {
 		return "", err
 	}
@@ -466,7 +491,23 @@ func (b *kitchenLocalBackend) FixLineageConflicts(lineage string) (string, error
 func (b *kitchenLocalBackend) MergeLineage(lineage string) (string, error) {
 	var summary string
 	err := b.withKitchen(func(k *Kitchen) error {
-		resp, err := k.MergeLineage(lineage)
+		resp, err := k.MergeLineageWithOptions(lineage, false)
+		if err != nil {
+			return err
+		}
+		if promptErr := mergeFallbackPromptFromResponse(lineage, resp); promptErr != nil {
+			return promptErr
+		}
+		summary = summarizeMerge(resp)
+		return nil
+	})
+	return summary, err
+}
+
+func (b *kitchenLocalBackend) MergeLineageAllowFallback(lineage string) (string, error) {
+	var summary string
+	err := b.withKitchen(func(k *Kitchen) error {
+		resp, err := k.MergeLineageWithOptions(lineage, true)
 		if err != nil {
 			return err
 		}
@@ -549,6 +590,7 @@ const (
 	kitchenTUIInputReplan              kitchenTUIInputMode = "replan"
 	kitchenTUIInputAnswer              kitchenTUIInputMode = "answer"
 	kitchenTUIInputMergeMenu           kitchenTUIInputMode = "merge-menu"
+	kitchenTUIInputMergeFallback       kitchenTUIInputMode = "merge-fallback"
 	kitchenTUIInputRemediate           kitchenTUIInputMode = "remediate-review"
 	kitchenTUIInputDeleteConfirm       kitchenTUIInputMode = "delete-confirm"
 
@@ -598,6 +640,7 @@ type kitchenTUIModel struct {
 	selectedQuestion            int
 	selectedOption              int
 	mergeMenuSelected           int
+	mergeFallbackSelected       int
 	remediateSelected           int
 	deleteConfirmSelected       int
 	leftMode                    kitchenTUILeftMode
@@ -620,6 +663,8 @@ type kitchenTUIModel struct {
 	promotePlanID               string
 	refinePlanID                string
 	steerImplementationPlanID   string
+	mergeFallbackLineage        string
+	mergeFallbackReason         string
 	flash                       string
 	flashUntil                  time.Time
 	errText                     string
@@ -743,6 +788,18 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case kitchenTUIActionMsg:
 		if msg.err != nil {
+			var promptErr *mergeFallbackPromptError
+			if errors.As(msg.err, &promptErr) {
+				m.inputMode = kitchenTUIInputMergeFallback
+				m.mergeFallbackSelected = 0
+				m.mergeFallbackLineage = promptErr.Lineage
+				m.mergeFallbackReason = promptErr.Reason
+				m.errText = ""
+				if strings.TrimSpace(msg.selectedPlanID) != "" {
+					m.pendingSelectedID = msg.selectedPlanID
+				}
+				return m, nil
+			}
 			m.errText = msg.err.Error()
 			return m, nil
 		}
@@ -771,6 +828,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.inputMode == kitchenTUIInputMergeMenu {
 			return m.updateMergeMenuInput(msg)
+		}
+		if m.inputMode == kitchenTUIInputMergeFallback {
+			return m.updateMergeFallbackInput(msg)
 		}
 		if m.inputMode == kitchenTUIInputRemediate {
 			return m.updateRemediateMenuInput(msg)
@@ -1158,6 +1218,11 @@ var kitchenTUIMergeMenuOptions = []string{
 	"Reapply on base",
 }
 
+var kitchenTUIMergeFallbackOptions = []string{
+	"Do nothing",
+	"Continue with fallback commit message",
+}
+
 var kitchenTUIRemediationOptions = []string{
 	"Fix minor findings",
 	"Fix minor findings and nits",
@@ -1209,6 +1274,51 @@ func (m kitchenTUIModel) updateMergeMenuInput(msg tea.KeyMsg) (tea.Model, tea.Cm
 			return m, m.actionCmd(func() (string, string, error) {
 				summary, err := m.backend.ReapplyLineage(plan.Record.Lineage)
 				return summary, plan.Record.PlanID, err
+			})
+		}
+	}
+	return m, nil
+}
+
+func (m kitchenTUIModel) updateMergeFallbackInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode = kitchenTUIInputNone
+		m.mergeFallbackLineage = ""
+		m.mergeFallbackReason = ""
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.mergeFallbackSelected > 0 {
+			m.mergeFallbackSelected--
+		}
+		return m, nil
+	case "down", "j":
+		if m.mergeFallbackSelected < len(kitchenTUIMergeFallbackOptions)-1 {
+			m.mergeFallbackSelected++
+		}
+		return m, nil
+	case "enter":
+		lineage := strings.TrimSpace(m.mergeFallbackLineage)
+		plan := m.selectedPlanItem()
+		selectedPlanID := ""
+		if plan != nil {
+			selectedPlanID = plan.Record.PlanID
+		}
+		m.inputMode = kitchenTUIInputNone
+		m.mergeFallbackLineage = ""
+		m.mergeFallbackReason = ""
+		if lineage == "" {
+			return m, nil
+		}
+		switch m.mergeFallbackSelected {
+		case 0:
+			return m, nil
+		case 1:
+			return m, m.actionCmd(func() (string, string, error) {
+				summary, err := m.backend.MergeLineageAllowFallback(lineage)
+				return summary, selectedPlanID, err
 			})
 		}
 	}
@@ -2036,7 +2146,7 @@ func (m kitchenTUIModel) canCheckMergeSelectedPlan() bool {
 		return false
 	}
 	switch planDisplayState(*plan) {
-	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationFailed, planStateImplementationReview, planStatePlanningFailed, planStateClosed, planStateRejected, planStateMerged, planStateWaitingOnDependency:
+	case "", "cancelled", planStatePlanning, planStateReviewing, planStateImplementationFailed, planStateImplementationReview, planStatePlanningFailed, planStateMerging, planStateClosed, planStateRejected, planStateMerged, planStateWaitingOnDependency:
 		return false
 	default:
 		return true
@@ -2134,6 +2244,8 @@ func (m kitchenTUIModel) footerActions() []string {
 			}
 			return []string{"enter answer", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputMergeMenu:
+			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputMergeFallback:
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputRemediate:
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
@@ -2497,6 +2609,10 @@ func (m kitchenTUIModel) renderDetailPane(width, height int) string {
 		lines = append(lines, m.renderMergeMenuLines(innerWidth)...)
 		lines = append(lines, "")
 		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+	} else if m.inputMode == kitchenTUIInputMergeFallback {
+		lines = append(lines, m.renderMergeFallbackLines(innerWidth)...)
+		lines = append(lines, "")
+		lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 	} else if m.inputMode == kitchenTUIInputRemediate {
 		lines = append(lines, m.renderRemediationMenuLines(innerWidth)...)
 		lines = append(lines, "")
@@ -2531,6 +2647,28 @@ func (m kitchenTUIModel) renderMergeMenuLines(innerWidth int) []string {
 	}
 	for i, option := range kitchenTUIMergeMenuOptions {
 		if i == m.mergeMenuSelected {
+			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
+			continue
+		}
+		lines = append(lines, truncate("  "+option, innerWidth))
+	}
+	return lines
+}
+
+func (m kitchenTUIModel) renderMergeFallbackLines(innerWidth int) []string {
+	highlightStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Render("Fallback Commit Message"),
+		"LLM squash commit message generation failed.",
+	}
+	if reason := strings.TrimSpace(m.mergeFallbackReason); reason != "" {
+		lines = append(lines, "")
+		lines = append(lines, wrapText("Reason: "+reason, innerWidth)...)
+	}
+	lines = append(lines, "")
+	lines = append(lines, "Default is no-op. Continue only if you want the plain squash merge title.")
+	for i, option := range kitchenTUIMergeFallbackOptions {
+		if i == m.mergeFallbackSelected {
 			lines = append(lines, truncate(highlightStyle.Render("> "+option), innerWidth))
 			continue
 		}
@@ -2702,6 +2840,12 @@ func (m kitchenTUIModel) measureCurrentRightPane() ([]string, int, int) {
 		}
 		if m.inputMode == kitchenTUIInputMergeMenu {
 			lines := append([]string(nil), m.renderMergeMenuLines(innerWidth)...)
+			lines = append(lines, "")
+			lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
+			return lines, innerWidth, height
+		}
+		if m.inputMode == kitchenTUIInputMergeFallback {
+			lines := append([]string(nil), m.renderMergeFallbackLines(innerWidth)...)
 			lines = append(lines, "")
 			lines = append(lines, m.renderPlanDetailLines(innerWidth)...)
 			return lines, innerWidth, height
@@ -2943,14 +3087,6 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 	}
 	if task.WorkerID != "" {
 		lines = append(lines, fmt.Sprintf("Worker: %s", task.WorkerID))
-		for _, w := range m.status.Workers {
-			if w.ID == task.WorkerID {
-				if w.Provider != "" || w.Model != "" {
-					lines = append(lines, fmt.Sprintf("AI: %s, %s", w.Provider, w.Model))
-				}
-				break
-			}
-		}
 	}
 	if task.Complexity != "" {
 		lines = append(lines, fmt.Sprintf("Complexity: %s", task.Complexity))
@@ -3218,7 +3354,7 @@ func (m kitchenTUIModel) renderTaskLogLines(innerWidth int) []string {
 
 func (m kitchenTUIModel) renderInputBar() string {
 	// Multiple-choice answer mode doesn't use the input bar
-	if m.inputMode == kitchenTUIInputMergeMenu || m.inputMode == kitchenTUIInputRemediate || m.inputMode == kitchenTUIInputDeleteConfirm || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
+	if m.inputMode == kitchenTUIInputMergeMenu || m.inputMode == kitchenTUIInputMergeFallback || m.inputMode == kitchenTUIInputRemediate || m.inputMode == kitchenTUIInputDeleteConfirm || (m.inputMode == kitchenTUIInputAnswer && m.selectedQuestionItem() != nil && len(m.selectedQuestionItem().Options) > 0) {
 		return ""
 	}
 	label := "Input"
@@ -3388,7 +3524,7 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	var implementationTasks []PlanTask
 	var trailingTimelineTasks []PlanTask
 	for _, task := range detail.Plan.Tasks {
-		if isLineageFixMergePlanTask(task.ID) {
+		if isTrailingTimelinePlanTask(task.ID) {
 			trailingTimelineTasks = append(trailingTimelineTasks, task)
 			continue
 		}
@@ -3424,8 +3560,9 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	return items
 }
 
-func isLineageFixMergePlanTask(taskID string) bool {
-	return strings.HasPrefix(strings.TrimSpace(taskID), "fix-merge-")
+func isTrailingTimelinePlanTask(taskID string) bool {
+	taskID = strings.TrimSpace(taskID)
+	return strings.HasPrefix(taskID, "fix-merge-") || isLineageMergePlanTask(taskID)
 }
 
 func orderTrailingTimelineTasks(tasks []PlanTask, history []PlanHistoryEntry) []PlanTask {
@@ -4140,10 +4277,32 @@ func summarizeMerge(resp map[string]any) string {
 	status, _ := resp["status"].(string)
 	baseBranch, _ := resp["baseBranch"].(string)
 	mode, _ := resp["mode"].(string)
+	newTaskID, _ := resp["newTaskId"].(string)
+	if status == "merge_queued" {
+		summary := fmt.Sprintf("merge queued %s into %s", mode, baseBranch)
+		if strings.TrimSpace(newTaskID) != "" {
+			summary += " task=" + newTaskID
+		}
+		return summary
+	}
 	if status == "" {
 		status = "merged"
 	}
 	return fmt.Sprintf("%s %s into %s", status, mode, baseBranch)
+}
+
+func mergeFallbackPromptFromResponse(lineage string, resp map[string]any) error {
+	status, _ := resp["status"].(string)
+	if status != "needs_fallback_confirmation" {
+		return nil
+	}
+	reason, _ := resp["error"].(string)
+	fallback, _ := resp["fallbackCommitMessage"].(string)
+	return &mergeFallbackPromptError{
+		Lineage:  lineage,
+		Reason:   strings.TrimSpace(reason),
+		Fallback: strings.TrimSpace(fallback),
+	}
 }
 
 func summarizeReapply(resp map[string]any) string {
@@ -4226,6 +4385,8 @@ func compactState(state string) string {
 		return "impl-fail"
 	case planStateImplementationReview:
 		return "impl-rev"
+	case planStateMerging:
+		return "merging"
 	case planStateActive:
 		return "active"
 	case planStateCompleted:

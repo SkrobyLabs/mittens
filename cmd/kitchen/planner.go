@@ -19,6 +19,7 @@ const (
 	planStatePlanningFailed             = "planning_failed"
 	planStatePendingApproval            = "pending_approval"
 	planStateActive                     = "active"
+	planStateMerging                    = "merging"
 	planStateImplementationFailed       = "implementation_failed"
 	planStateCompleted                  = "completed"
 	planStateImplementationReview       = "implementation_review"
@@ -1921,6 +1922,17 @@ func defaultLineage(title string) string {
 
 func planTaskRuntimeID(planID, taskID string) string {
 	return planID + "-" + taskID
+}
+
+func isLineageMergePlanTask(taskID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(taskID), "merge-")
+}
+
+func isLineageMergeTask(task pool.Task) bool {
+	if strings.TrimSpace(task.PlanID) == "" {
+		return false
+	}
+	return isLineageMergePlanTask(strings.TrimPrefix(strings.TrimSpace(task.ID), strings.TrimSpace(task.PlanID)+"-"))
 }
 
 func pendingQuestionsForPlan(pm *pool.PoolManager, planID string) []pool.Question {

@@ -442,6 +442,8 @@ func planPhase(bundle StoredPlan, pendingQuestions int) string {
 			return "auto_remediating_implementation_review"
 		}
 		return "executing"
+	case planStateMerging:
+		return "merging"
 	case planStateWaitingOnDependency:
 		return "waiting_on_dependency"
 	case "":

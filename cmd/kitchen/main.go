@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -800,9 +801,18 @@ func newRootCommand() *cobra.Command {
 			if client, ok, err := openKitchenAPIClient("."); err != nil {
 				return err
 			} else if ok {
-				resp, err := client.MergeLineage(args[0], mergeNoCommit)
+				resp, err := client.MergeLineage(args[0], mergeNoCommit, false)
 				if err != nil {
 					return err
+				}
+				if !mergeNoCommit {
+					confirmed, err := maybeConfirmFallbackMerge(cmd, resp, func() (map[string]any, error) {
+						return client.MergeLineage(args[0], false, true)
+					})
+					if err != nil {
+						return err
+					}
+					resp = confirmed
 				}
 				return writeJSON(cmd.OutOrStdout(), resp)
 			}
@@ -817,7 +827,12 @@ func newRootCommand() *cobra.Command {
 			if mergeNoCommit {
 				resp, err = k.PreviewMergeLineage(args[0])
 			} else {
-				resp, err = k.MergeLineage(args[0])
+				resp, err = k.MergeLineageWithOptions(args[0], false)
+				if err == nil {
+					resp, err = maybeConfirmFallbackMerge(cmd, resp, func() (map[string]any, error) {
+						return k.MergeLineageWithOptions(args[0], true)
+					})
+				}
 			}
 			if err != nil {
 				return err
@@ -1478,6 +1493,38 @@ func readSubmitIdeaFromEditor(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("editor exited without writing an idea")
 	}
 	return idea, nil
+}
+
+func maybeConfirmFallbackMerge(cmd *cobra.Command, resp map[string]any, confirm func() (map[string]any, error)) (map[string]any, error) {
+	if cmd == nil {
+		return resp, nil
+	}
+	status, _ := resp["status"].(string)
+	if status != "needs_fallback_confirmation" {
+		return resp, nil
+	}
+	reason, _ := resp["error"].(string)
+	fallback, _ := resp["fallbackCommitMessage"].(string)
+	fmt.Fprintf(cmd.ErrOrStderr(), "LLM squash commit message generation failed: %s\n", strings.TrimSpace(reason))
+	if strings.TrimSpace(fallback) != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Fallback commit message: %s\n", strings.TrimSpace(fallback))
+	}
+	fmt.Fprint(cmd.ErrOrStderr(), "Continue with fallback commit message? [y/N]: ")
+	reader := bufio.NewReader(cmd.InOrStdin())
+	answer, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		return map[string]any{
+			"status":     "not_merged",
+			"baseBranch": resp["baseBranch"],
+			"mode":       resp["mode"],
+			"reason":     "operator declined fallback commit message",
+		}, nil
+	}
+	return confirm()
 }
 
 func shellQuote(s string) string {

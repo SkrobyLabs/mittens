@@ -796,7 +796,8 @@ func (k *Kitchen) handleLineages(w http.ResponseWriter, r *http.Request) {
 
 func (k *Kitchen) handleMergeLineage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		NoCommit bool `json:"noCommit"`
+		NoCommit      bool `json:"noCommit"`
+		AllowFallback bool `json:"allowFallback"`
 	}
 	if !k.decodeAPIRequest(w, r, &req) {
 		return
@@ -808,7 +809,7 @@ func (k *Kitchen) handleMergeLineage(w http.ResponseWriter, r *http.Request) {
 	if req.NoCommit {
 		resp, err = k.PreviewMergeLineage(r.PathValue("name"))
 	} else {
-		resp, err = k.MergeLineage(r.PathValue("name"))
+		resp, err = k.MergeLineageWithOptions(r.PathValue("name"), req.AllowFallback)
 	}
 	if err != nil {
 		status := apiErrorStatus(err)

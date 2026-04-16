@@ -261,7 +261,7 @@ func TestKitchenCapabilitiesCommandOutputsCapabilityMap(t *testing.T) {
 	}
 }
 
-func TestKitchenMergeLineageMarksPlanMergedAndClearsActivePlan(t *testing.T) {
+func TestKitchenMergeLineageQueuesTaskAndMarksPlanMerging(t *testing.T) {
 	k := newTestKitchen(t)
 
 	bundle, err := k.SubmitIdea("Add parser error normalization", "parser-errors", false, false)
@@ -321,25 +321,28 @@ func TestKitchenMergeLineageMarksPlanMergedAndClearsActivePlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}
-	if resp["status"] != "merged" {
+	if resp["status"] != "merge_queued" {
 		t.Fatalf("merge response = %+v", resp)
+	}
+	if strings.TrimSpace(resp["newTaskId"].(string)) == "" {
+		t.Fatalf("merge response missing newTaskId: %+v", resp)
 	}
 
 	merged, err := k.GetPlan(bundle.Plan.PlanID)
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	if merged.Plan.State != planStateMerged {
-		t.Fatalf("plan state = %q, want %q", merged.Plan.State, planStateMerged)
+	if merged.Plan.State != planStateMerging {
+		t.Fatalf("plan state = %q, want %q", merged.Plan.State, planStateMerging)
 	}
-	if merged.Execution.State != planStateMerged {
-		t.Fatalf("execution state = %q, want %q", merged.Execution.State, planStateMerged)
+	if merged.Execution.State != planStateMerging {
+		t.Fatalf("execution state = %q, want %q", merged.Execution.State, planStateMerging)
 	}
-	if merged.Execution.CompletedAt == nil {
-		t.Fatal("expected completedAt to be set")
+	if len(merged.Execution.ActiveTaskIDs) != 1 || !strings.Contains(merged.Execution.ActiveTaskIDs[0], "-merge-") {
+		t.Fatalf("activeTaskIds = %+v, want queued merge task", merged.Execution.ActiveTaskIDs)
 	}
-	if activePlan, err := k.lineageMgr.ActivePlan(bundle.Plan.Lineage); err == nil || activePlan != "" {
-		t.Fatalf("active plan = %q, %v; want cleared", activePlan, err)
+	if activePlan, err := k.lineageMgr.ActivePlan(bundle.Plan.Lineage); err != nil || activePlan != bundle.Plan.PlanID {
+		t.Fatalf("active plan = %q, %v; want %q", activePlan, err, bundle.Plan.PlanID)
 	}
 }
 
@@ -575,8 +578,174 @@ func TestKitchenMergeLineageIgnoresHistoricalCouncilFailuresOnCompletedPlan(t *t
 	if err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}
-	if resp["status"] != "merged" {
-		t.Fatalf("merge response = %+v", resp)
+	if resp["status"] != "merge_queued" {
+		t.Fatalf("merge response = %+v, want merge_queued", resp)
+	}
+}
+
+func TestAnswerLineageMergeQuestionDeclinesFallbackRestoresCompleted(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_commit_msg_confirm",
+			Lineage: "parser-errors",
+			Title:   "Need merge message confirmation",
+			State:   planStateCompleted,
+			Anchor:  anchor,
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			Branch:      lineageBranchName("parser-errors"),
+			Anchor:      anchor,
+			CompletedAt: &completedAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	resp, err := k.MergeLineageWithOptions("parser-errors", false)
+	if err != nil {
+		t.Fatalf("MergeLineageWithOptions: %v", err)
+	}
+	if resp["status"] != "merge_queued" {
+		t.Fatalf("merge response = %+v, want merge_queued", resp)
+	}
+	taskID, _ := resp["newTaskId"].(string)
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-merge", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	qid, err := k.pm.AskQuestion("w-merge", pool.Question{
+		TaskID:   taskID,
+		Question: "Continue with fallback commit message?",
+		Category: "lineage_merge",
+		Options:  []string{"Do nothing", "Continue with fallback commit message"},
+		Blocking: true,
+	})
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := k.AnswerQuestion(qid, "Do nothing"); err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+
+	updated, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if updated.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", updated.Plan.State, planStateCompleted)
+	}
+	if updated.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", updated.Execution.State, planStateCompleted)
+	}
+}
+
+func TestAnswerLineageMergeQuestionUsesFallbackAndMergesPlan(t *testing.T) {
+	k := newTestKitchen(t)
+	completedAt := time.Now().UTC()
+
+	anchor, err := k.currentAnchor()
+	if err != nil {
+		t.Fatalf("currentAnchor: %v", err)
+	}
+	planID, err := k.planStore.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_commit_msg_fallback",
+			Lineage: "parser-errors",
+			Title:   "Allow fallback merge message",
+			State:   planStateCompleted,
+			Anchor:  anchor,
+		},
+		Execution: ExecutionRecord{
+			State:       planStateCompleted,
+			Branch:      lineageBranchName("parser-errors"),
+			Anchor:      anchor,
+			CompletedAt: &completedAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := k.lineageMgr.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+
+	gitMgr, err := k.gitManager()
+	if err != nil {
+		t.Fatalf("gitManager: %v", err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	resp, err := k.MergeLineageWithOptions("parser-errors", false)
+	if err != nil {
+		t.Fatalf("MergeLineageWithOptions: %v", err)
+	}
+	if resp["status"] != "merge_queued" {
+		t.Fatalf("merge response = %+v, want merge_queued", resp)
+	}
+	taskID, _ := resp["newTaskId"].(string)
+	if _, err := k.pm.SpawnWorker(pool.WorkerSpec{ID: "w-merge", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	qid, err := k.pm.AskQuestion("w-merge", pool.Question{
+		TaskID:   taskID,
+		Question: "Continue with fallback commit message?",
+		Category: "lineage_merge",
+		Options:  []string{"Do nothing", "Continue with fallback commit message"},
+		Blocking: true,
+	})
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := k.AnswerQuestion(qid, "Continue with fallback commit message"); err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	updated, err := k.GetPlan(planID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if updated.Plan.State != planStateMerged {
+		t.Fatalf("plan state = %q, want %q", updated.Plan.State, planStateMerged)
 	}
 }
 
