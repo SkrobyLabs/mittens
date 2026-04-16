@@ -1455,7 +1455,7 @@ func (k *Kitchen) enqueueLineageFixMergeTask(activePlanID string, bundle StoredP
 
 func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, planTitle string) string {
 	var sb strings.Builder
-	sb.WriteString("You are catching the Kitchen lineage branch up to the base branch so conflicts are resolved before the operator squash-merges the lineage into base.\n\n")
+	sb.WriteString("You are reconciling the Kitchen lineage branch with the latest base branch so conflicts are resolved before the operator squash-merges the lineage into base.\n\n")
 	sb.WriteString("## Context\n")
 	sb.WriteString("- Lineage: `")
 	sb.WriteString(lineage)
@@ -1466,7 +1466,9 @@ func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, plan
 	sb.WriteString("` (has drifted since the lineage started)\n")
 	sb.WriteString("\nYour working directory sits on a throwaway fix branch forked from the lineage, with `git merge --no-ff --no-commit ")
 	sb.WriteString(baseBranch)
-	sb.WriteString("` already in progress — `git status` shows the conflicting files with their `<<<<<<<` / `=======` / `>>>>>>>` markers. HEAD is the fix branch, NOT the lineage branch itself (Kitchen will fast-forward the lineage onto your resolution commit when you finish).\n\n")
+	sb.WriteString("` already in progress — `git status` shows the conflicting files with their `<<<<<<<` / `=======` / `>>>>>>>` markers. HEAD is the fix branch, NOT the lineage branch itself (Kitchen will fast-forward the lineage onto your resolution commit when you finish). The fact that HEAD/current is the lineage side does NOT mean you should prefer it; the incoming side from `")
+	sb.WriteString(baseBranch)
+	sb.WriteString("` is equally real work that must usually be incorporated.\n\n")
 	sb.WriteString("## Conflicting files\n")
 	for _, f := range files {
 		sb.WriteString("- ")
@@ -1474,14 +1476,16 @@ func buildLineageFixMergePrompt(baseBranch, lineage string, files []string, plan
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n## Your job\n")
-	sb.WriteString("1. Resolve every conflict marker. Keep both sides' intent whenever that is what each change was trying to achieve — do not drop the lineage's work and do not drop the base's work unless one strictly supersedes the other.\n")
-	sb.WriteString("2. Run the repository's standard verification (build, tests, linters — look at the project instructions if you are unsure what's standard) to make sure the resolved tree is healthy.\n")
-	sb.WriteString("3. Once it passes, `git add` the resolved files and commit with a message like `Merge ")
+	sb.WriteString("1. Resolve every conflict marker by integrating the lineage change with the incoming base update. Treat HEAD/current/ours and incoming/theirs as inputs to reconcile, not instructions about which side to keep.\n")
+	sb.WriteString("2. Keep both sides' intent whenever they are compatible. Do not drop the lineage's work just because the base changed, and do not drop the base's work just because the fix branch starts from lineage. Only discard a side when it is clearly superseded, incorrect, or incompatible with the intended end state.\n")
+	sb.WriteString("3. When the two sides made overlapping but valid edits, synthesize the smallest correct combined result instead of picking one side verbatim.\n")
+	sb.WriteString("4. Run the repository's standard verification (build, tests, linters — look at the project instructions if you are unsure what's standard) to make sure the resolved tree is healthy.\n")
+	sb.WriteString("5. Once it passes, `git add` the resolved files and commit with a message like `Merge ")
 	sb.WriteString(baseBranch)
 	sb.WriteString(" into ")
 	sb.WriteString(lineage)
 	sb.WriteString(" (conflict resolution)`.\n")
-	sb.WriteString("4. Do NOT touch the base branch, do not amend, do not rebase — a single resolution commit on your fix branch is enough. Kitchen fast-forwards the lineage branch onto your commit once the task completes; the base branch is left untouched and the operator still runs the normal `kitchen merge` to deliver the lineage.\n")
+	sb.WriteString("6. Do NOT touch the base branch, do not amend, do not rebase — a single resolution commit on your fix branch is enough. Kitchen fast-forwards the lineage branch onto your commit once the task completes; the base branch is left untouched and the operator still runs the normal `kitchen merge` to deliver the lineage.\n")
 	return sb.String()
 }
 
