@@ -200,7 +200,7 @@ func (g *GitManager) MergeChild(lineage, taskID string) error {
 		return g.forceBranchTo(lineageBranch, childBranch)
 	}
 
-	head, err := g.mergeIntoTemp(lineageBranch, childBranch, false)
+	head, err := g.mergeIntoTemp(lineageBranch, childBranch, false, "")
 	if err != nil {
 		return err
 	}
@@ -245,7 +245,7 @@ func isRecoverableWorktreeRemoveError(err error) bool {
 		strings.Contains(msg, "is not a working tree")
 }
 
-func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
+func (g *GitManager) MergeLineage(lineage, baseBranch, mode, commitMsg string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -276,7 +276,7 @@ func (g *GitManager) MergeLineage(lineage, baseBranch, mode string) error {
 		}
 	}
 
-	head, err := g.mergeIntoTemp(baseBranch, lineageBranch, squash)
+	head, err := g.mergeIntoTemp(baseBranch, lineageBranch, squash, commitMsg)
 	if err != nil {
 		return err
 	}
@@ -303,7 +303,7 @@ func (g *GitManager) ReapplyLineageOnBase(lineage, baseBranch string) (bool, []s
 		return true, nil, nil
 	}
 
-	head, err := g.mergeIntoTemp(lineageBranch, baseBranch, false)
+	head, err := g.mergeIntoTemp(lineageBranch, baseBranch, false, "")
 	if err != nil {
 		conflicts := parseConflictList(err.Error())
 		if len(conflicts) > 0 {
@@ -349,7 +349,7 @@ func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (stri
 		}
 	}
 
-	return g.mergeIntoTemp(baseBranch, lineageBranch, squash)
+	return g.mergeIntoTemp(baseBranch, lineageBranch, squash, "")
 }
 
 func (g *GitManager) MergeCheck(lineage, baseBranch string) (bool, []string, error) {
@@ -730,7 +730,7 @@ func (g *GitManager) advanceBranchToSHA(branch, sha string) error {
 	return err
 }
 
-func (g *GitManager) mergeIntoTemp(targetBranch, sourceBranch string, squash bool) (string, error) {
+func (g *GitManager) mergeIntoTemp(targetBranch, sourceBranch string, squash bool, commitMsg string) (string, error) {
 	tmpDir, err := os.MkdirTemp(g.worktreeBase, ".merge-*")
 	if err != nil {
 		return "", fmt.Errorf("create merge temp dir: %w", err)
@@ -775,7 +775,11 @@ func (g *GitManager) mergeIntoTemp(targetBranch, sourceBranch string, squash boo
 			}
 			return strings.TrimSpace(head), nil
 		}
-		if _, err := runGit(tmpDir, "commit", "-m", "Squash merge "+sourceBranch+" into "+targetBranch); err != nil {
+		msg := commitMsg
+		if msg == "" {
+			msg = "Squash merge " + sourceBranch + " into " + targetBranch
+		}
+		if _, err := runGit(tmpDir, "commit", "-m", msg); err != nil {
 			return "", err
 		}
 	}

@@ -291,7 +291,7 @@ func TestGitManagerMergeLineageSquashBlocksWhenLineageHasNoChanges(t *testing.T)
 	if err != nil {
 		t.Fatalf("rev-parse before: %v", err)
 	}
-	err = gm.MergeLineage("parser-errors", "feat/kitchen", "squash")
+	err = gm.MergeLineage("parser-errors", "feat/kitchen", "squash", "")
 	if err == nil || !strings.Contains(err.Error(), "has no changes to merge") {
 		t.Fatalf("MergeLineage error = %v, want no changes to merge", err)
 	}
@@ -531,7 +531,7 @@ func TestGitManagerMergeLineageSyncsCheckedOutBaseWorktree(t *testing.T) {
 
 	// Now merge the lineage into main — which is checked out in the
 	// main repo's working tree.
-	if err := gm.MergeLineage("adds-file", "main", "squash"); err != nil {
+	if err := gm.MergeLineage("adds-file", "main", "squash", ""); err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}
 
@@ -574,7 +574,7 @@ func TestGitManagerMergeLineagePreservesDirtyOperatorWorktree(t *testing.T) {
 	// Operator has uncommitted changes in the main repo.
 	writeFile(t, filepath.Join(repo, "README.md"), "operator edit\n")
 
-	if err := gm.MergeLineage("adds-file", "main", "squash"); err != nil {
+	if err := gm.MergeLineage("adds-file", "main", "squash", ""); err != nil {
 		t.Fatalf("MergeLineage: %v", err)
 	}
 
@@ -585,6 +585,80 @@ func TestGitManagerMergeLineagePreservesDirtyOperatorWorktree(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != "operator edit" {
 		t.Fatalf("operator edit lost: README.md = %q", string(data))
+	}
+}
+
+func TestMergeIntoTempSquashWithExplicitCommitMsg(t *testing.T) {
+	repo := initGitRepo(t)
+	worktrees := filepath.Join(t.TempDir(), "worktrees")
+
+	gm, err := NewGitManager(repo, worktrees)
+	if err != nil {
+		t.Fatalf("NewGitManager: %v", err)
+	}
+	if err := gm.CreateLineageBranch("feat", "HEAD"); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	wt, err := gm.CreateChildWorktree("feat", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(wt, "feat.txt"), "new feature\n")
+	mustRunGit(t, wt, "add", "feat.txt")
+	mustRunGit(t, wt, "commit", "-m", "add feature")
+	if err := gm.MergeChild("feat", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	customMsg := "feat: add new feature\n\nFeatures:\n- add feat.txt with new feature"
+	if err := gm.MergeLineage("feat", "main", "squash", customMsg); err != nil {
+		t.Fatalf("MergeLineage: %v", err)
+	}
+
+	subject, err := runGit(repo, "log", "-1", "--format=%B", "main")
+	if err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	if !strings.Contains(strings.TrimSpace(subject), "feat: add new feature") {
+		t.Fatalf("commit message = %q, want to contain %q", subject, "feat: add new feature")
+	}
+}
+
+func TestMergeIntoTempSquashEmptyCommitMsgUsesDefault(t *testing.T) {
+	repo := initGitRepo(t)
+	worktrees := filepath.Join(t.TempDir(), "worktrees")
+
+	gm, err := NewGitManager(repo, worktrees)
+	if err != nil {
+		t.Fatalf("NewGitManager: %v", err)
+	}
+	if err := gm.CreateLineageBranch("feat2", "HEAD"); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	wt, err := gm.CreateChildWorktree("feat2", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(wt, "feat2.txt"), "another feature\n")
+	mustRunGit(t, wt, "add", "feat2.txt")
+	mustRunGit(t, wt, "commit", "-m", "add feature2")
+	if err := gm.MergeChild("feat2", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+
+	// Pass empty commitMsg — should use the hardcoded default.
+	if err := gm.MergeLineage("feat2", "main", "squash", ""); err != nil {
+		t.Fatalf("MergeLineage: %v", err)
+	}
+
+	subject, err := runGit(repo, "log", "-1", "--format=%s", "main")
+	if err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	lineageBranch := lineageBranchName("feat2")
+	want := "Squash merge " + lineageBranch + " into main"
+	if strings.TrimSpace(subject) != want {
+		t.Fatalf("commit message = %q, want %q", strings.TrimSpace(subject), want)
 	}
 }
 

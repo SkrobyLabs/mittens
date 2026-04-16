@@ -106,7 +106,9 @@ func (k *Kitchen) MergeLineage(lineage string) (map[string]any, error) {
 	}
 
 	baseBranch := k.baseBranchForLineage(lineage)
-	if err := gitMgr.MergeLineage(lineage, baseBranch, "squash"); err != nil {
+	lineageBranch := lineageBranchName(lineage)
+	commitMsg := generateSquashCommitMessage(k.repoPath, lineageBranch, baseBranch)
+	if err := gitMgr.MergeLineage(lineage, baseBranch, "squash", commitMsg); err != nil {
 		return nil, err
 	}
 
