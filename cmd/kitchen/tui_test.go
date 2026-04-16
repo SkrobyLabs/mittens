@@ -3583,7 +3583,7 @@ func TestKitchenTUIMergeMenuOpensOnCapitalM(t *testing.T) {
 		t.Fatalf("mergeMenuSelected = %d, want 0", got.mergeMenuSelected)
 	}
 	detailPane := got.renderDetailPane(100, 20)
-	if !strings.Contains(detailPane, "Merge Menu") || !strings.Contains(detailPane, "Reapply on base") {
+	if !strings.Contains(detailPane, "Merge Menu") || !strings.Contains(detailPane, "Merge base into lineage") {
 		t.Fatalf("detail pane missing merge menu, got: %q", detailPane)
 	}
 }

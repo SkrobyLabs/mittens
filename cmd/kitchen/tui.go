@@ -1231,7 +1231,7 @@ var kitchenTUIMergeMenuOptions = []string{
 	"Check merge",
 	"Squash-merge into base",
 	"Fix conflicts",
-	"Reapply on base",
+	"Merge base into lineage",
 }
 
 var kitchenTUIMergeFallbackOptions = []string{
