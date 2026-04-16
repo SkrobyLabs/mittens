@@ -1682,6 +1682,9 @@ func (m *kitchenTUIModel) syncPlanSelection() {
 		return
 	}
 	target := strings.TrimSpace(m.pendingSelectedID)
+	if target == "" && m.detail != nil {
+		target = strings.TrimSpace(m.detail.Plan.PlanID)
+	}
 	if target != "" {
 		for i, plan := range m.plans {
 			if plan.Record.PlanID == target {

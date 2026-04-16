@@ -4175,3 +4175,44 @@ func TestKitchenTUIDeleteConfirmFooterHints(t *testing.T) {
 		t.Fatalf("delete confirm footer missing expected hints: %q", footer)
 	}
 }
+
+func TestKitchenTUISyncPlanSelectionUsesCurrentDetailAsFallbackAnchor(t *testing.T) {
+	planA := kitchenTUIPlanItem{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}
+	planB := kitchenTUIPlanItem{Record: PlanRecord{PlanID: "plan_b", Title: "B"}}
+
+	model := kitchenTUIModel{
+		plans:             []kitchenTUIPlanItem{planA, planB},
+		selectedPlan:      0,
+		pendingSelectedID: "",
+		detail:            &PlanDetail{Plan: PlanRecord{PlanID: "plan_a"}},
+	}
+
+	// Simulate list being re-sorted: plan_b now comes first
+	model.plans = []kitchenTUIPlanItem{planB, planA}
+	model.syncPlanSelection()
+
+	if model.selectedPlan != 1 {
+		t.Fatalf("selectedPlan = %d, want 1 (plan_a after re-sort)", model.selectedPlan)
+	}
+	if got := model.selectedPlanID(); got != "plan_a" {
+		t.Fatalf("selectedPlanID() = %q, want plan_a", got)
+	}
+}
+
+func TestKitchenTUISyncPlanSelectionPrefersPendingSelectedIDOverDetailFallback(t *testing.T) {
+	planA := kitchenTUIPlanItem{Record: PlanRecord{PlanID: "plan_a", Title: "A"}}
+	planB := kitchenTUIPlanItem{Record: PlanRecord{PlanID: "plan_b", Title: "B"}}
+
+	model := kitchenTUIModel{
+		plans:             []kitchenTUIPlanItem{planA, planB},
+		selectedPlan:      0,
+		pendingSelectedID: "plan_b",
+		detail:            &PlanDetail{Plan: PlanRecord{PlanID: "plan_a"}},
+	}
+
+	model.syncPlanSelection()
+
+	if got := model.selectedPlanID(); got != "plan_b" {
+		t.Fatalf("selectedPlanID() = %q, want plan_b (pendingSelectedID must win over detail fallback)", got)
+	}
+}
