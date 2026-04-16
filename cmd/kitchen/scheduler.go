@@ -938,6 +938,28 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 				return err
 			}
 		}
+		if bundle.Plan.Source == planSourceQuick {
+			maxRetries := quickPlanEffectiveMaxRetries(bundle)
+			if task.RetryCount < maxRetries {
+				if err := s.pm.ReviveFailedTask(task.ID, true); err != nil {
+					return err
+				}
+				bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+					Type:    planHistoryManualRetried,
+					TaskID:  task.ID,
+					Summary: fmt.Sprintf("Quick plan auto-retry (attempt %d of %d).", task.RetryCount+1, maxRetries),
+				})
+				if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+					return err
+				}
+				if revivedTask, ok := s.pm.Task(task.ID); ok {
+					if _, err := s.spawnWorkerForTask(*revivedTask); err != nil {
+						return err
+					}
+				}
+				return s.syncPlanExecution(task.PlanID)
+			}
+		}
 		return s.syncPlanExecution(task.PlanID)
 	}
 	if class == FailureAuth {
@@ -973,6 +995,33 @@ func (s *Scheduler) onTaskFailed(taskID string, class FailureClass) error {
 			}
 		}
 		return s.syncPlanExecution(task.PlanID)
+	}
+	// Quick-plan auto-retry: revive instead of entering implementation_failed.
+	if bundle.Plan.Source == planSourceQuick && !isLineageMergeTask(*task) {
+		maxRetries := quickPlanEffectiveMaxRetries(bundle)
+		if task.RetryCount < maxRetries {
+			if err := s.git.DiscardChild(bundle.Plan.Lineage, task.ID); err != nil {
+				return err
+			}
+			s.killWorkerForDiscardedWorktree(task.WorkerID, task.ID)
+			if err := s.pm.ReviveFailedTask(task.ID, true); err != nil {
+				return err
+			}
+			bundle.Execution = appendPlanHistory(bundle.Execution, PlanHistoryEntry{
+				Type:    planHistoryManualRetried,
+				TaskID:  task.ID,
+				Summary: fmt.Sprintf("Quick plan auto-retry (attempt %d of %d).", task.RetryCount+1, maxRetries),
+			})
+			if err := s.plans.UpdateExecution(task.PlanID, bundle.Execution); err != nil {
+				return err
+			}
+			if revivedTask, ok := s.pm.Task(task.ID); ok {
+				if _, err := s.spawnWorkerForTask(*revivedTask); err != nil {
+					return err
+				}
+			}
+			return s.syncPlanExecution(task.PlanID)
+		}
 	}
 	if class == FailureConflict || class == FailureInfrastructure || class == FailureEnvironment || class == FailureCapability || class == FailureAuth || class == FailureTimeout || class == FailureUnknown {
 		if err := s.git.DiscardChild(bundle.Plan.Lineage, taskID); err != nil {

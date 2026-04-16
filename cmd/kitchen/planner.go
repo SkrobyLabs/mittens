@@ -1531,6 +1531,9 @@ func (k *Kitchen) Replan(planID, reason string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if bundle.Plan.Source == planSourceQuick {
+		return "", fmt.Errorf("quick plans cannot be replanned: retry the task instead")
+	}
 	newPlan := bundle.Plan
 	newPlan.PlanID = ""
 	newPlan.State = planStatePendingApproval
@@ -2091,7 +2094,136 @@ const (
 	plannerTaskRole     = "planner"
 	lineageFixMergeRole = "lineage-fix-merge"
 	researcherTaskRole  = "researcher"
+
+	planSourceQuick         = "quick"
+	quickPlanDefaultRetries = 3
 )
+
+func quickPlanEffectiveMaxRetries(bundle StoredPlan) int {
+	if bundle.Plan.QuickRetries > 0 {
+		return bundle.Plan.QuickRetries
+	}
+	return quickPlanDefaultRetries
+}
+
+// QuickPlanRequest contains all parameters for submitting a quick plan.
+type QuickPlanRequest struct {
+	Prompt            string
+	Title             string
+	Lineage           string
+	Complexity        string
+	AnchorRef         string
+	MaxRetries        int
+	DependsOn         []string
+	ProviderOverrides *PlanProviderOverrides
+}
+
+// SubmitQuickPlan creates a single-task plan that activates immediately,
+// bypassing the council entirely. The plan auto-retries on failure instead
+// of entering implementation_failed.
+func (k *Kitchen) SubmitQuickPlan(req QuickPlanRequest) (*StoredPlan, error) {
+	if k == nil || k.planStore == nil {
+		return nil, fmt.Errorf("kitchen plan store not configured")
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt must not be empty")
+	}
+
+	complexity := Complexity(strings.TrimSpace(req.Complexity))
+	if !isValidComplexity(complexity) {
+		complexity = ComplexityMedium
+	}
+
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = derivePlanTitle(prompt)
+	}
+
+	lineage := strings.TrimSpace(req.Lineage)
+	if lineage == "" {
+		lineage = defaultLineage(title)
+	}
+	if err := validatePathComponent("lineage", lineage); err != nil {
+		return nil, err
+	}
+
+	anchor, err := k.anchorForRef(req.AnchorRef)
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize and deduplicate plan-level dependencies.
+	var cleanDeps []string
+	seen := make(map[string]bool)
+	for _, dep := range req.DependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep != "" && !seen[dep] {
+			seen[dep] = true
+			cleanDeps = append(cleanDeps, dep)
+		}
+	}
+
+	planID := generatePlanID(title)
+	taskPlanID := "task-1"
+
+	plan := PlanRecord{
+		PlanID:            planID,
+		Source:            planSourceQuick,
+		Anchor:            anchor,
+		Lineage:           lineage,
+		Title:             title,
+		Summary:           prompt,
+		DependsOn:         cleanDeps,
+		State:             planStatePendingApproval,
+		ProviderOverrides: req.ProviderOverrides,
+		QuickRetries:      req.MaxRetries,
+		Tasks: []PlanTask{
+			{
+				ID:         taskPlanID,
+				Title:      title,
+				Prompt:     prompt,
+				Complexity: complexity,
+			},
+		},
+	}
+
+	now := time.Now().UTC()
+	execution := ExecutionRecord{
+		State:      planStatePendingApproval,
+		Approved:   true,
+		ApprovedAt: &now,
+		Branch:     lineageBranchName(lineage),
+		Anchor:     anchor,
+	}
+	execution = appendPlanHistory(execution, PlanHistoryEntry{
+		Type:    planHistoryQuickPlanSubmitted,
+		TaskID:  planTaskRuntimeID(planID, taskPlanID),
+		Summary: "Quick plan submitted; activating immediately.",
+	})
+
+	if _, err = k.planStore.Create(StoredPlan{
+		Plan:      plan,
+		Execution: execution,
+	}); err != nil {
+		return nil, err
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := k.activatePlanImpl(bundle); err != nil {
+		return nil, err
+	}
+
+	bundle, err = k.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+	k.sendNotify(pool.Notification{Type: "plan_submitted", ID: planID, Message: plan.Title})
+	return &bundle, nil
+}
 
 func isValidComplexity(value Complexity) bool {
 	for _, complexity := range allComplexities {

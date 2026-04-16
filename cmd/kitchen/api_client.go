@@ -109,6 +109,35 @@ func (c *kitchenAPIClient) SubmitIdeaAt(idea, lineage string, auto, implReview b
 	return resp, c.request(http.MethodPost, "/v1/ideas", req, &resp)
 }
 
+func (c *kitchenAPIClient) SubmitQuick(prompt, title, lineage, complexity, anchorRef string, maxRetries int, overrides *PlanProviderOverrides, dependsOn ...string) (map[string]any, error) {
+	req := map[string]any{
+		"prompt": prompt,
+	}
+	if strings.TrimSpace(title) != "" {
+		req["title"] = strings.TrimSpace(title)
+	}
+	if strings.TrimSpace(lineage) != "" {
+		req["lineage"] = strings.TrimSpace(lineage)
+	}
+	if strings.TrimSpace(complexity) != "" {
+		req["complexity"] = strings.TrimSpace(complexity)
+	}
+	if strings.TrimSpace(anchorRef) != "" {
+		req["anchorRef"] = strings.TrimSpace(anchorRef)
+	}
+	if maxRetries > 0 {
+		req["maxRetries"] = maxRetries
+	}
+	if len(dependsOn) > 0 {
+		req["dependsOn"] = dependsOn
+	}
+	if overrides != nil {
+		req["providerOverrides"] = overrides
+	}
+	var resp map[string]any
+	return resp, c.request(http.MethodPost, "/v1/quick", req, &resp)
+}
+
 func (c *kitchenAPIClient) SubmitResearch(topic string) (map[string]any, error) {
 	req := map[string]any{
 		"topic": topic,

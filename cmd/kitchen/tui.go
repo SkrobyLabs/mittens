@@ -37,6 +37,7 @@ type kitchenTUIBackend interface {
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
 	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides, imagePaths []string) (string, error)
+	SubmitQuick(prompt, complexity string, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error)
 	SubmitResearch(topic string) (string, error)
 	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
 	RefineResearch(planID, clarification string) error
@@ -122,6 +123,18 @@ func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef s
 	}
 	return planID, nil
 }
+func (b *kitchenAPIBackend) SubmitQuick(prompt, complexity string, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+	resp, err := b.client.SubmitQuick(prompt, "", "", complexity, anchorRef, 0, overrides, dependsOn...)
+	if err != nil {
+		return "", err
+	}
+	planID, _ := resp["planId"].(string)
+	if strings.TrimSpace(planID) == "" {
+		return "", fmt.Errorf("quick submit response missing planId")
+	}
+	return planID, nil
+}
+
 func (b *kitchenAPIBackend) SubmitResearch(topic string) (string, error) {
 	resp, err := b.client.SubmitResearch(topic)
 	if err != nil {
@@ -345,6 +358,25 @@ func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef
 		if err := k.attachPlanImages(planID, imagePaths); err != nil {
 			return err
 		}
+		return nil
+	})
+	return planID, err
+}
+
+func (b *kitchenLocalBackend) SubmitQuick(prompt, complexity string, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+	var planID string
+	err := b.withKitchen(func(k *Kitchen) error {
+		bundle, err := k.SubmitQuickPlan(QuickPlanRequest{
+			Prompt:            prompt,
+			Complexity:        complexity,
+			AnchorRef:         anchorRef,
+			DependsOn:         dependsOn,
+			ProviderOverrides: overrides,
+		})
+		if err != nil {
+			return err
+		}
+		planID = bundle.Plan.PlanID
 		return nil
 	})
 	return planID, err
@@ -602,6 +634,7 @@ const (
 	kitchenTUIInputMergeFallback       kitchenTUIInputMode = "merge-fallback"
 	kitchenTUIInputRemediate           kitchenTUIInputMode = "remediate-review"
 	kitchenTUIInputDeleteConfirm       kitchenTUIInputMode = "delete-confirm"
+	kitchenTUIInputSubmitQuick         kitchenTUIInputMode = "submit-quick"
 
 	kitchenTUILeftPlans     kitchenTUILeftMode = "plans"
 	kitchenTUILeftTasks     kitchenTUILeftMode = "tasks"
@@ -685,6 +718,7 @@ type kitchenTUIModel struct {
 	submitProviderOverrideMode  bool
 	submitProviderOverrides     PlanProviderOverrides
 	submitProviderOverrideFocus int // 0=planner,1=council_a,2=council_b,3=implementer
+	submitQuickComplexity       string
 	submitTextarea              textarea.Model
 	submitImages                []string // temp paths of pasted images, cleared on submit/close
 	promotePlanID               string
@@ -1030,6 +1064,9 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "n":
 			m.openSubmitInput()
+			return m, nil
+		case "Q":
+			m.openQuickSubmitInput()
 			return m, nil
 		case "e":
 			if m.leftMode != kitchenTUILeftPlans {
@@ -1581,6 +1618,10 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.submitImplReview = !m.submitImplReview
 			return m, nil
 		}
+		if m.inputMode == kitchenTUIInputSubmitQuick {
+			m.submitQuickComplexity = cycleQuickComplexity(m.submitQuickComplexity)
+			return m, nil
+		}
 	case "D":
 		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.beginSubmitDependencySelection()
@@ -1610,6 +1651,21 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return "submitted research " + planID, planID, nil
 				})
 			}
+		case kitchenTUIInputSubmitQuick:
+			if value == "" {
+				m.errText = "prompt must not be empty"
+				return m, nil
+			}
+			prompt := value
+			complexity := m.submitQuickComplexity
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				planID, err := m.backend.SubmitQuick(prompt, complexity, "", nil, nil)
+				if err != nil {
+					return "", "", err
+				}
+				return "quick plan submitted " + planID, planID, nil
+			})
 		case kitchenTUIInputPromote:
 			planID := strings.TrimSpace(m.promotePlanID)
 			if planID == "" {
@@ -1799,6 +1855,26 @@ func (m *kitchenTUIModel) openSubmitInput() {
 	m.refreshSubmitInputPresentation()
 }
 
+func (m *kitchenTUIModel) openQuickSubmitInput() {
+	m.submitQuickComplexity = string(ComplexityMedium)
+	m.openInput(kitchenTUIInputSubmitQuick, "Quick plan", "Fix the flaky test in scheduler_test.go")
+}
+
+func cycleQuickComplexity(current string) string {
+	complexities := []string{
+		string(ComplexityTrivial),
+		string(ComplexityLow),
+		string(ComplexityMedium),
+		string(ComplexityHigh),
+	}
+	for i, c := range complexities {
+		if c == current {
+			return complexities[(i+1)%len(complexities)]
+		}
+	}
+	return string(ComplexityMedium)
+}
+
 func (m *kitchenTUIModel) openResearchInput() {
 	m.openSubmitInput()
 	m.submitResearch = true
@@ -1833,6 +1909,7 @@ func (m *kitchenTUIModel) closeInput() {
 	m.inputMode = kitchenTUIInputNone
 	m.submitImplReview = false
 	m.submitResearch = false
+	m.submitQuickComplexity = ""
 	m.promotePlanID = ""
 	m.refinePlanID = ""
 	m.steerImplementationPlanID = ""
@@ -2346,12 +2423,14 @@ func (m kitchenTUIModel) footerActions() []string {
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
 		case kitchenTUIInputDeleteConfirm:
 			return []string{"↑/↓ navigate", "enter select", "esc cancel", "ctrl+c quit"}
+		case kitchenTUIInputSubmitQuick:
+			return []string{"enter submit", "tab complexity:" + m.submitQuickComplexity, "esc cancel", "ctrl+c quit"}
 		default:
 			return []string{"esc cancel", "ctrl+c quit"}
 		}
 	}
 
-	actions := []string{"n submit", "ctrl+r research"}
+	actions := []string{"n submit", "Q quick", "ctrl+r research"}
 	if m.leftMode == kitchenTUILeftTasks {
 		actions = append(actions, "PgUp/PgDn scroll")
 		if m.canCancelSelectedTask() {
@@ -2598,10 +2677,15 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 		marker := rowMarker(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans)
 		badge := ""
 		badgeWidth := 0
+		if plan.Record.Source == planSourceQuick {
+			badgeText := " [Q]"
+			badgeWidth += len(badgeText)
+			badge += lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Render(badgeText)
+		}
 		if nq := pendingQuestionCountForPlan(plan.Record.PlanID, m.questions); nq > 0 {
 			badgeText := fmt.Sprintf(" [%d?]", nq)
-			badgeWidth = len(badgeText)
-			badge = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(badgeText)
+			badgeWidth += len(badgeText)
+			badge += lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(badgeText)
 		}
 		primary := truncate(fmt.Sprintf("%s %s %s", marker, state, plan.Record.Title), innerWidth-badgeWidth) + badge
 		secondary := fmt.Sprintf("    lineage: %s  plan: %s", firstNonEmpty(plan.Record.Lineage, "-"), plan.Record.PlanID)

@@ -117,6 +117,12 @@ func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorR
 	}
 	return b.submitPlanID, nil
 }
+func (b *fakeKitchenTUIBackend) SubmitQuick(prompt, complexity string, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+	if strings.TrimSpace(b.submitPlanID) == "" {
+		return "plan_quick", nil
+	}
+	return b.submitPlanID, nil
+}
 func (b *fakeKitchenTUIBackend) SubmitResearch(topic string) (string, error) {
 	b.submittedResearchTopic = topic
 	if strings.TrimSpace(b.submitPlanID) == "" {

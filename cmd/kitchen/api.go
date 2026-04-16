@@ -21,6 +21,7 @@ const apiMaxBodyBytes = 1 << 20
 func (k *Kitchen) NewAPIHandler(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/ideas", k.withAPIAuth(token, k.handleSubmitIdea))
+	mux.HandleFunc("POST /v1/quick", k.withAPIAuth(token, k.handleSubmitQuick))
 	mux.HandleFunc("POST /v1/research", k.withAPIAuth(token, k.handleSubmitResearch))
 	mux.HandleFunc("POST /v1/plans/{id}/promote", k.withAPIAuth(token, k.handlePromoteResearch))
 	mux.HandleFunc("POST /v1/plans/{id}/refine-research", k.withAPIAuth(token, k.handleRefineResearch))
@@ -160,6 +161,42 @@ func (k *Kitchen) handleSubmitIdea(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["councilMaxTurns"] = bundle.Execution.CouncilMaxTurns
 	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+func (k *Kitchen) handleSubmitQuick(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Prompt            string                 `json:"prompt"`
+		Title             string                 `json:"title,omitempty"`
+		Lineage           string                 `json:"lineage,omitempty"`
+		Complexity        string                 `json:"complexity,omitempty"`
+		AnchorRef         string                 `json:"anchorRef,omitempty"`
+		MaxRetries        int                    `json:"maxRetries,omitempty"`
+		DependsOn         []string               `json:"dependsOn,omitempty"`
+		ProviderOverrides *PlanProviderOverrides `json:"providerOverrides,omitempty"`
+	}
+	if !k.decodeAPIRequest(w, r, &req) {
+		return
+	}
+	bundle, err := k.SubmitQuickPlan(QuickPlanRequest{
+		Prompt:            req.Prompt,
+		Title:             req.Title,
+		Lineage:           req.Lineage,
+		Complexity:        req.Complexity,
+		AnchorRef:         req.AnchorRef,
+		MaxRetries:        req.MaxRetries,
+		DependsOn:         req.DependsOn,
+		ProviderOverrides: req.ProviderOverrides,
+	})
+	if err != nil {
+		writeAPIError(w, apiErrorStatus(err), err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusCreated, map[string]any{
+		"planId":  bundle.Plan.PlanID,
+		"state":   bundle.Execution.State,
+		"lineage": bundle.Plan.Lineage,
+		"source":  bundle.Plan.Source,
+	})
 }
 
 func (k *Kitchen) handleSubmitResearch(w http.ResponseWriter, r *http.Request) {

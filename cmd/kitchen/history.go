@@ -47,6 +47,7 @@ const (
 	planHistoryAutoRemediationRequested     = "auto_remediation_requested"
 	planHistoryAutoRemediationRecovered     = "auto_remediation_recovered"
 	planHistoryAutoRemediationSkipped       = "auto_remediation_skipped"
+	planHistoryQuickPlanSubmitted           = "quick_plan_submitted"
 )
 
 type PlanHistoryEntry struct {
