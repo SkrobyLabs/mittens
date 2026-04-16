@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -105,7 +106,7 @@ func (b *fakeKitchenTUIBackend) TaskOutput(taskID string) (string, error) {
 func (b *fakeKitchenTUIBackend) ListQuestions() ([]pool.Question, error) {
 	return append([]pool.Question(nil), b.questions...), nil
 }
-func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+func (b *fakeKitchenTUIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides, imagePaths []string) (string, error) {
 	b.submittedIdea = idea
 	b.submittedImplReview = implReview
 	b.submittedAnchorRef = anchorRef
@@ -221,6 +222,17 @@ func textInputWithValue(value string) textinput.Model {
 	input := textinput.New()
 	input.SetValue(value)
 	return input
+}
+
+func submitTextareaWithValue(value string) textarea.Model {
+	ta := textarea.New()
+	ta.CharLimit = 4000
+	ta.ShowLineNumbers = false
+	ta.Prompt = "> "
+	ta.SetWidth(80)
+	ta.SetHeight(6)
+	ta.SetValue(value)
+	return ta
 }
 
 func TestKitchenTUIRetryKeyRetriesFailedTask(t *testing.T) {
@@ -387,10 +399,10 @@ func TestKitchenTUISubmitEnterClosesInputAndQueuesLoad(t *testing.T) {
 		backend:          backend,
 		inputMode:        kitchenTUIInputSubmit,
 		submitImplReview: true,
+		submitTextarea:   submitTextareaWithValue("Add typed parser errors"),
 	}
-	model.input = textInputWithValue("Add typed parser errors")
 
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -427,10 +439,10 @@ func TestKitchenTUISubmitParsesAnchorPrefix(t *testing.T) {
 		backend:          backend,
 		inputMode:        kitchenTUIInputSubmit,
 		submitImplReview: false,
+		submitTextarea:   submitTextareaWithValue("[ref=main] Add typed parser errors"),
 	}
-	model.input = textInputWithValue("[ref=main] Add typed parser errors")
 
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -517,10 +529,10 @@ func TestKitchenTUISubmitPassesSelectedDependencies(t *testing.T) {
 		inputMode:        kitchenTUIInputSubmit,
 		submitImplReview: false,
 		submitDependsOn:  []string{"plan_alpha", "plan_beta"},
+		submitTextarea:   submitTextareaWithValue("[ref=main] Add typed parser errors"),
 	}
-	model.input = textInputWithValue("[ref=main] Add typed parser errors")
 
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
 		t.Fatal("expected submit command")
 	}
@@ -544,15 +556,21 @@ func TestKitchenTUISubmitPassesSelectedDependencies(t *testing.T) {
 
 func TestKitchenTUIOpenSubmitInputPrefillsCurrentAnchorRef(t *testing.T) {
 	repo := initGitRepo(t)
+	ta := textarea.New()
+	ta.CharLimit = 4000
+	ta.ShowLineNumbers = false
+	ta.SetWidth(80)
+	ta.SetHeight(6)
 	model := kitchenTUIModel{
-		repoPath: repo,
-		input:    textinput.New(),
+		repoPath:       repo,
+		input:          textinput.New(),
+		submitTextarea: ta,
 	}
 
 	model.openSubmitInput()
 
-	if !strings.HasPrefix(model.input.Value(), "[ref=main] ") {
-		t.Fatalf("submit input value = %q, want main anchor prefix", model.input.Value())
+	if !strings.HasPrefix(model.submitTextarea.Value(), "[ref=main] ") {
+		t.Fatalf("submit input value = %q, want main anchor prefix", model.submitTextarea.Value())
 	}
 }
 
@@ -3771,9 +3789,9 @@ func TestSummarizeReapply(t *testing.T) {
 func TestKitchenTUIAdvancedSubmitCyclesProviderAndSubmitsOverride(t *testing.T) {
 	backend := &fakeKitchenTUIBackend{}
 	model := kitchenTUIModel{
-		backend:   backend,
-		inputMode: kitchenTUIInputSubmit,
-		input:     textInputWithValue("Add provider override feature"),
+		backend:        backend,
+		inputMode:      kitchenTUIInputSubmit,
+		submitTextarea: submitTextareaWithValue("Add provider override feature"),
 	}
 
 	// Press 'A' to open the provider override overlay.
@@ -3790,10 +3808,10 @@ func TestKitchenTUIAdvancedSubmitCyclesProviderAndSubmitsOverride(t *testing.T) 
 		t.Fatalf("planner override = %q after up, want claude", got.submitProviderOverrides.ByRole[plannerTaskRole])
 	}
 
-	// Press 'enter' to submit — overlay is still active but enter falls through.
-	_, cmd := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Press 'ctrl+s' to submit — overlay is still active but ctrl+s falls through.
+	_, cmd := got.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
-		t.Fatal("expected submit command from enter while overlay is open")
+		t.Fatal("expected submit command from ctrl+s while overlay is open")
 	}
 	msg := cmd()
 	action, ok := msg.(kitchenTUIActionMsg)

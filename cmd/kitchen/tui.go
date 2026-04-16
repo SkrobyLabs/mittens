@@ -1,15 +1,21 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -30,7 +36,7 @@ type kitchenTUIBackend interface {
 	TaskActivity(taskID string) ([]pool.WorkerActivityRecord, error)
 	TaskOutput(taskID string) (string, error)
 	ListQuestions() ([]pool.Question, error)
-	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error)
+	SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides, imagePaths []string) (string, error)
 	SubmitResearch(topic string) (string, error)
 	PromoteResearch(planID, lineage string, auto, implReview bool) (string, error)
 	RefineResearch(planID, clarification string) error
@@ -105,7 +111,7 @@ func (b *kitchenAPIBackend) TaskOutput(taskID string) (string, error) {
 	return b.client.TaskOutput(taskID)
 }
 func (b *kitchenAPIBackend) ListQuestions() ([]pool.Question, error) { return b.client.ListQuestions() }
-func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+func (b *kitchenAPIBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides, imagePaths []string) (string, error) {
 	resp, err := b.client.SubmitIdeaAt(idea, "", false, implReview, anchorRef, overrides, dependsOn...)
 	if err != nil {
 		return "", err
@@ -328,7 +334,7 @@ func (b *kitchenLocalBackend) ListQuestions() ([]pool.Question, error) {
 	return questions, err
 }
 
-func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides) (string, error) {
+func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef string, dependsOn []string, overrides *PlanProviderOverrides, imagePaths []string) (string, error) {
 	var planID string
 	err := b.withKitchen(func(k *Kitchen) error {
 		bundle, err := k.SubmitIdeaAt(idea, "", false, implReview, overrides, anchorRef, dependsOn...)
@@ -336,6 +342,9 @@ func (b *kitchenLocalBackend) SubmitIdea(idea string, implReview bool, anchorRef
 			return err
 		}
 		planID = bundle.Plan.PlanID
+		if err := k.attachPlanImages(planID, imagePaths); err != nil {
+			return err
+		}
 		return nil
 	})
 	return planID, err
@@ -676,6 +685,8 @@ type kitchenTUIModel struct {
 	submitProviderOverrideMode  bool
 	submitProviderOverrides     PlanProviderOverrides
 	submitProviderOverrideFocus int // 0=planner,1=council_a,2=council_b,3=implementer
+	submitTextarea              textarea.Model
+	submitImages                []string // temp paths of pasted images, cleared on submit/close
 	promotePlanID               string
 	refinePlanID                string
 	steerImplementationPlanID   string
@@ -699,13 +710,20 @@ func runKitchenTUI(repoPath string) error {
 	input := textinput.New()
 	input.CharLimit = 1000
 	input.Prompt = "> "
+	ta := textarea.New()
+	ta.CharLimit = 4000
+	ta.ShowLineNumbers = false
+	ta.Prompt = "> "
+	ta.SetWidth(80)
+	ta.SetHeight(6)
 	model := kitchenTUIModel{
-		backend:          backend,
-		repoPath:         repoPath,
-		input:            input,
-		loading:          true,
-		leftMode:         kitchenTUILeftPlans,
-		taskPaneMode:     kitchenTUITaskPaneDetail,
+		backend:        backend,
+		repoPath:       repoPath,
+		input:          input,
+		submitTextarea: ta,
+		loading:        true,
+		leftMode:       kitchenTUILeftPlans,
+		taskPaneMode:   kitchenTUITaskPaneDetail,
 		rightPaneOffsets: map[string]int{},
 	}
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
@@ -724,6 +742,7 @@ func (m kitchenTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode != kitchenTUIInputNone {
 			m.input.Width = max(20, msg.Width-14)
 		}
+		m.submitTextarea.SetWidth(max(20, msg.Width-6))
 		return m, nil
 	case kitchenTUILoadedMsg:
 		m.loading = false
@@ -1481,9 +1500,12 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "down":
 			m.cycleSubmitProviderOverride(-1)
 			return m, nil
+		case "ctrl+s":
+			// Submit from the override picker — handle via the idea-mode
+			// ctrl+s path below by clearing the override mode first.
+			m.submitProviderOverrideMode = false
 		}
-		// Let enter fall through to the main switch so the user can submit
-		// while the override picker is visible.
+		// Let ctrl+s fall through to the idea-mode handler below.
 	}
 
 	if msg.Type == tea.KeyCtrlR && m.inputMode == kitchenTUIInputSubmit {
@@ -1491,6 +1513,59 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.submitProviderOverrideMode = false
 		m.refreshSubmitInputPresentation()
 		return m, nil
+	}
+
+	// Submit idea (non-research) mode: intercept special keys, forward the
+	// rest to the multi-line textarea.
+	if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch && !m.submitSelecting && !m.submitProviderOverrideMode {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.closeInput()
+			return m, nil
+		case "tab":
+			m.submitImplReview = !m.submitImplReview
+			return m, nil
+		case "D":
+			m.beginSubmitDependencySelection()
+			return m, nil
+		case "A":
+			m.submitProviderOverrideMode = !m.submitProviderOverrideMode
+			return m, nil
+		case "ctrl+s":
+			value := strings.TrimSpace(m.submitTextarea.Value())
+			idea, anchorRef, err := parseSubmitInput(value)
+			if err != nil {
+				m.errText = err.Error()
+				return m, nil
+			}
+			implReview := m.submitImplReview
+			dependsOn := append([]string(nil), m.submitDependsOn...)
+			overrides := buildSubmitProviderOverrides(m.submitProviderOverrides)
+			imagePaths := append([]string(nil), m.submitImages...)
+			m.closeInput()
+			return m, m.actionCmd(func() (string, string, error) {
+				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef, dependsOn, overrides, imagePaths)
+				if err != nil {
+					return "", "", err
+				}
+				status := "submitted " + planID
+				if implReview {
+					status += " with impl review"
+				}
+				return status, planID, nil
+			})
+		case "ctrl+i":
+			if err := m.pasteClipboardImage(); err != nil {
+				m.errText = err.Error()
+			}
+			return m, nil
+		}
+		// Forward everything else (including enter) to the textarea.
+		var taCmd tea.Cmd
+		m.submitTextarea, taCmd = m.submitTextarea.Update(msg)
+		return m, taCmd
 	}
 
 	switch msg.String() {
@@ -1520,6 +1595,7 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		value := strings.TrimSpace(m.input.Value())
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
+			// Only research mode reaches here; idea mode is handled above via ctrl+s.
 			if m.submitResearch {
 				if value == "" {
 					m.errText = "research topic must not be empty"
@@ -1534,26 +1610,6 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return "submitted research " + planID, planID, nil
 				})
 			}
-			idea, anchorRef, err := parseSubmitInput(value)
-			if err != nil {
-				m.errText = err.Error()
-				return m, nil
-			}
-			implReview := m.submitImplReview
-			dependsOn := append([]string(nil), m.submitDependsOn...)
-			overrides := buildSubmitProviderOverrides(m.submitProviderOverrides)
-			m.closeInput()
-			return m, m.actionCmd(func() (string, string, error) {
-				planID, err := m.backend.SubmitIdea(idea, implReview, anchorRef, dependsOn, overrides)
-				if err != nil {
-					return "", "", err
-				}
-				status := "submitted " + planID
-				if implReview {
-					status += " with impl review"
-				}
-				return status, planID, nil
-			})
 		case kitchenTUIInputPromote:
 			planID := strings.TrimSpace(m.promotePlanID)
 			if planID == "" {
@@ -1734,6 +1790,12 @@ func (m *kitchenTUIModel) openSubmitInput() {
 	m.submitProviderOverrides = PlanProviderOverrides{}
 	m.submitProviderOverrideFocus = 0
 	m.openInput(kitchenTUIInputSubmit, "Submit idea", "Add typed parser errors")
+	if m.submitTextarea.CharLimit > 0 {
+		m.submitTextarea.SetValue("")
+		m.submitTextarea.SetWidth(max(20, m.width-6))
+		m.submitTextarea.Focus()
+	}
+	m.submitImages = nil
 	m.refreshSubmitInputPresentation()
 }
 
@@ -1763,6 +1825,10 @@ func (m *kitchenTUIModel) closeInput() {
 	if m.inputMode == kitchenTUIInputSubmit {
 		m.finishSubmitDependencySelection()
 		m.submitDependsOn = nil
+		if m.submitTextarea.CharLimit > 0 {
+			m.submitTextarea.Blur()
+		}
+		m.submitImages = nil
 	}
 	m.inputMode = kitchenTUIInputNone
 	m.submitImplReview = false
@@ -1794,7 +1860,11 @@ func (m *kitchenTUIModel) finishSubmitDependencySelection() {
 	if m.submitPrevLeft != "" {
 		m.leftMode = m.submitPrevLeft
 	}
-	m.input.Focus()
+	if !m.submitResearch && m.submitTextarea.CharLimit > 0 {
+		m.submitTextarea.Focus()
+	} else {
+		m.input.Focus()
+	}
 }
 
 func (m *kitchenTUIModel) refreshSubmitInputPresentation() {
@@ -1807,17 +1877,23 @@ func (m *kitchenTUIModel) refreshSubmitInputPresentation() {
 		m.input.SetValue(stripSubmitAnchorPrefix(m.input.Value()))
 		m.input.CursorEnd()
 		m.input.Focus()
+		if m.submitTextarea.CharLimit > 0 {
+			m.submitTextarea.Blur()
+		}
 		return
 	}
-	m.input.Prompt = "Submit idea: "
-	m.input.Placeholder = "Add typed parser errors"
-	if strings.TrimSpace(m.input.Value()) == "" {
-		if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
-			m.input.SetValue("[ref=" + ref + "] ")
+	// Idea mode uses the textarea.
+	if m.submitTextarea.CharLimit > 0 {
+		m.submitTextarea.SetWidth(max(20, m.width-6))
+		m.submitTextarea.Placeholder = "Add typed parser errors"
+		if strings.TrimSpace(m.submitTextarea.Value()) == "" {
+			if ref := defaultSubmitAnchorRef(m.repoPath); ref != "" {
+				m.submitTextarea.SetValue("[ref=" + ref + "] ")
+			}
 		}
+		m.submitTextarea.Focus()
 	}
-	m.input.CursorEnd()
-	m.input.Focus()
+	m.input.Blur()
 }
 
 func (m *kitchenTUIModel) toggleSubmitDependency(planID string) {
@@ -2231,17 +2307,17 @@ func (m kitchenTUIModel) footerActions() []string {
 				return []string{"↑/↓ choose plan", "enter toggle dep", "D done", "esc done", "ctrl+c quit"}
 			}
 			if m.submitProviderOverrideMode {
-				return []string{"←/→ focus", "↑/↓ change", "enter submit", "A close", "ctrl+c quit"}
+				return []string{"←/→ focus", "↑/↓ change", "ctrl+s submit", "A close", "ctrl+c quit"}
 			}
 			submitMode := "idea"
 			if m.submitResearch {
 				submitMode = "research"
 			}
-			actions := []string{"enter submit", "ctrl+r mode:" + submitMode}
 			if m.submitResearch {
-				actions = append(actions, "esc cancel", "ctrl+c quit")
+				actions := []string{"enter submit", "ctrl+r mode:" + submitMode, "esc cancel", "ctrl+c quit"}
 				return actions
 			}
+			actions := []string{"ctrl+s submit", "ctrl+i paste-image", "ctrl+r mode:" + submitMode}
 			implReviewMode := "off"
 			if m.submitImplReview {
 				implReviewMode = "on"
@@ -3411,19 +3487,24 @@ func (m kitchenTUIModel) renderInputBar() string {
 	case kitchenTUIInputRemediate:
 		label = "Review remediation"
 	}
-	body := m.input.View()
+	var body string
 	height := 3
 	if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
+		// Idea mode: multi-line textarea.
+		body = m.submitTextarea.View()
+		height = 8 // textarea 6 lines + label + box border
 		depsLine := "Depends on: -"
 		if len(m.submitDependsOn) > 0 {
 			depsLine = "Depends on: " + strings.Join(m.submitDependsOn, ", ")
 		}
 		body += "\n" + truncate(depsLine, max(20, m.width-6))
-		height = 4
+		height = 9
 		if m.submitProviderOverrideMode {
 			body += "\n" + m.renderProviderOverrideLine()
-			height = 5
+			height = 10
 		}
+	} else {
+		body = m.input.View()
 	}
 	return paneBox(m.width, height, label+"\n"+body)
 }
@@ -4572,4 +4653,79 @@ func stripSubmitAnchorPrefix(value string) string {
 		}
 	}
 	return value
+}
+
+// pasteClipboardImage saves the clipboard image to a temp file, appends the
+// path to m.submitImages, and inserts an [image #N] marker in the textarea.
+func (m *kitchenTUIModel) pasteClipboardImage() error {
+	dir := filepath.Join(os.TempDir(), "kitchen-images")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create temp image dir: %w", err)
+	}
+	dest := filepath.Join(dir, "image-"+shortID()+".png")
+	if err := pasteImageFromClipboard(dest); err != nil {
+		return err
+	}
+	m.submitImages = append(m.submitImages, dest)
+	n := len(m.submitImages)
+	m.submitTextarea.InsertString(fmt.Sprintf("[image #%d]", n))
+	return nil
+}
+
+// pasteImageFromClipboard saves the current clipboard image to destPath.
+// Returns an error if no image is available.
+func pasteImageFromClipboard(destPath string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		// Try pngpaste first.
+		if path, err := exec.LookPath("pngpaste"); err == nil {
+			if err := exec.Command(path, destPath).Run(); err == nil {
+				return nil
+			}
+		}
+		// Fall back to osascript + sips.
+		script := `set theFile to (POSIX file "` + destPath + `.tiff")
+try
+	set imgData to the clipboard as «class TIFF»
+	set fp to open for access theFile with write permission
+	write imgData to fp
+	close access fp
+on error
+	return "no image"
+end try`
+		out, err := exec.Command("osascript", "-e", script).Output()
+		if err != nil || strings.TrimSpace(string(out)) == "no image" {
+			return fmt.Errorf("no image found in clipboard")
+		}
+		tiffPath := destPath + ".tiff"
+		defer os.Remove(tiffPath)
+		if err := exec.Command("sips", "-s", "format", "png", tiffPath, "--out", destPath).Run(); err != nil {
+			return fmt.Errorf("convert clipboard image to png: %w", err)
+		}
+		return nil
+	default:
+		// Linux/X11.
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "image/png", "-o")
+			out, err := cmd.Output()
+			if err == nil && len(out) > 0 {
+				return os.WriteFile(destPath, out, 0644)
+			}
+		}
+		// Linux/Wayland.
+		if _, err := exec.LookPath("wl-paste"); err == nil {
+			cmd := exec.Command("wl-paste", "--type", "image/png")
+			out, err := cmd.Output()
+			if err == nil && len(out) > 0 {
+				return os.WriteFile(destPath, out, 0644)
+			}
+		}
+		return fmt.Errorf("no image found in clipboard")
+	}
+}
+
+func shortID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

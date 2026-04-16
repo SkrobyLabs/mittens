@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -2129,4 +2131,48 @@ func validateTaskGraph(tasks []PlanTask) error {
 		}
 	}
 	return nil
+}
+
+// attachPlanImages copies temporary image files into the plan's images/
+// directory and updates the PlanRecord on disk.
+func (k *Kitchen) attachPlanImages(planID string, tempPaths []string) error {
+	if len(tempPaths) == 0 {
+		return nil
+	}
+	planDir := filepath.Join(k.planStore.plansDir, planID)
+	imagesDir := filepath.Join(planDir, "images")
+	if err := os.MkdirAll(imagesDir, 0755); err != nil {
+		return fmt.Errorf("create images dir: %w", err)
+	}
+	var imageNames []string
+	for i, src := range tempPaths {
+		name := fmt.Sprintf("image-%d.png", i+1)
+		dst := filepath.Join(imagesDir, name)
+		if err := copyFileSimple(src, dst); err != nil {
+			return fmt.Errorf("copy image %s: %w", src, err)
+		}
+		imageNames = append(imageNames, name)
+	}
+	bundle, err := k.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	bundle.Plan.Images = imageNames
+	return writeJSONAtomic(filepath.Join(planDir, planFileName), bundle.Plan)
+}
+
+// copyFileSimple copies a single file from src to dst.
+func copyFileSimple(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }

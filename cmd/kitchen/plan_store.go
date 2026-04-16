@@ -91,6 +91,7 @@ type PlanRecord struct {
 	ResearchPlanID    string                 `json:"researchPlanId,omitempty"`
 	ResearchContext   string                 `json:"researchContext,omitempty"`
 	ProviderOverrides *PlanProviderOverrides `json:"providerOverrides,omitempty"`
+	Images            []string               `json:"images,omitempty"`
 	CreatedAt         time.Time              `json:"createdAt"`
 	UpdatedAt         time.Time              `json:"updatedAt"`
 }
