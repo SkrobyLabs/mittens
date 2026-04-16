@@ -3944,6 +3944,125 @@ func TestSchedulerOnLineageMergeCompletedPromptsFallbackQuestion(t *testing.T) {
 	}
 }
 
+func TestRecoverLineageMergePlansOnStartup_ReplaysCompletedMergeTaskOutsideActiveList(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	branch, err := runGit(repo, "branch", "--show-current")
+	if err != nil {
+		t.Fatalf("branch --show-current: %v", err)
+	}
+	commit, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	anchor := PlanAnchor{Commit: strings.TrimSpace(commit), Branch: strings.TrimSpace(branch)}
+	planID, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_merge_restart_recovery",
+			Lineage: "parser-errors",
+			Title:   "Merge restart recovery",
+			State:   planStateMerging,
+			Anchor:  anchor,
+			Tasks: []PlanTask{{
+				ID:         "merge-123",
+				Title:      "Merge parser-errors into main",
+				Prompt:     "generate merge message",
+				Complexity: ComplexityMedium,
+			}},
+		},
+		Execution: ExecutionRecord{
+			State:            planStateMerging,
+			Branch:           lineageBranchName("parser-errors"),
+			Anchor:           anchor,
+			CompletedTaskIDs: []string{planTaskRuntimeID("plan_merge_restart_recovery", "merge-123")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-merge-restart-recovery"), "kitchen-test")
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", anchor.Commit); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	worktree, err := gitMgr.CreateChildWorktree("parser-errors", "t1")
+	if err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "lineage change\n")
+	mustRunGit(t, worktree, "add", "feature.txt")
+	mustRunGit(t, worktree, "commit", "-m", "lineage change")
+	if err := gitMgr.MergeChild("parser-errors", "t1"); err != nil {
+		t.Fatalf("MergeChild: %v", err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	if err := lineages.ActivatePlan("parser-errors", planID); err != nil {
+		t.Fatalf("ActivatePlan: %v", err)
+	}
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	taskID := planTaskRuntimeID(planID, "merge-123")
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "generate merge message",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-merge", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-merge", "container-w-merge"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-merge"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	workerStateDir := pool.WorkerStateDir(pm.StateDir(), "w-merge")
+	if err := os.MkdirAll(workerStateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll worker state: %v", err)
+	}
+	output := "<commit_message>\nfix: describe merged lineage\n\nFeatures:\n- summarize the lineage change\n</commit_message>\n"
+	if err := os.WriteFile(filepath.Join(workerStateDir, pool.WorkerResultFile), []byte(output), 0o644); err != nil {
+		t.Fatalf("WriteFile result: %v", err)
+	}
+	if err := pm.CompleteTask("w-merge", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if err := s.recoverLineageMergePlansOnStartup(); err != nil {
+		t.Fatalf("recoverLineageMergePlansOnStartup: %v", err)
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateMerged {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateMerged)
+	}
+	if bundle.Execution.State != planStateMerged {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateMerged)
+	}
+}
+
 func TestRestoreCompletedPlanAfterLineageMergeAttemptMarksMergeTaskFailed(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

@@ -1498,18 +1498,17 @@ func (s *Scheduler) recoverLineageMergePlansOnStartup() error {
 		if err != nil || bundle.Execution.State != planStateMerging {
 			continue
 		}
-		for _, taskID := range bundle.Execution.ActiveTaskIDs {
-			task, ok := s.pm.Task(taskID)
-			if !ok || !isLineageMergeTask(*task) {
+		for _, task := range s.pm.Tasks() {
+			if task.PlanID != plan.PlanID || !isLineageMergeTask(task) {
 				continue
 			}
 			switch task.Status {
 			case pool.TaskCompleted:
-				if err := s.onTaskCompleted(taskID); err != nil {
+				if err := s.onTaskCompleted(task.ID); err != nil {
 					return err
 				}
 			case pool.TaskFailed:
-				if err := s.onTaskFailed(taskID, s.taskFailureClass(task)); err != nil {
+				if err := s.onTaskFailed(task.ID, s.taskFailureClass(&task)); err != nil {
 					return err
 				}
 			}
