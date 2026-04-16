@@ -2966,6 +2966,131 @@ func TestSchedulerOnTaskFailedConflictRevivesTaskForFreshRetry(t *testing.T) {
 	}
 }
 
+func TestSchedulerOnTaskMergeFailedQuickPlanRevivesPlanState(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planID := "plan_quick_merge_retry"
+	taskID := planTaskRuntimeID(planID, "t1")
+	store := NewPlanStore(project.PlansDir)
+	_, err = store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:       planID,
+			Source:       planSourceQuick,
+			QuickRetries: 3,
+			Lineage:      "parser-errors",
+			Title:        "Quick merge retry",
+			Anchor:       PlanAnchor{Commit: strings.TrimSpace(head)},
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "task 1", Prompt: "task 1", Complexity: ComplexityMedium},
+			},
+			State: planStateActive,
+		},
+		Execution: ExecutionRecord{
+			State:         planStateActive,
+			ActiveTaskIDs: []string{taskID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-quick-merge-retry"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{ID: "w-1", Role: "implementer"}); err != nil {
+		t.Fatalf("SpawnWorker: %v", err)
+	}
+	if err := pm.RegisterWorker("w-1", "container-w-1"); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitMgr.CreateLineageBranch("parser-errors", strings.TrimSpace(head)); err != nil {
+		t.Fatalf("CreateLineageBranch: %v", err)
+	}
+	if _, err := gitMgr.CreateChildWorktree("parser-errors", taskID); err != nil {
+		t.Fatalf("CreateChildWorktree: %v", err)
+	}
+
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "task 1",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       "implementer",
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	if err := pm.DispatchTask(taskID, "w-1"); err != nil {
+		t.Fatalf("DispatchTask: %v", err)
+	}
+	if err := pm.CompleteTask("w-1", taskID); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if err := s.onTaskMergeFailed(*task, "parser-errors", errors.New("fatal: Not a valid object name lineage task ref")); err != nil {
+		t.Fatalf("onTaskMergeFailed: %v", err)
+	}
+
+	task, ok = pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found after merge failure", taskID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want %q", task.Status, pool.TaskQueued)
+	}
+	if task.RetryCount != 1 {
+		t.Fatalf("retryCount = %d, want 1", task.RetryCount)
+	}
+	if !task.RequireFreshWorker {
+		t.Fatal("expected quick-plan retry to require a fresh worker")
+	}
+
+	bundle, err := store.Get(planID)
+	if err != nil {
+		t.Fatalf("Get plan: %v", err)
+	}
+	if bundle.Plan.State != planStateActive {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	}
+	if bundle.Execution.State != planStateActive {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	}
+	if len(bundle.Execution.ActiveTaskIDs) != 1 || bundle.Execution.ActiveTaskIDs[0] != taskID {
+		t.Fatalf("active task IDs = %+v, want [%s]", bundle.Execution.ActiveTaskIDs, taskID)
+	}
+	if len(bundle.Execution.FailedTaskIDs) != 0 {
+		t.Fatalf("failed task IDs = %+v, want empty after revive", bundle.Execution.FailedTaskIDs)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1 fresh retry worker", len(host.spawnSpecs))
+	}
+}
+
 func TestRecoverFailedTasksOnStartup_RevivesConflictTaskAndDiscardsWorktree(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)

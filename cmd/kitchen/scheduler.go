@@ -2129,7 +2129,6 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		planStateReviewing,
 		planStatePendingApproval,
 		planStateMerging,
-		planStateImplementationFailed,
 		planStateImplementationReview,
 		planStateResearchComplete,
 		planStatePlanningFailed,
