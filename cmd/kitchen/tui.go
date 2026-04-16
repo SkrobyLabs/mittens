@@ -2555,7 +2555,7 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 	for i := start; i < end; i++ {
 		task := m.tasks[i]
 		marker := rowMarker(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks)
-		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 6), task.Title), innerWidth)
+		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 9), task.Title), innerWidth)
 		secondaryParts := []string{task.ID, task.Kind}
 		if workerSummary := taskWorkerSummary(task); workerSummary != "" {
 			secondaryParts = append(secondaryParts, workerSummary)
