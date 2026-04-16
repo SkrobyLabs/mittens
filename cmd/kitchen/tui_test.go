@@ -2164,6 +2164,29 @@ func TestRenderTaskDetailLinesIncludesFinalOutput(t *testing.T) {
 	}
 }
 
+func TestRenderTaskDetailLinesUsesCommaSeparatedWorkerModelMetadata(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode: kitchenTUILeftTasks,
+		tasks: []kitchenTUITaskItem{{
+			ID:             "t1",
+			RuntimeID:      "plan_a-t1",
+			Title:          "Task 1",
+			WorkerID:       "w-1",
+			WorkerProvider: "openai",
+			WorkerModel:    "gpt-5.4",
+		}},
+	}
+
+	lines := model.renderTaskDetailLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Worker: w-1, openai, gpt-5.4") {
+		t.Fatalf("detail lines missing combined worker metadata:\n%s", joined)
+	}
+	if strings.Contains(joined, "AI:") {
+		t.Fatalf("detail lines should not render a separate AI row:\n%s", joined)
+	}
+}
+
 func TestRenderTaskDetailLinesIncludesImplementationReviewTLDRForApprovedReview(t *testing.T) {
 	planID := "plan_review_pass"
 	model := kitchenTUIModel{
@@ -3238,6 +3261,46 @@ func TestBuildTaskItemsShowsResearchTaskWithoutPlannerCycle(t *testing.T) {
 	}
 }
 
+func TestBuildTaskItemsCopiesWorkerProviderModelFromSnapshot(t *testing.T) {
+	planID := "plan_worker_metadata"
+	runtimeID := planTaskRuntimeID(planID, "t1")
+	detail := &PlanDetail{
+		Plan: PlanRecord{
+			PlanID: planID,
+			Tasks: []PlanTask{
+				{ID: "t1", Title: "Implementation task", Complexity: ComplexityMedium},
+			},
+		},
+	}
+	snapshot := tuiStatusSnapshot{
+		Queue: struct {
+			AliveWorkers     int                `json:"aliveWorkers"`
+			MaxWorkers       int                `json:"maxWorkers"`
+			PendingQuestions int                `json:"pendingQuestions"`
+			Tasks            []pool.TaskSummary `json:"tasks"`
+		}{
+			Tasks: []pool.TaskSummary{{
+				ID:       runtimeID,
+				Status:   pool.TaskDispatched,
+				WorkerID: "w-1",
+			}},
+		},
+		Workers: []pool.Worker{{
+			ID:       "w-1",
+			Provider: "openai",
+			Model:    "gpt-5.4",
+		}},
+	}
+
+	items := buildTaskItems(detail, snapshot)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one task item", items)
+	}
+	if items[0].WorkerProvider != "openai" || items[0].WorkerModel != "gpt-5.4" {
+		t.Fatalf("item = %+v, want worker provider/model copied from snapshot", items[0])
+	}
+}
+
 func TestRenderTasksPaneUsesWholeTaskRows(t *testing.T) {
 	model := kitchenTUIModel{
 		leftMode:     kitchenTUILeftTasks,
@@ -3277,6 +3340,27 @@ func TestRenderTasksPaneKeepsSelectedTaskVisible(t *testing.T) {
 	}
 	if strings.Contains(rendered, "Planner cycle 1") {
 		t.Fatalf("rendered pane = %q, want window shifted to keep trailing selection visible", rendered)
+	}
+}
+
+func TestRenderTasksPaneShowsWorkerProviderModelInTaskRow(t *testing.T) {
+	model := kitchenTUIModel{
+		leftMode:     kitchenTUILeftTasks,
+		selectedTask: 0,
+		tasks: []kitchenTUITaskItem{{
+			ID:             "plan_a-t1",
+			Title:          "Implementation task",
+			Kind:           "implementation",
+			State:          pool.TaskDispatched,
+			WorkerID:       "w-1",
+			WorkerProvider: "openai",
+			WorkerModel:    "gpt-5.4",
+		}},
+	}
+
+	rendered := ansi.Strip(model.renderTasksPane(100, 8))
+	if !strings.Contains(rendered, "plan_a-t1 · implementation · w-1, openai, gpt-5.4") {
+		t.Fatalf("rendered pane = %q, want task row to include worker provider/model metadata", rendered)
 	}
 }
 

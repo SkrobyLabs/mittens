@@ -609,21 +609,37 @@ type kitchenTUIPlanItem struct {
 }
 
 type kitchenTUITaskItem struct {
-	ID          string
-	RuntimeID   string
-	RowKey      string
-	Kind        string
-	Title       string
-	State       string
-	WorkerID    string
-	Complexity  string
-	Prompt      string
-	Summary     string
-	HasConflict bool
+	ID             string
+	RuntimeID      string
+	RowKey         string
+	Kind           string
+	Title          string
+	State          string
+	WorkerID       string
+	WorkerProvider string
+	WorkerModel    string
+	Complexity     string
+	Prompt         string
+	Summary        string
+	HasConflict    bool
 }
 
 func taskHasConflictInfo(t kitchenTUITaskItem) bool {
 	return t.HasConflict
+}
+
+func taskWorkerSummary(task kitchenTUITaskItem) string {
+	parts := make([]string, 0, 3)
+	if workerID := strings.TrimSpace(task.WorkerID); workerID != "" {
+		parts = append(parts, workerID)
+	}
+	if provider := strings.TrimSpace(task.WorkerProvider); provider != "" {
+		parts = append(parts, provider)
+	}
+	if model := strings.TrimSpace(task.WorkerModel); model != "" {
+		parts = append(parts, model)
+	}
+	return strings.Join(parts, ", ")
 }
 
 type kitchenTUIModel struct {
@@ -2540,7 +2556,11 @@ func (m kitchenTUIModel) renderTasksPane(width, height int) string {
 		task := m.tasks[i]
 		marker := rowMarker(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks)
 		primary := truncate(fmt.Sprintf("%s %s %s", marker, padRight(compactState(task.State), 6), task.Title), innerWidth)
-		secondary := truncate("    "+task.ID+" · "+task.Kind, innerWidth)
+		secondaryParts := []string{task.ID, task.Kind}
+		if workerSummary := taskWorkerSummary(task); workerSummary != "" {
+			secondaryParts = append(secondaryParts, workerSummary)
+		}
+		secondary := truncate("    "+strings.Join(secondaryParts, " · "), innerWidth)
 		lines = append(lines, renderSelectableRow(i == m.selectedTask && m.leftMode == kitchenTUILeftTasks, false, primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, visibleLineBudget))
@@ -3088,8 +3108,8 @@ func (m kitchenTUIModel) renderTaskDetailLines(innerWidth int) []string {
 		fmt.Sprintf("Kind: %s", task.Kind),
 		fmt.Sprintf("State: %s", task.State),
 	}
-	if task.WorkerID != "" {
-		lines = append(lines, fmt.Sprintf("Worker: %s", task.WorkerID))
+	if workerSummary := taskWorkerSummary(*task); workerSummary != "" {
+		lines = append(lines, fmt.Sprintf("Worker: %s", workerSummary))
 	}
 	if task.Complexity != "" {
 		lines = append(lines, fmt.Sprintf("Complexity: %s", task.Complexity))
@@ -3519,8 +3539,12 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	for _, task := range snapshot.Queue.Tasks {
 		taskSummaryByID[task.ID] = task
 	}
+	workerByID := make(map[string]pool.Worker, len(snapshot.Workers))
+	for _, worker := range snapshot.Workers {
+		workerByID[worker.ID] = worker
+	}
 	if strings.TrimSpace(detail.Plan.Mode) == "research" {
-		return []kitchenTUITaskItem{buildResearchTaskItem(*detail, taskSummaryByID)}
+		return []kitchenTUITaskItem{buildResearchTaskItem(*detail, taskSummaryByID, workerByID)}
 	}
 
 	var items []kitchenTUITaskItem
@@ -3535,10 +3559,10 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	}
 	for _, cycle := range detail.Progress.Cycles {
 		if cycle.PlannerTaskID != "" {
-			items = append(items, buildCycleTaskItem("planner", cycle.PlannerTaskID, "Planner cycle "+fmt.Sprint(cycle.Index), cycle.PlannerTaskState, taskSummaryByID[cycle.PlannerTaskID]))
+			items = append(items, buildCycleTaskItem("planner", cycle.PlannerTaskID, "Planner cycle "+fmt.Sprint(cycle.Index), cycle.PlannerTaskState, taskSummaryByID[cycle.PlannerTaskID], workerByID))
 		}
 		if cycle.ReviewTaskID != "" {
-			items = append(items, buildCycleTaskItem("reviewer", cycle.ReviewTaskID, "Review cycle "+fmt.Sprint(cycle.Index), cycle.ReviewTaskState, taskSummaryByID[cycle.ReviewTaskID]))
+			items = append(items, buildCycleTaskItem("reviewer", cycle.ReviewTaskID, "Review cycle "+fmt.Sprint(cycle.Index), cycle.ReviewTaskState, taskSummaryByID[cycle.ReviewTaskID], workerByID))
 		}
 	}
 	roundCount, reviewCyclesByRound := planExecutionRounds(*detail)
@@ -3547,18 +3571,18 @@ func buildTaskItems(detail *PlanDetail, snapshot tuiStatusSnapshot) []kitchenTUI
 	}
 	for round := 1; round <= roundCount; round++ {
 		for _, task := range implementationTasks {
-			items = append(items, buildImplementationTaskItem(*detail, task, round, taskSummaryByID))
+			items = append(items, buildImplementationTaskItem(*detail, task, round, taskSummaryByID, workerByID))
 		}
 		for _, cycle := range reviewCyclesByRound[round] {
 			title := "Implementation review " + fmt.Sprint(max(1, cycle.Index))
 			if cycle.ImplReviewCycle > 1 {
 				title = fmt.Sprintf("Implementation review %d.%d", cycle.ImplReviewCycle, max(1, cycle.ImplReviewTurn))
 			}
-			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, title, cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID]))
+			items = append(items, buildCycleTaskItem("implementation-review", cycle.ImplReviewTaskID, title, cycle.ImplReviewTaskState, taskSummaryByID[cycle.ImplReviewTaskID], workerByID))
 		}
 	}
 	for _, task := range orderTrailingTimelineTasks(trailingTimelineTasks, detail.History) {
-		items = append(items, buildImplementationTaskItem(*detail, task, 1, taskSummaryByID))
+		items = append(items, buildImplementationTaskItem(*detail, task, 1, taskSummaryByID, workerByID))
 	}
 	return items
 }
@@ -3730,25 +3754,40 @@ func isImplementationTaskRuntimeID(planID, taskID string) bool {
 	return councilTurnNumberFromTaskID(planID, taskID) == 0 && reviewCouncilTurnNumberFromTaskID(planID, taskID) == 0
 }
 
-func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, taskSummaryByID map[string]pool.TaskSummary) kitchenTUITaskItem {
+func workerMetadataForTask(summary pool.TaskSummary, workerByID map[string]pool.Worker) (string, string) {
+	workerID := strings.TrimSpace(summary.WorkerID)
+	if workerID == "" {
+		return "", ""
+	}
+	worker, ok := workerByID[workerID]
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(worker.Provider), strings.TrimSpace(worker.Model)
+}
+
+func buildImplementationTaskItem(detail PlanDetail, task PlanTask, round int, taskSummaryByID map[string]pool.TaskSummary, workerByID map[string]pool.Worker) kitchenTUITaskItem {
 	runtimeID := planTaskRuntimeID(detail.Plan.PlanID, task.ID)
 	state := planTaskRuntimeState(detail, task.ID)
 	summary := taskSummaryByID[runtimeID]
+	workerProvider, workerModel := workerMetadataForTask(summary, workerByID)
 	if strings.TrimSpace(summary.Status) != "" && !shouldPreferPlanTrackedTaskState(task.ID, runtimeID, detail) {
 		state = summary.Status
 	}
 	return kitchenTUITaskItem{
-		ID:          task.ID,
-		RuntimeID:   runtimeID,
-		RowKey:      fmt.Sprintf("%s#round-%d", runtimeID, max(1, round)),
-		Kind:        "implementation",
-		Title:       firstNonEmpty(task.Title, task.ID),
-		State:       state,
-		WorkerID:    summary.WorkerID,
-		Complexity:  string(task.Complexity),
-		Prompt:      task.Prompt,
-		Summary:     summarizeTaskHistory(detail.History, runtimeID),
-		HasConflict: summary.HasConflict,
+		ID:             task.ID,
+		RuntimeID:      runtimeID,
+		RowKey:         fmt.Sprintf("%s#round-%d", runtimeID, max(1, round)),
+		Kind:           "implementation",
+		Title:          firstNonEmpty(task.Title, task.ID),
+		State:          state,
+		WorkerID:       summary.WorkerID,
+		WorkerProvider: workerProvider,
+		WorkerModel:    workerModel,
+		Complexity:     string(task.Complexity),
+		Prompt:         task.Prompt,
+		Summary:        summarizeTaskHistory(detail.History, runtimeID),
+		HasConflict:    summary.HasConflict,
 	}
 }
 
@@ -3768,38 +3807,44 @@ func shouldPreferPlanTrackedTaskState(logicalTaskID, runtimeID string, detail Pl
 	return false
 }
 
-func buildResearchTaskItem(detail PlanDetail, taskSummaryByID map[string]pool.TaskSummary) kitchenTUITaskItem {
+func buildResearchTaskItem(detail PlanDetail, taskSummaryByID map[string]pool.TaskSummary, workerByID map[string]pool.Worker) kitchenTUITaskItem {
 	runtimeID := "research_" + detail.Plan.PlanID
 	summary := taskSummaryByID[runtimeID]
+	workerProvider, workerModel := workerMetadataForTask(summary, workerByID)
 	state := string(planProgressTaskState(detail.Execution, runtimeID, nil))
 	if strings.TrimSpace(summary.Status) != "" {
 		state = summary.Status
 	}
 	return kitchenTUITaskItem{
-		ID:        runtimeID,
-		RuntimeID: runtimeID,
-		RowKey:    runtimeID,
-		Kind:      "research",
-		Title:     firstNonEmpty(strings.TrimSpace(detail.Plan.Title), "Research"),
-		State:     state,
-		WorkerID:  summary.WorkerID,
-		Prompt:    strings.TrimSpace(detail.Plan.Summary),
-		Summary:   strings.TrimSpace(detail.Execution.ResearchOutput),
+		ID:             runtimeID,
+		RuntimeID:      runtimeID,
+		RowKey:         runtimeID,
+		Kind:           "research",
+		Title:          firstNonEmpty(strings.TrimSpace(detail.Plan.Title), "Research"),
+		State:          state,
+		WorkerID:       summary.WorkerID,
+		WorkerProvider: workerProvider,
+		WorkerModel:    workerModel,
+		Prompt:         strings.TrimSpace(detail.Plan.Summary),
+		Summary:        strings.TrimSpace(detail.Execution.ResearchOutput),
 	}
 }
 
-func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskSummary) kitchenTUITaskItem {
+func buildCycleTaskItem(kind, runtimeID, title, state string, summary pool.TaskSummary, workerByID map[string]pool.Worker) kitchenTUITaskItem {
+	workerProvider, workerModel := workerMetadataForTask(summary, workerByID)
 	if strings.TrimSpace(summary.Status) != "" {
 		state = summary.Status
 	}
 	return kitchenTUITaskItem{
-		ID:        runtimeID,
-		RuntimeID: runtimeID,
-		RowKey:    runtimeID,
-		Kind:      kind,
-		Title:     title,
-		State:     state,
-		WorkerID:  summary.WorkerID,
+		ID:             runtimeID,
+		RuntimeID:      runtimeID,
+		RowKey:         runtimeID,
+		Kind:           kind,
+		Title:          title,
+		State:          state,
+		WorkerID:       summary.WorkerID,
+		WorkerProvider: workerProvider,
+		WorkerModel:    workerModel,
 	}
 }
 
