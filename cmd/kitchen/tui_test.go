@@ -3975,72 +3975,85 @@ func TestRenderSelectableRowNoAttentionUnhighlighted(t *testing.T) {
 	}
 }
 
-// TestRenderPlansPaneHighlightsAttentionRows verifies that attention plans render with amber style
-// and non-attention plans remain unstyled in the plans pane.
+// TestRenderPlansPaneHighlightsAttentionRows verifies the three-level colour
+// scheme in the plans pane: failed=red(88), attention=amber(94), plain=none.
 func TestRenderPlansPaneHighlightsAttentionRows(t *testing.T) {
 	forceColors(t)
 	model := kitchenTUIModel{
 		leftMode:     kitchenTUILeftPlans,
 		selectedPlan: 0,
 		plans: []kitchenTUIPlanItem{
-			// Index 0: selected — should use purple regardless of attention.
-			{Record: PlanRecord{PlanID: "plan_a", Title: "Pending Approval Plan", State: planStatePendingApproval}},
-			// Index 1: not selected, needs attention — amber.
+			// Index 0: selected — purple (62) overrides all colour coding.
+			{Record: PlanRecord{PlanID: "plan_a", Title: "Selected Plan", State: planStateActive}},
+			// Index 1: not selected, failed — dark-red (88).
 			{Record: PlanRecord{PlanID: "plan_b", Title: "Planning Failed Plan", State: planStatePlanningFailed}},
-			// Index 2: not selected, needs attention — amber.
+			// Index 2: not selected, failed — dark-red (88).
 			{Record: PlanRecord{PlanID: "plan_c", Title: "Implementation Failed Plan", State: planStateImplementationFailed}},
-			// Index 3: not selected, no attention — plain.
-			{Record: PlanRecord{PlanID: "plan_d", Title: "Active Plan", State: planStateActive}},
+			// Index 3: not selected, attention — amber (94).
+			{Record: PlanRecord{PlanID: "plan_d", Title: "Pending Approval Plan", State: planStatePendingApproval}},
+			// Index 4: not selected, no attention — plain.
+			{Record: PlanRecord{PlanID: "plan_e", Title: "Active Plan", State: planStateActive}},
 		},
 	}
 
 	pane := model.renderPlansPane(120, 20)
 
-	// The pane must contain all three plan titles (after stripping ANSI).
 	stripped := ansi.Strip(pane)
-	for _, title := range []string{"Pending Approval Plan", "Planning Failed Plan", "Implementation Failed Plan", "Active Plan"} {
+	for _, title := range []string{"Selected Plan", "Planning Failed Plan", "Implementation Failed Plan", "Pending Approval Plan", "Active Plan"} {
 		if !strings.Contains(stripped, title) {
 			t.Fatalf("plans pane missing title %q: %q", title, stripped)
 		}
 	}
 
-	// plan_b row (planning_failed, unselected) should have amber (94m).
-	// Split raw pane by newline and find lines containing plan_b's title text.
+	// plan_b (planning_failed) → dark-red (88m).
+	foundRed := false
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Planning Failed Plan") && strings.Contains(line, "88m") {
+			foundRed = true
+			break
+		}
+	}
+	if !foundRed {
+		t.Fatalf("planning_failed plan row should have dark-red (88m); pane = %q", pane)
+	}
+
+	// plan_c (implementation_failed) → dark-red (88m).
+	foundImplRed := false
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(ansi.Strip(line), "Implementation Failed Plan") && strings.Contains(line, "88m") {
+			foundImplRed = true
+			break
+		}
+	}
+	if !foundImplRed {
+		t.Fatalf("implementation_failed plan row should have dark-red (88m); pane = %q", pane)
+	}
+
+	// plan_d (pending_approval, unselected) → amber (94m).
 	foundAmber := false
 	for _, line := range strings.Split(pane, "\n") {
-		if strings.Contains(ansi.Strip(line), "Planning Failed Plan") && strings.Contains(line, "94m") {
+		if strings.Contains(ansi.Strip(line), "Pending Approval Plan") && strings.Contains(line, "94m") {
 			foundAmber = true
 			break
 		}
 	}
 	if !foundAmber {
-		t.Fatalf("planning_failed plan row should have amber (94m) highlight; pane = %q", pane)
+		t.Fatalf("pending_approval plan row should have amber (94m); pane = %q", pane)
 	}
 
-	foundImplementationFailedAmber := false
+	// plan_a row (selected) → purple (62m).
+	foundPurple := false
 	for _, line := range strings.Split(pane, "\n") {
-		if strings.Contains(ansi.Strip(line), "Implementation Failed Plan") && strings.Contains(line, "94m") {
-			foundImplementationFailedAmber = true
+		if strings.Contains(ansi.Strip(line), "Selected Plan") && strings.Contains(line, "62m") {
+			foundPurple = true
 			break
 		}
 	}
-	if !foundImplementationFailedAmber {
-		t.Fatalf("implementation_failed plan row should have amber (94m) highlight; pane = %q", pane)
-	}
-
-	// plan_a row (selected) should use purple (62m), not amber (94m).
-	foundPurpleSelected := false
-	for _, line := range strings.Split(pane, "\n") {
-		if strings.Contains(ansi.Strip(line), "Pending Approval Plan") && strings.Contains(line, "62m") {
-			foundPurpleSelected = true
-			break
-		}
-	}
-	if !foundPurpleSelected {
+	if !foundPurple {
 		t.Fatalf("selected plan row should have purple (62m); pane = %q", pane)
 	}
 
-	// plan_c row (active, unselected) should have no background color.
+	// plan_e (active, unselected) → no background colour.
 	for _, line := range strings.Split(pane, "\n") {
 		if strings.Contains(ansi.Strip(line), "Active Plan") && strings.Contains(line, "48;5;") {
 			t.Fatalf("active (plain) plan row should have no background color; line = %q", line)
@@ -4257,6 +4270,148 @@ func TestKitchenTUIDeleteConfirmFooterHints(t *testing.T) {
 	footer := model.renderFooter()
 	if !strings.Contains(footer, "↑/↓ navigate") || !strings.Contains(footer, "enter select") || !strings.Contains(footer, "esc cancel") {
 		t.Fatalf("delete confirm footer missing expected hints: %q", footer)
+	}
+}
+
+// TestRenderPlanRowFailedStyle verifies that renderPlanRow with "failed" uses dark-red (88) background.
+func TestRenderPlanRowFailedStyle(t *testing.T) {
+	forceColors(t)
+	rows := renderPlanRow(false, "failed", "failed primary", "failed secondary")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[0], "88m") {
+		t.Fatalf("primary row missing dark-red background (88m): %q", rows[0])
+	}
+	if !strings.Contains(rows[1], "88m") {
+		t.Fatalf("secondary row missing dark-red background (88m): %q", rows[1])
+	}
+	// Must not use amber (94) or selection purple (62).
+	for _, row := range rows {
+		if strings.Contains(row, "94m") {
+			t.Fatalf("failed row should not use amber (94m): %q", row)
+		}
+		if strings.Contains(row, "62m") {
+			t.Fatalf("failed row should not use purple (62m): %q", row)
+		}
+	}
+	if !strings.Contains(ansi.Strip(rows[0]), "failed primary") {
+		t.Fatalf("primary text missing: %q", rows[0])
+	}
+}
+
+// TestRenderPlanRowAttentionStyle verifies that renderPlanRow with "attention" uses amber (94) background.
+func TestRenderPlanRowAttentionStyle(t *testing.T) {
+	forceColors(t)
+	rows := renderPlanRow(false, "attention", "attention primary", "attention secondary")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[0], "94m") {
+		t.Fatalf("primary row missing amber background (94m): %q", rows[0])
+	}
+	if !strings.Contains(rows[1], "94m") {
+		t.Fatalf("secondary row missing amber background (94m): %q", rows[1])
+	}
+	for _, row := range rows {
+		if strings.Contains(row, "88m") {
+			t.Fatalf("attention row should not use dark-red (88m): %q", row)
+		}
+		if strings.Contains(row, "62m") {
+			t.Fatalf("attention row should not use purple (62m): %q", row)
+		}
+	}
+}
+
+// TestRenderPlanRowDefaultStyle verifies that renderPlanRow with "" has no background color.
+func TestRenderPlanRowDefaultStyle(t *testing.T) {
+	forceColors(t)
+	rows := renderPlanRow(false, "", "plain primary", "plain secondary")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	for _, row := range rows {
+		if strings.Contains(row, "48;5;") {
+			t.Fatalf("plain row should have no background color: %q", row)
+		}
+	}
+	if ansi.Strip(rows[0]) != "plain primary" {
+		t.Fatalf("primary text = %q, want plain primary", ansi.Strip(rows[0]))
+	}
+}
+
+// TestRenderPlanRowSelectedOverridesColor verifies that selected uses purple (62) regardless of planColor.
+func TestRenderPlanRowSelectedOverridesColor(t *testing.T) {
+	forceColors(t)
+	for _, color := range []string{"failed", "attention", ""} {
+		rows := renderPlanRow(true, color, "selected primary", "selected secondary")
+		if len(rows) != 2 {
+			t.Fatalf("color=%q: expected 2 rows, got %d", color, len(rows))
+		}
+		if !strings.Contains(rows[0], "62m") {
+			t.Fatalf("color=%q: selected row missing purple (62m): %q", color, rows[0])
+		}
+		if strings.Contains(rows[0], "88m") || strings.Contains(rows[0], "94m") {
+			t.Fatalf("color=%q: selected row should only use purple, got: %q", color, rows[0])
+		}
+	}
+}
+
+// TestRenderPlanRowImplReviewFailedDerived verifies that a plan whose Progress
+// marks the impl review as failed renders as dark-red (88) even when the record
+// State says "completed".
+func TestRenderPlanRowImplReviewFailedDerived(t *testing.T) {
+	forceColors(t)
+	plan := kitchenTUIPlanItem{
+		Record: PlanRecord{PlanID: "plan_x", Title: "Review Failed Plan", State: planStateCompleted},
+		Progress: &PlanProgress{
+			State:               planStateCompleted,
+			ImplReviewRequested: true,
+			ImplReviewStatus:    planReviewStatusFailed,
+		},
+	}
+	// planAttentionColor must classify this as "failed".
+	color := planAttentionColor(plan)
+	if color != "failed" {
+		t.Fatalf("planAttentionColor() = %q, want \"failed\" for impl-review-failed derived state", color)
+	}
+
+	// renderPlanRow with that color must use dark-red (88m).
+	rows := renderPlanRow(false, color, "Review Failed Plan", "secondary")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[0], "88m") {
+		t.Fatalf("impl-review-failed plan row missing dark-red (88m): %q", rows[0])
+	}
+}
+
+// TestCompactStatePlanStates verifies compactState returns human-readable labels
+// for the canonical plan state constants.
+func TestCompactStatePlanStates(t *testing.T) {
+	cases := []struct {
+		state string
+		want  string
+	}{
+		{planStatePendingApproval, "await"},
+		{planStatePlanningFailed, "failed"},
+		{planStatePlanning, "plan"},
+		{planStateReviewing, "review"},
+		{planStateImplementationFailed, "failed"},
+		{planStateImplementationReviewFailed, "impl-fail"},
+		{planStateImplementationReview, "impl-rev"},
+		{planStateMerging, "merging"},
+		{planStateActive, "active"},
+		{planStateCompleted, "done"},
+		{planStateMerged, "merged"},
+		{planStateWaitingOnDependency, "wait-dep"},
+		{"", "-"},
+	}
+	for _, tc := range cases {
+		got := compactState(tc.state)
+		if got != tc.want {
+			t.Errorf("compactState(%q) = %q, want %q", tc.state, got, tc.want)
+		}
 	}
 }
 

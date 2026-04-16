@@ -2533,7 +2533,7 @@ func (m kitchenTUIModel) renderPlansPane(width, height int) string {
 			secondary += " [dep]"
 		}
 		secondary = truncate(secondary, innerWidth)
-		lines = append(lines, renderSelectableRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, needsUserAttention(plan), primary, secondary)...)
+		lines = append(lines, renderPlanRow(i == m.selectedPlan && m.leftMode == kitchenTUILeftPlans, planAttentionColor(plan), primary, secondary)...)
 	}
 	return paneBox(width, height, title+"\n"+fitListLines(lines, listLineBudget))
 }
@@ -3877,6 +3877,29 @@ func needsUserAttention(plan kitchenTUIPlanItem) bool {
 	}
 }
 
+// planAttentionColor classifies a plan for colour-coded row rendering.
+// Returns "failed" (ANSI 88), "attention" (ANSI 94), or "" (default/plain).
+// It calls planDisplayState so derived states like implementation_review_failed
+// are handled even when the raw record state says "completed".
+func planAttentionColor(plan kitchenTUIPlanItem) string {
+	switch planDisplayState(plan) {
+	case planStatePlanningFailed, planStateImplementationFailed, planStateImplementationReviewFailed:
+		return "failed"
+	case planStatePendingApproval:
+		return "attention"
+	case planStateCompleted:
+		if strings.TrimSpace(plan.Record.Lineage) != "" {
+			return "attention"
+		}
+		if strings.TrimSpace(plan.Record.Mode) == "research" {
+			return "attention"
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
 func implementationReviewFailed(progress *PlanProgress) bool {
 	return progress != nil &&
 		progress.ImplReviewRequested &&
@@ -4115,6 +4138,31 @@ func renderSelectableRow(selected bool, attention bool, primary, secondary strin
 		return []string{main.Render(primary), sub.Render(secondary)}
 	}
 	if attention {
+		main := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("230")).Bold(true)
+		sub := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("252"))
+		return []string{main.Render(primary), sub.Render(secondary)}
+	}
+	return []string{
+		primary,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(secondary),
+	}
+}
+
+// renderPlanRow renders a two-line plan row with three-level colour coding.
+// selected (purple 62) overrides planColor. planColor must be one of
+// "failed" (dark-red 88), "attention" (amber 94), or "" (plain).
+func renderPlanRow(selected bool, planColor, primary, secondary string) []string {
+	if selected {
+		main := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true)
+		sub := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("252"))
+		return []string{main.Render(primary), sub.Render(secondary)}
+	}
+	switch planColor {
+	case "failed":
+		main := lipgloss.NewStyle().Background(lipgloss.Color("88")).Foreground(lipgloss.Color("230")).Bold(true)
+		sub := lipgloss.NewStyle().Background(lipgloss.Color("88")).Foreground(lipgloss.Color("252"))
+		return []string{main.Render(primary), sub.Render(secondary)}
+	case "attention":
 		main := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("230")).Bold(true)
 		sub := lipgloss.NewStyle().Background(lipgloss.Color("94")).Foreground(lipgloss.Color("252"))
 		return []string{main.Render(primary), sub.Render(secondary)}
