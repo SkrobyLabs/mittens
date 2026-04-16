@@ -330,7 +330,12 @@ func (g *GitManager) PreviewMergeLineage(lineage, baseBranch, mode string) (stri
 		return "", err
 	}
 	if !hasChanges {
-		return "", fmt.Errorf("lineage %s has no changes to merge into %s", lineage, baseBranch)
+		// Already up-to-date: the preview head is just the current base head.
+		sha, err := runGit(g.repoPath, "rev-parse", baseBranch)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(sha), nil
 	}
 
 	squash := strings.EqualFold(mode, "squash")

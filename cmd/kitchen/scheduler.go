@@ -2103,6 +2103,29 @@ func (s *Scheduler) shouldRetryConflict(task pool.Task) bool {
 	return task.RetryCount < rule.Max
 }
 
+// allTasksAreConflictFailed reports whether every task in failedIDs failed due
+// to a merge conflict. Conflict failures keep the plan active so the operator
+// can resolve them manually or via a fix-merge task.
+func allTasksAreConflictFailed(tasks []pool.Task, failedIDs []string) bool {
+	if len(failedIDs) == 0 {
+		return false
+	}
+	taskMap := make(map[string]pool.Task, len(tasks))
+	for _, t := range tasks {
+		taskMap[t.ID] = t
+	}
+	for _, id := range failedIDs {
+		t, ok := taskMap[id]
+		if !ok {
+			return false
+		}
+		if t.Result == nil || !strings.Contains(strings.ToLower(t.Result.Error), "merge conflict") {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Scheduler) logf(format string, args ...any) {
 	if s.stderr != nil {
 		fmt.Fprintf(s.stderr, format+"\n", args...)
@@ -2162,9 +2185,15 @@ func (s *Scheduler) syncPlanExecution(planID string) error {
 		bundle.Execution.State = planStateCompleted
 		bundle.Execution.CompletedAt = &now
 	} else if len(active) == 0 && len(failed) > 0 {
-		bundle.Plan.State = planStateImplementationFailed
-		bundle.Execution.State = planStateImplementationFailed
-		bundle.Execution.CompletedAt = nil
+		if allTasksAreConflictFailed(s.pm.Tasks(), failed) {
+			bundle.Plan.State = planStateActive
+			bundle.Execution.State = planStateActive
+			bundle.Execution.CompletedAt = nil
+		} else {
+			bundle.Plan.State = planStateImplementationFailed
+			bundle.Execution.State = planStateImplementationFailed
+			bundle.Execution.CompletedAt = nil
+		}
 	} else {
 		bundle.Plan.State = planStateActive
 		bundle.Execution.State = planStateActive

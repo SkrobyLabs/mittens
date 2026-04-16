@@ -485,7 +485,7 @@ func TestKitchenTUISubmitDependencySelectionTogglesPlans(t *testing.T) {
 		},
 	}
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	got := updated.(kitchenTUIModel)
 	if !got.submitSelecting {
 		t.Fatal("submitSelecting = false, want true")
@@ -515,7 +515,7 @@ func TestKitchenTUISubmitDependencySelectionTogglesPlans(t *testing.T) {
 		t.Fatalf("submitDependsOn = %+v, want both plans selected", got.submitDependsOn)
 	}
 
-	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	got = updated.(kitchenTUIModel)
 	if got.submitSelecting {
 		t.Fatal("submitSelecting = true, want false after leaving dependency selection")
@@ -3800,11 +3800,11 @@ func TestKitchenTUIAdvancedSubmitCyclesProviderAndSubmitsOverride(t *testing.T) 
 		submitTextarea: submitTextareaWithValue("Add provider override feature"),
 	}
 
-	// Press 'A' to open the provider override overlay.
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	// Press ctrl+a to open the provider override overlay.
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	got := updated.(kitchenTUIModel)
 	if !got.submitProviderOverrideMode {
-		t.Fatal("submitProviderOverrideMode = false after 'A', want true")
+		t.Fatal("submitProviderOverrideMode = false after ctrl+a, want true")
 	}
 
 	// Focus=0 is planner. Press 'up' (dir=+1): "" → "claude" (index 1 in submitProviderOptions).

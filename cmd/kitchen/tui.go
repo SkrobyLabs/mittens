@@ -1483,7 +1483,7 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "esc", "D":
+		case "esc", "ctrl+d":
 			m.finishSubmitDependencySelection()
 			return m, nil
 		case "up", "k":
@@ -1518,7 +1518,7 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "A", "esc":
+		case "ctrl+a", "esc":
 			m.submitProviderOverrideMode = false
 			return m, nil
 		case "left":
@@ -1564,10 +1564,10 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.submitImplReview = !m.submitImplReview
 			return m, nil
-		case "D":
+		case "ctrl+d":
 			m.beginSubmitDependencySelection()
 			return m, nil
-		case "A":
+		case "ctrl+a":
 			m.submitProviderOverrideMode = !m.submitProviderOverrideMode
 			return m, nil
 		case "ctrl+s":
@@ -1622,12 +1622,12 @@ func (m kitchenTUIModel) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.submitQuickComplexity = cycleQuickComplexity(m.submitQuickComplexity)
 			return m, nil
 		}
-	case "D":
+	case "ctrl+d":
 		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.beginSubmitDependencySelection()
 			return m, nil
 		}
-	case "A":
+	case "ctrl+a":
 		if m.inputMode == kitchenTUIInputSubmit && !m.submitResearch {
 			m.submitProviderOverrideMode = !m.submitProviderOverrideMode
 			return m, nil
@@ -2381,10 +2381,10 @@ func (m kitchenTUIModel) footerActions() []string {
 		switch m.inputMode {
 		case kitchenTUIInputSubmit:
 			if m.submitSelecting {
-				return []string{"↑/↓ choose plan", "enter toggle dep", "D done", "esc done", "ctrl+c quit"}
+				return []string{"↑/↓ choose plan", "enter toggle dep", "ctrl+d done", "esc done", "ctrl+c quit"}
 			}
 			if m.submitProviderOverrideMode {
-				return []string{"←/→ focus", "↑/↓ change", "ctrl+s submit", "A close", "ctrl+c quit"}
+				return []string{"←/→ focus", "↑/↓ change", "ctrl+s submit", "ctrl+a close", "ctrl+c quit"}
 			}
 			submitMode := "idea"
 			if m.submitResearch {
@@ -2400,7 +2400,7 @@ func (m kitchenTUIModel) footerActions() []string {
 				implReviewMode = "on"
 			}
 			deps := fmt.Sprintf("%d", len(m.submitDependsOn))
-			actions = append(actions, "tab impl-review:"+implReviewMode, "D deps:"+deps, "A providers", "esc cancel", "ctrl+c quit")
+			actions = append(actions, "tab impl-review:"+implReviewMode, "ctrl+d deps:"+deps, "ctrl+a providers", "esc cancel", "ctrl+c quit")
 			return actions
 		case kitchenTUIInputPromote:
 			return []string{"enter promote", "esc cancel", "ctrl+c quit"}
