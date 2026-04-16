@@ -2370,7 +2370,7 @@ func hasCanceledPlanTrackedTask(tasks []pool.Task, bundle StoredPlan) bool {
 		if task.PlanID != bundle.Plan.PlanID || task.Status != pool.TaskCanceled {
 			continue
 		}
-		if task.Role == plannerTaskRole || isReviewCouncilTask(task) || isLineageMergeTask(task) {
+		if task.Role == plannerTaskRole || isReviewCouncilTask(task) || isLineageMergeTask(task) || task.Role == lineageFixMergeRole {
 			continue
 		}
 		if _, _, _, ok := recoveredPlanTask(bundle.Plan, task.ID); ok {

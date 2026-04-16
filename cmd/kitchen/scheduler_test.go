@@ -5023,7 +5023,7 @@ func TestRunRecoverySuite_RequeuesMissingActiveLineageFixMergeTask(t *testing.T)
 	}
 }
 
-func TestHandleNotification_TaskCanceledKeepsLineageFixMergePlanActive(t *testing.T) {
+func TestHandleNotification_TaskCanceledCompletesLineageFixMergePlan(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
 	project, err := paths.Project(repo)
@@ -5138,11 +5138,11 @@ func TestHandleNotification_TaskCanceledKeepsLineageFixMergePlanActive(t *testin
 	if err != nil {
 		t.Fatalf("Get plan: %v", err)
 	}
-	if bundle.Plan.State != planStateActive {
-		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
 	}
-	if bundle.Execution.State != planStateActive {
-		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
 	}
 	if len(bundle.Execution.ActiveTaskIDs) != 0 {
 		t.Fatalf("active task ids = %+v, want empty", bundle.Execution.ActiveTaskIDs)
@@ -5150,12 +5150,12 @@ func TestHandleNotification_TaskCanceledKeepsLineageFixMergePlanActive(t *testin
 	if len(bundle.Execution.CompletedTaskIDs) != 1 || bundle.Execution.CompletedTaskIDs[0] != t1TaskID {
 		t.Fatalf("completed task ids = %+v, want [%q]", bundle.Execution.CompletedTaskIDs, t1TaskID)
 	}
-	if bundle.Execution.CompletedAt != nil {
-		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set")
 	}
 }
 
-func TestRunRecoverySuite_KeepsActivePlanWithCanceledLineageFixMergeTask(t *testing.T) {
+func TestRunRecoverySuite_CompletesPlanWithCanceledLineageFixMergeTask(t *testing.T) {
 	repo := initGitRepo(t)
 	paths := newKitchenTestPaths(t)
 	project, err := paths.Project(repo)
@@ -5272,11 +5272,11 @@ func TestRunRecoverySuite_KeepsActivePlanWithCanceledLineageFixMergeTask(t *test
 	if err != nil {
 		t.Fatalf("Get plan: %v", err)
 	}
-	if bundle.Plan.State != planStateActive {
-		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateActive)
+	if bundle.Plan.State != planStateCompleted {
+		t.Fatalf("plan state = %q, want %q", bundle.Plan.State, planStateCompleted)
 	}
-	if bundle.Execution.State != planStateActive {
-		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateActive)
+	if bundle.Execution.State != planStateCompleted {
+		t.Fatalf("execution state = %q, want %q", bundle.Execution.State, planStateCompleted)
 	}
 	if len(bundle.Execution.ActiveTaskIDs) != 0 {
 		t.Fatalf("active task ids = %+v, want empty", bundle.Execution.ActiveTaskIDs)
@@ -5284,8 +5284,8 @@ func TestRunRecoverySuite_KeepsActivePlanWithCanceledLineageFixMergeTask(t *test
 	if len(bundle.Execution.CompletedTaskIDs) != 1 || bundle.Execution.CompletedTaskIDs[0] != t1TaskID {
 		t.Fatalf("completed task ids = %+v, want [%q]", bundle.Execution.CompletedTaskIDs, t1TaskID)
 	}
-	if bundle.Execution.CompletedAt != nil {
-		t.Fatalf("completedAt = %v, want nil", bundle.Execution.CompletedAt)
+	if bundle.Execution.CompletedAt == nil {
+		t.Fatal("expected completedAt to be set")
 	}
 }
 

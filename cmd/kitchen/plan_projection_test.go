@@ -115,3 +115,64 @@ func TestProjectPlan_LiveReviewCouncilTaskOverridesStaleReviewFailure(t *testing
 		t.Fatalf("projection state = %q, want %q", proj.State, planStateImplementationReview)
 	}
 }
+
+func TestProjectPlan_CanceledLineageFixMergeProjectsCompletedWithPendingMerge(t *testing.T) {
+	bundle := StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  "plan_fix_merge_canceled",
+			Title:   "Canceled merge fix",
+			Lineage: "feat/canceled-merge-fix",
+			State:   planStateActive,
+			Tasks: []PlanTask{
+				{
+					ID:               "t1",
+					Title:            "Implement",
+					Prompt:           "implement",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+				{
+					ID:               "fix-merge-123",
+					Title:            "Fix merge conflicts",
+					Prompt:           "resolve merge conflicts",
+					Complexity:       ComplexityMedium,
+					ReviewComplexity: ComplexityMedium,
+				},
+			},
+		},
+		Execution: ExecutionRecord{
+			State:               planStateActive,
+			ImplReviewRequested: true,
+			ImplReviewStatus:    planReviewStatusPassed,
+		},
+	}
+	tasks := []pool.Task{
+		{
+			ID:     planTaskRuntimeID("plan_fix_merge_canceled", "t1"),
+			PlanID: "plan_fix_merge_canceled",
+			Role:   "implementer",
+			Status: pool.TaskCompleted,
+		},
+		{
+			ID:     planTaskRuntimeID("plan_fix_merge_canceled", "fix-merge-123"),
+			PlanID: "plan_fix_merge_canceled",
+			Role:   lineageFixMergeRole,
+			Status: pool.TaskCanceled,
+		},
+	}
+
+	proj := projectPlan(bundle, tasks, 0)
+
+	if proj.State != planStateCompleted {
+		t.Fatalf("projection state = %q, want %q", proj.State, planStateCompleted)
+	}
+	if proj.ExecutionDisposition != planExecutionDispositionSucceeded {
+		t.Fatalf("execution disposition = %q, want %q", proj.ExecutionDisposition, planExecutionDispositionSucceeded)
+	}
+	if proj.MergeDisposition != planMergeDispositionPending {
+		t.Fatalf("merge disposition = %q, want %q", proj.MergeDisposition, planMergeDispositionPending)
+	}
+	if got := proj.ActiveTaskIDs; len(got) != 0 {
+		t.Fatalf("active task ids = %v, want none", got)
+	}
+}
