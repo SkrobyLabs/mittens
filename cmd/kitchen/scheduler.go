@@ -1284,6 +1284,9 @@ func (s *Scheduler) workerSpecForTask(task pool.Task) (pool.WorkerSpec, error) {
 		spec.Adapter = adapter.DefaultAdapterForProvider(spec.Provider)
 	}
 	if isPlanControlTask(task) {
+		if s.git != nil {
+			spec.WorkspacePath = s.git.repoPath
+		}
 		return spec, nil
 	}
 
@@ -1784,11 +1787,7 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
 		return false
 	}
-	workerRole := strings.TrimSpace(worker.Role)
-	taskRole := strings.TrimSpace(task.Role)
-
-	if workerRole == "" || workerRole == "general" || taskRole == "" {
-	} else if workerRole != taskRole {
+	if !workerRoleCompatible(worker, task) {
 		return false
 	}
 	if !s.workerWorkspaceCompatible(worker, task) {
@@ -1808,6 +1807,16 @@ func (s *Scheduler) workerCanRunTask(worker pool.Worker, task pool.Task) bool {
 		}
 	}
 	return false
+}
+
+func workerRoleCompatible(worker pool.Worker, task pool.Task) bool {
+	workerRole := strings.TrimSpace(worker.Role)
+	taskRole := strings.TrimSpace(task.Role)
+
+	if workerRole == "" || workerRole == "general" || taskRole == "" {
+		return true
+	}
+	return workerRole == taskRole
 }
 
 func (s *Scheduler) workerWorkspaceCompatible(worker pool.Worker, task pool.Task) bool {
@@ -1833,6 +1842,9 @@ func (s *Scheduler) workerWorkspaceCompatible(worker pool.Worker, task pool.Task
 func (s *Scheduler) expectedWorkspaceForTask(task pool.Task) (path string, exact bool, ok bool) {
 	if s == nil || s.git == nil || s.plans == nil || strings.TrimSpace(task.PlanID) == "" {
 		return "", false, false
+	}
+	if task.Role == plannerTaskRole || isLineageMergeTask(task) {
+		return s.git.repoPath, true, true
 	}
 	bundle, err := s.plans.Get(task.PlanID)
 	if err != nil {

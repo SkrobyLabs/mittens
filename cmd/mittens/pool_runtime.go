@@ -66,9 +66,6 @@ func (a *App) spawnWorkerContainer(spec pool.WorkerSpec) (string, string, error)
 	}
 
 	workspacePath := strings.TrimSpace(spec.WorkspacePath)
-	if workspacePath == "" {
-		workspacePath = a.WorkspaceMountSrc
-	}
 	workspacePath, err := validateWorkerWorkspacePath(workspacePath)
 	if err != nil {
 		return "", "", fmt.Errorf("spawn worker: %w", err)

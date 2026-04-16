@@ -62,6 +62,9 @@ func (s *Scheduler) workerCanRunCouncilTask(worker pool.Worker, task pool.Task) 
 	if reserved, ok := s.reservedCouncilWorkerIDs()[worker.ID]; ok && reserved != bundle.Plan.PlanID+":"+seat.Seat {
 		return false, true
 	}
+	if !workerRoleCompatible(worker, task) {
+		return false, true
+	}
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
 		return false, true
 	}
@@ -86,6 +89,9 @@ func (s *Scheduler) refreshCouncilSeatWorker(workerID string) (*pool.Worker, boo
 
 func (s *Scheduler) councilSeatWorkerUsable(worker pool.Worker, task pool.Task) bool {
 	if worker.Status == pool.WorkerDead {
+		return false
+	}
+	if !workerRoleCompatible(worker, task) {
 		return false
 	}
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
@@ -522,9 +528,7 @@ func (s *Scheduler) recoverCouncilPlansOnStartup() error {
 }
 
 func (s *Scheduler) workerCanRunTaskWithoutCouncilAffinity(worker pool.Worker, task pool.Task) bool {
-	workerRole := strings.TrimSpace(worker.Role)
-	taskRole := strings.TrimSpace(task.Role)
-	if workerRole != "" && workerRole != "general" && taskRole != "" && workerRole != taskRole {
+	if !workerRoleCompatible(worker, task) {
 		return false
 	}
 	if !s.workerWorkspaceCompatible(worker, task) {

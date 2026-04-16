@@ -75,7 +75,7 @@ func (s *Scheduler) workerCanRunReviewCouncilTask(worker pool.Worker, task pool.
 	if targetWorkerID == "" {
 		return false, true
 	}
-	if strings.TrimSpace(worker.Role) != task.Role {
+	if !workerRoleCompatible(worker, task) {
 		return false, true
 	}
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {
@@ -101,6 +101,9 @@ func (s *Scheduler) refreshReviewCouncilSeatWorker(workerID string) (*pool.Worke
 
 func (s *Scheduler) reviewCouncilSeatWorkerUsable(worker pool.Worker, task pool.Task) bool {
 	if worker.Status == pool.WorkerDead {
+		return false
+	}
+	if !workerRoleCompatible(worker, task) {
 		return false
 	}
 	if s.pm != nil && !s.pm.WorkerHealthy(worker.ID, s.reapTimeout) {

@@ -279,6 +279,51 @@ esac
 	}
 }
 
+func TestSpawnWorkerContainerRequiresExplicitWorkspacePath(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+
+	tmp := t.TempDir()
+	t.Setenv("MITTENS_HOME", filepath.Join(tmp, ".mittens"))
+
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{
+		Provider:          ClaudeProvider(),
+		Workspace:         workspace,
+		WorkspaceMountSrc: workspace,
+		ImageName:         "mittens-test",
+		ImageTag:          "latest",
+		NoBuild:           true,
+		brokerPort:        43123,
+		brokerToken:       "broker-token",
+		poolSession:       "kitchen-workspace-explicit",
+		poolStateDir:      filepath.Join(tmp, "pool-state"),
+	}
+	if err := os.MkdirAll(app.poolStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := app.spawnWorkerContainer(pool.WorkerSpec{
+		ID:       "w-missing-workspace",
+		Role:     "planner",
+		Provider: "claude",
+		Environment: map[string]string{
+			"MITTENS_SESSION_ID":   "kitchen-workspace-explicit",
+			"MITTENS_KITCHEN_ADDR": "http://127.0.0.1:3900",
+		},
+	})
+	if err == nil {
+		t.Fatal("spawnWorkerContainer succeeded without explicit workspace path")
+	}
+	if !strings.Contains(err.Error(), "workspace path is required") {
+		t.Fatalf("spawnWorkerContainer error = %v, want workspace path is required", err)
+	}
+}
+
 func TestSpawnWorkerContainerMountsCommonGitDirForLinkedWorktree(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

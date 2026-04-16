@@ -465,11 +465,16 @@ func TestEnqueueReviewCouncilTurnRetainsSeatWorkerWhileRouteIsTemporarilyExhaust
 
 	host := &schedulerHostAPI{}
 	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-review-seat-exhausted"), "kitchen-test")
+	reviewWorkspace := filepath.Join(paths.WorktreesDir, "feat-review-seat-exhausted", "review-seat")
+	if err := os.MkdirAll(reviewWorkspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll review workspace: %v", err)
+	}
 	if _, err := pm.SpawnWorker(pool.WorkerSpec{
-		ID:       "w-review-seat",
-		Role:     "reviewer",
-		Provider: "openai",
-		Model:    "gpt-5.4",
+		ID:            "w-review-seat",
+		Role:          "reviewer",
+		Provider:      "openai",
+		Model:         "gpt-5.4",
+		WorkspacePath: reviewWorkspace,
 	}); err != nil {
 		t.Fatalf("SpawnWorker review seat: %v", err)
 	}
@@ -572,10 +577,11 @@ func TestEnqueueCouncilTurnRetainsSeatWorkerWhileRouteIsTemporarilyExhausted(t *
 	host := &schedulerHostAPI{}
 	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-seat-exhausted"), "kitchen-test")
 	if _, err := pm.SpawnWorker(pool.WorkerSpec{
-		ID:       "w-council-seat",
-		Role:     plannerTaskRole,
-		Provider: "openai",
-		Model:    "gpt-5.4",
+		ID:            "w-council-seat",
+		Role:          plannerTaskRole,
+		Provider:      "openai",
+		Model:         "gpt-5.4",
+		WorkspacePath: repo,
 	}); err != nil {
 		t.Fatalf("SpawnWorker council seat: %v", err)
 	}
@@ -1366,6 +1372,98 @@ func TestScheduleDoesNotReuseIdleWorkerWithoutWorkspaceForLineageTask(t *testing
 	expectedWorkspace := filepath.Join(paths.WorktreesDir, lineage, taskID)
 	if host.spawnSpecs[0].WorkspacePath != expectedWorkspace {
 		t.Fatalf("spawn workspace = %q, want %q", host.spawnSpecs[0].WorkspacePath, expectedWorkspace)
+	}
+}
+
+func TestScheduleDoesNotReuseIdleImplementerWorkerForCouncilTask(t *testing.T) {
+	repo := initGitRepo(t)
+	paths := newKitchenTestPaths(t)
+	project, err := paths.Project(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPlanStore(project.PlansDir)
+	planID := "plan-council-role-check"
+	lineage := "council-role-check"
+	if _, err := store.Create(StoredPlan{
+		Plan: PlanRecord{
+			PlanID:  planID,
+			Title:   "Council role check",
+			Lineage: lineage,
+			State:   planStatePlanning,
+		},
+		Execution: ExecutionRecord{
+			PlanID: planID,
+			State:  planStatePlanning,
+		},
+	}); err != nil {
+		t.Fatalf("Create plan: %v", err)
+	}
+
+	host := &schedulerHostAPI{}
+	pm := newSchedulerPoolManagerWithHost(t, host, filepath.Join(project.PoolsDir, "sched-council-role-check"), "kitchen-test")
+	if _, err := pm.SpawnWorker(pool.WorkerSpec{
+		ID:            "w-impl",
+		Role:          "implementer",
+		Provider:      "anthropic",
+		Model:         "sonnet",
+		WorkspacePath: repo,
+	}); err != nil {
+		t.Fatalf("SpawnWorker implementer: %v", err)
+	}
+	if err := pm.RegisterWorker("w-impl", "container-w-impl"); err != nil {
+		t.Fatalf("RegisterWorker implementer: %v", err)
+	}
+	if err := pm.Heartbeat("w-impl", "idle", nil, ""); err != nil {
+		t.Fatalf("Heartbeat implementer: %v", err)
+	}
+	host.spawnSpecs = nil
+
+	taskID := councilTaskID(planID, 1)
+	if _, err := pm.EnqueueTask(pool.TaskSpec{
+		ID:         taskID,
+		PlanID:     planID,
+		Prompt:     "plan",
+		Complexity: string(ComplexityMedium),
+		Priority:   1,
+		Role:       plannerTaskRole,
+	}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+
+	gitMgr, err := NewGitManager(repo, paths.WorktreesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineages := NewLineageManager(project.LineagesDir, project.PlansDir)
+	s := NewScheduler(pm, host, NewComplexityRouter(DefaultKitchenConfig(), nil), gitMgr, store, lineages, DefaultKitchenConfig().Concurrency, "kitchen-test")
+
+	if err := s.schedule(); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	task, ok := pm.Task(taskID)
+	if !ok {
+		t.Fatalf("task %q not found", taskID)
+	}
+	if task.WorkerID != "" {
+		t.Fatalf("task workerID = %q, want no implementer reuse for council task", task.WorkerID)
+	}
+	if task.Status != pool.TaskQueued {
+		t.Fatalf("task status = %q, want queued pending fresh spawn", task.Status)
+	}
+	if len(host.spawnSpecs) != 1 {
+		t.Fatalf("spawn specs = %d, want 1 planner worker", len(host.spawnSpecs))
+	}
+	if host.spawnSpecs[0].Role != plannerTaskRole {
+		t.Fatalf("spawn role = %q, want %q", host.spawnSpecs[0].Role, plannerTaskRole)
+	}
+	if host.spawnSpecs[0].WorkspacePath != repo {
+		t.Fatalf("spawn workspace = %q, want repo workspace %q", host.spawnSpecs[0].WorkspacePath, repo)
 	}
 }
 
