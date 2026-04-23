@@ -782,13 +782,15 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 	p := CodexProvider()
 	os.MkdirAll(p.HostConfigDir(home), 0o755)
 
+	workspace := "/Users/test/project"
 	a := &App{
-		Provider:          p,
-		NoHistory:         false,
-		ContainerName:     "mittens-codex-session",
-		WorkspaceMountSrc: "/tmp/ws",
-		Workspace:         "/Users/test/project",
-		Credentials:       &CredentialManager{},
+		Provider:           p,
+		NoHistory:          false,
+		ContainerName:      "mittens-codex-session",
+		WorkspaceMountSrc:  "/tmp/ws",
+		Workspace:          workspace,
+		EffectiveWorkspace: workspace,
+		Credentials:        &CredentialManager{},
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
@@ -801,6 +803,12 @@ func TestAssembleDockerArgs_CodexSessionPersistenceMountsWholeConfig(t *testing.
 	}
 	if argPairContains(args, "-v", "/projects/") {
 		t.Fatalf("did not expect project-only history mount for codex")
+	}
+
+	// HostWorkspace must be propagated so mittens-init can cd into the workspace.
+	cfg := extractInitConfig(t, args)
+	if cfg.HostWorkspace != workspace {
+		t.Errorf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
 	}
 }
 

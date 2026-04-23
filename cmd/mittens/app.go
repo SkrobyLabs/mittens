@@ -1150,6 +1150,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "--add-host=host.docker.internal:host-gateway")
 	}
 
+	// Tell mittens-init where the workspace lives so phase 2 can cd into it,
+	// regardless of which history-mount strategy the provider uses.
+	initCfg.HostWorkspace = a.EffectiveWorkspace
+
 	// Session persistence mounts.
 	if !a.NoHistory && a.Provider.HistoryMountsWholeConfig {
 		hostConfigDir := a.Provider.HostConfigDir(home)
@@ -1169,8 +1173,6 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			args = append(args, "-v", filepath.Join(hostConfigDir, "plans")+":"+filepath.Join(containerConfigDir, "plans"))
 			args = append(args, "-v", filepath.Join(hostConfigDir, "tasks")+":"+filepath.Join(containerConfigDir, "tasks"))
 		}
-
-		initCfg.HostWorkspace = a.EffectiveWorkspace
 	}
 
 	// Extra directory mounts.
