@@ -91,6 +91,119 @@ func TestReadWriteJSONFile(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmptyJSONObjectFileRewritesEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	normalizeEmptyJSONObjectFile(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{}\n" {
+		t.Fatalf("file contents = %q, want %q", string(data), "{}\n")
+	}
+}
+
+func TestNormalizeEmptyJSONObjectFilePreservesNonEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prefs.json")
+	if err := os.WriteFile(path, []byte("{\"existing\":true}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	normalizeEmptyJSONObjectFile(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{\"existing\":true}\n" {
+		t.Fatalf("file contents changed: %q", string(data))
+	}
+}
+
+func TestCopyConfigFilesCopiesPersistedDirsAndGlobs(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	home := filepath.Join(root, "home")
+	aidir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(filepath.Join(staging, ".codex", "sessions", "2026", "04"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(aidir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, ".codex", "config.toml"), []byte("model = \"gpt-5\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, ".codex", "sessions", "2026", "04", "session.jsonl"), []byte("session\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, ".codex", "state_5.sqlite"), []byte("sqlite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config{
+		ConfigMount:     staging,
+		AIConfigDir:     ".codex",
+		AIDir:           aidir,
+		AISettingsFile:  "config.toml",
+		AIProjectFile:   "AGENTS.md",
+		AIPersistDirs:   []string{"sessions"},
+		AIPersistGlobs:  []string{"state_*.sqlite*"},
+		AIConfigSubdirs: []string{},
+		AIPluginFiles:   []string{},
+		AIPersistFiles:  nil,
+	}
+
+	copyConfigFiles(cfg)
+
+	for _, rel := range []string{"config.toml", "sessions/2026/04/session.jsonl", "state_5.sqlite"} {
+		if _, err := os.Stat(filepath.Join(aidir, rel)); err != nil {
+			t.Fatalf("expected copied path %s: %v", rel, err)
+		}
+	}
+}
+
+func TestCopyConfigFilesDoesNotNormalizeEmptyTomlSettings(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	aidir := filepath.Join(root, "home", ".codex")
+	if err := os.MkdirAll(filepath.Join(staging, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(aidir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, ".codex", "config.toml"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config{
+		ConfigMount:      staging,
+		AIConfigDir:      ".codex",
+		AIDir:            aidir,
+		AISettingsFile:   "config.toml",
+		AIProjectFile:    "AGENTS.md",
+		AISettingsFormat: "toml",
+	}
+
+	copyConfigFiles(cfg)
+
+	data, err := os.ReadFile(filepath.Join(aidir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "" {
+		t.Fatalf("config.toml contents = %q, want empty", string(data))
+	}
+}
+
 func TestCredExpiresAt(t *testing.T) {
 	tests := []struct {
 		name     string

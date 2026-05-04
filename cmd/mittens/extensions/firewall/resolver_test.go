@@ -206,3 +206,52 @@ func TestSetup_MissingConf(t *testing.T) {
 		t.Error("expected error when no conf file available")
 	}
 }
+
+func TestSetup_DefaultConfDirectoryFallsBackToEmbedded(t *testing.T) {
+	tmp := t.TempDir()
+	confDir := filepath.Join(tmp, "firewall.conf")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origDefault := DefaultConfPath
+	origEmbedded := EmbeddedConf
+	DefaultConfPath = confDir
+	EmbeddedConf = []byte("api.github.com\n")
+	defer func() {
+		DefaultConfPath = origDefault
+		EmbeddedConf = origEmbedded
+	}()
+
+	var dockerArgs []string
+	var firewallExtra []string
+	var tempDirs []string
+
+	ext := &registry.Extension{
+		Name:    "firewall",
+		Enabled: true,
+	}
+	ctx := &registry.SetupContext{
+		Home:          tmp,
+		Extension:     ext,
+		DockerArgs:    &dockerArgs,
+		FirewallExtra: &firewallExtra,
+		TempDirs:      &tempDirs,
+		StagingDir:    t.TempDir(),
+	}
+
+	if err := setup(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(dockerArgs, " ")
+	if strings.Contains(joined, confDir+":/mnt/mittens-staging/firewall.conf:ro") {
+		t.Fatalf("docker args should not mount directory path as firewall conf: %v", dockerArgs)
+	}
+	if !strings.Contains(joined, "/mnt/mittens-staging/firewall.conf:ro") {
+		t.Fatalf("docker args missing firewall conf mount: %v", dockerArgs)
+	}
+	if !strings.Contains(joined, "MITTENS_FIREWALL=true") {
+		t.Fatalf("docker args missing MITTENS_FIREWALL=true: %v", dockerArgs)
+	}
+}

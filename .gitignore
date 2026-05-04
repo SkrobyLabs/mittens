@@ -4,6 +4,8 @@
 *.swo
 *~
 .DS_Store
+node_modules/
+**/node_modules/
 .claude/*
 !.claude/skills/
 
@@ -22,3 +24,13 @@ cmd/mittens/container/mittens-init
 clipboard-sync.exe
 
 *.exe
+
+.tmp_gomodcache/*
+.tmp_gocache/*
+.cache/*
+.codex-gocache/*
+.codex-gomodcache/*
+.gocache/*
+.gomodcache/*
+.gotmp/*
+.gopath/*

@@ -28,6 +28,11 @@ LDFLAGS  := -s -w \
 # LDFLAGS above, and the automatic stamping can fail in some environments
 # (worktrees, detached HEAD, cross-compilation).
 export GOFLAGS := -buildvcs=false
+# Anchor caches to the Makefile directory so `make -C ...` does not try to
+# create cache directories under the caller's cwd.
+MAKEFILE_DIR := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
+export GOMODCACHE ?= $(MAKEFILE_DIR)/.gomodcache
+export GOCACHE ?= $(MAKEFILE_DIR)/.gocache
 
 # Install destination: ~/.local on Linux (no sudo), /usr/local on macOS
 UNAME_S  := $(shell uname -s)
