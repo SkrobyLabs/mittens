@@ -23,6 +23,7 @@ import (
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/helm"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/kubectl"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/mcp"
+	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/trivy"
 )
 
 // Set by -ldflags at build time (see Makefile).

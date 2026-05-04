@@ -206,6 +206,12 @@ func LoadAllExtensions(bundledDir, userDir string, embeddedFS fs.FS) ([]*Extensi
 				})
 			}
 
+			// Load optional prompt.md file (convention-based).
+			promptPath := filepath.Join(extDir, "prompt.md")
+			if promptData, err := os.ReadFile(promptPath); err == nil {
+				ext.PromptFile = string(promptData)
+			}
+
 			if _, existed := byName[ext.Name]; existed {
 				ext.Source = "user (overrides built-in)"
 			} else {
@@ -250,6 +256,13 @@ func loadExtensionsFromDir(dir string) ([]*Extension, error) {
 		if ext.DefaultOn {
 			ext.Enabled = true
 		}
+
+		// Load optional prompt.md file (convention-based).
+		promptPath := filepath.Join(dir, entry.Name(), "prompt.md")
+		if promptData, err := os.ReadFile(promptPath); err == nil {
+			ext.PromptFile = string(promptData)
+		}
+
 		exts = append(exts, &ext)
 	}
 	return exts, nil
@@ -311,6 +324,13 @@ func LoadExtensions(fsys fs.FS) ([]*Extension, error) {
 		if ext.DefaultOn {
 			ext.Enabled = true
 		}
+
+		// Load optional prompt.md file (convention-based).
+		promptPath := filepath.Join(filepath.Dir(path), "prompt.md")
+		if promptData, err := fs.ReadFile(fsys, promptPath); err == nil {
+			ext.PromptFile = string(promptData)
+		}
+
 		exts = append(exts, &ext)
 	}
 	sort.Slice(exts, func(i, j int) bool { return exts[i].Name < exts[j].Name })

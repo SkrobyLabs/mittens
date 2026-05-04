@@ -1,0 +1,29 @@
+# trivy extension for mittens
+# Installs the Trivy vulnerability scanner and whitelists domains for DB updates.
+# Mounts host cache directory for vulnerability DB persistence across sessions.
+
+name: trivy
+description: Trivy vulnerability scanner with DB caching
+prompt: "Trivy vulnerability scanner is available as a native binary. Use `trivy image <name>` to scan Docker images for CVEs."
+
+flags:
+  - name: "--trivy"
+    description: "Install Trivy vulnerability scanner"
+    arg: "none"
+
+firewall:
+  - "ghcr.io"
+  - "pkg-containers.githubusercontent.com"
+  - "api.github.com"
+  - "github.com"
+  - "objects.githubusercontent.com"
+
+mounts:
+  - src: "~/.cache/trivy"
+    dst: "~/.cache/trivy"
+    mode: "rw"
+    when: "dir_exists"
+
+build:
+  script: "build.sh"
+  image_tag: "trivy"

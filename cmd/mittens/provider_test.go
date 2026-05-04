@@ -17,7 +17,7 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 		"PersistGlobs":             true, // provider-specific runtime persistence
 		"LiveMountFiles":           true, // provider-specific direct runtime mounts
 		"LiveMountDirs":            true, // provider-specific direct runtime mounts
-		"HistoryMountsWholeConfig": true, // provider-specific direct config mount
+		"HistoryMountsWholeConfig": true, // Codex-only: mount whole config dir for history
 		"HistoryMountsProjectDirs": true, // provider-specific history strategy
 		"EffortTemplate":           true, // some providers don't use template mode
 	}

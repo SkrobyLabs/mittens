@@ -4,6 +4,8 @@
 *.swo
 *~
 .DS_Store
+node_modules/
+**/node_modules/
 .claude/*
 !.claude/skills/
 
@@ -35,5 +37,4 @@ clipboard-sync.exe
 .gomodcache/*
 .gotmp/*
 .gopath/*
-
 kitchen-linux
