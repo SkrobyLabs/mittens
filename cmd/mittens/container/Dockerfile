@@ -67,6 +67,7 @@ RUN bash -c "${AI_INSTALL_CMD}"
 # Extensions live in extensions/<name>/build.sh
 # Build context is the project root, so paths are relative to it.
 COPY extensions/ /tmp/ext-builds/
+ARG AI_USERNAME="claude"
 ARG INSTALL_EXTENSIONS=""
 ARG DOTNET_CHANNEL="LTS"
 ARG GO_VERSION=""
@@ -87,7 +88,6 @@ fi && rm -rf /tmp/ext-builds/
 # Create a non-root user matching typical host UID
 # The node base image has a 'node' user at UID 1000 — if the requested UID
 # collides, rename that user instead of silently failing.
-ARG AI_USERNAME="claude"
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 RUN existing_user=$(getent passwd ${USER_ID} | cut -d: -f1) && \

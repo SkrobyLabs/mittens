@@ -17,6 +17,7 @@ firewall:
   - "api.nuget.org"
   - "azuresearch-usnc.nuget.org"
   - "azuresearch-ussc.nuget.org"
+  - "pkgs.dev.azure.com"
 
 mounts:
   - src: "~/.nuget/packages"
@@ -25,6 +26,26 @@ mounts:
     when: "dir_exists"
     env:
       NUGET_FALLBACK_PACKAGES: "~/.nuget/host-packages"
+  # TODO: These credential/config mounts are only a best-effort cross-OS fallback.
+  # They work for common Linux-style layouts, but native Windows/macOS credential
+  # storage differs. Replace this YAML-only approach with a dotnet resolver that
+  # stages NuGet/Azure Artifacts auth from host-specific locations.
+  - src: "~/.nuget/NuGet"
+    dst: "~/.nuget/NuGet"
+    mode: "ro"
+    when: "dir_exists"
+  - src: "~/.nuget/plugins"
+    dst: "~/.nuget/plugins"
+    mode: "ro"
+    when: "dir_exists"
+  - src: "~/.local/share/MicrosoftCredentialProvider"
+    dst: "~/.local/share/MicrosoftCredentialProvider"
+    mode: "rw"
+    when: "dir_exists"
+  - src: "~/.local/share/NuGet"
+    dst: "~/.local/share/NuGet"
+    mode: "rw"
+    when: "dir_exists"
 
 build:
   script: "dotnet.sh"

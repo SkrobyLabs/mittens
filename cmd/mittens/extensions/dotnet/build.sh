@@ -31,4 +31,6 @@ echo 'export PATH=$PATH:/usr/share/dotnet' >> /etc/profile.d/dotnet.sh
 
 # Pre-create .nuget so Docker bind mounts don't create it as root
 # (ownership is fixed by the chown -R in Dockerfile after useradd)
-mkdir -p /home/claude/.nuget
+ai_username="${AI_USERNAME:-claude}"
+ai_home="/home/${ai_username}"
+mkdir -p "${ai_home}/.nuget" "${ai_home}/.local/share/NuGet/plugins-cache"
