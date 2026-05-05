@@ -95,6 +95,12 @@ func TestRunHelp_HasVersionCommandEntry(t *testing.T) {
 	if !strings.Contains(out, "Show version information") {
 		t.Fatalf("help output missing version command description: %s", out)
 	}
+	if strings.Contains(out, "claude-args") {
+		t.Fatalf("help output should use provider-args, got: %s", out)
+	}
+	if !strings.Contains(out, "provider-args") {
+		t.Fatalf("help output missing provider args wording: %s", out)
+	}
 }
 
 func TestRunMain_VersionAliasesStillSupported(t *testing.T) {

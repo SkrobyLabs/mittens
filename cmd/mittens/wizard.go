@@ -51,24 +51,18 @@ func runWizard(extensions []*registry.Extension) error {
 	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens project setup"))
 	fmt.Fprintln(os.Stderr)
 
-	// 2. Handle existing config.
-	// Use raw lines (not split tokens) so that "parseExistingConfig" and
-	// display both see whole lines like "--go 1.24" rather than ["--go","1.24"].
-	existing, err := loadProjectConfigRaw(workspace)
+	// 2. Handle existing policy/config.
+	existing, source, err := loadWizardExistingConfig(workspace, extensions)
 	if err != nil {
 		return fmt.Errorf("loading existing config: %w", err)
 	}
 
 	editMode := false
-	var existDirs, existProviders, existExts, existFirewall, existOpts []string
+	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
 
 	if len(existing) > 0 {
-		configPath := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
-		fmt.Fprintf(os.Stderr, "Existing config: %s\n\n", configPath)
-		for _, line := range existing {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
-		}
-		fmt.Fprintln(os.Stderr)
+		displayWizardExistingConfig(workspace, source, existing, extensions)
+		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -125,12 +119,12 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 	configLines = append(configLines, extLines...)
 
-	// ── Step 6: Firewall ───────────────────────────────────────────────────
-	fwLines, err := wizardFirewall(editMode, existFirewall)
+	// ── Step 4: Network boundary ───────────────────────────────────────────
+	networkLines, extraDomains, err := wizardNetworkBoundary(editMode, existFirewall, existOpts, existExtraDomains)
 	if err != nil {
 		return gracefulAbort(err)
 	}
-	configLines = append(configLines, fwLines...)
+	configLines = append(configLines, networkLines...)
 
 	// ── Step N: Options ────────────────────────────────────────────────────
 	optLines, err := wizardOptions(editMode, existOpts)
@@ -139,14 +133,19 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 	configLines = append(configLines, optLines...)
 
-	// ── Write config ───────────────────────────────────────────────────────
-	if err := SaveProjectConfig(workspace, configLines); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	// ── Write structured project policy ────────────────────────────────────
+	policy, err := PolicyFromLegacyFlags(splitConfigFlags(configLines), extensions)
+	if err != nil {
+		return fmt.Errorf("building policy: %w", err)
+	}
+	policy.Network.ExtraDomains = normalizeNetworkDomains(extraDomains)
+	if err := SaveProjectPolicy(workspace, policy); err != nil {
+		return fmt.Errorf("saving policy: %w", err)
 	}
 
-	configPath := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "config")
+	configPath := projectPolicyPath(workspace)
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Config saved to: "+configPath))
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Policy saved to: "+configPath))
 	fmt.Fprintln(os.Stderr)
 
 	if len(configLines) > 0 {
@@ -186,9 +185,9 @@ func runWizard(extensions []*registry.Extension) error {
 // Returns the config lines for the caller to use as ephemeral config.
 // Returns huh.ErrUserAborted on Ctrl+C (not nil) so the caller can
 // distinguish cancellation from an empty-but-valid config.
-func wizardSession(extensions []*registry.Extension) ([]string, error) {
+func wizardSession(extensions []*registry.Extension) ([]string, []string, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, fmt.Errorf("--session requires an interactive terminal")
+		return nil, nil, fmt.Errorf("--session requires an interactive terminal")
 	}
 
 	workspace := detectWorkspace()
@@ -198,54 +197,50 @@ func wizardSession(extensions []*registry.Extension) ([]string, error) {
 	fmt.Fprintln(os.Stderr, wizardDim.Render("Changes apply to this launch only and will not be saved."))
 	fmt.Fprintln(os.Stderr)
 
-	existing, err := loadProjectConfigRaw(workspace)
+	existing, source, err := loadWizardExistingConfig(workspace, extensions)
 	if err != nil {
-		return nil, fmt.Errorf("loading existing config: %w", err)
+		return nil, nil, fmt.Errorf("loading existing config: %w", err)
 	}
 
 	editMode := false
-	var existDirs, existProviders, existExts, existFirewall, existOpts []string
+	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
 
 	if len(existing) > 0 {
 		editMode = true
 		existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
-
-		fmt.Fprintln(os.Stderr, wizardDim.Render("Current project config:"))
-		for _, line := range existing {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
-		}
-		fmt.Fprintln(os.Stderr)
+		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
+		displayWizardExistingConfig(workspace, source, existing, extensions)
 	}
 
 	var configLines []string
 
 	providerLines, err := wizardProvider(editMode, existProviders)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	configLines = append(configLines, providerLines...)
 
 	dirLines, err := wizardDirs(workspace, editMode, existDirs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	configLines = append(configLines, dirLines...)
 
 	extLines, err := wizardExtensions(extensions, editMode, existExts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	configLines = append(configLines, extLines...)
 
-	fwLines, err := wizardFirewall(editMode, existFirewall)
+	networkLines, extraDomains, err := wizardNetworkBoundary(editMode, existFirewall, existOpts, existExtraDomains)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	configLines = append(configLines, fwLines...)
+	configLines = append(configLines, networkLines...)
 
 	optLines, err := wizardOptions(editMode, existOpts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	configLines = append(configLines, optLines...)
 
@@ -258,7 +253,7 @@ func wizardSession(extensions []*registry.Extension) ([]string, error) {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	return configLines, nil
+	return configLines, extraDomains, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -488,15 +483,7 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 
 	// In edit mode, offer to keep existing directories.
 	if editMode {
-		if len(existDirs) > 0 {
-			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
-			for _, d := range existDirs {
-				fmt.Fprintln(os.Stderr, "  "+d)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "  (no extra directories)")
-		}
-		fmt.Fprintln(os.Stderr)
+		displayCurrentSetup(existDirs, "(no extra directories)")
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -539,40 +526,6 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 	}
 	selectedDirs = append(selectedDirs, chosen...)
 
-	// Custom path entry loop.
-	for {
-		var custom string
-		if err := huh.NewInput().
-			Title("Add custom directory path (leave empty to continue)").
-			Placeholder("/path/to/directory").
-			Value(&custom).
-			Run(); err != nil {
-			return nil, err
-		}
-		custom = strings.TrimSpace(custom)
-		if custom == "" {
-			break
-		}
-		abs, err := filepath.Abs(custom)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  Could not resolve path: %v\n", err)
-			continue
-		}
-		if info, err := os.Stat(abs); err != nil || !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "  Directory not found: %s\n", abs)
-			continue
-		}
-
-		readOnly := false
-		if err := huh.NewConfirm().
-			Title("Mount custom directory as read-only? (--dir-ro)").
-			Value(&readOnly).
-			Run(); err != nil {
-			return nil, err
-		}
-		selectedDirs = append(selectedDirs, dirMountSelection{Path: abs, ReadOnly: readOnly})
-	}
-
 	var lines []string
 	for _, d := range selectedDirs {
 		if d.ReadOnly {
@@ -594,15 +547,7 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Provider"))
 
 	if editMode {
-		if len(existProviders) > 0 {
-			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
-			for _, p := range existProviders {
-				fmt.Fprintln(os.Stderr, "  "+p)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "  --provider claude (default)")
-		}
-		fmt.Fprintln(os.Stderr)
+		displayCurrentSetup(existProviders, "Provider: claude (default)")
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -730,15 +675,7 @@ func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts
 
 	// In edit mode, offer to keep existing extensions.
 	if editMode {
-		if len(existExts) > 0 {
-			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
-			for _, e := range existExts {
-				fmt.Fprintln(os.Stderr, "  "+e)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "  (no extensions)")
-		}
-		fmt.Fprintln(os.Stderr)
+		displayCurrentSetup(existExts, "(no extensions)")
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -1065,50 +1002,81 @@ func configureCloud(name, flag, allFlag, title, selectTitle string) ([]string, e
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Firewall
+// Step 4: Network boundary
 // ---------------------------------------------------------------------------
 
-func wizardFirewall(editMode bool, existFirewall []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Firewall"))
+func wizardNetworkBoundary(editMode bool, existFirewall, existOpts, existExtraDomains []string) ([]string, []string, error) {
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 4: Network boundary"))
 
 	if editMode {
-		if len(existFirewall) > 0 {
-			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
-			for _, f := range existFirewall {
-				fmt.Fprintln(os.Stderr, "  "+f)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "  (strict — default)")
-		}
-		fmt.Fprintln(os.Stderr)
+		displayCurrentSetup(existingNetworkLines(existFirewall, existOpts, existExtraDomains), "Network: bridge + strict firewall (default)")
 
 		var action string
 		if err := huh.NewSelect[string]().
-			Title("Firewall mode").
+			Title("Network boundary").
 			Options(
 				huh.NewOption("Keep", "keep"),
 				huh.NewOption("Change", "change"),
 			).
 			Value(&action).
 			Run(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if action == "keep" {
 			fmt.Fprintln(os.Stderr)
-			return existFirewall, nil
+			return appendNetworkLines(existFirewall, existOpts), existExtraDomains, nil
 		}
 	}
 
 	fmt.Fprintln(os.Stderr)
 
-	var mode string
+	defaultBoundary := "bridge-firewall"
+	if hasLine(existOpts, "--network-host") {
+		defaultBoundary = "host"
+	} else if hasLine(existFirewall, "--no-firewall") {
+		defaultBoundary = "bridge-open"
+	}
+
+	boundary := defaultBoundary
 	if err := huh.NewSelect[string]().
-		Title("Firewall mode").
+		Title("Network boundary").
 		Options(
-			huh.NewOption("Strict (default) — git, registries, package managers only", "strict"),
-			huh.NewOption("Developer-friendly (--firewall-dev) — adds cloud APIs, apt, CDN", "dev"),
-			huh.NewOption("Custom file — provide your own whitelist", "custom"),
-			huh.NewOption("Disabled (--no-firewall) — allow all outbound traffic", "off"),
+			huh.NewOption("Bridge + firewall allowlist (recommended)", "bridge-firewall"),
+			huh.NewOption("Bridge + unrestricted outbound HTTP(S)", "bridge-open"),
+			huh.NewOption("Host network (least isolated, for local/VPN services)", "host"),
+		).
+		Value(&boundary).
+		Run(); err != nil {
+		return nil, nil, err
+	}
+	fmt.Fprintln(os.Stderr)
+
+	switch boundary {
+	case "bridge-open":
+		return []string{"--no-firewall"}, nil, nil
+	case "host":
+		return []string{"--network-host", "--no-firewall"}, nil, nil
+	}
+
+	firewallLines, err := wizardFirewallMode(existFirewall)
+	if err != nil {
+		return nil, nil, err
+	}
+	extraDomains, err := wizardFirewallExtraDomains(existExtraDomains)
+	if err != nil {
+		return nil, nil, err
+	}
+	return firewallLines, extraDomains, nil
+}
+
+func wizardFirewallMode(existFirewall []string) ([]string, error) {
+	mode := existingFirewallMode(existFirewall)
+	if err := huh.NewSelect[string]().
+		Title("Firewall allowlist").
+		Options(
+			huh.NewOption("Strict (default) - git, registries, package managers only", "strict"),
+			huh.NewOption("Developer-friendly - adds cloud APIs, apt, CDN", "dev"),
+			huh.NewOption("Custom file - provide your own whitelist", "custom"),
 		).
 		Value(&mode).
 		Run(); err != nil {
@@ -1120,7 +1088,7 @@ func wizardFirewall(editMode bool, existFirewall []string) ([]string, error) {
 	case "dev":
 		return []string{"--firewall-dev"}, nil
 	case "custom":
-		var path string
+		path := existingCustomFirewallPath(existFirewall)
 		if err := huh.NewInput().
 			Title("Path to custom whitelist file").
 			Placeholder("/path/to/firewall.conf").
@@ -1133,11 +1101,21 @@ func wizardFirewall(editMode bool, existFirewall []string) ([]string, error) {
 			return nil, nil
 		}
 		return []string{"--firewall " + path}, nil
-	case "off":
-		return []string{"--no-firewall"}, nil
 	default:
 		return nil, nil
 	}
+}
+
+func wizardFirewallExtraDomains(existing []string) ([]string, error) {
+	value := strings.Join(existing, ", ")
+	if err := huh.NewInput().
+		Title("Additional allowed domains (comma-separated, optional)").
+		Placeholder("*.apps.example.test, api.example.com").
+		Value(&value).
+		Run(); err != nil {
+		return nil, err
+	}
+	return normalizeNetworkDomains(parsePolicyList(value)), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,15 +1126,7 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Options"))
 
 	if editMode {
-		if len(existOpts) > 0 {
-			fmt.Fprintln(os.Stderr, "\nCurrently configured:")
-			for _, o := range existOpts {
-				fmt.Fprintln(os.Stderr, "  "+o)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "  (defaults)")
-		}
-		fmt.Fprintln(os.Stderr)
+		displayCurrentSetup(displayOptionSetupLines(existOpts), "")
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -1191,21 +1161,6 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		return nil, err
 	}
 
-	networkMode := "bridge"
-	if optSet["--network-host"] {
-		networkMode = "host"
-	}
-	if err := huh.NewSelect[string]().
-		Title("Network mode").
-		Options(
-			huh.NewOption("Bridge with firewall (default)", "bridge"),
-			huh.NewOption("Host networking (--network-host)", "host"),
-		).
-		Value(&networkMode).
-		Run(); err != nil {
-		return nil, err
-	}
-
 	worktree := optSet["--worktree"]
 	if err := huh.NewConfirm().
 		Title("Parallel agent isolation (git worktree)? (--worktree)").
@@ -1217,9 +1172,6 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 	var lines []string
 	if !yolo {
 		lines = append(lines, "--no-yolo")
-	}
-	if networkMode == "host" {
-		lines = append(lines, "--network-host")
 	}
 	if worktree {
 		lines = append(lines, "--worktree")
@@ -1253,6 +1205,183 @@ func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts 
 		}
 	}
 	return
+}
+
+func loadWizardExtraDomains(workspace string, extensions []*registry.Extension) []string {
+	policy, source, err := LoadProjectPolicy(workspace, extensions)
+	if err != nil || policy == nil || source != PolicySourceV2 {
+		return nil
+	}
+	return append([]string(nil), policy.Network.ExtraDomains...)
+}
+
+func existingNetworkLines(firewall, opts, extraDomains []string) []string {
+	lines := appendNetworkLines(firewall, opts)
+	for _, domain := range extraDomains {
+		lines = append(lines, "network.extra_domain "+domain)
+	}
+	return lines
+}
+
+func appendNetworkLines(firewall, opts []string) []string {
+	var lines []string
+	if hasLine(opts, "--network-host") {
+		lines = append(lines, "--network-host")
+	}
+	lines = append(lines, firewall...)
+	return lines
+}
+
+func hasLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+func existingFirewallMode(lines []string) string {
+	for _, line := range lines {
+		switch {
+		case line == "--firewall-dev":
+			return "dev"
+		case strings.HasPrefix(line, "--firewall "):
+			return "custom"
+		}
+	}
+	return "strict"
+}
+
+func existingCustomFirewallPath(lines []string) string {
+	for _, line := range lines {
+		if strings.HasPrefix(line, "--firewall ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "--firewall "))
+		}
+	}
+	return ""
+}
+
+func displayOptionSetupLines(lines []string) []string {
+	optSet := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		optSet[line] = true
+	}
+	out := []string{"option.yolo enabled"}
+	if optSet["--no-yolo"] {
+		out[0] = "option.yolo disabled"
+	}
+	if optSet["--worktree"] {
+		out = append(out, "option.worktree enabled")
+	} else {
+		out = append(out, "option.worktree disabled")
+	}
+	return out
+}
+
+func displayCurrentSetup(lines []string, empty string) {
+	fmt.Fprintln(os.Stderr, "\nCurrent setup:")
+	if len(lines) == 0 {
+		fmt.Fprintln(os.Stderr, "  "+empty)
+		fmt.Fprintln(os.Stderr)
+		return
+	}
+	for _, line := range lines {
+		fmt.Fprintln(os.Stderr, "  "+formatCurrentSetupLine(line))
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+func formatCurrentSetupLine(line string) string {
+	switch {
+	case strings.HasPrefix(line, "--provider "):
+		return "Provider: " + strings.TrimSpace(strings.TrimPrefix(line, "--provider "))
+	case strings.HasPrefix(line, "--dir-ro "):
+		return "Extra directory: " + strings.TrimSpace(strings.TrimPrefix(line, "--dir-ro ")) + " (read-only)"
+	case strings.HasPrefix(line, "--dir "):
+		return "Extra directory: " + strings.TrimSpace(strings.TrimPrefix(line, "--dir ")) + " (read/write)"
+	case line == "--firewall-dev":
+		return "Firewall: dev"
+	case line == "--no-firewall":
+		return "Firewall: disabled"
+	case strings.HasPrefix(line, "--firewall "):
+		return "Firewall: custom file " + strings.TrimSpace(strings.TrimPrefix(line, "--firewall "))
+	case line == "--no-yolo":
+		return "YOLO mode: disabled"
+	case line == "--yolo":
+		return "YOLO mode: enabled"
+	case line == "--network-host":
+		return "Network: host"
+	case line == "--worktree":
+		return "Parallel isolation: git worktree"
+	case strings.HasPrefix(line, "network.extra_domain "):
+		return "Allowed domain: " + strings.TrimSpace(strings.TrimPrefix(line, "network.extra_domain "))
+	case line == "option.yolo enabled":
+		return "YOLO mode: enabled"
+	case line == "option.yolo disabled":
+		return "YOLO mode: disabled"
+	case line == "option.worktree enabled":
+		return "Parallel isolation: git worktree"
+	case line == "option.worktree disabled":
+		return "Parallel isolation: disabled"
+	case strings.HasPrefix(line, "--"):
+		name, value, _ := strings.Cut(strings.TrimPrefix(line, "--"), " ")
+		name = strings.ReplaceAll(name, "-", " ")
+		if strings.TrimSpace(value) == "" {
+			return titleLabel(name) + ": enabled"
+		}
+		return titleLabel(name) + ": " + strings.TrimSpace(value)
+	default:
+		return line
+	}
+}
+
+func titleLabel(value string) string {
+	parts := strings.Fields(value)
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
+}
+
+func loadWizardExistingConfig(workspace string, extensions []*registry.Extension) ([]string, PolicySource, error) {
+	policy, source, err := LoadProjectPolicy(workspace, extensions)
+	if err != nil {
+		return nil, PolicySourceNone, err
+	}
+	if policy == nil {
+		return nil, PolicySourceNone, nil
+	}
+	if source == PolicySourceLegacy {
+		lines, err := readConfigLines(projectConfigPath(workspace))
+		if err != nil {
+			return nil, PolicySourceNone, err
+		}
+		return lines, source, nil
+	}
+	return legacyArgsToConfigLines(policy.ToLegacyFlags()), source, nil
+}
+
+func displayWizardExistingConfig(workspace string, source PolicySource, lines []string, extensions []*registry.Extension) {
+	switch source {
+	case PolicySourceV2:
+		fmt.Fprintf(os.Stderr, "Existing policy: %s\n\n", projectPolicyPath(workspace))
+		if policy, _, err := LoadProjectPolicy(workspace, extensions); err == nil && policy != nil {
+			fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, workspace).Render()))
+		}
+	case PolicySourceLegacy:
+		fmt.Fprintf(os.Stderr, "Existing legacy config: %s\n", projectConfigPath(workspace))
+		fmt.Fprintf(os.Stderr, "%s\n\n", wizardDim.Render("This will be saved as policy.yaml when you finish setup."))
+		for _, line := range lines {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
+		}
+	default:
+		return
+	}
+	fmt.Fprintln(os.Stderr)
 }
 
 // gracefulAbort handles huh interrupt errors (Ctrl+C) cleanly.

@@ -44,6 +44,36 @@ func TestDomainWhitelistWildcard(t *testing.T) {
 	}
 }
 
+func TestDomainWhitelistWildcardMatchesNestedAppHost(t *testing.T) {
+	wl := newDomainWhitelist([]string{".apps.example.test"})
+
+	if !wl.allowed("service-team--app-prod.apps.example.test") {
+		t.Error("expected wildcard to allow nested app host")
+	}
+	if !wl.allowed("apps.example.test") {
+		t.Error("expected wildcard to allow bare app host")
+	}
+}
+
+func TestDomainWhitelistStarWildcardMatchesNestedAppHost(t *testing.T) {
+	wl := newDomainWhitelist([]string{"*.apps.example.test"})
+
+	if !wl.allowed("service-team--app-prod.apps.example.test") {
+		t.Error("expected star wildcard to allow nested app host")
+	}
+	if !wl.allowed("apps.example.test") {
+		t.Error("expected star wildcard to allow bare app host")
+	}
+}
+
+func TestDomainWhitelistExactDoesNotMatchNestedSubdomain(t *testing.T) {
+	wl := newDomainWhitelist([]string{"apps.example.test"})
+
+	if wl.allowed("service-team--app-prod.apps.example.test") {
+		t.Error("exact domain should not allow nested subdomain")
+	}
+}
+
 func TestDomainWhitelistEmpty(t *testing.T) {
 	wl := newDomainWhitelist(nil)
 	if wl.allowed("anything.com") {
@@ -64,6 +94,7 @@ func TestParseWhitelistReader(t *testing.T) {
 api.github.com    # inline comment
 pypi.org
    .amazonaws.com
+*.apps.example.test
 
 # Another comment
 registry.npmjs.org`
@@ -71,7 +102,7 @@ registry.npmjs.org`
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	domains := parseWhitelistReader(scanner)
 
-	expected := []string{"api.github.com", "pypi.org", ".amazonaws.com", "registry.npmjs.org"}
+	expected := []string{"api.github.com", "pypi.org", ".amazonaws.com", ".apps.example.test", "registry.npmjs.org"}
 	if len(domains) != len(expected) {
 		t.Fatalf("expected %d domains, got %d: %v", len(expected), len(domains), domains)
 	}

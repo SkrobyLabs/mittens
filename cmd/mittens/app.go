@@ -50,7 +50,10 @@ type App struct {
 	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
 	Profile       string // model profile name (e.g. "planner", "fast")
 	ImagePasteKey string // "ctrl+v" or "meta+v"
+	HostBridge    HostBridgeConfig
+	PathTranslate bool
 	ExtraDirs     []string
+	FirewallExtra []string
 	InstanceName  string // user-provided name via --name
 	ClaudeArgs    []string
 
@@ -83,6 +86,9 @@ type App struct {
 	// Credential staging dirs ("staging_path:target_dir") from extension resolvers
 	credStagingDirs []string
 
+	// Launch boundary summary, populated while assembling docker args.
+	launchSummary LaunchSummary
+
 	// Drop zone for drag-and-drop file translation
 	dropDir string
 
@@ -94,6 +100,8 @@ type App struct {
 	brokerPort  int
 	brokerToken string
 	brokerSock  string // Unix socket path (Linux mode)
+
+	hostPolicyConfigured bool
 }
 
 // coreFlags maps flag names to a setter function on *App.
@@ -181,8 +189,8 @@ func (a *App) ParseFlags(args []string) error {
 			continue
 		}
 
-		// Info flags -- handle here since cobra doesn't parse for us.
-		// Note: --help/-h are caught in runMain before ParseFlags.
+		// Info flags are handled in runMain before config loading. Keep this
+		// fallback for direct tests or embedded callers that invoke ParseFlags.
 		if arg == "--extensions" {
 			printExtensions(a.Extensions)
 			os.Exit(0)
@@ -192,8 +200,8 @@ func (a *App) ParseFlags(args []string) error {
 			os.Exit(0)
 		}
 
-		// Unrecognised flag or positional arg -- forward to Claude.
-		// Claude Code accepts flags like --resume, --model, --print, etc.
+		// Unrecognised flag or positional arg -- forward to the selected provider.
+		// Providers accept their own flags like --model, --print, etc.
 		a.ClaudeArgs = append(a.ClaudeArgs, arg)
 		i++
 	}
@@ -203,6 +211,7 @@ func (a *App) ParseFlags(args []string) error {
 // Run is the main orchestration method.
 func (a *App) Run() error {
 	defer a.Cleanup()
+	a.ensureHostPolicyDefaults()
 
 	// Compute worktree suffix once for consistent naming across all worktrees.
 	a.worktreeSuffix = fmt.Sprintf("wt-%d", os.Getpid())
@@ -216,6 +225,7 @@ func (a *App) Run() error {
 	}
 
 	home := os.Getenv("HOME")
+	providerPlan := a.Provider.RuntimePlan()
 	ensureDir(a.Provider.HostConfigDir(home))
 
 	// Detect workspace.
@@ -226,9 +236,9 @@ func (a *App) Run() error {
 
 	// Session persistence setup.
 	if !a.NoHistory {
-		if a.Provider.HistoryMountsWholeConfig {
+		if providerPlan.HistoryMountsWholeConfig {
 			ensureDir(a.Provider.HostConfigDir(home))
-		} else if a.Provider.HistoryMountsProjectDirs {
+		} else if providerPlan.HistoryMountsProjectDirs {
 			a.HostProjectDir = ProjectDir(a.Workspace)
 			ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
 		}
@@ -296,64 +306,26 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Run setup resolvers for enabled extensions.
-	var resolverDockerArgs []string
-	var resolverFirewallExtra []string
-	var credStagingDirs []string
-	for _, ext := range a.Extensions {
-		if !ext.Enabled {
-			continue
-		}
-		logVerbose(a.Verbose, "Setting up extension: %s", ext.Name)
-		setupFn := registry.GetSetupResolver(ext.Name)
-		if setupFn == nil {
-			continue
-		}
-		// Create a staging directory for this extension.
-		staging, err := os.MkdirTemp("", "mittens-"+ext.Name+"-*")
-		if err != nil {
-			return fmt.Errorf("creating staging dir for %s: %w", ext.Name, err)
-		}
-		a.tempDirs = append(a.tempDirs, staging)
-
-		ctx := &registry.SetupContext{
-			Home:            home,
-			ContainerHome:   a.Provider.HomePath(),
-			ContainerName:   a.ContainerName,
-			Extension:       ext,
-			DockerArgs:      &resolverDockerArgs,
-			FirewallExtra:   &resolverFirewallExtra,
-			TempDirs:        &a.tempDirs,
-			StagingDir:      staging,
-			CredStagingDirs: &credStagingDirs,
-		}
-		if err := setupFn(ctx); err != nil {
-			return fmt.Errorf("extension %s setup: %w", ext.Name, err)
-		}
+	setupPlans, err := a.capabilitySetupPlans(home)
+	if err != nil {
+		return err
 	}
+	resolverDockerArgs, resolverFirewallExtra, credStagingDirs := flattenCapabilitySetupPlans(setupPlans)
 	a.credStagingDirs = credStagingDirs
 
-	// Include non-default provider in image tag to avoid cache collisions.
-	if a.Provider.Name != "claude" {
-		a.imageTagParts = append(a.imageTagParts, a.Provider.Name)
-	}
-
-	// Collect extension build state.
-	a.buildArgs = make(map[string]string)
+	// Collect provider and capability build state.
+	a.imageTagParts = append(a.imageTagParts, providerPlan.ImageTagParts...)
+	a.buildArgs = copyStringMap(providerPlan.BuildArgs)
 	var installExtensions []string
-	for _, ext := range a.Extensions {
-		if !ext.Enabled {
-			continue
+	for _, plan := range capabilityRuntimePlans(a.Extensions, home, a.Provider.HomePath()) {
+		if plan.Install {
+			installExtensions = append(installExtensions, plan.Name)
 		}
-		if ext.Build != nil && ext.Build.Script != "" {
-			installExtensions = append(installExtensions, ext.Name)
-		}
-		for k, v := range ext.BuildArgs() {
+		for k, v := range plan.BuildArgs {
 			a.buildArgs[k] = v
 		}
-		tag := ext.ImageTagPart()
-		if tag != "" {
-			a.imageTagParts = append(a.imageTagParts, tag)
+		if plan.ImageTagPart != "" {
+			a.imageTagParts = append(a.imageTagParts, plan.ImageTagPart)
 		}
 	}
 	if len(installExtensions) > 0 {
@@ -392,6 +364,8 @@ func (a *App) Run() error {
 		}
 		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
+		a.broker.Host = a.HostBridge
+		a.broker.Host.Notifications = a.broker.Host.Notifications && !a.NoNotify
 		if token, err := randomHex(16); err == nil {
 			a.brokerToken = token
 			a.broker.AuthToken = token
@@ -402,7 +376,7 @@ func (a *App) Run() error {
 		a.broker.OnOpen = func(url string) {
 			openOnHost(url, blogFnOpen)
 		}
-		if !a.NoNotify {
+		if a.broker.Host.Notifications {
 			displayName := a.Provider.DisplayName
 			focus := a.terminalFocus
 			blogFn := a.broker.blog
@@ -453,15 +427,9 @@ func (a *App) Run() error {
 	// Assemble docker run args and run.
 	dockerArgs := a.assembleDockerArgs(resolverDockerArgs, resolverFirewallExtra)
 
-	// Summary logging.
-	logInfo("Working directory: %s", cwd)
-	if !a.NoHistory && a.HostProjectDir != "" {
-		logInfo("Session persistence: enabled (project dir: %s)", a.HostProjectDir)
-	} else if a.NoHistory {
-		logInfo("Session persistence: disabled (--no-history)")
-	}
+	fmt.Fprint(os.Stderr, a.launchSummary.Render())
 	if len(a.ClaudeArgs) > 0 {
-		logInfo("Claude args: %s", strings.Join(a.ClaudeArgs, " "))
+		logInfo("%s args: %s", a.Provider.DisplayName, strings.Join(a.ClaudeArgs, " "))
 	}
 
 	if a.Verbose {
@@ -727,10 +695,11 @@ func (a *App) Cleanup() {
 			}
 		}
 		// Copy back provider runtime state from the container snapshot.
-		if len(a.Provider.PersistFiles) > 0 || len(a.Provider.PersistDirs) > 0 || len(a.Provider.PersistGlobs) > 0 {
+		providerPlan := a.Provider.RuntimePlan()
+		if len(providerPlan.AI.PersistFiles) > 0 || len(providerPlan.AI.PersistDirs) > 0 || len(providerPlan.AI.PersistGlobs) > 0 {
 			home := os.Getenv("HOME")
 			hostConfigDir := a.Provider.HostConfigDir(home)
-			if err := persistContainerConfig(a.ContainerName, a.Provider.ContainerConfigDir(), hostConfigDir, a.Provider.PersistFiles, a.Provider.PersistDirs, a.Provider.PersistGlobs, a.Verbose); err != nil {
+			if err := persistContainerConfig(a.ContainerName, a.Provider.ContainerConfigDir(), hostConfigDir, providerPlan.AI.PersistFiles, providerPlan.AI.PersistDirs, providerPlan.AI.PersistGlobs, a.Verbose); err != nil {
 				logWarn("Persist provider state: %v", err)
 			}
 		}
@@ -995,6 +964,120 @@ func registerClipboardClient(sharedDir, clientDir string) (string, error) {
 	return regFile.Name(), nil
 }
 
+func (a *App) ensureHostPolicyDefaults() {
+	if a.hostPolicyConfigured {
+		return
+	}
+	a.HostBridge = defaultHostBridgeConfig()
+	a.PathTranslate = true
+}
+
+func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
+	if policy == nil {
+		return
+	}
+	a.Profile = policy.Provider.Profile
+	a.ExtraDirs = appendPolicyMounts(a.ExtraDirs, policy.Workspace.Mounts)
+	a.FirewallExtra = append(a.FirewallExtra, policy.Network.ExtraDomains...)
+	a.NetworkHost = policy.Network.Mode == "host" || policy.Execution.NetworkHost
+	a.Worktree = policy.Workspace.Mode == "worktree" || policy.Execution.Worktree
+	a.Shell = policy.Execution.Shell
+	if policy.Execution.Yolo != nil {
+		a.Yolo = *policy.Execution.Yolo
+	}
+	if policy.Execution.History != nil {
+		a.NoHistory = !*policy.Execution.History
+	}
+	if policy.Execution.Notify != nil {
+		a.NoNotify = !*policy.Execution.Notify
+	}
+	if policy.Execution.Resume != "" {
+		a.ResumeSession = policy.Execution.Resume
+	}
+	if policy.Options != nil {
+		if key := policy.Options["image_paste_key"]; key != "" {
+			a.ImagePasteKey = key
+		}
+		if name := policy.Options["name"]; name != "" {
+			a.InstanceName = name
+		}
+	}
+	a.hostPolicyConfigured = true
+	a.HostBridge = HostBridgeConfig{
+		OpenURLs:        policy.Host.OpenURLs != "deny",
+		Notifications:   boolValue(policy.Host.Notifications, true),
+		ClipboardImages: boolValue(policy.Host.ClipboardImages, true),
+	}
+	a.PathTranslate = boolValue(policy.Host.PathTranslation, true)
+	if !a.HostBridge.Notifications {
+		a.NoNotify = true
+	}
+	a.applyPolicyCapabilities(policy)
+	a.ClaudeArgs = append(a.ClaudeArgs, policy.ExtraArgs...)
+}
+
+func appendPolicyMounts(extraDirs []string, mounts []PolicyMount) []string {
+	for _, mount := range mounts {
+		if mount.Access == "ro" {
+			extraDirs = append(extraDirs, "ro:"+mount.Path)
+		} else {
+			extraDirs = append(extraDirs, mount.Path)
+		}
+	}
+	return extraDirs
+}
+
+func (a *App) applyPolicyCapabilities(policy *ProjectPolicy) {
+	extByName := make(map[string]*registry.Extension, len(a.Extensions))
+	for _, ext := range a.Extensions {
+		if ext != nil {
+			extByName[ext.Name] = ext
+		}
+	}
+
+	if firewall := extByName["firewall"]; firewall != nil {
+		switch policy.Network.Firewall {
+		case "disabled":
+			firewall.Enabled = false
+		case "dev":
+			firewall.Enabled = true
+			firewallext.DevMode = true
+		case "custom":
+			firewall.Enabled = true
+			firewall.RawArg = policy.Network.CustomConfig
+			firewall.Args = []string{policy.Network.CustomConfig}
+		default:
+			firewall.Enabled = true
+		}
+	}
+
+	if policy.Execution.Docker != "" {
+		enablePolicyExtension(extByName["docker"], CapabilityPolicy{
+			Name: "docker",
+			Args: []string{policy.Execution.Docker},
+		})
+	}
+
+	for _, capability := range policy.Capabilities {
+		if capability.Name == "" || capability.Name == "firewall" {
+			continue
+		}
+		enablePolicyExtension(extByName[capability.Name], capability)
+	}
+}
+
+func enablePolicyExtension(ext *registry.Extension, capability CapabilityPolicy) {
+	if ext == nil {
+		return
+	}
+	ext.Enabled = true
+	ext.AllMode = capability.All
+	ext.Args = append([]string(nil), capability.Args...)
+	if len(capability.Args) > 0 {
+		ext.RawArg = strings.Join(capability.Args, ",")
+	}
+}
+
 // buildImage runs docker build.
 func (a *App) buildImage() error {
 
@@ -1026,22 +1109,18 @@ func (a *App) buildImage() error {
 		dockerfile = filepath.Join(tmpCtx, "container", "Dockerfile")
 	}
 
+	providerPlan := a.Provider.RuntimePlan()
 	return BuildImage(BuildContext{
-		ContextDir: contextDir,
-		Dockerfile: dockerfile,
-		ImageName:  a.ImageName,
-		ImageTag:   a.ImageTag,
-		UserID:     uid,
-		GroupID:    gid,
-		Extensions: enabledExts,
-		ExtraBuildArgs: map[string]string{
-			"AI_USERNAME":    a.Provider.Username,
-			"AI_BINARY":      a.Provider.Binary,
-			"AI_INSTALL_CMD": a.Provider.InstallCmd,
-			"AI_CONFIG_DIR":  a.Provider.ConfigDir,
-		},
-		Verbose: a.Verbose,
-		NoCache: a.Rebuild,
+		ContextDir:     contextDir,
+		Dockerfile:     dockerfile,
+		ImageName:      a.ImageName,
+		ImageTag:       a.ImageTag,
+		UserID:         uid,
+		GroupID:        gid,
+		Extensions:     enabledExts,
+		ExtraBuildArgs: providerPlan.BuildArgs,
+		Verbose:        a.Verbose,
+		NoCache:        a.Rebuild,
 	})
 }
 
@@ -1050,28 +1129,9 @@ func (a *App) buildImage() error {
 // Broker, ExtraDirs, FirewallExtra, and X11 clipboard fields are set
 // later in assembleDockerArgs as they depend on further processing.
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
+	providerPlan := a.Provider.RuntimePlan()
 	return &initcfg.ContainerConfig{
-		AI: initcfg.AIConfig{
-			Binary:          a.Provider.Binary,
-			ConfigDir:       a.Provider.ConfigDir,
-			CredFile:        a.Provider.CredentialFile,
-			PrefsFile:       a.Provider.UserPrefsFile,
-			SettingsFile:    a.Provider.SettingsFile,
-			ProjectFile:     a.Provider.ProjectFile,
-			TrustedDirsKey:  a.Provider.TrustedDirsKey,
-			YoloKey:         a.Provider.YoloKey,
-			MCPServersKey:   a.Provider.MCPServersKey,
-			TrustedDirsFile: a.Provider.TrustedDirsFile,
-			InitSettingsJQ:  a.Provider.InitSettingsJQ,
-			StopHookEvent:   a.Provider.StopHookEvent,
-			PersistFiles:    a.Provider.PersistFiles,
-			PersistDirs:     a.Provider.PersistDirs,
-			PersistGlobs:    a.Provider.PersistGlobs,
-			SettingsFormat:  a.Provider.SettingsFormat,
-			ConfigSubdirs:   a.Provider.ConfigSubdirs,
-			PluginDir:       a.Provider.PluginDir,
-			PluginFiles:     a.Provider.PluginFiles,
-		},
+		AI: providerPlan.AI,
 		Flags: initcfg.Flags{
 			Verbose:   a.Verbose,
 			Yolo:      a.Yolo,
@@ -1090,13 +1150,16 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 // assembleDockerArgs builds the full docker run argument list.
 // resolverArgs and resolverFirewall come from extension setup resolvers.
 func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []string) []string {
+	a.ensureHostPolicyDefaults()
+
 	home := os.Getenv("HOME")
+	providerPlan := a.Provider.RuntimePlan()
 	args := []string{
 		"-it",
 		"--name", a.ContainerName,
 	}
-	if a.Provider.ContainerHostname != "" {
-		args = append(args, "--hostname", a.Provider.ContainerHostname)
+	if providerPlan.ContainerHostname != "" {
+		args = append(args, "--hostname", providerPlan.ContainerHostname)
 	}
 
 	// Primary workspace mount (identity: host path = container path).
@@ -1105,7 +1168,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	// AI config staging (read-only). Providers that mount the whole config
 	// directory for session persistence should not also mount the same host
 	// path into the staging location.
-	if a.NoHistory || !a.Provider.HistoryMountsWholeConfig {
+	if a.NoHistory || !providerPlan.HistoryMountsWholeConfig {
 		args = append(args, "-v", a.Provider.HostConfigDir(home)+":"+a.Provider.StagingConfigDir()+":ro")
 	}
 
@@ -1121,7 +1184,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", "OLLAMA_HOST="+os.Getenv("OLLAMA_HOST"))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
-	for k, v := range a.Provider.ContainerEnv {
+	for k, v := range providerPlan.ContainerEnv {
 		args = append(args, "-e", k+"="+v)
 	}
 
@@ -1148,12 +1211,12 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Session persistence mounts.
-	if !a.NoHistory && a.Provider.HistoryMountsWholeConfig {
+	if !a.NoHistory && providerPlan.HistoryMountsWholeConfig {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		ensureDir(hostConfigDir)
 		args = append(args, "-v", hostConfigDir+":"+containerConfigDir)
-	} else if !a.NoHistory && a.Provider.HistoryMountsProjectDirs && a.HostProjectDir != "" {
+	} else if !a.NoHistory && providerPlan.HistoryMountsProjectDirs && a.HostProjectDir != "" {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
 		projDir := filepath.Join(hostConfigDir, "projects", a.HostProjectDir)
@@ -1170,13 +1233,13 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if !a.NoHistory {
 		hostConfigDir := a.Provider.HostConfigDir(home)
 		containerConfigDir := a.Provider.ContainerConfigDir()
-		for _, rel := range a.Provider.LiveMountFiles {
+		for _, rel := range providerPlan.LiveMountFiles {
 			hostPath := filepath.Join(hostConfigDir, rel)
 			containerPath := filepath.Join(containerConfigDir, rel)
 			ensureFile(hostPath)
 			args = append(args, "-v", hostPath+":"+containerPath)
 		}
-		for _, rel := range a.Provider.LiveMountDirs {
+		for _, rel := range providerPlan.LiveMountDirs {
 			hostPath := filepath.Join(hostConfigDir, rel)
 			containerPath := filepath.Join(containerConfigDir, rel)
 			ensureDir(hostPath)
@@ -1188,6 +1251,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if len(a.ExtraDirs) > 0 {
 		wtSuffix := a.worktreeSuffix
 		var extraPaths []string
+		var extraMounts []SummaryMount
 
 		// Collect stat info for dedup (os.SameFile handles case-insensitive filesystems).
 		type mountedDir struct {
@@ -1259,14 +1323,20 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 				args = append(args, "-v", resolved+":"+resolved+mountMode)
 			}
 			extraPaths = append(extraPaths, extraPath)
+			access := "rw"
 			if spec.ReadOnly {
+				access = "ro"
 				logInfo("Extra directory (read-only): %s", extraPath)
 			} else {
 				logInfo("Extra directory: %s", extraPath)
 			}
+			extraMounts = append(extraMounts, SummaryMount{Path: extraPath, Access: access})
 		}
 		if len(extraPaths) > 0 {
 			initCfg.ExtraDirs = extraPaths
+		}
+		if len(extraMounts) > 0 {
+			a.launchSummary.ExtraDirs = extraMounts
 		}
 	}
 
@@ -1296,15 +1366,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-v", gitconfig+":"+a.Provider.StagingGitconfigPath()+":ro")
 	}
 
-	// Extension mounts, env vars, capabilities (from YAML declarations).
+	// Extension mounts, env vars, capabilities, and firewall domains from plans.
 	var firewallDomains []string
-	for _, ext := range a.Extensions {
-		if !ext.Enabled {
-			continue
-		}
-
-		// Mounts from YAML.
-		for _, m := range ext.ExpandedMounts(home, a.Provider.HomePath()) {
+	for _, plan := range capabilityRuntimePlans(a.Extensions, home, a.Provider.HomePath()) {
+		for _, m := range plan.Mounts {
 			mountStr := m.Src + ":" + m.Dst
 			if m.Mode != "" {
 				mountStr += ":" + m.Mode
@@ -1314,24 +1379,19 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 				args = append(args, "-e", k+"="+v)
 			}
 		}
-
-		// Env vars from YAML.
-		for k, v := range ext.Env {
+		for k, v := range plan.Env {
 			args = append(args, "-e", k+"="+v)
 		}
-
-		// Capabilities from YAML.
-		for _, capability := range ext.Capabilities {
+		for _, capability := range plan.Capabilities {
 			args = append(args, "--cap-add", capability)
 		}
-
-		// Firewall domains from YAML.
-		firewallDomains = append(firewallDomains, ext.FirewallDomains()...)
+		firewallDomains = append(firewallDomains, plan.FirewallDomains...)
 	}
 
 	// Add provider, resolver-contributed docker args and firewall domains.
 	// Extract MITTENS_* env vars from resolver args into the JSON config.
-	firewallDomains = append(firewallDomains, a.Provider.FirewallDomains...)
+	firewallDomains = append(firewallDomains, a.FirewallExtra...)
+	firewallDomains = append(firewallDomains, providerPlan.FirewallDomains...)
 	args = filterMittensEnvArgs(args, resolverArgs, initCfg)
 	firewallDomains = append(firewallDomains, resolverFirewall...)
 
@@ -1375,16 +1435,20 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Clipboard image sync.
-	if extraArgs := platformClipboardSync(a); len(extraArgs) > 0 {
-		args = filterMittensEnvArgs(args, extraArgs, initCfg)
+	if a.HostBridge.ClipboardImages {
+		if extraArgs := platformClipboardSync(a); len(extraArgs) > 0 {
+			args = filterMittensEnvArgs(args, extraArgs, initCfg)
+		}
 	}
 
 	// Drop zone for drag-and-drop path translation.
-	if dir, err := os.MkdirTemp("", "mittens-drop.*"); err == nil {
-		a.dropDir = dir
-		a.tempDirs = append(a.tempDirs, dir)
-		args = append(args, "-v", dir+":/tmp/mittens-drops:ro")
-		logInfo("Drag-and-drop path translation: enabled")
+	if a.PathTranslate {
+		if dir, err := os.MkdirTemp("", "mittens-drop.*"); err == nil {
+			a.dropDir = dir
+			a.tempDirs = append(a.tempDirs, dir)
+			args = append(args, "-v", dir+":/tmp/mittens-drops:ro")
+			logInfo("Drag-and-drop path translation: enabled")
+		}
 	}
 
 	// Write mittens-init JSON config and mount it into the container.
@@ -1406,6 +1470,8 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			logWarn("Failed to write init config: %v", err)
 		}
 	}
+
+	a.launchSummary = a.buildLaunchSummary(initCfg, firewallDomains)
 
 	return args
 }
@@ -1667,9 +1733,9 @@ func extractMittensEnv(cfg *initcfg.ContainerConfig, kv string) bool {
 // ---------------------------------------------------------------------------
 
 func printHelp(exts []*registry.Extension) {
-	fmt.Println(`mittens - Run Claude Code in an isolated Docker container
+	fmt.Println(`mittens - Run AI coding agents in isolated Docker containers
 
-Usage: mittens [flags] [-- claude-args...]
+Usage: mittens [flags] [-- provider-args...]
        mittens <command>
 
 Commands:
@@ -1680,54 +1746,44 @@ Commands:
   init --profile NAME --delete  Delete a model profile
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
+  policy show [--json]          Show effective project policy and boundary
   extension list|install|remove Manage external extensions
   version [--json]              Show version information
 
 Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
   --session         Tweak settings for this run only (opens wizard, doesn't save)
-  --no-config       Skip config file loading (user defaults + project config)
-  --no-history      Disable session persistence (fully ephemeral)
+  --no-config       Skip config file loading (user defaults + project policy)
+  --no-history      Disable session persistence for this run
   --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
-  --firewall-dev    Developer-friendly firewall (adds cloud APIs, apt repos)
-  --no-firewall     Disable network firewall entirely
-  --docker MODE     Docker engine: dind (isolated daemon) or host (share host socket)
-  --no-yolo         Restore permission prompts (YOLO is the default)
-  --no-notify       Disable desktop notifications
-  --network-host    Use host networking (default: bridge)
-  --worktree        Git worktree isolation per invocation
-  --shell           Start a bash shell instead of Claude
   --name NAME       Name this instance (default: PID-based)
-  --dir PATH        Mount an additional directory (repeatable)
-  --dir-ro PATH     Mount an additional directory as read-only (repeatable)
-  --profile NAME    Use a model profile (created on first use if missing)
-  --provider NAME   AI provider to use (claude, codex, gemini; default: claude)
-  --image-paste-key KEY  Clipboard image paste key: meta+v (default) or ctrl+v
-  --extensions      List loaded extensions and their flags
-  --version, -V     Show version information`)
+  --extensions      List loaded capabilities and policy metadata
+  --version, -V     Show version information
+
+Project policy:
+  Launch policy is configured with mittens init or focused mittens policy set fields.
+  Legacy per-project flag config is converted to policy.yaml automatically.`)
 
 	if len(exts) > 0 {
-		fmt.Println("\nExtension flags:")
+		fmt.Println("\nCapabilities:")
 		for _, ext := range exts {
-			for _, f := range ext.Flags {
-				desc := f.Description
-				if desc == "" {
-					desc = ext.Description
-				}
-				fmt.Printf("  %-18s %s\n", f.Name, desc)
+			desc := ext.Description
+			if desc == "" {
+				desc = "(no description)"
 			}
+			fmt.Printf("  %-18s %s\n", ext.Name, desc)
 		}
 	}
 }
 
 func printExtensions(exts []*registry.Extension) {
 	if len(exts) == 0 {
-		fmt.Println("No extensions loaded")
+		fmt.Println("No capabilities loaded")
 		return
 	}
-	fmt.Println("Loaded extensions:")
+	fmt.Println("Loaded capabilities:")
 	fmt.Println()
 	for _, ext := range exts {
 		source := ext.Source
@@ -1735,13 +1791,8 @@ func printExtensions(exts []*registry.Extension) {
 			source = "built-in"
 		}
 		fmt.Printf("  %s [%s]: %s\n", ext.Name, source, ext.Description)
-		for _, f := range ext.Flags {
-			desc := f.Description
-			if desc == "" {
-				desc = "(no description)"
-			}
-			fmt.Printf("    %-16s %s\n", f.Name, desc)
-		}
+		fmt.Println("    Configure with: mittens init")
+		fmt.Printf("    Policy entry: capabilities[].name = %q\n", ext.Name)
 	}
 }
 
@@ -1771,21 +1822,11 @@ func printJSONCaps(exts []*registry.Extension) {
 	out := jsonCapsOutput{
 		Extensions: make([]jsonCapsExtension, 0, len(exts)),
 		CoreFlags: []jsonCapsFlag{
-			{Name: "--docker", Description: "Docker engine mode: dind or host", ArgType: "string"},
-			{Name: "--worktree", Description: "Git worktree isolation per invocation"},
-			{Name: "--no-yolo", Description: "Restore permission prompts (YOLO is the default)"},
-			{Name: "--no-notify", Description: "Disable desktop notifications"},
-			{Name: "--network-host", Description: "Use host networking (default: bridge)"},
-			{Name: "--no-history", Description: "Disable session persistence (fully ephemeral)"},
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--rebuild", Description: "Rebuild image without layer cache"},
+			{Name: "--no-history", Description: "Disable session persistence for this run"},
 			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
-			{Name: "--shell", Description: "Start a bash shell instead of Claude"},
-			{Name: "--dir", Description: "Mount an additional directory (repeatable)", ArgType: "path"},
-			{Name: "--dir-ro", Description: "Mount an additional directory read-only (repeatable)", ArgType: "path"},
-			{Name: "--profile", Description: "Use a model profile (created on first use)", ArgType: "string"},
-			{Name: "--provider", Description: "AI provider (claude, codex, gemini)", ArgType: "string"},
 		},
 	}
 

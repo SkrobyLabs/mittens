@@ -37,7 +37,10 @@ Each built-in extension lives under `cmd/mittens/extensions/<name>/` and consist
 
 ### 1. YAML Manifest (`extension.yaml`)
 
-Defines the extension's metadata, CLI flags, Docker mounts, environment variables, firewall domains, and build configuration. Embedded into the binary at compile time.
+Defines the extension's metadata, legacy flag identifiers, Docker mounts,
+environment variables, firewall domains, and build configuration. Embedded into
+the binary at compile time. V2 launch does not accept these flags directly;
+they are used for legacy config migration and policy/wizard plumbing.
 
 ```yaml
 name: ssh
@@ -74,7 +77,7 @@ build:
     DOTNET_CHANNEL: "{{if .Arg}}{{.Arg}}.0{{else}}LTS{{end}}"
 ```
 
-**Flag argument types:**
+**Legacy flag argument types:**
 
 | Type   | Behaviour | Example |
 |--------|-----------|---------|
@@ -83,7 +86,8 @@ build:
 | `enum` | Consumes next arg if it matches `enum_values`, otherwise just enables | `--dotnet 9` or `--dotnet` |
 | `path` | Consumes next arg as a file path | `--firewall /path/to/custom.conf` |
 
-Flags prefixed with `--no-` (e.g. `--no-firewall`) disable the extension.
+Flags prefixed with `--no-` (e.g. `--no-firewall`) disable the extension when
+converting older config into policy.
 
 ### 2. Go Resolver (`resolver.go`) -- optional
 
@@ -107,8 +111,8 @@ func listProfiles() ([]string, error) {
 }
 
 func setup(ctx *registry.SetupContext) error {
-    // ctx.Extension.Args     -- selected profiles (from --aws prod,staging)
-    // ctx.Extension.AllMode  -- true if --aws-all was used
+    // ctx.Extension.Args     -- selected profiles from policy or legacy config
+    // ctx.Extension.AllMode  -- true when the capability selects all items
     // ctx.Home               -- user's home directory
     // ctx.StagingDir         -- temp dir for this extension (cleaned up after)
     // ctx.DockerArgs          -- append -v, -e flags here
@@ -264,7 +268,7 @@ See `examples/redis-extension/plugin` for a complete Python implementation demon
    b. User: from ~/.mittens/extensions/ (YAML-only or plugin-based)
    c. User extensions with the same name shadow built-in ones
    d. Plugin-based extensions register subprocess resolvers
-4. CLI flags parsed -- extensions claim their flags, set Enabled/Args/AllMode
+4. Project policy is planned -- extensions are enabled from policy or converted legacy config
 5. For each enabled extension with a setup resolver:
    a. Create temp staging directory
    b. Call setup resolver (Go function or `plugin setup` subprocess)

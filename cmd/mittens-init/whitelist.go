@@ -23,6 +23,9 @@ func newDomainWhitelist(domains []string) *domainWhitelist {
 		if d == "" {
 			continue
 		}
+		if strings.HasPrefix(d, "*.") {
+			d = "." + strings.TrimPrefix(d, "*.")
+		}
 		if strings.HasPrefix(d, ".") {
 			w.suffixes = append(w.suffixes, d)
 			// Also allow the bare domain (e.g. ".foo.com" allows "foo.com" too).
@@ -72,6 +75,9 @@ func parseWhitelistReader(scanner *bufio.Scanner) []string {
 			line = line[:idx]
 		}
 		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "*.") {
+			line = "." + strings.TrimPrefix(line, "*.")
+		}
 		if line != "" {
 			domains = append(domains, line)
 		}

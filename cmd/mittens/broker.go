@@ -2,17 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -79,6 +72,7 @@ type HostBroker struct {
 	sockPath  string
 	Name      string // provider name for log identification, e.g. "claude", "gemini"
 	AuthToken string
+	Host      HostBridgeConfig
 	creds     string // latest credential JSON
 	mu        sync.RWMutex
 	srv       *http.Server
@@ -110,9 +104,12 @@ type HostBroker struct {
 	LogFile *os.File
 }
 
-// refreshCoordTimeout is how long a refresh coordinator holds the lock before
-// it is considered stale and a new coordinator can be appointed.
-const refreshCoordTimeout = 2 * time.Minute
+// HostBridgeConfig controls optional host integrations exposed to containers.
+type HostBridgeConfig struct {
+	OpenURLs        bool
+	Notifications   bool
+	ClipboardImages bool
+}
 
 // NewHostBroker creates a broker that will listen on sockPath.
 // seed is the initial credential JSON (may be empty).
@@ -123,6 +120,7 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 		creds:    seed,
 		stores:   stores,
 		done:     make(chan struct{}),
+		Host:     defaultHostBridgeConfig(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/open", b.withAuth(b.handleOpen))
@@ -133,6 +131,14 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b
+}
+
+func defaultHostBridgeConfig() HostBridgeConfig {
+	return HostBridgeConfig{
+		OpenURLs:        true,
+		Notifications:   true,
+		ClipboardImages: true,
+	}
 }
 
 // blog writes a timestamped log entry to the broker's log file (if set).
@@ -206,430 +212,4 @@ func (b *HostBroker) Close() error {
 		return b.srv.Shutdown(context.Background())
 	}
 	return nil
-}
-
-// Credentials returns the current credential JSON held by the broker.
-func (b *HostBroker) Credentials() string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.creds
-}
-
-func (b *HostBroker) handle(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		b.handleGet(w)
-	case http.MethodPut:
-		b.handlePut(w, r)
-	default:
-		w.Header().Set("Allow", "GET, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (b *HostBroker) handleGet(w http.ResponseWriter) {
-	b.mu.RLock()
-	data := b.creds
-	b.mu.RUnlock()
-
-	if data == "" {
-		b.blog("GET → 204 (no credentials)")
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	b.blog("GET → 200 (expiresAt: %d, %d bytes)", expiresAt(data), len(data))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, data)
-}
-
-const maxCredentialSize = 64 * 1024 // 64KB
-
-// readBody reads and size-checks the request body. Returns nil, false on error
-// (the response has already been written).
-func (b *HostBroker) readBody(w http.ResponseWriter, r *http.Request, maxSize int) ([]byte, bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxSize)+1))
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return nil, false
-	}
-	if len(body) > maxSize {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
-		return nil, false
-	}
-	return body, true
-}
-
-// requireMethod validates the request method. Returns false (response already
-// written) if it doesn't match.
-func (b *HostBroker) requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
-	if r.Method != method {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return false
-	}
-	return true
-}
-
-func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
-	body, ok := b.readBody(w, r, maxCredentialSize)
-	if !ok {
-		return
-	}
-
-	incoming := string(body)
-	incomingExp := expiresAt(incoming)
-	if incomingExp == 0 {
-		b.blog("PUT → 400 (missing/invalid expiresAt, %d bytes, keys: %s)", len(body), jsonKeys(incoming))
-		http.Error(w, "invalid credentials: missing or invalid expiresAt", http.StatusBadRequest)
-		return
-	}
-
-	b.mu.Lock()
-	currentExp := expiresAt(b.creds)
-	if incomingExp > currentExp {
-		b.creds = incoming
-		b.mu.Unlock()
-		b.blog("PUT → 204 accepted (incoming: %d, was: %d)", incomingExp, currentExp)
-		// Fresh credentials received — reset refresh coordination so the next
-		// nearing-expiry cycle can appoint a new coordinator.
-		b.refreshMu.Lock()
-		b.refreshInProgress = false
-		b.refreshMu.Unlock()
-		// Write-through: persist fresher creds to host stores immediately.
-		b.persistToHost(incoming)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	b.mu.Unlock()
-	b.blog("PUT → 409 stale (incoming: %d, current: %d)", incomingExp, currentExp)
-	http.Error(w, "stale credentials", http.StatusConflict)
-}
-
-// hostSync polls host credential stores every 5 seconds.
-// If the host has fresher creds, the broker's in-memory state is updated.
-func (b *HostBroker) hostSync() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-b.done:
-			return
-		case <-ticker.C:
-			b.pullFromHost()
-		}
-	}
-}
-
-// pullFromHost reads from all host stores, picks the freshest, and updates
-// the broker if the host has newer credentials.
-func (b *HostBroker) pullFromHost() {
-	var bestJSON string
-	var bestExp int64
-
-	for _, s := range b.stores {
-		data, err := s.Extract()
-		if err != nil || data == "" {
-			continue
-		}
-		exp := expiresAt(data)
-		if exp > bestExp {
-			bestJSON = data
-			bestExp = exp
-		}
-	}
-
-	if bestJSON == "" {
-		return
-	}
-
-	b.mu.Lock()
-	currentExp := expiresAt(b.creds)
-	if bestExp > currentExp {
-		b.creds = bestJSON
-		b.mu.Unlock()
-		b.blog("hostSync: pulled fresher creds from host (host: %d, was: %d)", bestExp, currentExp)
-		return
-	}
-	b.mu.Unlock()
-}
-
-// persistToHost writes credentials to all host stores (fire-and-forget).
-func (b *HostBroker) persistToHost(jsonData string) {
-	for _, s := range b.stores {
-		if err := s.Persist(jsonData); err != nil {
-			b.blog("persistToHost: FAILED %s: %v", s.Label(), err)
-			logWarn("Broker: persist to %s: %v", s.Label(), err)
-		} else {
-			b.blog("persistToHost: wrote to %s", s.Label())
-		}
-	}
-}
-
-const maxOpenURLSize = 4096
-
-func (b *HostBroker) handleOpen(w http.ResponseWriter, r *http.Request) {
-	if !b.requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	body, ok := b.readBody(w, r, maxOpenURLSize)
-	if !ok {
-		return
-	}
-
-	rawURL := strings.TrimSpace(string(body))
-	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
-		http.Error(w, "invalid URL", http.StatusBadRequest)
-		return
-	}
-
-	b.blog("OPEN → %s", redactURL(rawURL))
-
-	// Intercept OAuth login: start a temp listener on the callback port so
-	// the browser redirect lands on the host (not lost inside the container).
-	if port := extractOAuthCallbackPort(rawURL); port > 0 {
-		ready := make(chan struct{})
-		go b.interceptOAuthCallback(port, ready)
-		<-ready // wait for listener to bind before opening the browser
-	}
-
-	if b.OnOpen != nil {
-		b.OnOpen(rawURL)
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-const maxNotifySize = 4096
-
-func (b *HostBroker) handleNotify(w http.ResponseWriter, r *http.Request) {
-	if !b.requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	body, ok := b.readBody(w, r, maxNotifySize)
-	if !ok {
-		return
-	}
-
-	var payload struct {
-		Container string `json:"container"`
-		Event     string `json:"event"`
-		Message   string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	b.blog("NOTIFY → %s: %s", payload.Container, payload.Event)
-
-	if b.OnNotify != nil {
-		b.OnNotify(payload.Container, payload.Event, payload.Message)
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleRefresh coordinates proactive token refresh across containers.
-// The first container to POST becomes the coordinator (receives "refresh");
-// subsequent POsters receive "wait" until fresh creds arrive or the deadline expires.
-func (b *HostBroker) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if !b.requireMethod(w, r, http.MethodPost) {
-		return
-	}
-
-	b.refreshMu.Lock()
-	now := time.Now()
-	inProgress := b.refreshInProgress && now.Before(b.refreshDeadline)
-	if !inProgress {
-		b.refreshInProgress = true
-		b.refreshDeadline = now.Add(refreshCoordTimeout)
-	}
-	b.refreshMu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	if inProgress {
-		b.blog("REFRESH → wait (coordinator active until %s)", b.refreshDeadline.Format("15:04:05"))
-		_, _ = io.WriteString(w, `{"action":"wait"}`)
-		return
-	}
-	b.blog("REFRESH → refresh (coordinator appointed)")
-	_, _ = io.WriteString(w, `{"action":"refresh"}`)
-}
-
-// handleLoginCallback returns the captured OAuth callback URL (if any) so the
-// container can replay it to Claude Code's local callback server.
-func (b *HostBroker) handleLoginCallback(w http.ResponseWriter, r *http.Request) {
-	if !b.requireMethod(w, r, http.MethodGet) {
-		return
-	}
-
-	b.mu.Lock()
-	cb := b.pendingCallback
-	b.pendingCallback = ""
-	b.mu.Unlock()
-
-	if cb == "" {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	b.blog("login-callback → %s", redactURL(cb))
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = io.WriteString(w, cb)
-}
-
-// handleClipboard reads the host clipboard and returns PNG image data.
-// Returns 200 with image/png body if an image is available, 204 otherwise.
-func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
-	if !b.requireMethod(w, r, http.MethodGet) {
-		return
-	}
-
-	if b.OnClipboardRead == nil {
-		b.blog("CLIPBOARD → 204 (no reader configured)")
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	png := b.OnClipboardRead()
-	if len(png) == 0 {
-		b.blog("CLIPBOARD → 204 (no image)")
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	b.blog("CLIPBOARD → 200 (%d bytes)", len(png))
-	w.Header().Set("Content-Type", "image/png")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(png)
-}
-
-// withAuth wraps an HTTP handler with the broker's authorization check.
-func (b *HostBroker) withAuth(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !b.authorize(w, r) {
-			return
-		}
-		handler(w, r)
-	}
-}
-
-func (b *HostBroker) authorize(w http.ResponseWriter, r *http.Request) bool {
-	if b.AuthToken == "" {
-		return true
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Mittens-Token")), []byte(b.AuthToken)) == 1 {
-		return true
-	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
-}
-
-// interceptOAuthCallback starts a temporary HTTP server on the host at the
-// given port to capture the OAuth browser redirect. Once the callback arrives,
-// it stores the full callback URL for the container to pick up via
-// GET /login-callback.
-func (b *HostBroker) interceptOAuthCallback(port int, ready chan struct{}) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		b.blog("OAuth intercept: failed to listen on :%d: %v", port, err)
-		close(ready)
-		return
-	}
-	b.blog("OAuth intercept: listening on :%d", port)
-	close(ready)
-
-	callbackCh := make(chan string, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		callbackURL := fmt.Sprintf("http://localhost:%d%s", port, r.URL.RequestURI())
-		select {
-		case callbackCh <- callbackURL:
-		default:
-		}
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, oauthSuccessPage)
-	})
-
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-
-	select {
-	case cb := <-callbackCh:
-		b.mu.Lock()
-		b.pendingCallback = cb
-		b.mu.Unlock()
-		b.blog("OAuth intercept: captured callback")
-	case <-time.After(2 * time.Minute):
-		b.blog("OAuth intercept: timeout")
-	case <-b.done:
-		b.blog("OAuth intercept: broker closing")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-}
-
-// jsonKeys returns the sorted top-level keys of a JSON object as a bracketed
-// list (e.g. `[claudeAiOauth, primaryApiKey]`), or "<invalid JSON>" on failure.
-func jsonKeys(s string) string {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(s), &obj); err != nil {
-		return "<invalid JSON>"
-	}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return "[" + strings.Join(keys, ", ") + "]"
-}
-
-// redactURL replaces the values of sensitive query parameters in a URL with
-// "REDACTED". Falls back to the original string if parsing fails.
-func redactURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	redacted := false
-	for _, param := range []string{"code", "token", "access_token", "refresh_token"} {
-		if q.Has(param) {
-			q.Set(param, "REDACTED")
-			redacted = true
-		}
-	}
-	if !redacted {
-		return rawURL
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
-// extractOAuthCallbackPort parses an OAuth authorization URL and returns the
-// port from the redirect_uri parameter if it points to localhost.
-// Returns 0 if the URL is not an OAuth redirect or doesn't use localhost.
-func extractOAuthCallbackPort(rawURL string) int {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return 0
-	}
-	redirectURI := u.Query().Get("redirect_uri")
-	if redirectURI == "" {
-		return 0
-	}
-	ru, err := url.Parse(redirectURI)
-	if err != nil {
-		return 0
-	}
-	h := ru.Hostname()
-	if h != "localhost" && h != "127.0.0.1" {
-		return 0
-	}
-	port, err := strconv.Atoi(ru.Port())
-	if err != nil {
-		return 0
-	}
-	return port
 }

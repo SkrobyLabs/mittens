@@ -57,6 +57,34 @@ func TestParseFlags_LegacyWorkerPlannerIgnored(t *testing.T) {
 	}
 }
 
+func TestPrintExtensionsShowsPolicyMetadataNotLegacyFlags(t *testing.T) {
+	exts := []*registry.Extension{
+		{
+			Name:        "aws",
+			Description: "Mount filtered AWS credentials into the container",
+			Source:      "built-in",
+			Flags: []registry.ExtensionFlag{
+				{Name: "--aws", Description: "Mount filtered AWS credentials"},
+				{Name: "--aws-all", Description: "Mount entire ~/.aws directory"},
+			},
+		},
+	}
+
+	out := captureStdoutFor(t, func() error {
+		printExtensions(exts)
+		return nil
+	})
+	if !strings.Contains(out, "Loaded capabilities:") {
+		t.Fatalf("extensions output missing capabilities heading: %s", out)
+	}
+	if !strings.Contains(out, `Policy entry: capabilities[].name = "aws"`) {
+		t.Fatalf("extensions output missing policy metadata: %s", out)
+	}
+	if strings.Contains(out, "--aws") || strings.Contains(out, "legacy config input") {
+		t.Fatalf("extensions output should not advertise legacy flags: %s", out)
+	}
+}
+
 func TestParseFlags_ProfileFlag(t *testing.T) {
 	a := &App{}
 	if err := a.ParseFlags([]string{"--profile", "fast", "--print"}); err != nil {
@@ -925,6 +953,7 @@ func TestAssembleDockerArgs_ExtensionMountsEnvCaps(t *testing.T) {
 		WorkspaceMountSrc: "/tmp/ws",
 		Extensions:        []*registry.Extension{ext},
 		Credentials:       &CredentialManager{},
+		FirewallExtra:     []string{".apps.example.test"},
 	}
 
 	args := a.assembleDockerArgs(nil, nil)
@@ -961,6 +990,16 @@ func TestAssembleDockerArgs_ExtensionMountsEnvCaps(t *testing.T) {
 		}
 		if !found {
 			t.Error("FirewallExtra missing ext.example.com")
+		}
+		found = false
+		for _, d := range cfg.FirewallExtra {
+			if d == ".apps.example.test" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("FirewallExtra missing policy extra domain")
 		}
 	}
 }

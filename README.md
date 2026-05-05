@@ -45,6 +45,11 @@ make install  # → /usr/local/bin/mittens (or PREFIX=~/.local)
 
 On Windows, `make build` produces both `mittens.exe` (WSL shim) and `mittens-linux` (real binary). Run `mittens.exe` from PowerShell or cmd — it transparently uses WSL under the hood.
 
+The installed binary carries the built-in Docker runtime files with it. If no
+adjacent `container/` directory is present, Mittens materializes those assets
+under `~/.mittens/runtime/<version>-<commit>/`. For local runtime development,
+set `MITTENS_RUNTIME_ROOT=/path/to/cmd/mittens` to force a source checkout.
+
 ## Quick Start
 
 ```bash
@@ -53,28 +58,38 @@ mittens                  # run in a container — that's it
 mittens init             # interactive project setup (extensions, dirs, firewall)
 mittens init --defaults  # set user-wide defaults (provider, firewall, paste key)
 mittens init --help      # see all init subcommands
+mittens policy show      # inspect the effective project policy and boundary
+mittens policy set host.open_urls deny
 mittens help             # see all flags and commands
 ```
 
-Project configs are saved to `~/.mittens/projects/` — one flag per line, loaded automatically next time.
+Project policies are saved to `~/.mittens/projects/` as `policy.yaml` and loaded automatically next time. Older one-flag-per-line project configs remain readable.
+When an older project config is found at launch, Mittens converts it to
+`policy.yaml` automatically. Policy-shaped launch flags are no longer accepted;
+use `mittens init` or `mittens policy set` instead.
+
+Policy can also disable host integrations directly. For example,
+`host.open_urls: deny`, `host.clipboard_images: false`,
+`host.notifications: false`, and `host.path_translation: false` are enforced at
+launch time.
 
 ## Providers
 
-Mittens supports multiple AI coding agents via `--provider`:
+Mittens supports multiple AI coding agents configured in project policy:
 
-| Provider | Flag |
-|----------|------|
-| **Claude** (default) | `--provider claude` |
-| **Codex** | `--provider codex` |
-| **Gemini** | `--provider gemini` |
+| Provider | Policy value |
+|----------|--------------|
+| **Claude** (default) | `provider.name: claude` |
+| **Codex** | `provider.name: codex` |
+| **Gemini** | `provider.name: gemini` |
 
-Each provider brings its own credential layout, firewall domains, CLI flags, and config format. Mittens handles all the differences — same workflow regardless of provider.
+Each provider brings its own credential layout, firewall domains, agent CLI args, and config format. Mittens handles all the differences — same workflow regardless of provider.
 
 ## How It Works
 
 ### Container Isolation
 
-The AI CLI runs inside a Docker container with `--cap-drop ALL` (unless `--docker dind` is used). The workspace is mounted at `/workspace` and the CLI's config is copied from the host at startup.
+The AI CLI runs inside a Docker container with `--cap-drop ALL` unless Docker-in-Docker is enabled in policy. The workspace is mounted at `/workspace` and the CLI's config is copied from the host at startup.
 
 The container starts as root for initial setup (firewall rules, Docker daemon), then drops to a non-root user via `syscall.Setuid/Setgid`. Containers are force-removed on exit — each invocation is ephemeral.
 
@@ -128,35 +143,69 @@ This works transparently — the AI CLI sees container-valid paths.
 
 ### Network Firewall
 
-Enabled by default (`--no-firewall` to disable). Uses a built-in Go forward proxy + iptables to restrict outbound HTTP/HTTPS to whitelisted domains only.
+Enabled by default. Use `mittens policy set network.firewall disabled` to
+disable it. Uses a built-in Go forward proxy + iptables to restrict outbound
+HTTP/HTTPS to whitelisted domains only.
 
 Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm/PyPI/crates.io/Go proxy, Docker registries, Helm, and Terraform.
 
-Extensions declare additional domains (e.g. AWS endpoints when `--aws` is enabled). MCP server domains are auto-resolved from config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22) bypasses the proxy entirely.
+Extensions declare additional domains, such as AWS endpoints when the AWS
+capability is enabled in policy. MCP server domains are auto-resolved from
+config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22)
+bypasses the proxy entirely.
 
-Use `--firewall-dev` for a developer-friendly whitelist that adds cloud APIs and apt repos.
+Project-specific domains can be added with `mittens policy set
+network.extra_domains`. Use `*.` or a leading dot to allow a domain and all
+nested subdomains, for example:
+
+```bash
+mittens policy set network.extra_domains '*.apps.example.test'
+```
+
+Use `mittens policy set network.firewall dev` for a developer-friendly
+whitelist that adds cloud APIs and apt repos.
+
+### Launch Boundary Summary
+
+Before starting the container, Mittens prints a compact summary of the boundary
+the agent will run inside: provider, workspace mount, extra directories,
+credential sources, network mode, enabled extensions, host integrations,
+execution mode, and history mode. Sensitive values are not printed.
+
+Use `--verbose` to also print the sanitized `docker run` command.
+
+Use `mittens policy show` to inspect the same boundary without launching a
+container. Add `--json` for machine-readable policy output.
 
 ### Docker-in-Docker
 
-`--docker dind` runs the container in `--privileged` mode with a dedicated Docker volume. A separate `dockerd` starts inside the container, allowing the AI to build and run containers as part of its work. The DinD volume is named `<container>-docker` and cleaned up on exit.
+`mittens policy set execution.docker dind` runs the container in `--privileged`
+mode with a dedicated Docker volume. A separate `dockerd` starts inside the
+container, allowing the AI to build and run containers as part of its work. The
+DinD volume is named `<container>-docker` and cleaned up on exit.
 
 ### Worktree Isolation
 
-`--worktree` creates a detached-HEAD git worktree for each invocation, so the AI works on a copy instead of the primary working tree. On exit, the worktree is removed if clean (no changes, no new commits) or kept if dirty. Extra directories (`--dir`) also get their own worktrees when possible.
+`mittens policy set execution.worktree true` creates a detached-HEAD git
+worktree for each invocation, so the AI works on a copy instead of the primary
+working tree. On exit, the worktree is removed if clean (no changes, no new
+commits) or kept if dirty. Extra directories configured as policy mounts also
+get their own worktrees when possible.
 
-Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only (`--dir-ro`) will fail worktree creation entirely.
+Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only by policy will fail worktree creation entirely.
 
 ### Model Profiles
 
-`--profile NAME` selects a saved model + effort preset. Profiles are per-provider, per-project, and created on first use:
+`mittens policy set provider.profile NAME` selects a saved model + effort
+preset. Profiles are per-provider and per-project.
 
 ```bash
-mittens --profile planner       # use the "planner" profile (prompts to create if missing)
+mittens policy set provider.profile planner
 mittens init --profile fast     # configure the "fast" profile
 mittens init --profile planner --delete  # remove a profile
 ```
 
-If profiles exist for the current provider and no `--profile` flag is given, mittens shows a picker at startup.
+If profiles exist for the current provider and no policy profile is set, mittens shows a picker at startup.
 
 ### Session Persistence
 
@@ -166,7 +215,7 @@ Enabled by default (`--no-history` to disable). Conversation history is persiste
 
 On macOS, a host-side script polls the clipboard for images every second and writes PNGs to a temp directory mounted into the container. An `xclip` shim inside the container reads these images, allowing the AI CLI to access clipboard images.
 
-For `--provider codex` on macOS, mittens also starts a local `Xvfb` display inside the container and mirrors the synced PNG into the X11 clipboard using a real `xclip` process. This gives Codex's Linux clipboard backend an in-container display/clipboard to read from.
+For the Codex provider on macOS, mittens also starts a local `Xvfb` display inside the container and mirrors the synced PNG into the X11 clipboard using a real `xclip` process. This gives Codex's Linux clipboard backend an in-container display/clipboard to read from.
 
 ### Notifications
 
@@ -176,17 +225,20 @@ When the AI CLI triggers a hook event (e.g. task completion, permission prompt),
 
 The container's `xdg-open` is replaced with a shim that forwards all URLs to the host browser via the broker's `POST /open` endpoint. This works for any URL the AI CLI tries to open, not just OAuth flows.
 
-Run `mittens help` for all flags and commands, or `mittens init --help` for setup subcommands.
+Run `mittens help` for commands, or `mittens init --help` for setup subcommands.
 
 ## Debugging
 
 - `mittens logs [-f]` — view broker logs (credential sync, OAuth intercept, URL forwarding). `-f` follows the log.
 - `--verbose` — prints the full `docker run` command so you can see all mounts, env vars, and flags.
-- `--shell` — drops into a bash shell inside the container for manual inspection.
+- `mittens policy set execution.shell true` — drops into a bash shell inside the container for manual inspection.
 
 ## Extensions
 
-Built-in: `--ssh`, `--gh`, `--aws`, `--azure`, `--gcp`, `--k8s`, `--helm`, `--docker`, `--dotnet`, `--go`, `--python`, `--rust`, `--mcp`, `--firewall` (on by default)
+Built-in capabilities include SSH, GitHub, AWS, Azure, GCP, Kubernetes, Helm,
+Docker, .NET, Go, Python, Rust, MCP, and the default firewall. Configure them
+with `mittens init`; legacy extension flags in old project config are converted
+to structured policy automatically.
 
 External plugins: drop an executable at `~/.mittens/extensions/<name>/plugin` — no recompilation needed.
 

@@ -35,8 +35,8 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:                "mittens [flags] [-- claude-args...]",
-		Short:              "Run Claude Code in an isolated Docker container",
+		Use:                "mittens [flags] [-- provider-args...]",
+		Short:              "Run AI coding agents in an isolated Docker container",
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		SilenceErrors:      true,
@@ -72,6 +72,8 @@ func runMain(args []string) error {
 			return runLogs(args[1:])
 		case "clean":
 			return runClean(args[1:])
+		case "policy":
+			return runPolicy(args[1:])
 		case "version":
 			return runVersion(args[1:])
 		case "extension":
@@ -106,6 +108,8 @@ func runMain(args []string) error {
 		ImageName:       "mittens",
 		ImageTag:        "latest",
 		Yolo:            true,
+		HostBridge:      defaultHostBridgeConfig(),
+		PathTranslate:   true,
 		worktreeOrigins: make(map[string]string),
 		worktreeRepos:   make(map[string]string),
 	}
@@ -116,6 +120,17 @@ func runMain(args []string) error {
 		return fmt.Errorf("loading extensions: %w", err)
 	}
 	app.Extensions = exts
+	if hasSubFlag(args, "--extensions") {
+		printExtensions(app.Extensions)
+		return nil
+	}
+	if hasSubFlag(args, "--json-caps") {
+		printJSONCaps(app.Extensions)
+		return nil
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags(args, app.Extensions); err != nil {
+		return err
+	}
 
 	// Set the default firewall.conf path for the firewall extension.
 	// Also provide the embedded copy so the binary works standalone
@@ -126,12 +141,12 @@ func runMain(args []string) error {
 
 	// 3. Load config: either ephemeral (--session wizard) or from disk.
 	var userArgs []string
-	var configArgs []string
+	var projectPolicy *ProjectPolicy
 
 	if sessionMode {
 		userArgs, _ = LoadUserDefaults()
 
-		ephemeralLines, err := wizardSession(app.Extensions)
+		ephemeralLines, ephemeralDomains, err := wizardSession(app.Extensions)
 		if err != nil {
 			if err == huh.ErrUserAborted {
 				fmt.Fprintln(os.Stderr, "\nCancelled.")
@@ -139,7 +154,11 @@ func runMain(args []string) error {
 			}
 			return err
 		}
-		configArgs = splitConfigFlags(ephemeralLines)
+		projectPolicy, err = PolicyFromLegacyFlags(splitConfigFlags(ephemeralLines), app.Extensions)
+		if err != nil {
+			return fmt.Errorf("building session policy: %w", err)
+		}
+		projectPolicy.Network.ExtraDomains = ephemeralDomains
 
 		// Strip --session from args before merging.
 		var filtered []string
@@ -165,36 +184,93 @@ func runMain(args []string) error {
 			}
 
 			workspace := detectWorkspace()
-			configArgs, err = LoadProjectConfig(workspace)
+			policy, source, err := LoadProjectPolicy(workspace, app.Extensions)
 			if err != nil {
 				return fmt.Errorf("loading project config: %w", err)
 			}
-			if len(configArgs) > 0 {
+			if policy != nil {
+				projectPolicy = policy
+				if source == PolicySourceLegacy {
+					if err := SaveProjectPolicy(workspace, policy); err != nil {
+						return fmt.Errorf("migrating legacy project config: %w", err)
+					}
+					logInfo("Migrated legacy project config to policy.yaml")
+				}
 				logInfo("Loaded project config for %s", ProjectDir(workspace))
 			}
 		}
 	}
 
-	// 5. Merge: user defaults → project config → CLI args (last wins).
-	merged := append(userArgs, configArgs...)
-	merged = append(merged, args...)
-
-	// 6. Resolve provider from merged flags (project config first, then CLI).
-	provider, err := resolveProviderFromArgs(merged)
+	// 5. Apply user defaults, then structured project/session policy, then CLI runtime args.
+	provider, err := resolveProviderFromArgs(userArgs)
 	if err != nil {
 		return err
 	}
 	app.Provider = provider
 
-	// 7. Parse all flags from the merged list.
-	if err := app.ParseFlags(merged); err != nil {
+	if err := app.ParseFlags(userArgs); err != nil {
+		return err
+	}
+	if projectPolicy != nil {
+		provider, err := providerByName(projectPolicy.Provider.Name)
+		if err != nil {
+			return err
+		}
+		app.Provider = provider
+		app.applyProjectPolicy(projectPolicy)
+	}
+	if err := app.ParseFlags(args); err != nil {
 		return err
 	}
 
 	app.NoConfig = hasSubFlag(args, "--no-config")
 
-	// 8. Run.
 	return app.Run()
+}
+
+var deprecatedLaunchPolicyFlags = map[string]string{
+	"--provider":        "provider.name",
+	"--profile":         "provider.profile",
+	"--dir":             "workspace.mounts",
+	"--dir-ro":          "workspace.mounts",
+	"--firewall-dev":    "network.firewall",
+	"--no-firewall":     "network.firewall",
+	"--firewall":        "network.custom_config",
+	"--docker":          "execution.docker",
+	"--no-yolo":         "execution.yolo",
+	"--no-notify":       "host.notifications",
+	"--network-host":    "network.mode",
+	"--worktree":        "workspace.mode",
+	"--shell":           "execution.shell",
+	"--image-paste-key": "options.image_paste_key",
+	"--worker":          "provider.profile",
+	"--planner":         "provider.profile",
+}
+
+func rejectDeprecatedLaunchPolicyFlags(args []string, extensions []*registry.Extension) error {
+	extensionFlags := map[string]string{}
+	for _, ext := range extensions {
+		for _, flag := range ext.Flags {
+			extensionFlags[flag.Name] = ext.Name
+		}
+	}
+
+	for _, arg := range args {
+		if arg == "--" {
+			return nil
+		}
+		name := arg
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			name = name[:idx]
+		}
+		if field, ok := deprecatedLaunchPolicyFlags[name]; ok {
+			return fmt.Errorf("%s is no longer accepted as a launch flag; use `mittens policy set %s <value>` or `mittens init`", name, field)
+		}
+		if extName, ok := extensionFlags[name]; ok {
+			return fmt.Errorf("%s is no longer accepted as a launch flag; configure the %s capability with `mittens init` or project policy", name, extName)
+		}
+	}
+	return nil
 }
 
 // hasSubFlag checks whether a flag appears in the args (before "--").

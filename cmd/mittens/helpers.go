@@ -77,8 +77,13 @@ func scriptDir() string {
 // runtimeRoot returns the directory that contains the container/ and
 // extensions/ subdirectories needed at runtime.
 // In a dist/install layout these sit next to the binary; in a dev build
-// from the repo root they live under cmd/mittens/.
+// from the repo root they live under cmd/mittens/. Standalone binaries fall
+// back to embedded runtime assets materialized under ~/.mittens/runtime/.
 func runtimeRoot() string {
+	if override := strings.TrimSpace(os.Getenv(runtimeRootEnv)); override != "" {
+		return override
+	}
+
 	dir := scriptDir()
 	// Dist / install layout: container/ is next to the binary.
 	if _, err := os.Stat(filepath.Join(dir, "container", "Dockerfile")); err == nil {
@@ -88,6 +93,11 @@ func runtimeRoot() string {
 	dev := filepath.Join(dir, "cmd", "mittens")
 	if _, err := os.Stat(filepath.Join(dev, "container", "Dockerfile")); err == nil {
 		return dev
+	}
+	if root, err := embeddedRuntimeRoot(); err == nil {
+		return root
+	} else {
+		logWarn("Failed to materialize embedded runtime assets: %v", err)
 	}
 	return dir // fall back for error reporting
 }

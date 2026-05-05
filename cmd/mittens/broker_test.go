@@ -508,6 +508,34 @@ func TestBroker_TCP_OpenRejectsNonHTTP(t *testing.T) {
 	}
 }
 
+func TestBroker_TCP_OpenDisabled(t *testing.T) {
+	b := NewHostBroker("", "", nil)
+	b.Host.OpenURLs = false
+	b.OnOpen = func(string) {
+		t.Fatal("OnOpen should not be called when URL opening is disabled")
+	}
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader("https://example.com"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("POST /open disabled: status = %d, want 403", resp.StatusCode)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cross-broker sync via TCP (simulates two containers syncing through host stores)
 // ---------------------------------------------------------------------------
@@ -1068,6 +1096,38 @@ func TestBroker_TCP_NotifyWithMessage(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestBroker_TCP_NotifyDisabled(t *testing.T) {
+	b := NewHostBroker("", "", nil)
+	b.Host.Notifications = false
+	b.OnNotify = func(_, _, _ string) {
+		t.Fatal("OnNotify should not be called when notifications are disabled")
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	payload := `{"container":"mittens-99","event":"notification","message":"ignored"}`
+	req, _ := http.NewRequest(http.MethodPost, base+"/notify", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /notify disabled: status = %d, want 204", resp.StatusCode)
+	}
+}
+
 func TestBroker_TCP_NotifyRejectsGET(t *testing.T) {
 	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()
@@ -1217,6 +1277,80 @@ func TestBroker_TCP_NotifySpecialCharacters(t *testing.T) {
 			}
 			mu.Unlock()
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /clipboard endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestBroker_TCP_ClipboardReturnsPNG(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G'}
+
+	b := NewHostBroker("", "", nil)
+	b.OnClipboardRead = func() []byte {
+		return png
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	resp, err := client.Get(base + "/clipboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /clipboard: status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, png) {
+		t.Errorf("clipboard body = %v, want %v", body, png)
+	}
+}
+
+func TestBroker_TCP_ClipboardDisabled(t *testing.T) {
+	b := NewHostBroker("", "", nil)
+	b.Host.ClipboardImages = false
+	b.OnClipboardRead = func() []byte {
+		t.Fatal("OnClipboardRead should not be called when clipboard images are disabled")
+		return nil
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	resp, err := client.Get(base + "/clipboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("GET /clipboard disabled: status = %d, want 204", resp.StatusCode)
 	}
 }
 

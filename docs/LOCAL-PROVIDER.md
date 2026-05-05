@@ -144,33 +144,30 @@ For local use (Ollama on the same machine), use `http://localhost:11434/v1` as t
 
 ```bash
 OPENAI_API_KEY=sk-local-0 \
-mittens --provider codex --network-host --no-firewall -- --profile gemma
+mittens -- --profile gemma
 ```
 
-Flags explained:
-- `--network-host` -- gives the container direct LAN access (required to reach the local server)
-- `--no-firewall` -- disables the HTTP proxy (which only allows ports 80/443 and would block port 11434)
+Project policy needed:
+- `provider.name: codex`
+- `network.mode: host` gives the container direct LAN access, which is required to reach the local server
+- `network.firewall: disabled` disables the HTTP proxy, which only allows ports 80/443 and would block port 11434
 - `--profile gemma` -- selects the Ollama provider and model (passed through to Codex via `--`)
 - `OPENAI_API_KEY` -- Ollama doesn't require a real key, but Codex expects one to be set. Any non-empty value works.
 
 Mittens automatically skips OAuth credential staging when a custom model provider base URL is configured.
 
-### 3. Save as project config (optional)
+### 3. Save as project policy
 
-To avoid typing the flags every time:
+Configure the project once:
 
 ```bash
 mittens init
-# Or manually create the config:
-mkdir -p ~/.mittens/projects/<project-name>
-cat > ~/.mittens/projects/<project-name>/config << 'EOF'
---provider codex
---network-host
---no-firewall
-EOF
+mittens policy set provider.name codex
+mittens policy set network.mode host
+mittens policy set network.firewall disabled
 ```
 
-Then run with just the env var and profile:
+Then run with just the env var and provider args:
 
 ```bash
 OPENAI_API_KEY=sk-local-0 mittens -- --profile gemma
@@ -182,7 +179,7 @@ If you prefer Codex's built-in `--oss` mode over a custom provider profile, mitt
 
 ```bash
 OLLAMA_HOST=http://<server-ip>:11434 \
-mittens --provider codex --network-host --no-firewall -- --oss
+mittens -- --oss
 ```
 
 Note: `--oss` mode uses Codex's built-in Ollama integration which auto-pulls models. The profile-based approach above gives you more control over model selection and avoids redundant downloads.

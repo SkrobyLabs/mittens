@@ -135,6 +135,12 @@ func writeConfigFile(path, header string, lines []string) error {
 // LoadProjectConfig reads the per-project config file and returns the stored
 // flags, one per line. Blank lines and lines starting with '#' are skipped.
 func LoadProjectConfig(workspace string) ([]string, error) {
+	if policy, err := loadProjectPolicyFile(workspace); err == nil && policy != nil {
+		return policy.ToLegacyFlags(), nil
+	} else if err != nil {
+		return nil, err
+	}
+
 	lines, err := readConfigLines(projectConfigPath(workspace))
 	if err != nil {
 		return nil, err
@@ -232,6 +238,11 @@ func SaveProfileConfig(workspace string, cfg *ProfileConfig) error {
 // used for display and for edit-mode categorisation where line structure matters
 // (e.g. "--go 1.24" must stay as one entry, not become ["--go", "1.24"]).
 func loadProjectConfigRaw(workspace string) ([]string, error) {
+	if policy, err := loadProjectPolicyFile(workspace); err == nil && policy != nil {
+		return legacyArgsToConfigLines(policy.ToLegacyFlags()), nil
+	} else if err != nil {
+		return nil, err
+	}
 	return readConfigLines(projectConfigPath(workspace))
 }
 

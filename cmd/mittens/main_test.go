@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+)
 
 func TestHasSubFlag_Init(t *testing.T) {
 	if !hasSubFlag([]string{"--init"}, "--init") {
@@ -95,5 +100,27 @@ func TestSessionConflictsDetected(t *testing.T) {
 	args = []string{"--session", "--init"}
 	if !hasSubFlag(args, "--session") || !hasSubFlag(args, "--init") {
 		t.Fatal("expected both --session and --init to be detected")
+	}
+}
+
+func TestRejectDeprecatedLaunchPolicyFlags(t *testing.T) {
+	exts := []*registry.Extension{{
+		Name:  "aws",
+		Flags: []registry.ExtensionFlag{{Name: "--aws"}},
+	}}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--provider", "codex"}, exts); err == nil || !strings.Contains(err.Error(), "policy set provider.name") {
+		t.Fatalf("expected provider policy error, got %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--aws"}, exts); err == nil || !strings.Contains(err.Error(), "aws capability") {
+		t.Fatalf("expected extension policy error, got %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--worker"}, exts); err == nil || !strings.Contains(err.Error(), "policy set provider.profile") {
+		t.Fatalf("expected legacy role policy error, got %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--verbose", "--", "--provider", "codex"}, exts); err != nil {
+		t.Fatalf("provider args after separator should be forwarded: %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--session", "--no-build", "--resume"}, exts); err != nil {
+		t.Fatalf("runtime flags should still be accepted: %v", err)
 	}
 }
