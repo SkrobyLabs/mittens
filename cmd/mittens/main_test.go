@@ -120,7 +120,13 @@ func TestRejectDeprecatedLaunchPolicyFlags(t *testing.T) {
 	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--verbose", "--", "--provider", "codex"}, exts); err != nil {
 		t.Fatalf("provider args after separator should be forwarded: %v", err)
 	}
-	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--session", "--no-build", "--resume"}, exts); err != nil {
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--session", "--no-build"}, exts); err != nil {
 		t.Fatalf("runtime flags should still be accepted: %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--resume"}, exts); err == nil || !strings.Contains(err.Error(), "pass provider resume args after `--`") {
+		t.Fatalf("expected resume pass-through error, got %v", err)
+	}
+	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--", "--resume", "latest"}, exts); err != nil {
+		t.Fatalf("resume args after separator should be forwarded: %v", err)
 	}
 }

@@ -5,7 +5,7 @@ Run Codex inside mittens against a local model (Ollama, LM Studio, etc.) on your
 ## Prerequisites
 
 - A machine on your LAN running an OpenAI-compatible API (e.g. Ollama)
-- Mittens built with `--provider codex` support
+- Mittens with Codex selected as the project provider
 
 ## Server Setup (Mac with Apple Silicon)
 
@@ -166,6 +166,9 @@ mittens policy set provider.name codex
 mittens policy set network.mode host
 mittens policy set network.firewall disabled
 ```
+
+You can also choose these through `mittens init`: select Codex as provider and
+choose the host-network boundary for local/LAN model access.
 
 Then run with just the env var and provider args:
 

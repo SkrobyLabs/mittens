@@ -263,6 +263,9 @@ func rejectDeprecatedLaunchPolicyFlags(args []string, extensions []*registry.Ext
 		if idx := strings.IndexByte(name, '='); idx >= 0 {
 			name = name[:idx]
 		}
+		if name == "--resume" {
+			return fmt.Errorf("--resume is not a mittens flag; pass provider resume args after `--`, for example `mittens -- --resume latest`")
+		}
 		if field, ok := deprecatedLaunchPolicyFlags[name]; ok {
 			return fmt.Errorf("%s is no longer accepted as a launch flag; use `mittens policy set %s <value>` or `mittens init`", name, field)
 		}

@@ -218,7 +218,6 @@ func TestApplyProjectPolicyConfiguresRuntimeAndCapabilities(t *testing.T) {
 	policy.Execution.Notify = &notify
 	policy.Execution.Shell = true
 	policy.Execution.Docker = "dind"
-	policy.Execution.Resume = "latest"
 	policy.Options["image_paste_key"] = "ctrl+v"
 	policy.Options["name"] = "worker"
 	policy.Capabilities = []CapabilityPolicy{{Name: "aws", Args: []string{"prod", "stage"}}}
@@ -240,8 +239,8 @@ func TestApplyProjectPolicyConfiguresRuntimeAndCapabilities(t *testing.T) {
 	if app.Yolo || !app.NoHistory || !app.NoNotify {
 		t.Fatalf("execution booleans not applied: yolo=%v noHistory=%v noNotify=%v", app.Yolo, app.NoHistory, app.NoNotify)
 	}
-	if app.ResumeSession != "latest" || app.ImagePasteKey != "ctrl+v" || app.InstanceName != "worker" {
-		t.Fatalf("runtime values not applied: resume=%q paste=%q name=%q", app.ResumeSession, app.ImagePasteKey, app.InstanceName)
+	if app.ImagePasteKey != "ctrl+v" || app.InstanceName != "worker" {
+		t.Fatalf("runtime values not applied: paste=%q name=%q", app.ImagePasteKey, app.InstanceName)
 	}
 	if !reflect.DeepEqual(app.ExtraDirs, []string{"ro:../shared"}) {
 		t.Fatalf("extra dirs = %#v", app.ExtraDirs)
@@ -423,6 +422,21 @@ func TestPolicyFromLegacyFlags_IgnoresOldRoleFlags(t *testing.T) {
 	}
 	if len(policy.ExtraArgs) != 0 {
 		t.Fatalf("extra args = %#v", policy.ExtraArgs)
+	}
+}
+
+func TestPolicyFromLegacyFlags_IgnoresRuntimeResume(t *testing.T) {
+	policy, err := PolicyFromLegacyFlags([]string{"--resume", "abc123", "--provider", "codex"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Provider.Name != "codex" {
+		t.Fatalf("provider = %q", policy.Provider.Name)
+	}
+	for _, flag := range policy.ToLegacyFlags() {
+		if flag == "--resume" || flag == "abc123" {
+			t.Fatalf("legacy flags retained runtime resume: %#v", policy.ToLegacyFlags())
+		}
 	}
 }
 

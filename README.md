@@ -209,7 +209,7 @@ If profiles exist for the current provider and no policy profile is set, mittens
 
 ### Session Persistence
 
-Enabled by default (`--no-history` to disable). Conversation history is persisted and mounted into the container. Each launch starts a fresh session by default; use `--resume` to continue the last session or `--resume SESSION_ID` to resume a specific one.
+Enabled by default (`--no-history` to disable). Conversation history is persisted and mounted into the container. Mittens does not expose a generic resume flag; pass the selected provider's resume/continue arguments after `--`, for example `mittens -- --resume latest` for providers that support that syntax.
 
 ### Clipboard & Image Sync (macOS)
 

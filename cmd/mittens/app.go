@@ -47,7 +47,6 @@ type App struct {
 	NetworkHost   bool
 	Worktree      bool
 	Shell         bool
-	ResumeSession string // "" = fresh, "latest" = continue last, other = passthrough ID
 	Profile       string // model profile name (e.g. "planner", "fast")
 	ImagePasteKey string // "ctrl+v" or "meta+v"
 	HostBridge    HostBridgeConfig
@@ -119,7 +118,6 @@ var coreFlags = map[string]func(*App){
 	"--shell":        func(a *App) { a.Shell = true },
 	"--worker":       func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	"--planner":      func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	// --resume is handled specially in ParseFlags (optional argument).
 	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
 }
 
@@ -144,18 +142,6 @@ func (a *App) ParseFlags(args []string) error {
 		if arg == "--" {
 			a.ClaudeArgs = append(a.ClaudeArgs, args[i+1:]...)
 			break
-		}
-
-		// --resume [ID] — optional argument.
-		if arg == "--resume" {
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				a.ResumeSession = args[i+1]
-				i += 2
-			} else {
-				a.ResumeSession = "latest"
-				i++
-			}
-			continue
 		}
 
 		// Core boolean flags.
@@ -415,9 +401,6 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Resume session if --resume was given.
-	a.maybeApplyResumeArgs()
-
 	// Yolo mode: prepend skip-permissions flag.
 	if a.Yolo {
 		a.ClaudeArgs = append([]string{a.Provider.SkipPermsFlag}, a.ClaudeArgs...)
@@ -437,22 +420,6 @@ func (a *App) Run() error {
 	}
 
 	return a.runContainer(dockerArgs)
-}
-
-func (a *App) maybeApplyResumeArgs() {
-	if a.ResumeSession == "" || a.Shell {
-		return
-	}
-	for _, arg := range a.ClaudeArgs {
-		if a.Provider.IsResumeFlag(arg) {
-			return
-		}
-	}
-	if a.ResumeSession == "latest" {
-		a.ClaudeArgs = append(a.Provider.ContinueArgs, a.ClaudeArgs...)
-		return
-	}
-	a.ClaudeArgs = append([]string{"--resume", a.ResumeSession}, a.ClaudeArgs...)
 }
 
 func (a *App) maybeApplyProfile() error {
@@ -990,9 +957,6 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	}
 	if policy.Execution.Notify != nil {
 		a.NoNotify = !*policy.Execution.Notify
-	}
-	if policy.Execution.Resume != "" {
-		a.ResumeSession = policy.Execution.Resume
 	}
 	if policy.Options != nil {
 		if key := policy.Options["image_paste_key"]; key != "" {
@@ -1755,7 +1719,6 @@ Core flags:
   --session         Tweak settings for this run only (opens wizard, doesn't save)
   --no-config       Skip config file loading (user defaults + project policy)
   --no-history      Disable session persistence for this run
-  --resume [ID]     Resume last session, or a specific session by ID
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
   --name NAME       Name this instance (default: PID-based)
@@ -1825,7 +1788,6 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--rebuild", Description: "Rebuild image without layer cache"},
 			{Name: "--no-history", Description: "Disable session persistence for this run"},
-			{Name: "--resume", Description: "Resume last session, or a specific session by ID", ArgType: "string"},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 		},
 	}

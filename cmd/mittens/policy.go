@@ -87,7 +87,6 @@ type ExecutionPolicy struct {
 	Docker      string `yaml:"docker,omitempty"`
 	NetworkHost bool   `yaml:"network_host,omitempty"`
 	Notify      *bool  `yaml:"notify,omitempty"`
-	Resume      string `yaml:"resume,omitempty"`
 }
 
 func projectPolicyPath(workspace string) string {
@@ -226,9 +225,8 @@ func PolicyFromLegacyFlags(args []string, extensions []*registry.Extension) (*Pr
 			policy.Execution.Notify = &v
 			policy.Host.Notifications = boolPtr(false)
 		case "--resume":
-			policy.Execution.Resume = "latest"
+			// Historical runtime-only flag. Do not migrate it into project policy.
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				policy.Execution.Resume = args[i+1]
 				i++
 			}
 		case "--docker":
@@ -318,12 +316,6 @@ func (p *ProjectPolicy) ToLegacyFlags() []string {
 		args = append(args, "--no-notify")
 	} else if p.Host.Notifications != nil && !*p.Host.Notifications {
 		args = append(args, "--no-notify")
-	}
-	if p.Execution.Resume != "" {
-		args = append(args, "--resume")
-		if p.Execution.Resume != "latest" {
-			args = append(args, p.Execution.Resume)
-		}
 	}
 	if name := p.Options["name"]; name != "" {
 		args = append(args, "--name", name)

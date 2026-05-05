@@ -7,10 +7,10 @@ mittens uses a pluggable extension system. There are two kinds of extensions:
 
 ## Distribution
 
-The compiled `mittens` binary is **not self-contained**. It needs these files next to it (resolved via the binary's directory):
+The compiled `mittens` binary embeds the built-in runtime assets it needs for
+normal installed use:
 
 ```
-mittens                          # compiled binary
 cmd/mittens/container/
   Dockerfile                     # base Docker image definition
   mittens-init                   # container entrypoint binary (built from cmd/mittens-init)
@@ -19,17 +19,24 @@ cmd/mittens/container/
   mcp-domains.conf               # MCP server -> domain mappings
   clipboard-sync.sh              # macOS host-side clipboard polling
 cmd/mittens/extensions/
-  aws/build.sh                   # build scripts are COPY'd into Docker
-  azure/build.sh                 #   and executed during `docker build`
-  dotnet/build.sh
-  gcp/build.sh
-  go/build.sh
-  kubectl/build.sh
+  <name>/extension.yaml          # built-in capability manifest
+  <name>/build.sh                # optional Docker build-time install script
+  <name>/prompt.md               # optional AI-facing capability guidance
 ```
 
-The `mittens-init` binary is the container entrypoint — it handles root-level setup (firewall proxy, iptables, DinD, privilege drop), user-level setup (config staging, JSON settings, credential sync), and provides busybox-style symlink dispatch for `xdg-open`, `xclip`, and `notify.sh`.
+At runtime, Mittens first looks for adjacent source-tree assets so local
+development edits are picked up. If none are present, it materializes the
+embedded assets under `~/.mittens/runtime/<version>-<commit>/`. Set
+`MITTENS_RUNTIME_ROOT=/path/to/cmd/mittens` to force a source checkout.
 
-The extension YAML manifests and Go resolver logic are embedded into the binary at compile time (`go:embed`), so they don't need to ship as files. Only `cmd/mittens/container/` and `cmd/mittens/extensions/*/build.sh` must be present at runtime.
+The `mittens-init` binary is the container entrypoint. It handles root-level
+setup (firewall proxy, iptables, DinD, privilege drop), user-level setup
+(config staging, JSON settings, credential sync), and busybox-style symlink
+dispatch for `xdg-open`, `xclip`, and `notify.sh`.
+
+The extension YAML manifests, prompt files, build scripts, and Go resolver
+logic are compiled into the binary. External user extensions still live under
+`~/.mittens/extensions/<name>/`.
 
 ## Built-in Extensions
 
@@ -130,9 +137,9 @@ import (
 )
 ```
 
-**Current built-in extensions with resolvers:** aws, azure, gcp, kubectl, mcp, firewall
+**Current built-in extensions with resolvers:** aws, azure, docker, firewall, gcp, gh, helm, kubectl, mcp, trivy
 
-**Current built-in extensions without resolvers (YAML-only):** ssh, gh, dotnet, go
+**Current built-in extensions without resolvers (YAML-only):** dotnet, go, python, rust, ssh
 
 ### 3. Build Script (`build.sh`) -- optional
 
@@ -268,7 +275,7 @@ See `examples/redis-extension/plugin` for a complete Python implementation demon
    b. User: from ~/.mittens/extensions/ (YAML-only or plugin-based)
    c. User extensions with the same name shadow built-in ones
    d. Plugin-based extensions register subprocess resolvers
-4. Project policy is planned -- extensions are enabled from policy or converted legacy config
+4. Project policy is planned -- capabilities are enabled from policy or converted legacy config
 5. For each enabled extension with a setup resolver:
    a. Create temp staging directory
    b. Call setup resolver (Go function or `plugin setup` subprocess)

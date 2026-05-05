@@ -363,9 +363,6 @@ func executionFromPolicy(policy *ProjectPolicy) []string {
 	default:
 		out = append(out, "no Docker access")
 	}
-	if policy.Execution.Resume != "" {
-		out = append(out, "resume "+policy.Execution.Resume)
-	}
 	return out
 }
 

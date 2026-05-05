@@ -294,53 +294,6 @@ func TestLoadProfileConfig_LegacyRolesJsonFallback(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ParseFlags — --resume with optional argument
-// ---------------------------------------------------------------------------
-
-func TestParseFlags_ResumeLatest(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--resume"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "latest" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
-	}
-}
-
-func TestParseFlags_ResumeWithID(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--resume", "abc123"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "abc123" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "abc123")
-	}
-}
-
-func TestParseFlags_ResumeBeforeOtherFlags(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--resume", "--verbose"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "latest" {
-		t.Errorf("ResumeSession = %q, want %q", a.ResumeSession, "latest")
-	}
-	if !a.Verbose {
-		t.Error("--verbose not set")
-	}
-}
-
-func TestParseFlags_DefaultNoResume(t *testing.T) {
-	a := &App{}
-	if err := a.ParseFlags([]string{"--verbose"}); err != nil {
-		t.Fatal(err)
-	}
-	if a.ResumeSession != "" {
-		t.Errorf("ResumeSession = %q, want empty", a.ResumeSession)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ParseFlags — --dir with argument
 // ---------------------------------------------------------------------------
 
@@ -1623,40 +1576,6 @@ func TestAssembleDockerArgs_SettingsFormatEnv(t *testing.T) {
 	cfg := extractInitConfig(t, args)
 	if cfg.AI.SettingsFormat != "json" {
 		t.Errorf("AI.SettingsFormat = %q, want json", cfg.AI.SettingsFormat)
-	}
-}
-
-func TestMaybeApplyResumeArgs_CodexLatest(t *testing.T) {
-	a := &App{
-		Provider:      CodexProvider(),
-		ResumeSession: "latest",
-		ClaudeArgs:    []string{"--model", "gpt-5"},
-	}
-
-	a.maybeApplyResumeArgs()
-
-	want := []string{"--resume", "latest", "--model", "gpt-5"}
-	if len(a.ClaudeArgs) != len(want) {
-		t.Fatalf("ClaudeArgs = %v, want %v", a.ClaudeArgs, want)
-	}
-	for i := range want {
-		if a.ClaudeArgs[i] != want[i] {
-			t.Fatalf("ClaudeArgs[%d] = %q, want %q", i, a.ClaudeArgs[i], want[i])
-		}
-	}
-}
-
-func TestMaybeApplyResumeArgs_DoesNotDuplicate(t *testing.T) {
-	a := &App{
-		Provider:      CodexProvider(),
-		ResumeSession: "latest",
-		ClaudeArgs:    []string{"--resume", "abc123"},
-	}
-
-	a.maybeApplyResumeArgs()
-
-	if len(a.ClaudeArgs) != 2 {
-		t.Fatalf("ClaudeArgs = %v, want existing args unchanged", a.ClaudeArgs)
 	}
 }
 

@@ -1,55 +1,62 @@
 # mittens
 
-Run Claude Code in isolated Docker containers with credential forwarding, network firewall, Docker-in-Docker, and pluggable extensions.
+Run AI coding agents in isolated Docker containers with credential forwarding,
+network firewalling, Docker-in-Docker, host integrations, and policy-driven
+capabilities.
 
 ## Project Structure
 
 ```
 cmd/
   mittens/                   # main binary source
-    main.go                  # CLI entry point (cobra, flag routing)
-    app.go                   # core orchestration (ParseFlags, Run, Cleanup)
-    broker.go                # HostBroker — host↔container communication (creds, URLs, notifications, OAuth)
-    config.go                # per-project config (~/.mittens/projects/...)
-    wizard.go                # TUI setup wizard (charmbracelet/huh)
+    main.go                  # CLI entry point, manual command/flag routing
+    app.go                   # core orchestration, policy application, Docker run assembly
+    policy.go                # structured project policy model + legacy config conversion
+    policy_cmd.go            # mittens policy show/set
+    summary.go               # launch boundary summary rendering
+    runtime_assets.go        # materializes embedded runtime files for installed binaries
+    runtime_plan.go          # provider/capability runtime planning seams
+    broker.go                # HostBroker lifecycle and shared state
+    broker_host.go           # URL opening, OAuth callbacks, notifications, clipboard endpoints
+    broker_credentials.go    # credential sync and freshest-wins storage
+    broker_refresh.go        # token refresh coordination
+    broker_http.go           # broker HTTP helper functions
+    config.go                # user defaults and legacy per-project config helpers
+    wizard.go                # TUI setup wizard (mittens init / --session)
     docker.go                # docker build/run/cp operations
-    drop.go                  # DropProxy — stdin PTY proxy for drag-and-drop path translation
+    drop.go                  # DropProxy for drag-and-drop path translation
     credentials.go           # credential extraction and persistence
     credentials_darwin.go    # macOS Keychain credential source
-    credentials_other.go     # non-macOS stub
+    credentials_other.go     # non-macOS credential source
     terminal_focus.go        # detect terminal and re-focus on notification
-    helpers.go               # logging, scriptDir, captureCommand
-    embed.go                 # go:embed for extension YAMLs
-    container/               # Docker image files (not embedded, must ship with binary)
+    helpers.go               # logging and shared helpers
+    embed.go                 # go:embed runtime assets and extension manifests
+    container/               # runtime files embedded into the mittens binary
       Dockerfile
       mittens-init           # container entrypoint binary (built from cmd/mittens-init)
       firewall.conf          # default domain whitelist
       firewall-dev.conf      # developer-friendly whitelist superset
       mcp-domains.conf       # MCP server name -> domain mappings
       clipboard-sync.sh      # macOS host-side clipboard polling
-    extensions/              # pluggable extension system
-      registry/              # shared types + registration (registry.Register, LoadExtensions)
-        types.go             # Extension, SetupContext, SetupResult, ParseFlag
-        registry.go          # Register, GetListResolver, GetSetupResolver, LoadExternalExtensions
-      <name>/                # one directory per extension
-        extension.yaml       # manifest (embedded at compile time)
+    extensions/              # built-in capability system
+      registry/              # shared types + registration
+      <name>/                # one directory per built-in capability
+        extension.yaml       # manifest embedded at compile time
         resolver.go          # Go resolver with init() registration (optional)
         build.sh             # Docker build-time install script (optional)
-    internal/
-      fileutil/              # CopyFile, CopyDir helpers
   mittens-init/              # container-side entrypoint binary
     main.go                  # busybox-style argv[0] dispatch + entrypoint
     config.go                # MITTENS_* env var loading
-    phase1.go                # root: DinD, Docker socket, Go proxy, iptables, priv-drop
-    phase2.go                # user: config staging, JSON settings, trust dirs, hooks, cred-sync
+    phase1.go                # root: DinD, Docker socket, proxy, iptables, priv-drop
+    phase2.go                # user: config staging, settings, trust dirs, hooks, cred-sync
     proxy.go                 # FQDN-filtering HTTP/HTTPS forward proxy
-    whitelist.go             # domain whitelist with .domain wildcard matching
+    whitelist.go             # domain whitelist with .domain and *.domain wildcard matching
     credsync.go              # credential sync goroutine
     broker_client.go         # shared HTTP client for host broker
     handlers.go              # xdg-open, notify, xclip, x11-clipboard handlers
   shim/                      # Windows WSL shim
-examples/
-  redis-extension/           # example external extension (Python subprocess protocol)
+internal/
+  fileutil/                  # CopyFile, CopyDir helpers
 ```
 
 ## Build
@@ -60,27 +67,79 @@ make install             # install to /usr/local/bin (or PREFIX=~/.local)
 make help                # all targets
 ```
 
-Requires Go 1.23+. The binary embeds extension YAMLs but needs `cmd/mittens/container/` and `cmd/mittens/extensions/*/build.sh` at runtime (resolved relative to binary location).
+Requires Go 1.23+.
 
-## Extension System
+The installed binary embeds built-in runtime files (`container/*` and
+`extensions/*`) and materializes them under
+`~/.mittens/runtime/<version>-<commit>/` when no adjacent source runtime exists.
+Set `MITTENS_RUNTIME_ROOT=/path/to/cmd/mittens` to force a checkout during
+runtime development.
 
-See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension architecture, YAML manifest schema, Go resolver API, and external subprocess protocol.
+## Policy Model
+
+Mittens v2 uses structured project policy:
+
+- Project policies live at `~/.mittens/projects/<project>/policy.yaml`.
+- `mittens init` is the interactive policy editor.
+- `mittens policy show [--json]` prints the effective policy and launch boundary.
+- `mittens policy set <field> <value>` edits narrow scalar fields for automation.
+- Older one-flag-per-line project configs are still readable and are converted to `policy.yaml` automatically on launch or init.
+- Policy-shaped launch flags are intentionally rejected; use `mittens init` or `mittens policy set`.
+
+Important policy areas:
+
+- `provider.name`: `claude`, `codex`, or `gemini`
+- `workspace.mounts`: extra read/write or read-only mounts
+- `network.mode`: `bridge` or `host`
+- `network.firewall`: `strict`, `dev`, `custom`, or `disabled`
+- `network.extra_domains`: project-specific firewall allowlist domains, including `*.domain` wildcards
+- `host`: URL opening, notifications, clipboard images, and path translation
+- `capabilities`: built-in or external capability selections
+- `execution`: yolo, history, worktree, shell, and Docker access
+
+## Extension And Capability System
+
+See [docs/EXTENSIONS.md](docs/EXTENSIONS.md) for the full architecture, YAML
+manifest schema, Go resolver API, and external subprocess protocol.
+
+Built-in capabilities are loaded from embedded manifests with disk-first
+override during source/runtime development. User extensions are discovered from
+`~/.mittens/extensions/<name>/` and may provide YAML, a `plugin`, and optional
+`build.sh`.
 
 ## Key Patterns
 
-- Extensions self-register via `init()` + blank imports in main.go
-- `go:embed extensions/*/extension.yaml` bakes manifests into the binary
-- Flag parsing: cobra with `DisableFlagParsing: true`, manual dispatch to core flags then extensions
-- Config files: one flag per line at `~/.mittens/projects/<project>/config`, loaded and split with `strings.Fields`
-- Docker image tags derived from enabled extensions (e.g. `mittens:aws-dotnet9`)
-- Credentials: compare Keychain + file freshness, mount read-only, extract via `docker cp` after exit
-- `HostBroker` (broker.go): single TCP server bridging host↔container for creds, URLs, OAuth, notifications, refresh coordination
-- `DropProxy` (drop.go): wraps stdin through a PTY to translate host paths in bracketed paste sequences
-- Container runs as root initially (for iptables/DinD), drops to AI user via syscall.Setuid/Setgid in mittens-init
-- `mittens-init` (cmd/mittens-init): container entrypoint binary; handles root setup (proxy, iptables, DinD, priv-drop), user setup (config staging, JSON settings, cred sync), and busybox-style argv[0] dispatch for xdg-open, xclip, notify.sh symlinks
+- Providers encapsulate CLI identity, config paths, credential files, firewall domains, history handling, and resume/continue flags.
+- Runtime planning happens before launch: provider plans and capability plans contribute image tag parts, build args, mounts, env vars, Linux capabilities, firewall domains, and setup resolver output.
+- `App.applyProjectPolicy` applies structured policy directly; runtime behavior should not depend on round-tripping through synthetic launch flags.
+- Extension legacy flags remain in manifests for migration and wizard plumbing, but are not supported as launch flags.
+- `go:embed` covers runtime assets and extension manifests; installed binaries materialize runtime files into the Mittens runtime cache.
+- Credentials use a freshest-wins model across host and container stores.
+- `DropProxy` wraps stdin through a PTY to translate host paths in bracketed paste sequences.
+- The container starts as root for iptables/DinD setup, then drops to the provider user via `syscall.Setuid/Setgid` in `mittens-init`.
+- `mittens-init` handles root setup, user setup, credential sync, and busybox-style dispatch for `xdg-open`, `xclip`, and `notify.sh` symlinks.
 
-## Core Flags
+## Core CLI Surface
 
-`--verbose`, `--no-config`, `--no-history`, `--no-build`, `--rebuild`, `--docker MODE`, `--no-yolo`, `--network-host`, `--worktree`, `--shell`, `--dir PATH`, `--extensions`, `--help`
+Commands:
 
-Unrecognised flags are forwarded to Claude Code (e.g. `--model`, `--print`).
+- `mittens init` edits project policy.
+- `mittens init --defaults` edits user defaults.
+- `mittens init --profile NAME` edits provider model profiles.
+- `mittens policy show [--json]` inspects effective policy and boundary.
+- `mittens policy set <field> <value>` updates narrow scalar policy fields.
+- `mittens extension list|install|remove` manages external extensions.
+- `mittens logs [-f]`, `mittens clean`, and `mittens version`.
+
+Launch/runtime flags are intentionally small:
+
+`--verbose`, `--session`, `--no-config`, `--no-history`,
+`--no-build`, `--rebuild`, `--name NAME`, `--extensions`, `--json-caps`,
+`--version`, `--help`
+
+Unrecognised arguments after Mittens parsing are forwarded to the selected
+provider CLI. Use `--` when passing provider args explicitly, for example:
+
+```
+mittens -- --model opus
+```
