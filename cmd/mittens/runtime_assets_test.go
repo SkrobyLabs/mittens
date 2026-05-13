@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,15 @@ func TestMaterializeRuntimeAssetsWritesRequiredFiles(t *testing.T) {
 	}
 	if info.Mode()&0111 == 0 {
 		t.Fatalf("container/mittens-init mode = %v, want executable", info.Mode())
+	}
+}
+
+func TestContainerDockerfileInstallsBuildxPlugin(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("container", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "docker-buildx-plugin") {
+		t.Fatal("container Dockerfile must install docker-buildx-plugin so docker buildx is available inside Docker-enabled agents")
 	}
 }

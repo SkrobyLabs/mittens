@@ -54,6 +54,7 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
     apt-get update && apt-get install -y --no-install-recommends \
     docker-ce \
     docker-ce-cli \
+    docker-buildx-plugin \
     containerd.io \
     && rm -rf /var/lib/apt/lists/*
 
