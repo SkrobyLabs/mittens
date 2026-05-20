@@ -369,8 +369,11 @@ func dropPrivileges(cfg *config) error {
 		return fmt.Errorf("looking up user %s: %w", cfg.AIUsername, err)
 	}
 
-	// Set supplementary groups.
-	if err := syscall.Setgroups(nil); err != nil {
+	supplementaryGroups, err := lookupSupplementaryGroups(cfg.AIUsername, gid)
+	if err != nil {
+		return fmt.Errorf("looking up supplementary groups for %s: %w", cfg.AIUsername, err)
+	}
+	if err := syscall.Setgroups(supplementaryGroups); err != nil {
 		return fmt.Errorf("setgroups: %w", err)
 	}
 
@@ -395,7 +398,11 @@ func dropPrivileges(cfg *config) error {
 
 // lookupUser returns UID and GID for the given username by parsing /etc/passwd.
 func lookupUser(username string) (uid, gid int, err error) {
-	data, err := os.ReadFile("/etc/passwd")
+	return lookupUserInFile("/etc/passwd", username)
+}
+
+func lookupUserInFile(path, username string) (uid, gid int, err error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -412,5 +419,46 @@ func lookupUser(username string) (uid, gid int, err error) {
 			return u, g, nil
 		}
 	}
-	return 0, 0, fmt.Errorf("user %s not found in /etc/passwd", username)
+	return 0, 0, fmt.Errorf("user %s not found in %s", username, path)
+}
+
+// lookupSupplementaryGroups returns the non-primary group IDs that list the
+// user as a member in /etc/group.
+func lookupSupplementaryGroups(username string, primaryGID int) ([]int, error) {
+	return lookupSupplementaryGroupsInFile("/etc/group", username, primaryGID)
+}
+
+func lookupSupplementaryGroupsInFile(path, username string, primaryGID int) ([]int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var groups []int
+	seen := make(map[int]bool)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 4 {
+			continue
+		}
+		var gid int
+		if _, err := fmt.Sscanf(fields[2], "%d", &gid); err != nil {
+			continue
+		}
+		if gid == primaryGID || seen[gid] {
+			continue
+		}
+		for _, member := range strings.Split(fields[3], ",") {
+			if strings.TrimSpace(member) == username {
+				groups = append(groups, gid)
+				seen[gid] = true
+				break
+			}
+		}
+	}
+	return groups, nil
 }

@@ -1452,6 +1452,9 @@ func (a *App) runContainer(dockerArgs []string) error {
 		return fmt.Errorf("docker run failed: %w", err)
 	}
 	if code != 0 {
+		if cleanup != nil {
+			cleanup()
+		}
 		os.Exit(code)
 	}
 	return nil

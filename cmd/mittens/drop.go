@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/SkrobyLabs/mittens/internal/fileutil"
@@ -395,12 +396,13 @@ func StartPTYProxy(proxy *DropProxy) (slave *os.File, cleanup func(), err error)
 		_ = pty.Setsize(master, sz)
 	}
 
-	// Set real stdin to raw mode so keystrokes pass through immediately.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	// Set real stdin to byte-at-a-time input mode so keystrokes pass through
+	// immediately, while preserving host output processing on the shared TTY.
+	oldState, err := makeInputRawPreserveOutput(int(os.Stdin.Fd()))
 	if err != nil {
 		master.Close()
 		slave.Close()
-		return nil, nil, fmt.Errorf("make raw: %w", err)
+		return nil, nil, fmt.Errorf("set terminal input mode: %w", err)
 	}
 
 	// Forward SIGWINCH to resize the pty.
@@ -420,14 +422,16 @@ func StartPTYProxy(proxy *DropProxy) (slave *os.File, cleanup func(), err error)
 		master.Close()
 	}()
 
+	var cleanupOnce sync.Once
 	cleanup = func() {
-		signal.Stop(sigCh)
-		close(sigCh)
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-		master.Close()
-		slave.Close()
+		cleanupOnce.Do(func() {
+			signal.Stop(sigCh)
+			close(sigCh)
+			_ = restoreTerminalMode(int(os.Stdin.Fd()), oldState)
+			master.Close()
+			slave.Close()
+		})
 	}
 
 	return slave, cleanup, nil
 }
-
