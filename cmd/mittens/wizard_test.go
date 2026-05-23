@@ -38,11 +38,12 @@ func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 func TestParseProviderLines(t *testing.T) {
 	selected, def := parseProviderLines([]string{
 		"--provider codex",
+		"--provider ollama",
 		"--provider gemini",
 	})
 
-	if !selected["codex"] || !selected["gemini"] {
-		t.Fatalf("expected selected codex and gemini, got %v", selected)
+	if !selected["codex"] || !selected["ollama"] || !selected["gemini"] {
+		t.Fatalf("expected selected codex, ollama and gemini, got %v", selected)
 	}
 	if def != "gemini" {
 		t.Fatalf("expected default provider gemini, got %q", def)
@@ -105,11 +106,13 @@ func TestFormatCurrentSetupLineHidesLegacyFlags(t *testing.T) {
 		"--no-yolo":          "YOLO mode: disabled",
 		"--network-host":     "Network: host",
 		"--worktree":         "Parallel isolation: git worktree",
-		"network.extra_domain *.apps.example.test": "Allowed domain: *.apps.example.test",
-		"option.yolo enabled":                      "YOLO mode: enabled",
-		"option.worktree disabled":                 "Parallel isolation: disabled",
-		"--go 1.23":                                "Go: 1.23",
-		"--docker host":                            "Docker: host",
+		"network.extra_domain *.apps.example.test":            "Allowed domain: *.apps.example.test",
+		"provider.endpoint http://host.docker.internal:11434": "Provider endpoint: http://host.docker.internal:11434",
+		"provider.model qwen3-coder:30b":                      "Provider model: qwen3-coder:30b",
+		"option.yolo enabled":                                 "YOLO mode: enabled",
+		"option.worktree disabled":                            "Parallel isolation: disabled",
+		"--go 1.23":                                           "Go: 1.23",
+		"--docker host":                                       "Docker: host",
 	}
 	for input, want := range cases {
 		if got := formatCurrentSetupLine(input); got != want {

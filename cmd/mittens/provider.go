@@ -73,8 +73,13 @@ type Provider struct {
 	// Container settings
 	ContainerHostname string            // fixed Docker hostname; empty = Docker default. Required when credential file encryption is hostname-dependent (e.g. Gemini).
 	ContainerEnv      map[string]string // extra env vars injected at docker run time; empty value = unset the var.
+	DockerArgs        []string          // extra docker run args needed by this provider.
+	DefaultArgs       []string          // provider CLI args applied when the user has not supplied equivalent args.
 	InitSettingsJQ    string            // jq expression applied to settings.json once after all other setup; empty = unused.
 	StopHookEvent     string            // hook event name for session end, e.g. "Stop" (Claude) or "SessionEnd" (Gemini); empty = skip stop hook.
+	SkipCredentials   bool              // skip provider OAuth/API credential staging.
+	LocalModelSource  string            // optional local model detector name, e.g. "ollama".
+	DefaultModel      string            // provider default model applied when no --model arg is supplied.
 }
 
 // HomePath returns the home directory for this provider's user inside the container.
@@ -152,8 +157,7 @@ func (p *Provider) IsResumeFlag(arg string) bool {
 	return false
 }
 
-// ClaudeProvider returns a Provider configured for Claude Code with all
-// current hardcoded values. This is the only provider implemented today.
+// ClaudeProvider returns a Provider configured for Claude Code.
 func ClaudeProvider() *Provider {
 	return &Provider{
 		Name:           "claude",
@@ -349,6 +353,69 @@ func GeminiProvider() *Provider {
 	}
 }
 
+// OllamaProvider returns a Provider that uses Codex as the harness while
+// directing model requests to a locally hosted Ollama server.
+func OllamaProvider() *Provider {
+	p := CodexProvider()
+	ollamaHost := ollamaHostURL()
+	p.Name = "ollama"
+	p.DisplayName = "Ollama (Codex)"
+	p.APIKeyEnv = ""
+	p.BaseURLEnv = ""
+	p.FirewallDomains = nil
+	p.ContainerEnv = map[string]string{
+		"CODEX_OSS_BASE_URL": envOrDefault("CODEX_OSS_BASE_URL", ollamaOpenAIBaseURL(ollamaHost)),
+		"OLLAMA_HOST":        ollamaHost,
+		"OPENAI_API_KEY":     envOrDefault("OPENAI_API_KEY", "sk-local-0"),
+	}
+	p.DockerArgs = []string{"--add-host", "host.docker.internal:host-gateway"}
+	p.DefaultArgs = []string{"--oss", "--local-provider", "ollama"}
+	p.SkipCredentials = true
+	p.LocalModelSource = "ollama"
+	return p
+}
+
+func (p *Provider) ApplyPolicy(policy ProviderPolicy) {
+	if p == nil {
+		return
+	}
+	if policy.Model != "" {
+		p.DefaultModel = policy.Model
+	}
+	if p.Name == "ollama" && policy.Endpoint != "" {
+		host := normalizeOllamaURL(policy.Endpoint)
+		p.ContainerEnv["OLLAMA_HOST"] = host
+		p.ContainerEnv["CODEX_OSS_BASE_URL"] = envOrDefault("CODEX_OSS_BASE_URL", ollamaOpenAIBaseURL(host))
+	}
+}
+
+func ollamaHostURL() string {
+	if v := os.Getenv("MITTENS_OLLAMA_HOST"); v != "" {
+		return normalizeOllamaURL(v)
+	}
+	if v := os.Getenv("OLLAMA_HOST"); v != "" {
+		return normalizeOllamaURL(v)
+	}
+	return "http://host.docker.internal:11434"
+}
+
+func ollamaOpenAIBaseURL(host string) string {
+	return strings.TrimRight(normalizeOllamaURL(host), "/") + "/v1"
+}
+
+func normalizeOllamaURL(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimRight(host, "/")
+	if host == "" {
+		return "http://host.docker.internal:11434"
+	}
+	if !strings.Contains(host, "://") {
+		host = "http://" + host
+	}
+	host = strings.TrimSuffix(host, "/v1")
+	return host
+}
+
 // DefaultProvider returns the default provider (Claude).
 func DefaultProvider() *Provider {
 	return ClaudeProvider()
@@ -362,6 +429,8 @@ func canonicalProviderName(name string) string {
 		return "codex"
 	case "gemini", "google":
 		return "gemini"
+	case "ollama", "local", "local-ollama":
+		return "ollama"
 	default:
 		return strings.ToLower(strings.TrimSpace(name))
 	}

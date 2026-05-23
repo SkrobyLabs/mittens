@@ -82,6 +82,7 @@ Mittens supports multiple AI coding agents configured in project policy:
 | **Claude** (default) | `provider.name: claude` |
 | **Codex** | `provider.name: codex` |
 | **Gemini** | `provider.name: gemini` |
+| **Ollama** | `provider.name: ollama` |
 
 Each provider brings its own credential layout, firewall domains, agent CLI args, and config format. Mittens handles all the differences — same workflow regardless of provider.
 

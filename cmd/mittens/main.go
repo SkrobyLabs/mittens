@@ -216,6 +216,7 @@ func runMain(args []string) error {
 		if err != nil {
 			return err
 		}
+		provider.ApplyPolicy(projectPolicy.Provider)
 		app.Provider = provider
 		app.applyProjectPolicy(projectPolicy)
 	}
@@ -419,8 +420,10 @@ func providerByName(name string) (*Provider, error) {
 		return CodexProvider(), nil
 	case "gemini":
 		return GeminiProvider(), nil
+	case "ollama":
+		return OllamaProvider(), nil
 	default:
-		return nil, fmt.Errorf("unknown provider %q (available: claude, codex, gemini)", name)
+		return nil, fmt.Errorf("unknown provider %q (available: claude, codex, gemini, ollama)", name)
 	}
 }
 

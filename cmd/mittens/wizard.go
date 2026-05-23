@@ -59,10 +59,12 @@ func runWizard(extensions []*registry.Extension) error {
 
 	editMode := false
 	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
+	var existProviderConfig ProviderWizardConfig
 
 	if len(existing) > 0 {
 		displayWizardExistingConfig(workspace, source, existing, extensions)
 		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
+		existProviderConfig = loadWizardProviderConfig(workspace, extensions)
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -99,7 +101,7 @@ func runWizard(extensions []*registry.Extension) error {
 	var configLines []string
 
 	// ── Step 1: Provider ───────────────────────────────────────────────────
-	providerLines, err := wizardProvider(editMode, existProviders)
+	providerLines, providerConfig, err := wizardProvider(editMode, existProviders, existProviderConfig)
 	if err != nil {
 		return gracefulAbort(err)
 	}
@@ -138,6 +140,8 @@ func runWizard(extensions []*registry.Extension) error {
 	if err != nil {
 		return fmt.Errorf("building policy: %w", err)
 	}
+	policy.Provider.Endpoint = providerConfig.Endpoint
+	policy.Provider.Model = providerConfig.Model
 	policy.Network.ExtraDomains = normalizeNetworkDomains(extraDomains)
 	if err := SaveProjectPolicy(workspace, policy); err != nil {
 		return fmt.Errorf("saving policy: %w", err)
@@ -204,17 +208,19 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 
 	editMode := false
 	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
+	var existProviderConfig ProviderWizardConfig
 
 	if len(existing) > 0 {
 		editMode = true
 		existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
 		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
+		existProviderConfig = loadWizardProviderConfig(workspace, extensions)
 		displayWizardExistingConfig(workspace, source, existing, extensions)
 	}
 
 	var configLines []string
 
-	providerLines, err := wizardProvider(editMode, existProviders)
+	providerLines, _, err := wizardProvider(editMode, existProviders, existProviderConfig)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -543,11 +549,16 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 // Step 1: Provider
 // ---------------------------------------------------------------------------
 
-func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
+type ProviderWizardConfig struct {
+	Endpoint string
+	Model    string
+}
+
+func wizardProvider(editMode bool, existProviders []string, existConfig ProviderWizardConfig) ([]string, ProviderWizardConfig, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Provider"))
 
 	if editMode {
-		displayCurrentSetup(existProviders, "Provider: claude (default)")
+		displayCurrentSetup(providerSetupLines(existProviders, existConfig), "Provider: claude (default)")
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -558,11 +569,11 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 			).
 			Value(&action).
 			Run(); err != nil {
-			return nil, err
+			return nil, ProviderWizardConfig{}, err
 		}
 		if action == "keep" {
 			fmt.Fprintln(os.Stderr)
-			return existProviders, nil
+			return existProviders, existConfig, nil
 		}
 	}
 
@@ -580,6 +591,7 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 		{name: "claude", label: "Claude", description: "Anthropic Claude Code CLI"},
 		{name: "codex", label: "Codex", description: "OpenAI Codex CLI"},
 		{name: "gemini", label: "Gemini", description: "Google Gemini CLI"},
+		{name: "ollama", label: "Ollama", description: "local Ollama via Codex harness"},
 	}
 	var opts []huh.Option[string]
 	for _, p := range providerOptions {
@@ -591,7 +603,7 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 		Options(opts...).
 		Value(&selected).
 		Run(); err != nil {
-		return nil, err
+		return nil, ProviderWizardConfig{}, err
 	}
 
 	if len(selected) == 0 {
@@ -621,6 +633,8 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 				label = "Codex"
 			case "gemini":
 				label = "Gemini"
+			case "ollama":
+				label = "Ollama"
 			}
 			defaultOpts = append(defaultOpts, huh.NewOption(label, p))
 		}
@@ -629,7 +643,16 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 			Options(defaultOpts...).
 			Value(&defaultChoice).
 			Run(); err != nil {
-			return nil, err
+			return nil, ProviderWizardConfig{}, err
+		}
+	}
+
+	config := ProviderWizardConfig{}
+	if defaultChoice == "ollama" {
+		var cfgErr error
+		config, cfgErr = wizardOllamaProviderConfig(existConfig)
+		if cfgErr != nil {
+			return nil, ProviderWizardConfig{}, cfgErr
 		}
 	}
 
@@ -643,7 +666,49 @@ func wizardProvider(editMode bool, existProviders []string) ([]string, error) {
 	lines = append(lines, "--provider "+defaultChoice)
 
 	fmt.Fprintln(os.Stderr)
-	return lines, nil
+	return lines, config, nil
+}
+
+func wizardOllamaProviderConfig(existing ProviderWizardConfig) (ProviderWizardConfig, error) {
+	cfg := existing
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = ollamaHostURL()
+	}
+	if cfg.Model == "" {
+		cfg.Model = detectOllamaModel()
+	}
+
+	endpoint := cfg.Endpoint
+	model := cfg.Model
+	if err := huh.NewInput().
+		Title("Ollama endpoint").
+		Description("Use host.docker.internal for Ollama running on this Mac, or a LAN host/IP for a remote server.").
+		Placeholder("http://host.docker.internal:11434").
+		Value(&endpoint).
+		Run(); err != nil {
+		return ProviderWizardConfig{}, err
+	}
+	if err := huh.NewInput().
+		Title("Ollama model").
+		Placeholder("qwen3-coder:30b").
+		Value(&model).
+		Run(); err != nil {
+		return ProviderWizardConfig{}, err
+	}
+	cfg.Endpoint = normalizeOllamaURL(endpoint)
+	cfg.Model = strings.TrimSpace(model)
+	return cfg, nil
+}
+
+func providerSetupLines(providerLines []string, cfg ProviderWizardConfig) []string {
+	lines := append([]string(nil), providerLines...)
+	if cfg.Endpoint != "" {
+		lines = append(lines, "provider.endpoint "+cfg.Endpoint)
+	}
+	if cfg.Model != "" {
+		lines = append(lines, "provider.model "+cfg.Model)
+	}
+	return lines
 }
 
 func parseProviderLines(lines []string) (selected map[string]bool, defaultProvider string) {
@@ -658,7 +723,7 @@ func parseProviderLines(lines []string) (selected map[string]bool, defaultProvid
 			continue
 		}
 		switch p {
-		case "claude", "codex", "gemini":
+		case "claude", "codex", "gemini", "ollama":
 			selected[p] = true
 			defaultProvider = p
 		}
@@ -1215,6 +1280,17 @@ func loadWizardExtraDomains(workspace string, extensions []*registry.Extension) 
 	return append([]string(nil), policy.Network.ExtraDomains...)
 }
 
+func loadWizardProviderConfig(workspace string, extensions []*registry.Extension) ProviderWizardConfig {
+	policy, source, err := LoadProjectPolicy(workspace, extensions)
+	if err != nil || policy == nil || source != PolicySourceV2 {
+		return ProviderWizardConfig{}
+	}
+	return ProviderWizardConfig{
+		Endpoint: policy.Provider.Endpoint,
+		Model:    policy.Provider.Model,
+	}
+}
+
 func existingNetworkLines(firewall, opts, extraDomains []string) []string {
 	lines := appendNetworkLines(firewall, opts)
 	for _, domain := range extraDomains {
@@ -1296,6 +1372,10 @@ func formatCurrentSetupLine(line string) string {
 	switch {
 	case strings.HasPrefix(line, "--provider "):
 		return "Provider: " + strings.TrimSpace(strings.TrimPrefix(line, "--provider "))
+	case strings.HasPrefix(line, "provider.endpoint "):
+		return "Provider endpoint: " + strings.TrimSpace(strings.TrimPrefix(line, "provider.endpoint "))
+	case strings.HasPrefix(line, "provider.model "):
+		return "Provider model: " + strings.TrimSpace(strings.TrimPrefix(line, "provider.model "))
 	case strings.HasPrefix(line, "--dir-ro "):
 		return "Extra directory: " + strings.TrimSpace(strings.TrimPrefix(line, "--dir-ro ")) + " (read-only)"
 	case strings.HasPrefix(line, "--dir "):

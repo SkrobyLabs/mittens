@@ -61,6 +61,14 @@ func TestResolveProviderFromArgs_Aliases(t *testing.T) {
 	if p.Name != "claude" {
 		t.Fatalf("expected anthropic alias to resolve to claude, got %q", p.Name)
 	}
+
+	p, err = resolveProviderFromArgs([]string{"--provider", "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "ollama" {
+		t.Fatalf("expected local alias to resolve to ollama, got %q", p.Name)
+	}
 }
 
 func TestResolveProviderFromArgs_MissingArg(t *testing.T) {

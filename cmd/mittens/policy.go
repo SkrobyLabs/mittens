@@ -34,8 +34,10 @@ type ProjectPolicy struct {
 }
 
 type ProviderPolicy struct {
-	Name    string `yaml:"name,omitempty"`
-	Profile string `yaml:"profile,omitempty"`
+	Name     string `yaml:"name,omitempty"`
+	Profile  string `yaml:"profile,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty"`
+	Model    string `yaml:"model,omitempty"`
 }
 
 type WorkspacePolicy struct {

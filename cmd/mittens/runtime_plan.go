@@ -17,10 +17,15 @@ type ProviderRuntimePlan struct {
 	AI                       initcfg.AIConfig
 	ContainerEnv             map[string]string
 	ContainerHostname        string
+	DockerArgs               []string
+	DefaultArgs              []string
 	HistoryMountsWholeConfig bool
 	HistoryMountsProjectDirs bool
 	LiveMountFiles           []string
 	LiveMountDirs            []string
+	SkipCredentials          bool
+	LocalModelSource         string
+	DefaultModel             string
 }
 
 // RuntimePlan returns the provider's contribution to the runtime plan.
@@ -36,10 +41,15 @@ func (p *Provider) RuntimePlan() ProviderRuntimePlan {
 		AI:                       p.initConfigPlan(),
 		ContainerEnv:             copyStringMap(p.ContainerEnv),
 		ContainerHostname:        p.ContainerHostname,
+		DockerArgs:               append([]string(nil), p.DockerArgs...),
+		DefaultArgs:              append([]string(nil), p.DefaultArgs...),
 		HistoryMountsWholeConfig: p.HistoryMountsWholeConfig,
 		HistoryMountsProjectDirs: p.HistoryMountsProjectDirs,
 		LiveMountFiles:           append([]string(nil), p.LiveMountFiles...),
 		LiveMountDirs:            append([]string(nil), p.LiveMountDirs...),
+		SkipCredentials:          p.SkipCredentials,
+		LocalModelSource:         p.LocalModelSource,
+		DefaultModel:             p.DefaultModel,
 	}
 	if p.Name != "" && p.Name != "claude" {
 		plan.ImageTagParts = append(plan.ImageTagParts, p.Name)

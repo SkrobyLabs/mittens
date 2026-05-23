@@ -124,6 +124,10 @@ func setPolicyField(policy *ProjectPolicy, field, value string) error {
 		policy.Provider.Name = value
 	case "provider.profile":
 		policy.Provider.Profile = value
+	case "provider.endpoint":
+		policy.Provider.Endpoint = value
+	case "provider.model":
+		policy.Provider.Model = value
 	case "workspace.mode":
 		policy.Workspace.Mode = value
 		policy.Execution.Worktree = value == "worktree"

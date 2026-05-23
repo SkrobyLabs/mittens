@@ -11,7 +11,12 @@ func TestClaudeProvider_AllFieldsNonEmpty(t *testing.T) {
 		"TrustedDirsFile":          true, // Gemini-only: separate trusted dirs file
 		"ContainerHostname":        true, // Gemini-only: fixed Docker hostname
 		"ContainerEnv":             true, // optional runtime env overrides
+		"DockerArgs":               true, // provider-specific docker args
+		"DefaultArgs":              true, // provider-specific default CLI args
 		"InitSettingsJQ":           true, // Gemini-only: post-init settings patch
+		"SkipCredentials":          true, // local/third-party providers
+		"LocalModelSource":         true, // local provider model detection
+		"DefaultModel":             true, // provider/model policy default
 		"PersistFiles":             true, // Gemini-only: state files to survive between runs
 		"PersistDirs":              true, // provider-specific runtime persistence
 		"PersistGlobs":             true, // provider-specific runtime persistence
@@ -155,6 +160,8 @@ func TestCanonicalProviderName(t *testing.T) {
 		"openai":      "codex",
 		"gemini":      "gemini",
 		"google":      "gemini",
+		"ollama":      "ollama",
+		"local":       "ollama",
 		"custom-ai":   "custom-ai",
 		" CUSTOM-AI ": "custom-ai",
 	}
@@ -276,5 +283,67 @@ func TestCodexProvider_IsResumeFlag(t *testing.T) {
 		if p.IsResumeFlag(f) {
 			t.Errorf("IsResumeFlag(%q) = true, want false", f)
 		}
+	}
+}
+
+func TestOllamaProvider_UsesCodexHarness(t *testing.T) {
+	p := OllamaProvider()
+
+	if p.Name != "ollama" {
+		t.Fatalf("Name = %q, want ollama", p.Name)
+	}
+	if p.Binary != "codex" {
+		t.Fatalf("Binary = %q, want codex", p.Binary)
+	}
+	if p.Username != "codex" {
+		t.Fatalf("Username = %q, want codex", p.Username)
+	}
+	if p.ConfigDir != ".codex" || p.SettingsFile != "config.toml" {
+		t.Fatalf("Codex config layout not preserved: %s %s", p.ConfigDir, p.SettingsFile)
+	}
+	if !p.SkipCredentials {
+		t.Fatal("SkipCredentials = false, want true")
+	}
+	if p.LocalModelSource != "ollama" {
+		t.Fatalf("LocalModelSource = %q, want ollama", p.LocalModelSource)
+	}
+	if !reflect.DeepEqual(p.DefaultArgs, []string{"--oss", "--local-provider", "ollama"}) {
+		t.Fatalf("DefaultArgs = %#v", p.DefaultArgs)
+	}
+}
+
+func TestOllamaProvider_EndpointConfig(t *testing.T) {
+	t.Setenv("MITTENS_OLLAMA_HOST", "10.0.1.50:11434")
+
+	p := OllamaProvider()
+	if got := p.ContainerEnv["OLLAMA_HOST"]; got != "http://10.0.1.50:11434" {
+		t.Fatalf("OLLAMA_HOST = %q", got)
+	}
+	if got := p.ContainerEnv["CODEX_OSS_BASE_URL"]; got != "http://10.0.1.50:11434/v1" {
+		t.Fatalf("CODEX_OSS_BASE_URL = %q", got)
+	}
+}
+
+func TestOllamaOpenAIBaseURL_NormalizesV1(t *testing.T) {
+	if got := ollamaOpenAIBaseURL("http://host.docker.internal:11434/v1"); got != "http://host.docker.internal:11434/v1" {
+		t.Fatalf("ollamaOpenAIBaseURL = %q", got)
+	}
+}
+
+func TestProviderApplyPolicy_OllamaEndpointAndModel(t *testing.T) {
+	p := OllamaProvider()
+	p.ApplyPolicy(ProviderPolicy{
+		Endpoint: "10.0.1.50:11434",
+		Model:    "qwen3-coder:30b",
+	})
+
+	if p.DefaultModel != "qwen3-coder:30b" {
+		t.Fatalf("DefaultModel = %q", p.DefaultModel)
+	}
+	if got := p.ContainerEnv["OLLAMA_HOST"]; got != "http://10.0.1.50:11434" {
+		t.Fatalf("OLLAMA_HOST = %q", got)
+	}
+	if got := p.ContainerEnv["CODEX_OSS_BASE_URL"]; got != "http://10.0.1.50:11434/v1" {
+		t.Fatalf("CODEX_OSS_BASE_URL = %q", got)
 	}
 }

@@ -112,6 +112,34 @@ The service starts automatically on login (`RunAtLoad`) and restarts if it crash
 
 ## Client Setup (Mittens)
 
+### Recommended: Ollama Provider
+
+Mittens can select Ollama directly while still using Codex as the harness:
+
+```bash
+mittens policy set provider.name ollama
+mittens policy set provider.endpoint http://host.docker.internal:11434
+mittens policy set provider.model qwen3-coder:30b
+mittens
+```
+
+For this provider, mittens runs Codex with `--oss --local-provider ollama`,
+sets `CODEX_OSS_BASE_URL` to `http://host.docker.internal:11434/v1` when it is
+not already set, skips cloud credential staging, and adds Docker's
+`host.docker.internal` host-gateway mapping. Set `provider.endpoint` through
+`mittens init` or `mittens policy set provider.endpoint` to point at a remote
+Ollama server, for example `http://10.0.1.50:11434`. `MITTENS_OLLAMA_HOST` and
+`OLLAMA_HOST` are still accepted as environment defaults.
+
+It detects the model from `MITTENS_OLLAMA_MODEL`, then `ollama ps`, then
+`ollama list`, preferring model names that contain `coder` or `code`.
+
+To force a model:
+
+```bash
+MITTENS_OLLAMA_MODEL=qwen3-coder:30b mittens
+```
+
 ### 1. Configure Codex
 
 Create or update `~/.codex/config.toml`:

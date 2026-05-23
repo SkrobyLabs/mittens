@@ -326,8 +326,8 @@ func (a *App) Run() error {
 	// Skip OAuth credential staging when using a custom base URL (local/third-party
 	// provider) — the stored tokens belong to the original provider and will cause
 	// refresh failures that block the CLI.
-	if a.Provider.UsingCustomBaseURL() || os.Getenv("OLLAMA_HOST") != "" {
-		logInfo("Custom base URL detected (%s), skipping OAuth credential staging", a.Provider.BaseURLEnv)
+	if providerPlan.SkipCredentials || a.Provider.UsingCustomBaseURL() || os.Getenv("OLLAMA_HOST") != "" {
+		logInfo("Local/custom provider detected, skipping OAuth credential staging")
 		a.Credentials = &CredentialManager{}
 	} else {
 		a.Credentials = NewCredentialManager(a.Provider)
@@ -393,6 +393,7 @@ func (a *App) Run() error {
 		}
 		return err
 	}
+	a.applyProviderDefaultArgs(providerPlan)
 
 	// Build Docker image.
 	if !a.NoBuild {
@@ -640,6 +641,88 @@ func argExists(args []string, val string) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) applyProviderDefaultArgs(plan ProviderRuntimePlan) {
+	defaults := append([]string(nil), plan.DefaultArgs...)
+	if a.Provider.ModelFlag != "" && !argExists(a.ClaudeArgs, a.Provider.ModelFlag) {
+		model := plan.DefaultModel
+		if model == "" && plan.LocalModelSource != "" {
+			model = detectLocalModel(plan.LocalModelSource)
+		}
+		if model != "" {
+			defaults = append(defaults, a.Provider.ModelFlag, model)
+		}
+	}
+	a.ClaudeArgs = appendMissingProviderArgs(a.ClaudeArgs, defaults)
+}
+
+func appendMissingProviderArgs(args, defaults []string) []string {
+	var missing []string
+	for i := 0; i < len(defaults); i++ {
+		arg := defaults[i]
+		if strings.HasPrefix(arg, "-") && argExists(args, arg) {
+			if i+1 < len(defaults) && !strings.HasPrefix(defaults[i+1], "-") {
+				i++
+			}
+			continue
+		}
+		missing = append(missing, arg)
+	}
+	out := append([]string(nil), missing...)
+	out = append(out, args...)
+	return out
+}
+
+func detectLocalModel(source string) string {
+	switch source {
+	case "ollama":
+		return detectOllamaModel()
+	default:
+		return ""
+	}
+}
+
+func detectOllamaModel() string {
+	if model := os.Getenv("MITTENS_OLLAMA_MODEL"); model != "" {
+		return model
+	}
+	if model := firstOllamaModelFrom("ps"); model != "" {
+		return model
+	}
+	if model := firstOllamaModelFrom("list"); model != "" {
+		return model
+	}
+	return ""
+}
+
+func firstOllamaModelFrom(subcmd string) string {
+	out, err := exec.Command("ollama", subcmd).Output()
+	if err != nil {
+		return ""
+	}
+	return pickOllamaModel(string(out))
+}
+
+func pickOllamaModel(out string) string {
+	var models []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.EqualFold(fields[0], "NAME") {
+			continue
+		}
+		models = append(models, fields[0])
+	}
+	for _, model := range models {
+		lower := strings.ToLower(model)
+		if strings.Contains(lower, "coder") || strings.Contains(lower, "code") {
+			return model
+		}
+	}
+	if len(models) > 0 {
+		return models[0]
+	}
+	return ""
 }
 
 // Cleanup extracts credentials, removes the container, cleans temp state.
@@ -1125,6 +1208,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if providerPlan.ContainerHostname != "" {
 		args = append(args, "--hostname", providerPlan.ContainerHostname)
 	}
+	args = append(args, providerPlan.DockerArgs...)
 
 	// Primary workspace mount (identity: host path = container path).
 	args = append(args, "-v", a.WorkspaceMountSrc+":"+a.WorkspaceMountSrc)

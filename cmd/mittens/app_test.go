@@ -1510,6 +1510,51 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 	}
 }
 
+func TestAssembleDockerArgs_OllamaProvider(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("MITTENS_OLLAMA_MODEL", "qwen3-coder:30b")
+
+	p := OllamaProvider()
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-ollama",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+	a.applyProviderDefaultArgs(p.RuntimePlan())
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "--add-host", "host.docker.internal:host-gateway") {
+		t.Error("missing host.docker.internal host-gateway mapping")
+	}
+	if !argPairExists(args, "-e", "CODEX_OSS_BASE_URL=http://host.docker.internal:11434/v1") {
+		t.Error("missing default CODEX_OSS_BASE_URL env var")
+	}
+	if !argPairExists(args, "-e", "OLLAMA_HOST=http://host.docker.internal:11434") {
+		t.Error("missing default OLLAMA_HOST env var")
+	}
+	if !argPairExists(args, "-e", "OPENAI_API_KEY=sk-local-0") {
+		t.Error("missing dummy OPENAI_API_KEY env var")
+	}
+	if argPairContains(args, "-e", "OPENAI_BASE_URL") {
+		t.Error("OPENAI_BASE_URL should not be set for Ollama provider")
+	}
+	if !argExists(a.ClaudeArgs, "--oss") || !argPairExists(a.ClaudeArgs, "--local-provider", "ollama") || !argPairExists(a.ClaudeArgs, "--model", "qwen3-coder:30b") {
+		t.Fatalf("unexpected Ollama default args: %#v", a.ClaudeArgs)
+	}
+}
+
+func TestPickOllamaModelPrefersCoder(t *testing.T) {
+	out := "NAME               ID              SIZE\nllama3.2:latest    abc             2 GB\nqwen3-coder:30b    def             18 GB\n"
+	if got := pickOllamaModel(out); got != "qwen3-coder:30b" {
+		t.Fatalf("pickOllamaModel = %q, want qwen3-coder:30b", got)
+	}
+}
+
 func TestAssembleDockerArgs_GeminiProvider(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)
