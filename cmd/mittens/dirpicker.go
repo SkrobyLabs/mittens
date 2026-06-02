@@ -45,12 +45,15 @@ type dirMountSelection struct {
 
 type dirPickerModel struct {
 	currentDir string
+	allEntries []dirEntry
 	entries    []dirEntry
 	cursor     int
 	selected   map[string]dirMountSelection
 	exclude    string // absolute path to hide (primary workspace)
 	done       bool
 	cancelled  bool
+	searching  bool
+	search     string
 	height     int // visible entry rows (terminal height - 7)
 	termHeight int // full terminal height
 	termWidth  int // full terminal width
@@ -77,6 +80,7 @@ func (m *dirPickerModel) loadDir(path string) {
 	m.currentDir = path
 	m.cursor = 0
 	m.offset = 0
+	m.allEntries = nil
 	m.entries = nil
 
 	entries, err := os.ReadDir(path)
@@ -90,9 +94,6 @@ func (m *dirPickerModel) loadDir(path string) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
 		full := filepath.Join(path, name)
 		if m.exclude != "" && full == m.exclude {
 			continue
@@ -101,11 +102,41 @@ func (m *dirPickerModel) loadDir(path string) {
 		if info, err := os.Stat(filepath.Join(full, ".git")); err == nil && info.IsDir() {
 			isGit = true
 		}
-		m.entries = append(m.entries, dirEntry{name: name, path: full, isGit: isGit})
+		m.allEntries = append(m.allEntries, dirEntry{name: name, path: full, isGit: isGit})
 	}
-	sort.Slice(m.entries, func(i, j int) bool {
-		return m.entries[i].name < m.entries[j].name
+	sort.Slice(m.allEntries, func(i, j int) bool {
+		return m.allEntries[i].name < m.allEntries[j].name
 	})
+	m.applySearch()
+}
+
+func (m *dirPickerModel) applySearch() {
+	query := strings.ToLower(strings.TrimSpace(m.search))
+	if query == "" {
+		m.entries = append([]dirEntry(nil), m.allEntries...)
+	} else {
+		m.entries = nil
+		for _, entry := range m.allEntries {
+			if strings.Contains(strings.ToLower(entry.name), query) || strings.Contains(strings.ToLower(entry.path), query) {
+				m.entries = append(m.entries, entry)
+			}
+		}
+	}
+	if m.cursor >= len(m.entries) {
+		m.cursor = len(m.entries) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.offset > m.cursor {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+m.height {
+		m.offset = m.cursor - m.height + 1
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
 }
 
 func (m dirPickerModel) Init() tea.Cmd {
@@ -124,18 +155,19 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if m.searching {
+			return m.updateSearch(msg)
+		}
 		switch msg.String() {
 		case "q", "esc":
 			m.cancelled = true
 			return m, tea.Quit
 
-		case "d", "enter":
-			// "enter" on an entry navigates into it, but "d" is always done.
-			if msg.String() == "d" {
-				m.done = true
-				return m, tea.Quit
-			}
-			// enter navigates into the directory
+		case "enter":
+			m.done = true
+			return m, tea.Quit
+
+		case "ctrl+j", "ctrl+enter":
 			if len(m.entries) > 0 {
 				target := m.entries[m.cursor].path
 				m.loadDir(target)
@@ -204,6 +236,34 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected[p] = cur
 				}
 			}
+
+		case "f":
+			m.searching = true
+			m.search = ""
+			m.applySearch()
+		}
+	}
+	return m, nil
+}
+
+func (m dirPickerModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "enter":
+		m.searching = false
+		return m, nil
+	case "backspace", "ctrl+h":
+		if len(m.search) > 0 {
+			runes := []rune(m.search)
+			m.search = string(runes[:len(runes)-1])
+			m.applySearch()
+		}
+	case "ctrl+u":
+		m.search = ""
+		m.applySearch()
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.search += string(msg.Runes)
+			m.applySearch()
 		}
 	}
 	return m, nil
@@ -215,6 +275,14 @@ func (m dirPickerModel) View() string {
 	// Header: current path
 	b.WriteString(dpStylePath.Render("Browse: " + m.currentDir))
 	b.WriteString("\n\n")
+	if m.searching || m.search != "" {
+		prompt := "Search: " + m.search
+		if m.searching {
+			prompt += "█"
+		}
+		b.WriteString(dpStyleHelp.Render("  " + prompt))
+		b.WriteString("\n")
+	}
 
 	if len(m.entries) == 0 {
 		b.WriteString(dpStyleHelp.Render("  (no subdirectories)"))
@@ -277,7 +345,11 @@ func (m dirPickerModel) View() string {
 
 	// Footer
 	b.WriteString("\n")
-	b.WriteString(dpStyleHelp.Render("  ←/→ navigate  space toggle rw  r toggle read-only  d done  esc cancel"))
+	if m.searching {
+		b.WriteString(dpStyleHelp.Render("  type to search  enter/esc close search  backspace delete"))
+	} else {
+		b.WriteString(dpStyleHelp.Render("  enter done  ←/→ navigate  ctrl+enter enter folder  f search  space toggle rw  r toggle read-only  esc cancel"))
+	}
 
 	// Place content in a fixed-size box to overwrite stale lines on navigation.
 	if m.termWidth > 0 && m.termHeight > 0 {
