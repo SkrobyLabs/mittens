@@ -351,11 +351,41 @@ func (m dirPickerModel) View() string {
 		b.WriteString(dpStyleHelp.Render("  enter done  ←/→ navigate  ctrl+enter enter folder  f search  space toggle rw  r toggle read-only  esc cancel"))
 	}
 
-	// Place content in a fixed-size box to overwrite stale lines on navigation.
 	if m.termWidth > 0 && m.termHeight > 0 {
-		return lipgloss.Place(m.termWidth, m.termHeight, lipgloss.Left, lipgloss.Top, b.String())
+		return fixedTerminalBlock(b.String(), m.termWidth, m.termHeight)
 	}
 	return b.String()
+}
+
+func fixedTerminalBlock(content string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	} else {
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+	}
+
+	for i, line := range lines {
+		lineWidth := lipgloss.Width(line)
+		if lineWidth > width {
+			line = lipgloss.NewStyle().MaxWidth(width).Render(line)
+			line = strings.Split(line, "\n")[0]
+			lineWidth = lipgloss.Width(line)
+		}
+		if lineWidth < width {
+			lines[i] = line + strings.Repeat(" ", width-lineWidth)
+		} else {
+			lines[i] = line
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // ---------------------------------------------------------------------------

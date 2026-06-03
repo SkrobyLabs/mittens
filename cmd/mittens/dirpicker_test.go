@@ -3,9 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestDirPickerShowsHiddenDirectories(t *testing.T) {
@@ -72,6 +74,42 @@ func TestDirPickerEnterDoneAndCtrlEnterNavigates(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("enter should quit picker")
+	}
+}
+
+func TestDirPickerViewPadsEveryTerminalLine(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "deployments"))
+
+	model := newDirPickerModel(root, nil, "")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 32, Height: 8})
+	model = updated.(dirPickerModel)
+	model.searching = true
+	model.search = "de"
+	model.applySearch()
+
+	view := model.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != 8 {
+		t.Fatalf("line count = %d, want 8\n%s", len(lines), view)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != 32 {
+			t.Fatalf("line %d width = %d, want 32: %q", i, got, line)
+		}
+	}
+}
+
+func TestFixedTerminalBlockTruncatesHeightAndPadsWidth(t *testing.T) {
+	block := fixedTerminalBlock("short\nlonger\nthis-line-is-too-long", 8, 3)
+	lines := strings.Split(block, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3", len(lines))
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != 8 {
+			t.Fatalf("line %d width = %d, want 8: %q", i, got, line)
+		}
 	}
 }
 
