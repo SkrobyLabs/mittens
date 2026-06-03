@@ -65,6 +65,8 @@ type AIConfig struct {
 	TrustedDirsKey  string   `json:"trustedDirsKey,omitempty"`
 	YoloKey         string   `json:"yoloKey,omitempty"`
 	MCPServersKey   string   `json:"mcpServersKey,omitempty"`
+	MCPConfigFile   string   `json:"mcpConfigFile,omitempty"`
+	MCPConfigFormat string   `json:"mcpConfigFormat,omitempty"`
 	TrustedDirsFile string   `json:"trustedDirsFile,omitempty"`
 	InitSettingsJQ  string   `json:"initSettingsJQ,omitempty"`
 	StopHookEvent   string   `json:"stopHookEvent,omitempty"`

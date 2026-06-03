@@ -1,5 +1,5 @@
 // Package mcp implements the MCP server domain resolver for mittens.
-// It discovers MCP server names from domain mapping files and Claude
+// It discovers MCP server names from domain mapping files and provider
 // configuration, then passes the selected servers to the container
 // entrypoint via an environment variable for firewall whitelisting.
 package mcp
@@ -23,11 +23,11 @@ func init() {
 }
 
 // listServers returns a sorted, deduplicated list of all known MCP server
-// names gathered from:
+// names gathered from documented provider config locations:
 //  1. The built-in mcp-domains.conf (/etc/mittens/mcp-domains.conf)
-//  2. User override at ~/.claude/mcp-domains.conf
-//  3. mcpServers keys from ~/.claude.json
-//  4. Server names from {workspace}/.mcp.json (if it exists)
+//  2. Provider domain overrides, e.g. ~/.claude/mcp-domains.conf
+//  3. Provider MCP config files, e.g. ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml
+//  4. Server names from {workspace}/.mcp.json, if it exists
 func listServers() ([]registry.ListItem, error) {
 	seen := make(map[string]bool)
 	var servers []string
@@ -49,24 +49,28 @@ func listServers() ([]registry.ListItem, error) {
 
 	home, _ := os.UserHomeDir()
 	if home != "" {
-		// 2. User override mcp-domains.conf.
-		userConf := filepath.Join(home, ".claude", "mcp-domains.conf")
-		if names, err := readMCPDomainNames(userConf); err == nil {
-			add(names)
+		// 2. Provider-specific user override mcp-domains.conf.
+		for _, dir := range []string{".claude", ".gemini", ".codex"} {
+			userConf := filepath.Join(home, dir, "mcp-domains.conf")
+			if names, err := readMCPDomainNames(userConf); err == nil {
+				add(names)
+			}
 		}
 
-		// 3. mcpServers keys from ~/.claude.json.
-		claudeJSON := filepath.Join(home, ".claude.json")
-		if names, err := readMCPServerKeys(claudeJSON); err == nil {
-			add(names)
+		// 3. Provider MCP config files.
+		cwd, _ := os.Getwd()
+		for _, cfg := range hostMCPConfigs(home, cwd) {
+			if names, err := readMCPConfigServerNames(cfg); err == nil {
+				add(names)
+			}
 		}
 	}
 
 	// 4. Workspace .mcp.json (cwd-based).
 	cwd, _ := os.Getwd()
 	if cwd != "" {
-		mcpJSON := filepath.Join(cwd, ".mcp.json")
-		if names, err := readMCPServerKeys(mcpJSON); err == nil {
+		mcpJSON := mcpConfig{Path: filepath.Join(cwd, ".mcp.json"), Format: "json", Key: "mcpServers"}
+		if names, err := readMCPConfigServerNames(mcpJSON); err == nil {
 			add(names)
 		}
 	}
@@ -108,6 +112,21 @@ func setup(ctx *registry.SetupContext) error {
 // File parsers
 // ---------------------------------------------------------------------------
 
+type mcpConfig struct {
+	Path        string
+	Format      string
+	Key         string
+	ProjectPath string
+}
+
+func hostMCPConfigs(home, projectPath string) []mcpConfig {
+	return []mcpConfig{
+		{Path: filepath.Join(home, ".claude.json"), Format: "json", Key: "mcpServers", ProjectPath: projectPath},
+		{Path: filepath.Join(home, ".gemini", "settings.json"), Format: "json", Key: "mcpServers"},
+		{Path: filepath.Join(home, ".codex", "config.toml"), Format: "toml", Key: "mcp_servers"},
+	}
+}
+
 // readMCPDomainNames reads a mcp-domains.conf file and returns the server
 // names (left-hand side of each name=domain1,domain2 line).
 func readMCPDomainNames(path string) ([]string, error) {
@@ -135,9 +154,23 @@ func readMCPDomainNames(path string) ([]string, error) {
 	return names, scanner.Err()
 }
 
-// readMCPServerKeys reads a JSON file and returns the keys of its top-level
-// mcpServers object. Works for both ~/.claude.json and .mcp.json formats.
+// readMCPServerKeys reads a JSON file and returns the keys of its MCP server object.
 func readMCPServerKeys(path string) ([]string, error) {
+	return readMCPConfigServerNames(mcpConfig{Path: path, Format: "json", Key: "mcpServers"})
+}
+
+func readMCPConfigServerNames(cfg mcpConfig) ([]string, error) {
+	switch cfg.Format {
+	case "json":
+		return readMCPJSONServerKeys(cfg.Path, cfg.Key, cfg.ProjectPath)
+	case "toml":
+		return readMCPTOMLServerKeys(cfg.Path, cfg.Key)
+	default:
+		return nil, nil
+	}
+}
+
+func readMCPJSONServerKeys(path, key, projectPath string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -148,19 +181,92 @@ func readMCPServerKeys(path string) ([]string, error) {
 		return nil, err
 	}
 
-	serversRaw, ok := raw["mcpServers"]
-	if !ok {
-		return nil, nil
+	var names []string
+	if serversRaw, ok := raw[key]; ok {
+		serverNames, err := serverNamesFromRawJSON(serversRaw)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, serverNames...)
 	}
 
+	if projectPath != "" {
+		projectsRaw, ok := raw["projects"]
+		if ok {
+			var projects map[string]json.RawMessage
+			if err := json.Unmarshal(projectsRaw, &projects); err == nil {
+				if projectRaw, ok := projects[projectPath]; ok {
+					var project map[string]json.RawMessage
+					if err := json.Unmarshal(projectRaw, &project); err == nil {
+						if serversRaw, ok := project[key]; ok {
+							serverNames, err := serverNamesFromRawJSON(serversRaw)
+							if err != nil {
+								return nil, err
+							}
+							names = append(names, serverNames...)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return names, nil
+}
+
+func serverNamesFromRawJSON(raw json.RawMessage) ([]string, error) {
 	var serversMap map[string]json.RawMessage
-	if err := json.Unmarshal(serversRaw, &serversMap); err != nil {
+	if err := json.Unmarshal(raw, &serversMap); err != nil {
 		return nil, err
 	}
-
 	var names []string
 	for name := range serversMap {
 		names = append(names, name)
 	}
 	return names, nil
+}
+
+func readMCPTOMLServerKeys(path, table string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	prefix := table + "."
+	for _, line := range strings.Split(string(data), "\n") {
+		section := tomlSectionName(line)
+		if section == "" || !strings.HasPrefix(section, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(section, prefix)
+		if idx := strings.IndexByte(name, '.'); idx >= 0 {
+			name = name[:idx]
+		}
+		name = unquoteTOMLKey(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func tomlSectionName(line string) string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+		return ""
+	}
+	if strings.HasPrefix(line, "[[") || strings.HasSuffix(line, "]]") {
+		return ""
+	}
+	return strings.TrimSpace(line[1 : len(line)-1])
+}
+
+func unquoteTOMLKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) >= 2 {
+		if (key[0] == '"' && key[len(key)-1] == '"') || (key[0] == '\'' && key[len(key)-1] == '\'') {
+			return key[1 : len(key)-1]
+		}
+	}
+	return key
 }

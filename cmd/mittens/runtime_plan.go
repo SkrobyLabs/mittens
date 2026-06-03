@@ -68,6 +68,8 @@ func (p *Provider) initConfigPlan() initcfg.AIConfig {
 		TrustedDirsKey:  p.TrustedDirsKey,
 		YoloKey:         p.YoloKey,
 		MCPServersKey:   p.MCPServersKey,
+		MCPConfigFile:   p.MCPConfigFile,
+		MCPConfigFormat: p.MCPConfigFormat,
 		TrustedDirsFile: p.TrustedDirsFile,
 		InitSettingsJQ:  p.InitSettingsJQ,
 		StopHookEvent:   p.StopHookEvent,

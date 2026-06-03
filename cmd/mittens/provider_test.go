@@ -208,7 +208,6 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 		"PluginDir":       p.PluginDir,
 		"TrustedDirsKey":  p.TrustedDirsKey,
 		"YoloKey":         p.YoloKey,
-		"MCPServersKey":   p.MCPServersKey,
 	}
 	for name, val := range intentionallyEmpty {
 		if val != "" {
@@ -218,6 +217,15 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 
 	if len(p.FirewallDomains) == 0 {
 		t.Error("CodexProvider().FirewallDomains is empty")
+	}
+	if p.MCPServersKey != "mcp_servers" {
+		t.Errorf("CodexProvider().MCPServersKey = %q, want mcp_servers", p.MCPServersKey)
+	}
+	if p.MCPConfigFile != ".codex/config.toml" {
+		t.Errorf("CodexProvider().MCPConfigFile = %q, want .codex/config.toml", p.MCPConfigFile)
+	}
+	if p.MCPConfigFormat != "toml" {
+		t.Errorf("CodexProvider().MCPConfigFormat = %q, want toml", p.MCPConfigFormat)
 	}
 	if len(p.PersistFiles) != 0 {
 		t.Errorf("CodexProvider().PersistFiles = %v, want empty", p.PersistFiles)

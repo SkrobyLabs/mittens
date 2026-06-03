@@ -22,6 +22,8 @@ type config struct {
 	AITrustedDirsKey  string
 	AIYoloKey         string
 	AIMCPServersKey   string
+	AIMCPConfigFile   string
+	AIMCPConfigFormat string
 	AITrustedDirsFile string
 	AIInitSettingsJQ  string
 	AIStopHookEvent   string
@@ -96,6 +98,8 @@ func loadConfig() *config {
 		AITrustedDirsKey:  jcfg.AI.TrustedDirsKey,
 		AIYoloKey:         jcfg.AI.YoloKey,
 		AIMCPServersKey:   jcfg.AI.MCPServersKey,
+		AIMCPConfigFile:   jcfg.AI.MCPConfigFile,
+		AIMCPConfigFormat: jcfg.AI.MCPConfigFormat,
 		AITrustedDirsFile: jcfg.AI.TrustedDirsFile,
 		AIInitSettingsJQ:  jcfg.AI.InitSettingsJQ,
 		AIStopHookEvent:   jcfg.AI.StopHookEvent,

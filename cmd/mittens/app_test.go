@@ -1402,6 +1402,12 @@ func TestAssembleDockerArgs_ProviderEnvVars(t *testing.T) {
 	if cfg.AI.MCPServersKey != "mcpServers" {
 		t.Errorf("AI.MCPServersKey = %q, want mcpServers", cfg.AI.MCPServersKey)
 	}
+	if cfg.AI.MCPConfigFile != ".claude.json" {
+		t.Errorf("AI.MCPConfigFile = %q, want .claude.json", cfg.AI.MCPConfigFile)
+	}
+	if cfg.AI.MCPConfigFormat != "json" {
+		t.Errorf("AI.MCPConfigFormat = %q, want json", cfg.AI.MCPConfigFormat)
+	}
 	if cfg.AI.SettingsFormat != "json" {
 		t.Errorf("AI.SettingsFormat = %q, want json", cfg.AI.SettingsFormat)
 	}
@@ -1502,6 +1508,15 @@ func TestAssembleDockerArgs_CodexProvider(t *testing.T) {
 	}
 	if cfg.AI.SettingsFormat != "toml" {
 		t.Errorf("AI.SettingsFormat = %q, want toml", cfg.AI.SettingsFormat)
+	}
+	if cfg.AI.MCPServersKey != "mcp_servers" {
+		t.Errorf("AI.MCPServersKey = %q, want mcp_servers", cfg.AI.MCPServersKey)
+	}
+	if cfg.AI.MCPConfigFile != ".codex/config.toml" {
+		t.Errorf("AI.MCPConfigFile = %q, want .codex/config.toml", cfg.AI.MCPConfigFile)
+	}
+	if cfg.AI.MCPConfigFormat != "toml" {
+		t.Errorf("AI.MCPConfigFormat = %q, want toml", cfg.AI.MCPConfigFormat)
 	}
 
 	// UserPrefsFile is empty — should NOT mount a user prefs file.

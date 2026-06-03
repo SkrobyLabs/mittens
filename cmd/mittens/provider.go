@@ -47,9 +47,11 @@ type Provider struct {
 	PluginFiles []string // plugin config files to copy, e.g. ["installed_plugins.json", ...]
 
 	// Settings keys (used in jq operations inside the container)
-	TrustedDirsKey string // e.g. "trustedDirectories"
-	YoloKey        string // e.g. "skipDangerousModePermissionPrompt"
-	MCPServersKey  string // e.g. "mcpServers"
+	TrustedDirsKey  string // e.g. "trustedDirectories"
+	YoloKey         string // e.g. "skipDangerousModePermissionPrompt"
+	MCPServersKey   string // e.g. "mcpServers"
+	MCPConfigFile   string // MCP config file relative to $HOME, e.g. ".claude.json" or ".codex/config.toml"
+	MCPConfigFormat string // "json" or "toml"
 
 	// Files (relative to ConfigDir) to persist: copied in on start, copied back on exit.
 	// Used for provider state files that must survive between runs (e.g. Gemini auth state).
@@ -191,9 +193,11 @@ func ClaudeProvider() *Provider {
 		PluginDir:   "plugins",
 		PluginFiles: []string{"installed_plugins.json", "known_marketplaces.json", "config.json"},
 
-		TrustedDirsKey: "trustedDirectories",
-		YoloKey:        "skipDangerousModePermissionPrompt",
-		MCPServersKey:  "mcpServers",
+		TrustedDirsKey:  "trustedDirectories",
+		YoloKey:         "skipDangerousModePermissionPrompt",
+		MCPServersKey:   "mcpServers",
+		MCPConfigFile:   ".claude.json",
+		MCPConfigFormat: "json",
 
 		ResumeFlags:              []string{"--continue", "-c", "--resume", "-r"},
 		SkipPermsFlag:            "--dangerously-skip-permissions",
@@ -239,9 +243,11 @@ func CodexProvider() *Provider {
 		PluginDir:   "",
 		PluginFiles: []string{},
 
-		TrustedDirsKey: "",
-		YoloKey:        "",
-		MCPServersKey:  "",
+		TrustedDirsKey:  "",
+		YoloKey:         "",
+		MCPServersKey:   "mcp_servers",
+		MCPConfigFile:   ".codex/config.toml",
+		MCPConfigFormat: "toml",
 
 		ResumeFlags:              []string{"--resume", "-r", "--continue", "-l"},
 		SkipPermsFlag:            "--dangerously-bypass-approvals-and-sandbox",
@@ -316,6 +322,8 @@ func GeminiProvider() *Provider {
 		TrustedDirsKey:  "",
 		YoloKey:         "",
 		MCPServersKey:   "mcpServers",
+		MCPConfigFile:   ".gemini/settings.json",
+		MCPConfigFormat: "json",
 		TrustedDirsFile: "trustedFolders.json",
 
 		ResumeFlags:              []string{"--resume", "-r"},

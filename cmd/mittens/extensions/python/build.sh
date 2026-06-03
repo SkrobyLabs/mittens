@@ -67,7 +67,9 @@ export PATH=/usr/local/python${PYTHON_VERSION}/bin:\$PATH
 EOF
 
 # Pre-create pip cache so Docker bind mounts don't create it as root
-mkdir -p /home/claude/.cache/pip
+ai_username="${AI_USERNAME:-claude}"
+ai_home="/home/${ai_username}"
+mkdir -p "${ai_home}/.cache/pip"
 
 # Clean up build artifacts and -dev headers.
 # NOTE: Do NOT purge build-essential — the base Dockerfile installs it

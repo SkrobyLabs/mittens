@@ -31,10 +31,14 @@ rm "/tmp/${TARBALL}"
 
 # Make Go available system-wide
 cat > /etc/profile.d/golang.sh <<'EOF'
-export GOPATH=/home/claude/go
-export PATH=$PATH:/usr/local/go/bin:$GOPATH/bin
+export GOPATH="${GOPATH:-$HOME/go}"
+export GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
+export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
+export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
 EOF
 
 # Pre-create GOPATH so Docker bind mounts don't create it as root
 # (ownership is fixed by the chown -R in Dockerfile after useradd)
-mkdir -p /home/claude/go/pkg/mod
+ai_username="${AI_USERNAME:-claude}"
+ai_home="/home/${ai_username}"
+mkdir -p "${ai_home}/go/pkg/mod" "${ai_home}/.cache/go-build"

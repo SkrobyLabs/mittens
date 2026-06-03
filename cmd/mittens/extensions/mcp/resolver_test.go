@@ -116,6 +116,64 @@ func TestReadMCPServerKeys_MCPJSON(t *testing.T) {
 	}
 }
 
+func TestReadMCPJSONServerKeys_ProjectScopedClaudeConfig(t *testing.T) {
+	tmp := t.TempDir()
+	project := filepath.Join(tmp, "project")
+	f := filepath.Join(tmp, ".claude.json")
+	content := `{
+	"projects": {
+		"` + project + `": {
+			"mcpServers": {
+				"project-server": {"url": "https://project.example.com/mcp"}
+			}
+		}
+	}
+}`
+	os.WriteFile(f, []byte(content), 0644)
+
+	names, err := readMCPJSONServerKeys(f, "mcpServers", project)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(names) != 1 || names[0] != "project-server" {
+		t.Errorf("got %v, want [project-server]", names)
+	}
+}
+
+func TestReadMCPConfigServerNames_CodexTOML(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "config.toml")
+	content := `
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp"
+
+[mcp_servers."linear-team"]
+command = "npx"
+args = ["-y", "linear-mcp"]
+
+[profiles.dev]
+model = "gpt-5"
+`
+	os.WriteFile(f, []byte(content), 0644)
+
+	names, err := readMCPConfigServerNames(mcpConfig{Path: f, Format: "toml", Key: "mcp_servers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sort.Strings(names)
+	want := []string{"github", "linear-team"}
+	if len(names) != len(want) {
+		t.Fatalf("got %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Errorf("names[%d] = %q, want %q", i, n, want[i])
+		}
+	}
+}
+
 func TestReadMCPServerKeys_Missing(t *testing.T) {
 	_, err := readMCPServerKeys("/nonexistent/.mcp.json")
 	if err == nil {

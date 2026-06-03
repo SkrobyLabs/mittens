@@ -228,12 +228,17 @@ func resolveMCPDomains(cfg *config) []string {
 
 	// Determine which servers to resolve.
 	var serverList []string
+	providerConfig := cfg.providerMCPConfig()
 	if cfg.MCP == "__all__" {
 		// Collect all MCP server names from config files.
-		claudeJSON := cfg.ConfigMount + "/" + cfg.AIPrefsFile
-		serverList = append(serverList, extractMCPServerNames(claudeJSON, cfg.AIMCPServersKey)...)
+		serverList = append(serverList, extractMCPServerNames(providerConfig)...)
 		if cfg.HostWorkspace != "" {
-			serverList = append(serverList, extractMCPServerNames(cfg.HostWorkspace+"/.mcp.json", "mcpServers")...)
+			serverList = append(serverList, extractMCPServerNames(mcpConfig{
+				Path:        cfg.HostWorkspace + "/.mcp.json",
+				Format:      "json",
+				Key:         "mcpServers",
+				ProjectPath: cfg.HostWorkspace,
+			})...)
 		}
 	} else {
 		serverList = strings.Split(cfg.MCP, ",")
@@ -247,7 +252,15 @@ func resolveMCPDomains(cfg *config) []string {
 		}
 
 		// Check for SSE/HTTP URL in config.
-		resolved := extractMCPServerURL(cfg.ConfigMount+"/"+cfg.AIPrefsFile, cfg.AIMCPServersKey, server)
+		resolved := extractMCPServerURL(providerConfig, server)
+		if resolved == "" && cfg.HostWorkspace != "" {
+			resolved = extractMCPServerURL(mcpConfig{
+				Path:        cfg.HostWorkspace + "/.mcp.json",
+				Format:      "json",
+				Key:         "mcpServers",
+				ProjectPath: cfg.HostWorkspace,
+			}, server)
+		}
 
 		// Fall back to lookup table.
 		if resolved == "" {
@@ -268,6 +281,33 @@ func resolveMCPDomains(cfg *config) []string {
 		}
 	}
 	return domains
+}
+
+type mcpConfig struct {
+	Path        string
+	Format      string
+	Key         string
+	ProjectPath string
+}
+
+func (cfg *config) providerMCPConfig() mcpConfig {
+	if cfg.AIMCPConfigFile != "" {
+		return mcpConfig{
+			Path:        cfg.ConfigMount + "/" + cfg.AIMCPConfigFile,
+			Format:      cfg.AIMCPConfigFormat,
+			Key:         cfg.AIMCPServersKey,
+			ProjectPath: cfg.HostWorkspace,
+		}
+	}
+	if cfg.AIPrefsFile != "" {
+		return mcpConfig{
+			Path:        cfg.ConfigMount + "/" + cfg.AIPrefsFile,
+			Format:      "json",
+			Key:         cfg.AIMCPServersKey,
+			ProjectPath: cfg.HostWorkspace,
+		}
+	}
+	return mcpConfig{}
 }
 
 // loadMCPDomainMap reads a name=domain1,domain2 mapping file into the map.
@@ -293,8 +333,19 @@ func loadMCPDomainMap(path string, m map[string]string) {
 	}
 }
 
-// extractMCPServerNames reads a JSON file and extracts MCP server names.
-func extractMCPServerNames(path, key string) []string {
+// extractMCPServerNames reads a provider MCP config file and extracts MCP server names.
+func extractMCPServerNames(cfg mcpConfig) []string {
+	switch cfg.Format {
+	case "json":
+		return extractMCPJSONServerNames(cfg.Path, cfg.Key, cfg.ProjectPath)
+	case "toml":
+		return extractMCPTOMLServerNames(cfg.Path, cfg.Key)
+	default:
+		return nil
+	}
+}
+
+func extractMCPJSONServerNames(path, key, projectPath string) []string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -303,10 +354,49 @@ func extractMCPServerNames(path, key string) []string {
 	if json.Unmarshal(data, &obj) != nil {
 		return nil
 	}
-	raw, ok := obj[key]
-	if !ok {
+
+	var names []string
+	if raw, ok := obj[key]; ok {
+		names = append(names, mcpServerNamesFromRawJSON(raw)...)
+	}
+	if projectPath != "" {
+		if projectRaw := projectRawJSON(obj, projectPath); len(projectRaw) > 0 {
+			var project map[string]json.RawMessage
+			if json.Unmarshal(projectRaw, &project) == nil {
+				if raw, ok := project[key]; ok {
+					names = append(names, mcpServerNamesFromRawJSON(raw)...)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func extractMCPTOMLServerNames(path, table string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil
 	}
+	prefix := table + "."
+	var names []string
+	for _, line := range strings.Split(string(data), "\n") {
+		section := tomlSectionName(line)
+		if section == "" || !strings.HasPrefix(section, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(section, prefix)
+		if idx := strings.IndexByte(name, '.'); idx >= 0 {
+			name = name[:idx]
+		}
+		name = unquoteTOMLKey(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func mcpServerNamesFromRawJSON(raw json.RawMessage) []string {
 	var servers map[string]json.RawMessage
 	if json.Unmarshal(raw, &servers) != nil {
 		return nil
@@ -319,7 +409,18 @@ func extractMCPServerNames(path, key string) []string {
 }
 
 // extractMCPServerURL extracts the URL from an MCP server config entry.
-func extractMCPServerURL(path, key, server string) string {
+func extractMCPServerURL(cfg mcpConfig, server string) string {
+	switch cfg.Format {
+	case "json":
+		return extractMCPJSONServerURL(cfg.Path, cfg.Key, cfg.ProjectPath, server)
+	case "toml":
+		return extractMCPTOMLServerURL(cfg.Path, cfg.Key, server)
+	default:
+		return ""
+	}
+}
+
+func extractMCPJSONServerURL(path, key, projectPath, server string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -328,6 +429,19 @@ func extractMCPServerURL(path, key, server string) string {
 	if json.Unmarshal(data, &obj) != nil {
 		return ""
 	}
+	url := extractMCPServerURLFromObject(obj, key, server)
+	if url == "" && projectPath != "" {
+		if projectRaw := projectRawJSON(obj, projectPath); len(projectRaw) > 0 {
+			var project map[string]json.RawMessage
+			if json.Unmarshal(projectRaw, &project) == nil {
+				url = extractMCPServerURLFromObject(project, key, server)
+			}
+		}
+	}
+	return normalizeMCPURLHost(url)
+}
+
+func extractMCPServerURLFromObject(obj map[string]json.RawMessage, key, server string) string {
 	raw, ok := obj[key]
 	if !ok {
 		return ""
@@ -352,13 +466,95 @@ func extractMCPServerURL(path, key, server string) string {
 	if json.Unmarshal(urlRaw, &url) != nil {
 		return ""
 	}
-	// Extract hostname from URL.
+	return url
+}
+
+func projectRawJSON(obj map[string]json.RawMessage, projectPath string) json.RawMessage {
+	projectsRaw, ok := obj["projects"]
+	if !ok {
+		return nil
+	}
+	var projects map[string]json.RawMessage
+	if json.Unmarshal(projectsRaw, &projects) != nil {
+		return nil
+	}
+	return projects[projectPath]
+}
+
+func extractMCPTOMLServerURL(path, table, server string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	prefix := table + "."
+	inServer := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if section := tomlSectionName(line); section != "" {
+			name := ""
+			if strings.HasPrefix(section, prefix) {
+				name = strings.TrimPrefix(section, prefix)
+				if idx := strings.IndexByte(name, '.'); idx >= 0 {
+					name = name[:idx]
+				}
+				name = unquoteTOMLKey(name)
+			}
+			inServer = name == server
+			continue
+		}
+		if !inServer {
+			continue
+		}
+		key, value, ok := splitTOMLAssignment(line)
+		if ok && key == "url" {
+			return normalizeMCPURLHost(unquoteTOMLString(value))
+		}
+	}
+	return ""
+}
+
+func normalizeMCPURLHost(url string) string {
 	url = strings.TrimPrefix(url, "http://")
 	url = strings.TrimPrefix(url, "https://")
 	if idx := strings.IndexAny(url, ":/"); idx >= 0 {
 		url = url[:idx]
 	}
 	return url
+}
+
+func tomlSectionName(line string) string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+		return ""
+	}
+	if strings.HasPrefix(line, "[[") || strings.HasSuffix(line, "]]") {
+		return ""
+	}
+	return strings.TrimSpace(line[1 : len(line)-1])
+}
+
+func splitTOMLAssignment(line string) (string, string, bool) {
+	if idx := strings.IndexByte(line, '#'); idx >= 0 {
+		line = line[:idx]
+	}
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
+}
+
+func unquoteTOMLKey(key string) string {
+	return unquoteTOMLString(strings.TrimSpace(key))
+}
+
+func unquoteTOMLString(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
 }
 
 // dropPrivileges drops from root to the AI user and re-execs this binary.
