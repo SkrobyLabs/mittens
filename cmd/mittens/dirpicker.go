@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -251,6 +250,11 @@ func (m dirPickerModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "enter":
 		m.searching = false
 		return m, nil
+	case "down", "j":
+		m.searching = false
+		m.cursor = 0
+		m.offset = 0
+		return m, nil
 	case "backspace", "ctrl+h":
 		if len(m.search) > 0 {
 			runes := []rune(m.search)
@@ -346,7 +350,7 @@ func (m dirPickerModel) View() string {
 	// Footer
 	b.WriteString("\n")
 	if m.searching {
-		b.WriteString(dpStyleHelp.Render("  type to search  enter/esc close search  backspace delete"))
+		b.WriteString(dpStyleHelp.Render("  type to search  down results  enter/esc close search  backspace delete"))
 	} else {
 		b.WriteString(dpStyleHelp.Render("  enter done  ←/→ navigate  ctrl+enter enter folder  f search  space toggle rw  r toggle read-only  esc cancel"))
 	}
@@ -407,7 +411,7 @@ func runDirPicker(startDir string, preSelected map[string]bool, exclude string) 
 
 	m := result.(dirPickerModel)
 	if m.cancelled {
-		return nil, huh.ErrUserAborted
+		return nil, errPickerCancelled
 	}
 
 	var paths []string

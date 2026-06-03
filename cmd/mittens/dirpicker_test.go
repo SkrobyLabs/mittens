@@ -54,6 +54,56 @@ func TestDirPickerSearchFiltersAndCloses(t *testing.T) {
 	}
 }
 
+func TestDirPickerDownLeavesSearchAndFocusesFirstResult(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, ".config"))
+	mkdir(t, filepath.Join(root, "deployments"))
+	mkdir(t, filepath.Join(root, "workspace"))
+
+	model := newDirPickerModel(root, nil, "")
+	model.searching = true
+	model.search = "e"
+	model.applySearch()
+	model.cursor = 1
+	model.offset = 1
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dirPickerModel)
+
+	if model.searching {
+		t.Fatal("down should close search mode")
+	}
+	if model.cursor != 0 || model.offset != 0 {
+		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
+	}
+	if len(model.entries) == 0 || model.entries[0].name != ".config" {
+		t.Fatalf("entries = %#v, want .config first", model.entries)
+	}
+}
+
+func TestDirPickerDownLeavesSearchWithNoResults(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "workspace"))
+
+	model := newDirPickerModel(root, nil, "")
+	model.searching = true
+	model.search = "missing"
+	model.applySearch()
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dirPickerModel)
+
+	if model.searching {
+		t.Fatal("down should close search mode")
+	}
+	if model.cursor != 0 || model.offset != 0 {
+		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
+	}
+	if len(model.entries) != 0 {
+		t.Fatalf("entries = %#v, want none", model.entries)
+	}
+}
+
 func TestDirPickerEnterDoneAndCtrlEnterNavigates(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
