@@ -212,6 +212,51 @@ func TestSaveProjectConfig_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestTrustCodexProjectInConfigAddsProjectTrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	workspace := `/Users/test/Project "A"`
+
+	if err := trustCodexProjectInConfig(path, workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `[projects."/Users/test/Project \"A\""]`) {
+		t.Fatalf("missing escaped project section:\n%s", got)
+	}
+	if !strings.Contains(got, `trust_level = "trusted"`) {
+		t.Fatalf("missing trusted line:\n%s", got)
+	}
+}
+
+func TestTrustCodexProjectInConfigUpdatesExistingProjectTrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "model = \"gpt-5.5\"\n\n[projects.\"/repo/app\"]\ntrust_level = \"untrusted\"\n\n[tools]\nweb_search = \"disabled\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := trustCodexProjectInConfig(path, "/repo/app"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "[projects.\"/repo/app\"]\ntrust_level = \"trusted\"\n\n[tools]") {
+		t.Fatalf("trust level was not updated in place:\n%s", got)
+	}
+	if strings.Count(got, `[projects."/repo/app"]`) != 1 {
+		t.Fatalf("project section duplicated:\n%s", got)
+	}
+}
+
 func TestLoadProfileConfig_Missing(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)
@@ -367,7 +412,7 @@ func TestSaveProfileConfigRoundTrip(t *testing.T) {
 	workspace := "/test/profiles"
 	pc := &ProfileConfig{Profiles: map[string]map[string]ProfilePreset{
 		"claude": {
-			"fast":    {Model: "haiku", Effort: "low"},
+			"fast": {Model: "haiku", Effort: "low"},
 			"deep": {Model: "opus", Effort: "max"},
 		},
 	}}

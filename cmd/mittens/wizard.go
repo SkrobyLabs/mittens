@@ -101,7 +101,7 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	// ── Step 1: Provider ───────────────────────────────────────────────────
-	providerLines, providerConfig, err := wizardProvider(editMode, existProviderState)
+	providerLines, providerConfig, err := wizardProvider(workspace, editMode, existProviderState)
 	if err != nil {
 		return gracefulAbort(err)
 	}
@@ -221,7 +221,7 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 		displayWizardExistingConfig(workspace, source, existing, extensions)
 	}
 
-	providerLines, _, err := wizardProvider(editMode, existProviderState)
+	providerLines, _, err := wizardProvider(workspace, editMode, existProviderState)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -624,7 +624,7 @@ type ProviderWizardState struct {
 	Config   ProviderWizardConfig
 }
 
-func wizardProvider(editMode bool, existing ProviderWizardState) ([]string, ProviderWizardConfig, error) {
+func wizardProvider(workspace string, editMode bool, existing ProviderWizardState) ([]string, ProviderWizardConfig, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Provider"))
 	state := normalizeProviderWizardState(existing)
 
@@ -725,8 +725,51 @@ func wizardProvider(editMode bool, existing ProviderWizardState) ([]string, Prov
 		Config:   config,
 	})
 
+	if err := maybeWizardCodexTrustProject(workspace, state.ProviderLines()); err != nil {
+		return nil, ProviderWizardConfig{}, err
+	}
+
 	fmt.Fprintln(os.Stderr)
 	return state.ProviderLines(), state.Config, nil
+}
+
+func providerLinesUseCodexHarness(lines []string) bool {
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case "--provider codex", "--provider ollama":
+			return true
+		}
+	}
+	return false
+}
+
+func maybeWizardCodexTrustProject(workspace string, providerLines []string) error {
+	if !providerLinesUseCodexHarness(providerLines) {
+		return nil
+	}
+	return wizardCodexTrustProject(workspace)
+}
+
+func wizardCodexTrustProject(workspace string) error {
+	trust := true
+	if err := huh.NewConfirm().
+		Title("Trust this project in Codex config?").
+		Description("This skips Codex's startup trust prompt for this workspace when using Codex or Ollama.").
+		Value(&trust).
+		Run(); err != nil {
+		return err
+	}
+	if !trust {
+		fmt.Fprintln(os.Stderr)
+		return nil
+	}
+	configPath, err := trustCodexProject(workspace)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Codex project trust saved to: "+configPath))
+	fmt.Fprintln(os.Stderr)
+	return nil
 }
 
 func wizardOllamaProviderConfig(existing ProviderWizardConfig) (ProviderWizardConfig, error) {

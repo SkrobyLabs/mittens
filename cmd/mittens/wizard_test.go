@@ -115,6 +115,28 @@ func TestProviderWizardStateNormalizesDefaultProvider(t *testing.T) {
 	}
 }
 
+func TestProviderLinesUseCodexHarness(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{name: "codex", lines: []string{"--provider codex"}, want: true},
+		{name: "ollama", lines: []string{"--provider ollama"}, want: true},
+		{name: "claude", lines: []string{"--provider claude"}, want: false},
+		{name: "gemini", lines: []string{"--provider gemini"}, want: false},
+		{name: "mixed", lines: []string{"--provider claude", "--provider codex"}, want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := providerLinesUseCodexHarness(tc.lines); got != tc.want {
+				t.Fatalf("providerLinesUseCodexHarness(%v) = %v, want %v", tc.lines, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDirectoryMountLineConversion(t *testing.T) {
 	lines := []string{
 		"--dir /repo/extra",

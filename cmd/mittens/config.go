@@ -132,6 +132,74 @@ func writeConfigFile(path, header string, lines []string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
+func trustCodexProject(workspace string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding home directory: %w", err)
+	}
+	configPath := filepath.Join(CodexProvider().HostConfigDir(home), "config.toml")
+	return configPath, trustCodexProjectInConfig(configPath, workspace)
+}
+
+func trustCodexProjectInConfig(path, workspace string) error {
+	section := `[projects."` + tomlEscapeString(workspace) + `"]`
+	trustLine := `trust_level = "trusted"`
+
+	var lines []string
+	if data, err := os.ReadFile(path); err == nil {
+		lines = strings.Split(string(data), "\n")
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading Codex config %s: %w", path, err)
+	}
+
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != section {
+			continue
+		}
+		insertAt := i + 1
+		for insertAt < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[insertAt]), "[") {
+			if strings.HasPrefix(strings.TrimSpace(lines[insertAt]), "trust_level") {
+				lines[insertAt] = trustLine
+				return writeRawConfig(path, lines)
+			}
+			insertAt++
+		}
+		lines = append(lines[:insertAt], append([]string{trustLine}, lines[insertAt:]...)...)
+		return writeRawConfig(path, lines)
+	}
+
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, section, trustLine)
+	return writeRawConfig(path, lines)
+}
+
+func writeRawConfig(path string, lines []string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating config dir %s: %w", filepath.Dir(path), err)
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func tomlEscapeString(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // LoadProjectConfig reads the per-project config file and returns the stored
 // flags, one per line. Blank lines and lines starting with '#' are skipped.
 func LoadProjectConfig(workspace string) ([]string, error) {
