@@ -109,11 +109,24 @@ func containerDir() string {
 
 // execCommand runs a command, connecting stdin/stdout/stderr.
 func execCommand(name string, args ...string) error {
+	resetTerminalPresentation()
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func resetTerminalPresentation() {
+	if !termSupportsANSI() {
+		return
+	}
+	// Reset text attributes, show the cursor, leave alternate screen, and disable bracketed paste.
+	fmt.Fprint(os.Stdout, "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[?2004l")
+}
+
+func termSupportsANSI() bool {
+	return os.Getenv("TERM") != "dumb"
 }
 
 // captureCommand runs a command and returns its stdout.
