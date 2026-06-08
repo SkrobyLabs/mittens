@@ -207,6 +207,13 @@ func TestFileCredentialStore_RoundTrip(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Errorf("permissions = %v, want 0600", info.Mode().Perm())
 	}
+
+	if err := store.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("credential file should be deleted, stat err = %v", err)
+	}
 }
 
 func TestFileCredentialStore_Label(t *testing.T) {
@@ -284,6 +291,34 @@ func TestCredentialManager_Setup_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestCredentialManager_Setup_StagesExpiredCredentialsForProviderUX(t *testing.T) {
+	tmp := t.TempDir()
+	expiredPath := filepath.Join(tmp, "expired.json")
+	if err := os.WriteFile(expiredPath, []byte(`{"accessToken":"old","expiresAt":1700000000000}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := &CredentialManager{
+		stores: []CredentialStore{
+			&FileCredentialStore{path: expiredPath},
+		},
+	}
+
+	if err := mgr.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.TmpFile() == "" {
+		t.Fatal("TmpFile() should be set for expired credentials")
+	}
+	data, err := os.ReadFile(mgr.TmpFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"accessToken":"old"`) {
+		t.Errorf("temp file should preserve expired credential metadata, got %q", string(data))
+	}
+}
+
 func TestCredentialManager_Cleanup(t *testing.T) {
 	tmp := t.TempDir()
 	credPath := filepath.Join(tmp, "creds.json")
@@ -344,6 +379,30 @@ func TestCredentialManager_PersistAll(t *testing.T) {
 		}
 		if string(data) != creds {
 			t.Errorf("%s = %q, want %q", path, data, creds)
+		}
+	}
+}
+
+func TestCredentialManager_DeleteAll(t *testing.T) {
+	tmp := t.TempDir()
+
+	pathA := filepath.Join(tmp, "a.json")
+	pathB := filepath.Join(tmp, "b.json")
+
+	mgr := &CredentialManager{
+		stores: []CredentialStore{
+			&FileCredentialStore{path: pathA},
+			&FileCredentialStore{path: pathB},
+		},
+	}
+
+	creds := `{"accessToken":"refreshed","expiresAt":9999}`
+	mgr.PersistAll(creds)
+	mgr.DeleteAll()
+
+	for _, path := range []string{pathA, pathB} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s should be deleted, stat err = %v", path, err)
 		}
 	}
 }

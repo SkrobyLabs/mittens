@@ -18,6 +18,7 @@ import (
 
 	firewallext "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/firewall"
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/internal/credutil"
 	"github.com/SkrobyLabs/mittens/internal/initcfg"
 )
 
@@ -346,7 +347,11 @@ func (a *App) Run() error {
 		var seed string
 		if a.Credentials.TmpFile() != "" {
 			data, _ := os.ReadFile(a.Credentials.TmpFile())
-			seed = string(data)
+			if len(data) > 0 && json.Valid(data) && !credutil.IsExpired(data, time.Now()) {
+				if fields, ok := credutil.ObjectFieldCount(data); ok && fields > 0 {
+					seed = string(data)
+				}
+			}
 		}
 		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
@@ -738,8 +743,16 @@ func (a *App) Cleanup() {
 	if a.ContainerName != "" {
 		if a.Credentials != nil {
 			if a.broker != nil {
-				if finalCreds := a.broker.Credentials(); finalCreds != "" {
+				finalCreds, finalAction, err := a.finalContainerCredentials()
+				if err != nil {
+					logVerbose(a.Verbose, "Final credential snapshot: %v", err)
+				}
+				if finalAction == finalCredentialPersist {
 					a.Credentials.PersistAll(finalCreds)
+				} else if finalAction == finalCredentialClear {
+					a.Credentials.DeleteAll()
+				} else if brokerCreds := a.broker.Credentials(); brokerCreds != "" && !credutil.IsExpired([]byte(brokerCreds), time.Now()) {
+					a.Credentials.PersistAll(brokerCreds)
 				}
 				_ = a.broker.Close()
 			}
@@ -787,6 +800,70 @@ func (a *App) Cleanup() {
 	for _, d := range a.tempDirs {
 		os.RemoveAll(d)
 	}
+}
+
+type finalCredentialAction int
+
+const (
+	finalCredentialIgnore finalCredentialAction = iota
+	finalCredentialPersist
+	finalCredentialClear
+)
+
+// finalContainerCredentials reads the provider credential file from the stopped
+// container. Missing or empty credentials are treated as logout; expired
+// credentials are ignored so account metadata in the host file survives.
+func (a *App) finalContainerCredentials() (string, finalCredentialAction, error) {
+	if a.Provider == nil || a.Provider.CredentialFile == "" || a.ContainerName == "" {
+		return "", finalCredentialIgnore, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "mittens-final-creds.*")
+	if err != nil {
+		return "", finalCredentialIgnore, fmt.Errorf("create final credential temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dst := filepath.Join(tmpDir, filepath.Base(a.Provider.CredentialFile))
+	src := a.ContainerName + ":" + a.Provider.ContainerCredentialPath()
+	if out, err := exec.Command("docker", "cp", src, dst).CombinedOutput(); err != nil {
+		if dockerCpMissingPath(out) {
+			return "", finalCredentialClear, nil
+		}
+		return "", finalCredentialIgnore, fmt.Errorf("copy final credential file: %w: %s", err, out)
+	}
+
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", finalCredentialClear, nil
+		}
+		return "", finalCredentialIgnore, fmt.Errorf("read final credential file: %w", err)
+	}
+	return classifyFinalCredentialJSON(data, time.Now())
+}
+
+func dockerCpMissingPath(out []byte) bool {
+	msg := strings.ToLower(string(out))
+	return strings.Contains(msg, "could not find") ||
+		strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "not found")
+}
+
+func classifyFinalCredentialJSON(data []byte, now time.Time) (string, finalCredentialAction, error) {
+	if len(data) == 0 {
+		return "", finalCredentialClear, nil
+	}
+	if !json.Valid(data) {
+		return "", finalCredentialClear, nil
+	}
+	if fields, ok := credutil.ObjectFieldCount(data); !ok || fields == 0 {
+		return "", finalCredentialClear, nil
+	}
+	if credutil.IsExpired(data, now) {
+		return "", finalCredentialIgnore, nil
+	}
+	return string(data), finalCredentialPersist, nil
 }
 
 type clipboardPaths struct {

@@ -151,17 +151,43 @@ func TestBroker_PUT_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestBroker_PUT_MissingExpiresAt(t *testing.T) {
+func TestBroker_PUT_OpaqueCredentials(t *testing.T) {
 	_, client := startBroker(t, "")
 
-	resp, err := client.Do(putReq(`{"accessToken":"tok"}`))
+	opaque := `{"accessToken":"tok"}`
+	resp, err := client.Do(putReq(opaque))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("PUT missing expiresAt: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("PUT opaque credentials: status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	resp, err = client.Get("http://broker/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != opaque {
+		t.Errorf("GET after opaque PUT = %q, want %q", body, opaque)
+	}
+}
+
+func TestBroker_PUT_OpaqueDoesNotOverwriteExpiringCredentials(t *testing.T) {
+	seed := `{"accessToken":"fresh","expiresAt":4102444800000}`
+	_, client := startBroker(t, seed)
+
+	resp, err := client.Do(putReq(`{"accessToken":"opaque"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("PUT opaque over expiring credentials: status = %d, want %d", resp.StatusCode, http.StatusConflict)
 	}
 }
 
@@ -204,7 +230,7 @@ func TestBroker_Credentials(t *testing.T) {
 func TestBroker_MethodNotAllowed(t *testing.T) {
 	_, client := startBroker(t, "")
 
-	req, _ := http.NewRequest(http.MethodDelete, "http://broker/", nil)
+	req, _ := http.NewRequest(http.MethodPatch, "http://broker/", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -214,8 +240,66 @@ func TestBroker_MethodNotAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("DELETE: status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
-	if allow := resp.Header.Get("Allow"); allow != "GET, PUT" {
-		t.Errorf("Allow header = %q, want %q", allow, "GET, PUT")
+	if allow := resp.Header.Get("Allow"); allow != "GET, PUT, DELETE" {
+		t.Errorf("Allow header = %q, want %q", allow, "GET, PUT, DELETE")
+	}
+}
+
+func TestBroker_DELETE_ClearsCredentialsAndHostStore(t *testing.T) {
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "creds.json")
+	store := &FileCredentialStore{path: storePath}
+	seed := `{"accessToken":"seed","expiresAt":4102444800000}`
+	if err := store.Persist(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := shortSockPath(t)
+	b := NewHostBroker(sockPath, seed, []CredentialStore{store})
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	client := brokerClient(sockPath)
+	waitForBroker(t, client)
+
+	req, _ := http.NewRequest(http.MethodDelete, "http://broker/", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: status = %d, want 204", resp.StatusCode)
+	}
+	if got := b.Credentials(); got != "" {
+		t.Fatalf("broker credentials = %q, want empty", got)
+	}
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("host store should be removed, stat err = %v", err)
+	}
+
+	resp, err = client.Get("http://broker/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("GET after DELETE: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestBroker_PUT_ExpiredRejected(t *testing.T) {
+	_, client := startBroker(t, "")
+
+	expired := `{"accessToken":"old","expiresAt":1700000000000}`
+	resp, err := client.Do(putReq(expired))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("PUT expired: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 

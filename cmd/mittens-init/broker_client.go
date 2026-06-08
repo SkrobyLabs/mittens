@@ -109,3 +109,17 @@ func (b *brokerClient) put(path, jsonBody string) (int, error) {
 	resp.Body.Close()
 	return resp.StatusCode, nil
 }
+
+// delete sends a DELETE request and returns the HTTP status code.
+func (b *brokerClient) delete(path string) (int, error) {
+	req, err := http.NewRequest(http.MethodDelete, b.baseURL+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}

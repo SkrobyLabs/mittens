@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	credSyncInterval     = 5 * time.Second
-	refreshThresholdMS   = 300000 // trigger proactive refresh when <5 min remain
+	credSyncInterval      = 5 * time.Second
+	refreshThresholdMS    = 300000           // trigger proactive refresh when <5 min remain
 	refreshPendingTimeout = 60 * time.Second // safety timeout for refresh-pending state
 )
 
@@ -78,8 +78,17 @@ func runCredSync(bc *brokerClient, credFile string) {
 	lastHash := computeFileHash(credFile)
 	if data, err := os.ReadFile(credFile); err == nil && len(data) > 0 {
 		localExp := credExpiresAt(data)
-		code, _ := bc.put("/", string(data))
-		log.write("initial push: expiresAt=%d → %d", localExp, code)
+		if fields, ok := credutil.ObjectFieldCount(data); !ok || fields == 0 {
+			code, _ := bc.delete("/")
+			log.write("initial credentials empty/invalid, clearing broker -> %d", code)
+			_ = os.Remove(credFile)
+			lastHash = ""
+		} else if credutil.IsExpired(data, time.Now()) {
+			log.write("initial credentials expired, not syncing")
+		} else {
+			code, _ := bc.put("/", string(data))
+			log.write("initial push: expiresAt=%d -> %d", localExp, code)
+		}
 	} else {
 		log.write("no credentials file at startup")
 	}
@@ -96,14 +105,44 @@ func runCredSync(bc *brokerClient, credFile string) {
 	for range ticker.C {
 		// --- Push: detect local file changes ---
 		currentHash := computeFileHash(credFile)
+		if currentHash == "" && lastHash != "" {
+			code, err := bc.delete("/")
+			if err == nil {
+				log.write("push: credentials removed locally -> %d", code)
+				if code == 204 {
+					refreshPending = false
+				}
+			}
+			lastHash = ""
+		}
 		if currentHash != "" && currentHash != lastHash {
 			if data, err := os.ReadFile(credFile); err == nil && len(data) > 0 {
 				localExp := credExpiresAt(data)
-				code, _ := bc.put("/", string(data))
-				log.write("push: file changed, expiresAt=%d → %d", localExp, code)
-				if code == 204 || code == 409 || code == 400 {
+				if fields, ok := credutil.ObjectFieldCount(data); !ok || fields == 0 {
+					code, _ := bc.delete("/")
+					log.write("push: credentials empty/invalid locally, clearing broker -> %d", code)
+					_ = os.Remove(credFile)
+					currentHash = ""
+					lastHash = ""
+					refreshPending = false
+				} else if credutil.IsExpired(data, time.Now()) {
+					log.write("push: credentials expired locally, not syncing")
 					lastHash = currentHash
+					refreshPending = false
+				} else {
+					code, _ := bc.put("/", string(data))
+					log.write("push: file changed, expiresAt=%d -> %d", localExp, code)
+					if code == 204 || code == 409 || code == 400 {
+						lastHash = currentHash
+					}
 				}
+			} else if currentHash != "" {
+				code, err := bc.delete("/")
+				if err == nil {
+					log.write("push: credentials unreadable/empty, clearing broker -> %d", code)
+				}
+				_ = os.Remove(credFile)
+				lastHash = ""
 			}
 		}
 
@@ -117,11 +156,27 @@ func runCredSync(bc *brokerClient, credFile string) {
 			log.write("proactive refresh: timeout waiting for CLI refresh, resuming pull")
 		}
 		remote, code, err := bc.get("/")
+		if err == nil && code == 204 {
+			if computeFileHash(credFile) != "" {
+				_ = os.Remove(credFile)
+				lastHash = ""
+				refreshPending = false
+				log.write("pull: broker has no creds, removed local creds")
+			}
+		}
 		if err == nil && code == 200 && remote != "" {
 			remoteExp := credExpiresAt([]byte(remote))
 			localExp := credExpiresAtFile(credFile)
+			localHash := computeFileHash(credFile)
 
-			if shouldAcceptPull(remoteExp, localExp, refreshOrigExp, refreshPending) {
+			if remoteExp == 0 && localHash == "" && !refreshPending {
+				tmp := credFile + fmt.Sprintf(".tmp.%d", os.Getpid())
+				if err := os.WriteFile(tmp, []byte(remote), 0600); err == nil {
+					os.Rename(tmp, credFile)
+					lastHash = computeFileHash(credFile)
+					log.write("pull: restored opaque local creds from broker")
+				}
+			} else if shouldAcceptPull(remoteExp, localExp, refreshOrigExp, refreshPending) {
 				tmp := credFile + fmt.Sprintf(".tmp.%d", os.Getpid())
 				if err := os.WriteFile(tmp, []byte(remote), 0600); err == nil {
 					os.Rename(tmp, credFile)
@@ -137,7 +192,7 @@ func runCredSync(bc *brokerClient, credFile string) {
 		}
 
 		// --- Proactive refresh ---
-		curExp := credExpiresAtFile(credFile)
+		curExp := credExpiresAtMillisFile(credFile)
 		nowMS := time.Now().UnixMilli()
 		if curExp > 0 {
 			remaining := curExp - nowMS
@@ -164,12 +219,24 @@ func credExpiresAt(data []byte) int64 {
 	return credutil.ExpiresAt(data)
 }
 
+func credExpiresAtMillis(data []byte) int64 {
+	return credutil.ExpiresAtMillis(data)
+}
+
 func credExpiresAtFile(path string) int64 {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
 	return credExpiresAt(data)
+}
+
+func credExpiresAtMillisFile(path string) int64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return credExpiresAtMillis(data)
 }
 
 func computeFileHash(path string) string {

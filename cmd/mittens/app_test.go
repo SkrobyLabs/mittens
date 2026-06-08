@@ -47,6 +47,59 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 	}
 }
 
+func TestClassifyFinalCredentialJSON(t *testing.T) {
+	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour).UnixMilli()
+
+	tests := []struct {
+		name       string
+		data       string
+		wantJSON   string
+		wantAction finalCredentialAction
+	}{
+		{name: "empty", data: "", wantAction: finalCredentialClear},
+		{name: "invalid json", data: "not json", wantAction: finalCredentialClear},
+		{name: "empty object", data: `{}`, wantAction: finalCredentialClear},
+		{name: "opaque object", data: `{"accessToken":"tok"}`, wantJSON: `{"accessToken":"tok"}`, wantAction: finalCredentialPersist},
+		{name: "expired millis", data: `{"accessToken":"old","expiresAt":1700000000000}`, wantAction: finalCredentialIgnore},
+		{name: "expired codex seconds", data: `{"access_token":"old","expires_at":1700000000}`, wantAction: finalCredentialIgnore},
+		{name: "fresh", data: fmt.Sprintf(`{"accessToken":"new","expiresAt":%d}`, future), wantJSON: fmt.Sprintf(`{"accessToken":"new","expiresAt":%d}`, future), wantAction: finalCredentialPersist},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotJSON, gotAction, err := classifyFinalCredentialJSON([]byte(tc.data), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotJSON != tc.wantJSON || gotAction != tc.wantAction {
+				t.Fatalf("classifyFinalCredentialJSON() = (%q, %v), want (%q, %v)", gotJSON, gotAction, tc.wantJSON, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestDockerCpMissingPath(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "docker could not find", out: `Error response from daemon: Could not find the file /home/codex/.codex/auth.json in container mittens-codex`, want: true},
+		{name: "no such file", out: `stat /home/codex/.codex/auth.json: no such file or directory`, want: true},
+		{name: "not found", out: `not found`, want: true},
+		{name: "other error", out: `permission denied`, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dockerCpMissingPath([]byte(tc.out)); got != tc.want {
+				t.Fatalf("dockerCpMissingPath() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseFlags_LegacyWorkerPlannerIgnored(t *testing.T) {
 	a := &App{}
 	if err := a.ParseFlags([]string{"--worker", "--planner", "--print"}); err != nil {

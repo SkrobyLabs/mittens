@@ -46,6 +46,18 @@ func (k *KeychainStore) Persist(jsonData string) error {
 	return nil
 }
 
+func (k *KeychainStore) Delete() error {
+	cmd := exec.Command("security", "delete-generic-password", "-s", k.service)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "could not be found") ||
+			strings.Contains(string(out), "The specified item could not be found") {
+			return nil
+		}
+		return fmt.Errorf("keychain delete: %w: %s", err, out)
+	}
+	return nil
+}
+
 func (k *KeychainStore) Label() string {
 	return "keychain"
 }

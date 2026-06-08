@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SkrobyLabs/mittens/internal/credutil"
 )
 
 const maxCredentialSize = 64 * 1024 // 64KB
@@ -24,8 +26,10 @@ func (b *HostBroker) handle(w http.ResponseWriter, r *http.Request) {
 		b.handleGet(w)
 	case http.MethodPut:
 		b.handlePut(w, r)
+	case http.MethodDelete:
+		b.handleDelete(w)
 	default:
-		w.Header().Set("Allow", "GET, PUT")
+		w.Header().Set("Allow", "GET, PUT, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -53,15 +57,42 @@ func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incoming := string(body)
+	if !json.Valid(body) {
+		b.blog("PUT -> 400 (invalid JSON, %d bytes)", len(body))
+		http.Error(w, "invalid credentials: invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if fields, ok := credutil.ObjectFieldCount(body); !ok || fields == 0 {
+		b.blog("PUT -> 400 (empty/non-object credentials, %d bytes)", len(body))
+		http.Error(w, "invalid credentials: empty or non-object JSON", http.StatusBadRequest)
+		return
+	}
 	incomingExp := expiresAt(incoming)
-	if incomingExp == 0 {
-		b.blog("PUT -> 400 (missing/invalid expiresAt, %d bytes, keys: %s)", len(body), jsonKeys(incoming))
-		http.Error(w, "invalid credentials: missing or invalid expiresAt", http.StatusBadRequest)
+	if credutil.IsExpired(body, time.Now()) {
+		b.blog("PUT -> 400 (expired credentials, expiresAt: %d)", incomingExp)
+		http.Error(w, "invalid credentials: expired", http.StatusBadRequest)
 		return
 	}
 
 	b.mu.Lock()
 	currentExp := expiresAt(b.creds)
+	if incomingExp == 0 {
+		if currentExp == 0 {
+			b.creds = incoming
+			b.mu.Unlock()
+			b.blog("PUT -> 204 accepted opaque credentials (was: %d)", currentExp)
+			b.refreshMu.Lock()
+			b.refreshInProgress = false
+			b.refreshMu.Unlock()
+			b.persistToHost(incoming)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		b.mu.Unlock()
+		b.blog("PUT -> 409 opaque credentials ignored (current: %d, keys: %s)", currentExp, jsonKeys(incoming))
+		http.Error(w, "stale credentials", http.StatusConflict)
+		return
+	}
 	if incomingExp > currentExp {
 		b.creds = incoming
 		b.mu.Unlock()
@@ -77,6 +108,13 @@ func (b *HostBroker) handlePut(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 	b.blog("PUT -> 409 stale (incoming: %d, current: %d)", incomingExp, currentExp)
 	http.Error(w, "stale credentials", http.StatusConflict)
+}
+
+func (b *HostBroker) handleDelete(w http.ResponseWriter) {
+	b.clearCredentials()
+	b.blog("DELETE -> 204 cleared")
+	b.deleteFromHost()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // hostSync polls host credential stores every 5 seconds.
@@ -98,20 +136,63 @@ func (b *HostBroker) hostSync() {
 func (b *HostBroker) pullFromHost() {
 	var bestJSON string
 	var bestExp int64
+	var opaqueJSON string
+	seenReadableStore := false
+	seenUsableCredential := false
 
 	for _, s := range b.stores {
 		data, err := s.Extract()
-		if err != nil || data == "" {
+		if err != nil {
 			continue
 		}
+		seenReadableStore = true
+		if data == "" {
+			continue
+		}
+		if fields, ok := credutil.ObjectFieldCount([]byte(data)); !ok || fields == 0 {
+			continue
+		}
+		if credutil.IsExpired([]byte(data), time.Now()) {
+			b.blog("hostSync: ignoring expired creds from %s (expiresAt: %d)", s.Label(), expiresAt(data))
+			continue
+		}
+		seenUsableCredential = true
 		exp := expiresAt(data)
+		if exp == 0 {
+			if opaqueJSON == "" {
+				opaqueJSON = data
+			}
+			continue
+		}
 		if exp > bestExp {
 			bestJSON = data
 			bestExp = exp
 		}
 	}
 
+	if bestJSON == "" && opaqueJSON != "" {
+		b.mu.Lock()
+		currentExp := expiresAt(b.creds)
+		if b.creds == "" || currentExp == 0 {
+			b.creds = opaqueJSON
+			b.mu.Unlock()
+			b.blog("hostSync: pulled opaque creds from host (was: %d)", currentExp)
+			return
+		}
+		b.mu.Unlock()
+		return
+	}
+
 	if bestJSON == "" {
+		if seenReadableStore && !seenUsableCredential {
+			b.mu.Lock()
+			hadCreds := b.creds != ""
+			b.creds = ""
+			b.mu.Unlock()
+			if hadCreds {
+				b.blog("hostSync: cleared broker creds because host stores are empty or expired")
+			}
+		}
 		return
 	}
 
@@ -134,6 +215,28 @@ func (b *HostBroker) persistToHost(jsonData string) {
 			logWarn("Broker: persist to %s: %v", s.Label(), err)
 		} else {
 			b.blog("persistToHost: wrote to %s", s.Label())
+		}
+	}
+}
+
+func (b *HostBroker) clearCredentials() {
+	b.mu.Lock()
+	b.creds = ""
+	b.mu.Unlock()
+
+	b.refreshMu.Lock()
+	b.refreshInProgress = false
+	b.refreshMu.Unlock()
+}
+
+// deleteFromHost removes credentials from all host stores.
+func (b *HostBroker) deleteFromHost() {
+	for _, s := range b.stores {
+		if err := s.Delete(); err != nil {
+			b.blog("deleteFromHost: FAILED %s: %v", s.Label(), err)
+			logWarn("Broker: delete from %s: %v", s.Label(), err)
+		} else {
+			b.blog("deleteFromHost: removed from %s", s.Label())
 		}
 	}
 }

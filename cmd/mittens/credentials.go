@@ -14,6 +14,8 @@ type CredentialStore interface {
 	Extract() (string, error)
 	// Persist writes credentials back to the store.
 	Persist(jsonData string) error
+	// Delete removes credentials from the store.
+	Delete() error
 	// Label returns a human-readable source name.
 	Label() string
 }
@@ -59,6 +61,10 @@ func (m *CredentialManager) Setup() error {
 	for _, s := range m.stores {
 		data, err := s.Extract()
 		if err != nil || data == "" {
+			continue
+		}
+		if fields, ok := credutil.ObjectFieldCount([]byte(data)); !ok || fields == 0 {
+			logInfo("Ignoring empty or invalid OAuth credentials from %s", s.Label())
 			continue
 		}
 		sources = append(sources, credentialSource{json: data, label: s.Label()})
@@ -108,6 +114,15 @@ func (m *CredentialManager) PersistAll(jsonData string) {
 	for _, s := range m.stores {
 		if err := s.Persist(jsonData); err != nil {
 			logWarn("Failed to persist credentials to %s: %v", s.Label(), err)
+		}
+	}
+}
+
+// DeleteAll removes credentials from all known stores.
+func (m *CredentialManager) DeleteAll() {
+	for _, s := range m.stores {
+		if err := s.Delete(); err != nil {
+			logWarn("Failed to delete credentials from %s: %v", s.Label(), err)
 		}
 	}
 }
@@ -183,6 +198,13 @@ func (f *FileCredentialStore) Persist(jsonData string) error {
 		return fmt.Errorf("creating credential directory: %w", err)
 	}
 	return os.WriteFile(f.path, []byte(jsonData), 0600)
+}
+
+func (f *FileCredentialStore) Delete() error {
+	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (f *FileCredentialStore) Label() string {
