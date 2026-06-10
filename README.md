@@ -20,6 +20,14 @@ AI coding agents work best when you stop babysitting them and let them run auton
 
 You could spin up a VM or a remote box, but then you lose everything that makes local development comfortable: clipboard access, drag-and-drop, desktop notifications, browser-based OAuth login, and instant access to your credentials. You'd also be paying for cloud compute and waiting for VMs to boot. Mittens containers start in seconds, run on your own machine, and handle all the host integration transparently — credential syncing, URL forwarding, path translation — so it feels like working locally, just sandboxed.
 
+## What Mittens Is (And Isn't)
+
+Mittens is built to **contain mistakes and limit blast radius**. An agent that goes off-task, runs a destructive command, or makes a bad call can only touch what you explicitly mounted and the domains you allowed — not your whole home directory, not arbitrary hosts, not your other projects.
+
+It is **not** a hardened jail against an agent (or a compromised dependency) *actively trying to escape*. A few egress channels stay open by design, and the host integrations that make Mittens pleasant to use are, by definition, channels back to your host. See [Security Model](#security-model) for exactly what is and isn't enforced.
+
+In short: Mittens protects you from an agent's **errors** far better than a bare `--dangerously-skip-permissions` session on your host, while keeping local development ergonomics. Treat the credentials and directories you pass in as "things the agent can use," not "things the agent can never leak."
+
 ## Supported Platforms
 
 | Platform | How it works |
@@ -27,6 +35,8 @@ You could spin up a VM or a remote box, but then you lose everything that makes 
 | **macOS** | Native binary, Keychain credential sync, clipboard image sync |
 | **Linux** | Native binary, file-based credential store |
 | **Windows** | `mittens.exe` shim auto-delegates to the real binary via WSL |
+
+Maturity varies by platform: **macOS and Linux are the best-tested paths**; **Windows/WSL works but is newer** and more likely to surprise you. Ollama as a provider is supported on all platforms (see [docs/LOCAL-PROVIDER.md](docs/LOCAL-PROVIDER.md)).
 
 ## Requirements
 
@@ -228,11 +238,61 @@ The container's `xdg-open` is replaced with a shim that forwards all URLs to the
 
 Run `mittens help` for commands, or `mittens init --help` for setup subcommands.
 
+## Security Model
+
+Before relying on Mittens for anything sensitive, it's worth knowing exactly what the boundary enforces — and what it deliberately does not.
+
+### Enforced
+
+- **Reduced capabilities** — the container runs with `--cap-drop ALL` unless Docker-in-Docker is explicitly enabled in policy.
+- **Non-root agent** — the container performs root-only setup (iptables, DinD), then drops to an unprivileged user via `setgroups`/`setgid`/`setuid` before the agent CLI ever runs.
+- **Default-deny egress** — the firewall sets the `OUTPUT` policy to `DROP` and forces all outbound HTTP/HTTPS through an in-container proxy that only permits whitelisted domains on ports 80/443.
+- **Scoped mounts** — only the workspace and the directories you configure in policy are visible; the rest of your host filesystem is not mounted.
+- **Ephemeral containers** — each run is force-removed on exit.
+- **Authenticated host bridge** — the broker requires a per-run random token and binds to a Unix socket (Linux) or localhost (macOS/WSL), not a public port.
+
+### Not a hard boundary
+
+- **SSH (port 22) egress is open to any host.** It exists so git-over-SSH works, but it is an unrestricted outbound TCP channel — a determined agent could use it to reach or tunnel to arbitrary hosts.
+- **DNS (port 53) is open to any resolver,** which makes DNS-tunnel exfiltration theoretically possible.
+- **The firewall filters by hostname, not destination identity.** Like any FQDN-filtering proxy, it trusts the requested hostname and cannot prevent domain-fronting through a shared CDN IP.
+- **Host integrations are intentional holes.** URL opening, notifications, clipboard sync, and credential write-through each bridge the container back to your host. They are gated by policy and the broker token, but they exist.
+
+If your threat model includes an agent or dependency *actively trying* to exfiltrate data, tighten the boundary: use `network.firewall strict`, keep `network.extra_domains` minimal, disable host integrations you don't need (`mittens policy set host.open_urls deny`, `host.clipboard_images false`, `host.notifications false`), and treat any credentials you forward as potentially reachable by the agent.
+
 ## Debugging
 
 - `mittens logs [-f]` — view broker logs (credential sync, OAuth intercept, URL forwarding). `-f` follows the log.
 - `--verbose` — prints the full `docker run` command so you can see all mounts, env vars, and flags.
 - `mittens policy set execution.shell true` — drops into a bash shell inside the container for manual inspection.
+
+## Troubleshooting
+
+| Symptom | Likely cause & fix |
+|---------|--------------------|
+| A build or tool can't reach a domain (`403 not in whitelist`) | The firewall blocked it. Add it with `mittens policy set network.extra_domains 'example.com'` (use `*.example.com` for subdomains), or check `mittens logs` for the denied host. |
+| OAuth login never completes | The broker couldn't intercept the callback. Check `mittens logs` for `OAuth intercept` lines, and ensure the callback port isn't already in use on the host. |
+| `host Docker socket not accessible` | The container couldn't access the host Docker socket. Ensure Docker is running and your user can reach `/var/run/docker.sock`. |
+| Credentials don't sync / agent asks to log in again | Check `mittens logs` for credential-sync activity. Stale provider tokens can require a fresh login — for Codex, see the notes in [docs/LOCAL-PROVIDER.md](docs/LOCAL-PROVIDER.md). |
+| Clipboard images or notifications don't work | These are macOS/WSL features and may be disabled by policy. Verify `host.clipboard_images` / `host.notifications` and see `mittens policy show`. |
+
+For anything else, `mittens logs -f` follows the broker log live, and `--verbose` prints the full sanitized `docker run` command.
+
+## Files & State
+
+Mittens keeps all of its state under `~/.mittens/`:
+
+```
+~/.mittens/
+  projects/<project>/policy.yaml   # per-project policy
+  runtime/<version>-<commit>/      # materialized runtime assets (installed binaries)
+  extensions/<name>/               # user-installed external extensions
+  logs/broker.log                  # broker debug log (mittens logs)
+```
+
+Credentials are synced through the host's native stores (Keychain on macOS, file-based stores elsewhere) and a per-run broker; they are not stored in plain text under `~/.mittens/`.
+
+To remove Mittens entirely: uninstall the binary (delete `/usr/local/bin/mittens` or your `PREFIX` path), then `rm -rf ~/.mittens`. On macOS, any Mittens-related Keychain items can be removed via Keychain Access.
 
 ## Extensions
 
