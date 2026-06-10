@@ -138,6 +138,51 @@ func (b *HostBroker) handleClipboard(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
+const maxEgressDenySize = 512
+
+// egressDenyWarnCap bounds how many unique blocked hosts trigger an OnEgressDeny
+// callback, so a probing agent can't flood the host terminal. Every denial is
+// still recorded in the broker log regardless of the cap.
+const egressDenyWarnCap = 20
+
+// handleEgressDeny records a hostname the in-container firewall blocked. It logs
+// every report and invokes OnEgressDeny once per unique host (up to a cap).
+func (b *HostBroker) handleEgressDeny(w http.ResponseWriter, r *http.Request) {
+	if !b.requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	body, ok := b.readBody(w, r, maxEgressDenySize)
+	if !ok {
+		return
+	}
+	host := strings.TrimSpace(string(body))
+	if host == "" {
+		http.Error(w, "empty host", http.StatusBadRequest)
+		return
+	}
+
+	b.mu.Lock()
+	first := !b.deniedHosts[host]
+	if first {
+		if b.deniedHosts == nil {
+			b.deniedHosts = make(map[string]bool)
+		}
+		b.deniedHosts[host] = true
+	}
+	count := len(b.deniedHosts)
+	b.mu.Unlock()
+
+	if first {
+		b.blog("EGRESS-DENY -> %s (blocked, not in allowlist)", host)
+		if b.OnEgressDeny != nil && count <= egressDenyWarnCap {
+			b.OnEgressDeny(host)
+		} else if count == egressDenyWarnCap+1 {
+			b.blog("EGRESS-DENY -> further host warnings suppressed (%d+ unique); see mittens logs", egressDenyWarnCap)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // interceptOAuthCallback starts a temporary HTTP server on the host at the
 // given port to capture the OAuth browser redirect. Once the callback arrives,
 // it stores the full callback URL for the container to pick up via

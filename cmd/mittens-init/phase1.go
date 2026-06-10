@@ -133,7 +133,7 @@ func setupFirewall(cfg *config) error {
 	// Fork the proxy as a separate child process. It must run as root
 	// (UID 0) so the iptables uid-owner rule allows its outbound connections.
 	// A goroutine would be killed by the syscall.Exec privilege drop.
-	if err := forkProxy(domains, cfg.Verbose); err != nil {
+	if err := forkProxy(domains, cfg); err != nil {
 		return fmt.Errorf("starting proxy: %w", err)
 	}
 

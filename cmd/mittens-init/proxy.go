@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,13 +25,23 @@ type proxyServer struct {
 	listener  net.Listener
 	verbose   bool
 	logFile   *os.File
+	// onDeny, if set, is called with the hostname of each denied request so the
+	// host broker can surface blocked egress attempts. May be nil.
+	onDeny func(host string)
+}
+
+// reportDeny forwards a denied hostname to the deny reporter, if configured.
+func (p *proxyServer) reportDeny(host string) {
+	if p.onDeny != nil {
+		p.onDeny(host)
+	}
 }
 
 // forkProxy starts the proxy as a separate child process that stays root.
 // This is necessary because the parent process will syscall.Exec to drop
 // privileges — which would kill an in-process goroutine-based proxy.
 // The child process inherits the root UID and survives the parent's exec.
-func forkProxy(domains []string, verbose bool) error {
+func forkProxy(domains []string, cfg *config) error {
 	// Serialize config for the child via env vars.
 	domainsJSON, _ := json.Marshal(domains)
 
@@ -39,9 +50,16 @@ func forkProxy(domains []string, verbose bool) error {
 		"MITTENS_PROXY_MODE=1",
 		"MITTENS_PROXY_DOMAINS="+string(domainsJSON),
 	)
-	if verbose {
+	if cfg.Verbose {
 		cmd.Env = append(cmd.Env, "MITTENS_PROXY_VERBOSE=1")
 	}
+	// Pass broker connection details so the proxy can report blocked egress
+	// attempts to the host (visible via `mittens logs`).
+	cmd.Env = append(cmd.Env,
+		"MITTENS_PROXY_BROKER_SOCK="+cfg.BrokerSock,
+		"MITTENS_PROXY_BROKER_PORT="+cfg.BrokerPort,
+		"MITTENS_PROXY_BROKER_TOKEN="+cfg.BrokerToken,
+	)
 
 	// Detach stdout/stderr so they don't block.
 	logFile, _ := os.OpenFile("/tmp/proxy-child.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -68,7 +86,12 @@ func runProxyMain() {
 	verbose := os.Getenv("MITTENS_PROXY_VERBOSE") == "1"
 
 	wl := newDomainWhitelist(domains)
-	p, err := startProxy(wl, verbose)
+	onDeny := newDenyReporter(&config{
+		BrokerSock:  os.Getenv("MITTENS_PROXY_BROKER_SOCK"),
+		BrokerPort:  os.Getenv("MITTENS_PROXY_BROKER_PORT"),
+		BrokerToken: os.Getenv("MITTENS_PROXY_BROKER_TOKEN"),
+	})
+	p, err := startProxy(wl, verbose, onDeny)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[mittens-proxy] %v\n", err)
 		os.Exit(1)
@@ -79,9 +102,36 @@ func runProxyMain() {
 	select {}
 }
 
+// newDenyReporter returns a function that reports each unique denied hostname to
+// the host broker exactly once per run. Returns nil when no broker is
+// configured, leaving the proxy to log denials locally only.
+func newDenyReporter(cfg *config) func(string) {
+	client := newBrokerClient(cfg)
+	if client == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	return func(host string) {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			return
+		}
+		mu.Lock()
+		dup := seen[host]
+		seen[host] = true
+		mu.Unlock()
+		if dup {
+			return
+		}
+		// Fire-and-forget so request handling is never blocked on the broker.
+		go func() { _, _ = client.post("/egress-deny", "text/plain", host) }()
+	}
+}
+
 // startProxy creates and starts the forward proxy on 127.0.0.1:3128.
 // Returns the proxy server (for later shutdown) or an error.
-func startProxy(wl *domainWhitelist, verbose bool) (*proxyServer, error) {
+func startProxy(wl *domainWhitelist, verbose bool, onDeny func(string)) (*proxyServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:3128")
 	if err != nil {
 		return nil, fmt.Errorf("proxy listen: %w", err)
@@ -94,6 +144,7 @@ func startProxy(wl *domainWhitelist, verbose bool) (*proxyServer, error) {
 		listener:  ln,
 		verbose:   verbose,
 		logFile:   logFile,
+		onDeny:    onDeny,
 	}
 	go p.serve()
 	return p, nil
@@ -160,6 +211,7 @@ func (p *proxyServer) handleConnect(conn net.Conn, req *http.Request) {
 
 	if !p.whitelist.allowed(host) {
 		p.log("DENIED  CONNECT %s:%s (not in whitelist)", host, port)
+		p.reportDeny(host)
 		writeHTTPError(conn, 403, fmt.Sprintf("domain %q not in whitelist", host))
 		return
 	}
@@ -201,6 +253,7 @@ func (p *proxyServer) handleHTTP(conn net.Conn, br *bufio.Reader, req *http.Requ
 
 	if !p.whitelist.allowed(host) {
 		p.log("DENIED  %s http://%s%s (not in whitelist)", req.Method, host, req.URL.Path)
+		p.reportDeny(host)
 		writeHTTPError(conn, 403, fmt.Sprintf("domain %q not in whitelist", host))
 		return
 	}

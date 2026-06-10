@@ -100,6 +100,13 @@ type HostBroker struct {
 	// Returns PNG bytes or nil if no image is available.
 	OnClipboardRead func() []byte
 
+	// OnEgressDeny is called the first time the firewall blocks egress to a
+	// given hostname, so the host can surface it. May be nil.
+	OnEgressDeny func(host string)
+
+	// deniedHosts deduplicates blocked-egress reports across the run.
+	deniedHosts map[string]bool
+
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
 }
@@ -128,6 +135,7 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/refresh", b.withAuth(b.handleRefresh))
 	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
 	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
+	mux.HandleFunc("/egress-deny", b.withAuth(b.handleEgressDeny))
 	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b

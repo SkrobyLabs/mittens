@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -224,6 +225,45 @@ func TestBroker_Credentials(t *testing.T) {
 	got := b.Credentials()
 	if got != seed {
 		t.Errorf("Credentials() = %q, want %q", got, seed)
+	}
+}
+
+func TestBroker_EgressDeny_DedupsAndCallsBack(t *testing.T) {
+	b, client := startBroker(t, "")
+
+	var mu sync.Mutex
+	var seen []string
+	b.OnEgressDeny = func(host string) {
+		mu.Lock()
+		seen = append(seen, host)
+		mu.Unlock()
+	}
+
+	post := func(host string) int {
+		req, _ := http.NewRequest(http.MethodPost, "http://broker/egress-deny", strings.NewReader(host))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post("evil.example.com"); code != http.StatusNoContent {
+		t.Fatalf("first deny: status = %d, want %d", code, http.StatusNoContent)
+	}
+	post("evil.example.com") // duplicate — must not call back again
+	post("other.example.com")
+
+	if code := post(" "); code != http.StatusBadRequest {
+		t.Errorf("empty host: status = %d, want %d", code, http.StatusBadRequest)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"evil.example.com", "other.example.com"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("callbacks = %v, want %v", seen, want)
 	}
 }
 

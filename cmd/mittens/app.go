@@ -368,6 +368,9 @@ func (a *App) Run() error {
 		a.broker.OnOpen = func(url string) {
 			openOnHost(url, blogFnOpen)
 		}
+		a.broker.OnEgressDeny = func(host string) {
+			logWarn("Firewall blocked egress to %s (not in allowlist; add via 'mittens policy set network.extra_domains')", host)
+		}
 		if a.broker.Host.Notifications {
 			displayName := a.Provider.DisplayName
 			focus := a.terminalFocus
