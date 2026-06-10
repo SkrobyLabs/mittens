@@ -267,6 +267,7 @@ If your threat model includes an agent or dependency *actively trying* to exfilt
 - `mittens logs [-f]` — view broker logs (credential sync, OAuth intercept, URL forwarding, blocked egress). `-f` follows the log. When the firewall blocks an outbound domain, the attempt is logged here and a one-line warning is printed to the terminal that launched mittens (deduplicated per host).
 - `--verbose` — prints the full `docker run` command so you can see all mounts, env vars, and flags.
 - `mittens policy set execution.shell true` — drops into a bash shell inside the container for manual inspection.
+- `mittens doctor` — checks Docker, runtime assets, and broker prerequisites, and reports any problems. Run `mittens doctor --migrate-all` to convert every legacy per-project config under `~/.mittens/projects` to `policy.yaml` in one pass.
 
 ## Troubleshooting
 

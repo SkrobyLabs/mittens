@@ -143,6 +143,13 @@ func loadProjectPolicyFile(workspace string) (*ProjectPolicy, error) {
 }
 
 func SaveProjectPolicy(workspace string, policy *ProjectPolicy) error {
+	return savePolicyFile(projectPolicyPath(workspace), policy)
+}
+
+// savePolicyFile validates and writes a policy to an explicit path, creating
+// parent directories as needed. Used by SaveProjectPolicy and by the doctor
+// migration sweep, which operates on project directories directly.
+func savePolicyFile(path string, policy *ProjectPolicy) error {
 	if policy == nil {
 		return fmt.Errorf("policy is nil")
 	}
@@ -154,7 +161,6 @@ func SaveProjectPolicy(workspace string, policy *ProjectPolicy) error {
 	if err != nil {
 		return err
 	}
-	path := projectPolicyPath(workspace)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating policy dir: %w", err)
 	}

@@ -1883,6 +1883,7 @@ Commands:
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   policy show [--json]          Show effective project policy and boundary
+  doctor [--migrate-all]        Check environment and migrate legacy config
   extension list|install|remove Manage external extensions
   version [--json]              Show version information
 

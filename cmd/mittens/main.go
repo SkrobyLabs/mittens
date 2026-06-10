@@ -74,6 +74,8 @@ func runMain(args []string) error {
 			return runClean(args[1:])
 		case "policy":
 			return runPolicy(args[1:])
+		case "doctor":
+			return runDoctor(args[1:])
 		case "version":
 			return runVersion(args[1:])
 		case "extension":

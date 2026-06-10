@@ -130,6 +130,7 @@ Commands:
 - `mittens policy show [--json]` inspects effective policy and boundary.
 - `mittens policy set <field> <value>` updates narrow scalar policy fields.
 - `mittens extension list|install|remove` manages external extensions.
+- `mittens doctor [--migrate-all]` checks environment health (Docker, runtime assets, broker transport) and migrates legacy per-project config to `policy.yaml`.
 - `mittens logs [-f]`, `mittens clean`, and `mittens version`.
 
 Launch/runtime flags are intentionally small:
