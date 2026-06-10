@@ -114,7 +114,22 @@ func TestBuildLaunchSummary_FirewallDomainCountDeduped(t *testing.T) {
 	cfg.Flags.Firewall = true
 
 	s := app.buildLaunchSummary(cfg, []string{"api.github.com", "api.github.com", "registry.npmjs.org"})
-	if s.Network != "docker bridge, firewall allowlist (+2 dynamic domains)" {
+	if s.Network != "docker bridge, firewall allowlist (+2 dynamic domains), SSH egress allowed" {
+		t.Fatalf("network = %q", s.Network)
+	}
+}
+
+func TestBuildLaunchSummary_SSHEgressBlocked(t *testing.T) {
+	app := &App{
+		Provider:          ClaudeProvider(),
+		WorkspaceMountSrc: "/repo/app",
+	}
+	cfg := &initcfg.ContainerConfig{}
+	cfg.Flags.Firewall = true
+	cfg.Flags.NoSSHEgress = true
+
+	s := app.buildLaunchSummary(cfg, nil)
+	if s.Network != "docker bridge, firewall allowlist, SSH egress blocked" {
 		t.Fatalf("network = %q", s.Network)
 	}
 }

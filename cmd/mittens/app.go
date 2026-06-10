@@ -46,6 +46,7 @@ type App struct {
 	Yolo          bool
 	NoNotify      bool
 	NetworkHost   bool
+	NoSSHEgress   bool
 	Worktree      bool
 	Shell         bool
 	Profile       string // model profile name (e.g. "planner", "fast")
@@ -1107,6 +1108,9 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	a.ExtraDirs = appendPolicyMounts(a.ExtraDirs, policy.Workspace.Mounts)
 	a.FirewallExtra = append(a.FirewallExtra, policy.Network.ExtraDomains...)
 	a.NetworkHost = policy.Network.Mode == "host" || policy.Execution.NetworkHost
+	if policy.Network.SSHEgress != nil {
+		a.NoSSHEgress = !*policy.Network.SSHEgress
+	}
 	a.Worktree = policy.Workspace.Mode == "worktree" || policy.Execution.Worktree
 	a.Shell = policy.Execution.Shell
 	if policy.Execution.Yolo != nil {
@@ -1257,11 +1261,12 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 	return &initcfg.ContainerConfig{
 		AI: providerPlan.AI,
 		Flags: initcfg.Flags{
-			Verbose:   a.Verbose,
-			Yolo:      a.Yolo,
-			NoNotify:  a.NoNotify,
-			Shell:     a.Shell,
-			PrintMode: argExists(a.ClaudeArgs, "--print"),
+			Verbose:     a.Verbose,
+			Yolo:        a.Yolo,
+			NoNotify:    a.NoNotify,
+			Shell:       a.Shell,
+			PrintMode:   argExists(a.ClaudeArgs, "--print"),
+			NoSSHEgress: a.NoSSHEgress,
 		},
 		ContainerName:   a.ContainerName,
 		InstanceName:    a.InstanceName,

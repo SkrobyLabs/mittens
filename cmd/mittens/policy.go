@@ -55,6 +55,11 @@ type NetworkPolicy struct {
 	Firewall     string   `yaml:"firewall,omitempty"`
 	CustomConfig string   `yaml:"custom_config,omitempty"`
 	ExtraDomains []string `yaml:"extra_domains,omitempty"`
+	// SSHEgress controls whether the firewall permits outbound SSH (port 22)
+	// from the unprivileged agent. Unset means allowed (so git-over-SSH works);
+	// set to false to close this channel. Only meaningful when the firewall is
+	// enabled — with the firewall off, all egress is unrestricted anyway.
+	SSHEgress *bool `yaml:"ssh_egress,omitempty"`
 }
 
 type CredentialPolicy struct {

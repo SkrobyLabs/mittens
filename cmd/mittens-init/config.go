@@ -42,6 +42,7 @@ type config struct {
 	DinD               bool
 	DockerHost         bool
 	Firewall           bool
+	NoSSHEgress        bool
 	Verbose            bool
 	Yolo               bool
 	NoNotify           bool
@@ -117,6 +118,7 @@ func loadConfig() *config {
 		DinD:               jcfg.Flags.DinD,
 		DockerHost:         jcfg.Flags.DockerHost,
 		Firewall:           jcfg.Flags.Firewall,
+		NoSSHEgress:        jcfg.Flags.NoSSHEgress,
 		Verbose:            jcfg.Flags.Verbose,
 		Yolo:               jcfg.Flags.Yolo,
 		NoNotify:           jcfg.Flags.NoNotify,

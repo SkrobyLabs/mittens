@@ -163,7 +163,9 @@ Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm
 Extensions declare additional domains, such as AWS endpoints when the AWS
 capability is enabled in policy. MCP server domains are auto-resolved from
 config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22)
-bypasses the proxy entirely.
+bypasses the proxy entirely so git-over-SSH works; because that is an
+unrestricted outbound channel, you can close it with `mittens policy set
+network.ssh_egress false` (see [Security Model](#security-model)).
 
 Project-specific domains can be added with `mittens policy set
 network.extra_domains`. Use `*.` or a leading dot to allow a domain and all
@@ -253,12 +255,12 @@ Before relying on Mittens for anything sensitive, it's worth knowing exactly wha
 
 ### Not a hard boundary
 
-- **SSH (port 22) egress is open to any host.** It exists so git-over-SSH works, but it is an unrestricted outbound TCP channel — a determined agent could use it to reach or tunnel to arbitrary hosts.
+- **SSH (port 22) egress is open to any host by default.** It exists so git-over-SSH works, but it is an unrestricted outbound TCP channel — a determined agent could use it to reach or tunnel to arbitrary hosts. Close it with `mittens policy set network.ssh_egress false`; the launch boundary summary shows whether it is allowed or blocked for each run.
 - **DNS (port 53) is open to any resolver,** which makes DNS-tunnel exfiltration theoretically possible.
 - **The firewall filters by hostname, not destination identity.** Like any FQDN-filtering proxy, it trusts the requested hostname and cannot prevent domain-fronting through a shared CDN IP.
 - **Host integrations are intentional holes.** URL opening, notifications, clipboard sync, and credential write-through each bridge the container back to your host. They are gated by policy and the broker token, but they exist.
 
-If your threat model includes an agent or dependency *actively trying* to exfiltrate data, tighten the boundary: use `network.firewall strict`, keep `network.extra_domains` minimal, disable host integrations you don't need (`mittens policy set host.open_urls deny`, `host.clipboard_images false`, `host.notifications false`), and treat any credentials you forward as potentially reachable by the agent.
+If your threat model includes an agent or dependency *actively trying* to exfiltrate data, tighten the boundary: use `network.firewall strict`, keep `network.extra_domains` minimal, close SSH egress with `mittens policy set network.ssh_egress false`, disable host integrations you don't need (`mittens policy set host.open_urls deny`, `host.clipboard_images false`, `host.notifications false`), and treat any credentials you forward as potentially reachable by the agent.
 
 ## Debugging
 

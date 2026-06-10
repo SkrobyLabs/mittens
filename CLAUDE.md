@@ -93,6 +93,7 @@ Important policy areas:
 - `network.mode`: `bridge` or `host`
 - `network.firewall`: `strict`, `dev`, `custom`, or `disabled`
 - `network.extra_domains`: project-specific firewall allowlist domains, including `*.domain` wildcards
+- `network.ssh_egress`: allow outbound SSH (port 22); unset/true permits git-over-SSH, false closes the channel
 - `host`: URL opening, notifications, clipboard images, and path translation
 - `capabilities`: built-in or external capability selections
 - `execution`: yolo, history, worktree, shell, and Docker access

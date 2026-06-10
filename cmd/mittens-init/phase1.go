@@ -192,8 +192,6 @@ func setupIPTables(cfg *config) error {
 			// Only root (proxy runs as root) may connect directly on 80/443.
 			{cmd, "-A", "OUTPUT", "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"},
 			{cmd, "-A", "OUTPUT", "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"},
-			// SSH for git.
-			{cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"},
 		}
 
 		for _, args := range rules {
@@ -204,6 +202,25 @@ func setupIPTables(cfg *config) error {
 					return fmt.Errorf("%s failed: %w", strings.Join(args, " "), err)
 				}
 			}
+		}
+
+		// SSH (port 22) for git-over-SSH. This is an unrestricted outbound TCP
+		// channel, so it is gated by policy (network.ssh_egress). When allowed,
+		// log a rate-limited sample so the channel is auditable where kernel
+		// logging is visible; when blocked, it falls through to the DROP policy.
+		if !cfg.NoSSHEgress {
+			logRule := []string{cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", "22",
+				"-m", "limit", "--limit", "5/min", "--limit-burst", "5",
+				"-j", "LOG", "--log-prefix", "MITTENS-SSH-OUT "}
+			// Best-effort: the limit/LOG modules may be absent in minimal images.
+			_ = exec.Command(logRule[0], logRule[1:]...).Run()
+
+			acceptRule := []string{cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"}
+			if err := exec.Command(acceptRule[0], acceptRule[1:]...).Run(); err != nil && cmd == "iptables" {
+				return fmt.Errorf("%s failed: %w", strings.Join(acceptRule, " "), err)
+			}
+		} else if cmd == "iptables" {
+			logInfo("SSH egress (port 22) blocked by policy")
 		}
 
 		// Allow container to reach the host broker.

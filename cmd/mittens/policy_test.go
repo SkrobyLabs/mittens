@@ -332,6 +332,22 @@ func TestRunPolicySetUpdatesNetworkExtraDomains(t *testing.T) {
 	}
 }
 
+func TestSetPolicyFieldSSHEgress(t *testing.T) {
+	policy := defaultProjectPolicy()
+	if policy.Network.SSHEgress != nil {
+		t.Fatalf("ssh_egress should be unset by default, got %v", *policy.Network.SSHEgress)
+	}
+	if err := setPolicyField(policy, "network.ssh_egress", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if policy.Network.SSHEgress == nil || *policy.Network.SSHEgress {
+		t.Fatalf("ssh_egress = %v, want false", policy.Network.SSHEgress)
+	}
+	if err := setPolicyField(policy, "network.ssh_egress", "maybe"); err == nil {
+		t.Fatal("expected invalid ssh_egress value to fail")
+	}
+}
+
 func TestSetPolicyFieldRejectsInvalidValues(t *testing.T) {
 	policy := defaultProjectPolicy()
 	if err := setPolicyField(policy, "host.open_urls", "maybe"); err == nil {

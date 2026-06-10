@@ -140,6 +140,12 @@ func setPolicyField(policy *ProjectPolicy, field, value string) error {
 		policy.Network.CustomConfig = value
 	case "network.extra_domains":
 		policy.Network.ExtraDomains = normalizeNetworkDomains(parsePolicyList(value))
+	case "network.ssh_egress":
+		v, err := parsePolicyBool(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+		policy.Network.SSHEgress = &v
 	case "host.open_urls":
 		policy.Host.OpenURLs = value
 	case "host.clipboard_images":

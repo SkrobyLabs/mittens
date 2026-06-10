@@ -75,11 +75,15 @@ func (a *App) networkSummary(cfg *initcfg.ContainerConfig, firewallDomains []str
 		mode = "host network"
 	}
 	if cfg.Flags.Firewall {
+		ssh := "SSH egress allowed"
+		if cfg.Flags.NoSSHEgress {
+			ssh = "SSH egress blocked"
+		}
 		count := len(uniqueSorted(firewallDomains))
 		if count > 0 {
-			return fmt.Sprintf("%s, firewall allowlist (+%d dynamic domains)", mode, count)
+			return fmt.Sprintf("%s, firewall allowlist (+%d dynamic domains), %s", mode, count, ssh)
 		}
-		return mode + ", firewall allowlist"
+		return fmt.Sprintf("%s, firewall allowlist, %s", mode, ssh)
 	}
 	return mode + ", firewall disabled"
 }

@@ -91,6 +91,10 @@ type Flags struct {
 	WSLClipboard       bool `json:"wslClipboard,omitempty"`
 	Shell              bool `json:"shell,omitempty"`
 	PrintMode          bool `json:"printMode,omitempty"`
+	// NoSSHEgress, when true, withholds the iptables rule that lets the
+	// unprivileged agent open outbound port-22 (SSH) connections. Inverted so
+	// the zero value preserves the default-on behaviour.
+	NoSSHEgress bool `json:"noSshEgress,omitempty"`
 }
 
 // BrokerConfig holds connection details for the host credential broker.
