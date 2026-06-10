@@ -115,7 +115,7 @@ override during source/runtime development. User extensions are discovered from
 - `App.applyProjectPolicy` applies structured policy directly; runtime behavior should not depend on round-tripping through synthetic launch flags.
 - Extension legacy flags remain in manifests for migration and wizard plumbing, but are not supported as launch flags.
 - `go:embed` covers runtime assets and extension manifests; installed binaries materialize runtime files into the Mittens runtime cache.
-- Credentials use a freshest-wins model across host and container stores.
+- Credentials use a freshest-wins model across host and container stores. Only the selected provider's stores are read/synced; the full token (incl. refresh token) necessarily enters the container so the agent CLI can refresh it, and write-through to the host is deliberate — refresh tokens rotate, so a read-only mode would invalidate the host copy after the first refresh. Host-side refresh is intentionally not attempted (it would require hooking each harness's refresh internals).
 - `DropProxy` wraps stdin through a PTY to translate host paths in bracketed paste sequences.
 - The container starts as root for iptables/DinD setup, then drops to the provider user via `syscall.Setuid/Setgid` in `mittens-init`.
 - `mittens-init` handles root setup, user setup, credential sync, and busybox-style dispatch for `xdg-open`, `xclip`, and `notify.sh` symlinks.
