@@ -129,6 +129,7 @@ Commands:
 - `mittens init --profile NAME` edits provider model profiles.
 - `mittens policy show [--json]` inspects effective policy and boundary.
 - `mittens policy set <field> <value>` updates narrow scalar policy fields.
+- `mittens policy allow <domain...>` appends and de-duplicates firewall allowlist domains.
 - `mittens extension list|install|remove` manages external extensions.
 - `mittens doctor [--migrate-all]` checks environment health (Docker, runtime assets, broker transport) and migrates legacy per-project config to `policy.yaml`.
 - `mittens logs [-f]`, `mittens clean`, and `mittens version`.
@@ -136,8 +137,10 @@ Commands:
 Launch/runtime flags are intentionally small:
 
 `--verbose`, `--session`, `--no-config`, `--no-history`,
-`--no-build`, `--rebuild`, `--name NAME`, `--extensions`, `--json-caps`,
-`--version`, `--help`
+`--no-build`, `--rebuild`, `--name NAME`, `--firewall-learn`, `--extensions`,
+`--json-caps`, `--version`, `--help`
+
+`--firewall-learn` runs one permissive-but-logging pass that records out-of-allowlist domains and offers to add them to `network.extra_domains`; `mittens init` can arm a one-time pass via a `.learn-once` sentinel under the project dir (transient operational state, deliberately not a policy field).
 
 Unrecognised arguments after Mittens parsing are forwarded to the selected
 provider CLI. Use `--` when passing provider args explicitly, for example:

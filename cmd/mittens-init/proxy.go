@@ -25,8 +25,12 @@ type proxyServer struct {
 	listener  net.Listener
 	verbose   bool
 	logFile   *os.File
-	// onDeny, if set, is called with the hostname of each denied request so the
-	// host broker can surface blocked egress attempts. May be nil.
+	// learn, when true, forwards out-of-allowlist hosts instead of blocking them,
+	// still reporting each via onDeny so the run can discover required domains.
+	learn bool
+	// onDeny, if set, is called with the hostname of each denied (or, in learn
+	// mode, observed-but-allowed) request so the host broker can surface it.
+	// May be nil.
 	onDeny func(host string)
 }
 
@@ -52,6 +56,9 @@ func forkProxy(domains []string, cfg *config) error {
 	)
 	if cfg.Verbose {
 		cmd.Env = append(cmd.Env, "MITTENS_PROXY_VERBOSE=1")
+	}
+	if cfg.FirewallLearn {
+		cmd.Env = append(cmd.Env, "MITTENS_PROXY_LEARN=1")
 	}
 	// Pass broker connection details so the proxy can report blocked egress
 	// attempts to the host (visible via `mittens logs`).
@@ -84,6 +91,7 @@ func runProxyMain() {
 		json.Unmarshal([]byte(raw), &domains)
 	}
 	verbose := os.Getenv("MITTENS_PROXY_VERBOSE") == "1"
+	learn := os.Getenv("MITTENS_PROXY_LEARN") == "1"
 
 	wl := newDomainWhitelist(domains)
 	onDeny := newDenyReporter(&config{
@@ -91,7 +99,7 @@ func runProxyMain() {
 		BrokerPort:  os.Getenv("MITTENS_PROXY_BROKER_PORT"),
 		BrokerToken: os.Getenv("MITTENS_PROXY_BROKER_TOKEN"),
 	})
-	p, err := startProxy(wl, verbose, onDeny)
+	p, err := startProxy(wl, verbose, learn, onDeny)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[mittens-proxy] %v\n", err)
 		os.Exit(1)
@@ -131,7 +139,7 @@ func newDenyReporter(cfg *config) func(string) {
 
 // startProxy creates and starts the forward proxy on 127.0.0.1:3128.
 // Returns the proxy server (for later shutdown) or an error.
-func startProxy(wl *domainWhitelist, verbose bool, onDeny func(string)) (*proxyServer, error) {
+func startProxy(wl *domainWhitelist, verbose, learn bool, onDeny func(string)) (*proxyServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:3128")
 	if err != nil {
 		return nil, fmt.Errorf("proxy listen: %w", err)
@@ -143,6 +151,7 @@ func startProxy(wl *domainWhitelist, verbose bool, onDeny func(string)) (*proxyS
 		whitelist: wl,
 		listener:  ln,
 		verbose:   verbose,
+		learn:     learn,
 		logFile:   logFile,
 		onDeny:    onDeny,
 	}
@@ -210,10 +219,13 @@ func (p *proxyServer) handleConnect(conn net.Conn, req *http.Request) {
 	}
 
 	if !p.whitelist.allowed(host) {
-		p.log("DENIED  CONNECT %s:%s (not in whitelist)", host, port)
 		p.reportDeny(host)
-		writeHTTPError(conn, 403, fmt.Sprintf("domain %q not in whitelist", host))
-		return
+		if !p.learn {
+			p.log("DENIED  CONNECT %s:%s (not in whitelist)", host, port)
+			writeHTTPError(conn, 403, denyMessage(host))
+			return
+		}
+		p.log("LEARN   CONNECT %s:%s (allowed, outside allowlist)", host, port)
 	}
 
 	// Dial the upstream server.
@@ -252,10 +264,13 @@ func (p *proxyServer) handleHTTP(conn net.Conn, br *bufio.Reader, req *http.Requ
 	}
 
 	if !p.whitelist.allowed(host) {
-		p.log("DENIED  %s http://%s%s (not in whitelist)", req.Method, host, req.URL.Path)
 		p.reportDeny(host)
-		writeHTTPError(conn, 403, fmt.Sprintf("domain %q not in whitelist", host))
-		return
+		if !p.learn {
+			p.log("DENIED  %s http://%s%s (not in whitelist)", req.Method, host, req.URL.Path)
+			writeHTTPError(conn, 403, denyMessage(host))
+			return
+		}
+		p.log("LEARN   %s http://%s%s (allowed, outside allowlist)", req.Method, host, req.URL.Path)
 	}
 
 	// Dial upstream.
@@ -283,6 +298,14 @@ func (p *proxyServer) handleHTTP(conn net.Conn, br *bufio.Reader, req *http.Requ
 
 	// Relay the response back (including any subsequent data for keep-alive).
 	splice(conn, upstream)
+}
+
+// denyMessage is the body returned to the agent when the firewall blocks a
+// host. It names the host and gives the exact, copy-pasteable command the
+// operator runs on the host to allow it, so the agent can relay an actionable
+// fix instead of an opaque network error.
+func denyMessage(host string) string {
+	return fmt.Sprintf("domain %q blocked by mittens firewall; ask the operator to allow it on the host: mittens policy allow %s", host, host)
 }
 
 func writeHTTPError(conn net.Conn, code int, msg string) {

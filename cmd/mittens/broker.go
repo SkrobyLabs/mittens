@@ -104,6 +104,11 @@ type HostBroker struct {
 	// given hostname, so the host can surface it. May be nil.
 	OnEgressDeny func(host string)
 
+	// Learn marks the run as a firewall-learn pass: out-of-allowlist hosts are
+	// observed-but-allowed rather than blocked. It only changes how reports are
+	// logged, so the logs describe exactly what happened.
+	Learn bool
+
 	// deniedHosts deduplicates blocked-egress reports across the run.
 	deniedHosts map[string]bool
 

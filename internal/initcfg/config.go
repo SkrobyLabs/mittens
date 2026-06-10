@@ -95,6 +95,11 @@ type Flags struct {
 	// unprivileged agent open outbound port-22 (SSH) connections. Inverted so
 	// the zero value preserves the default-on behaviour.
 	NoSSHEgress bool `json:"noSshEgress,omitempty"`
+	// FirewallLearn runs the proxy permissive-but-logging: every out-of-allowlist
+	// host is forwarded and reported instead of blocked, so a single run can
+	// discover the domains a project actually needs. The allowlist is NOT
+	// enforced while this is set.
+	FirewallLearn bool `json:"firewallLearn,omitempty"`
 }
 
 // BrokerConfig holds connection details for the host credential broker.

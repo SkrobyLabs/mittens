@@ -133,3 +133,18 @@ func TestBuildLaunchSummary_SSHEgressBlocked(t *testing.T) {
 		t.Fatalf("network = %q", s.Network)
 	}
 }
+
+func TestBuildLaunchSummary_FirewallLearn(t *testing.T) {
+	app := &App{
+		Provider:          ClaudeProvider(),
+		WorkspaceMountSrc: "/repo/app",
+	}
+	cfg := &initcfg.ContainerConfig{}
+	cfg.Flags.Firewall = true
+	cfg.Flags.FirewallLearn = true
+
+	s := app.buildLaunchSummary(cfg, []string{"api.github.com"})
+	if !strings.Contains(s.Network, "LEARN mode") || !strings.Contains(s.Network, "not enforced") {
+		t.Fatalf("learn-mode network summary = %q", s.Network)
+	}
+}

@@ -151,13 +151,19 @@ Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm
 
 Extensions declare additional domains, such as AWS endpoints when the AWS capability is enabled in policy. MCP server domains are auto-resolved from config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22) bypasses the proxy entirely so git-over-SSH works; because that is an unrestricted outbound channel, you can close it with `mittens policy set network.ssh_egress false` (see [Security Model](#security-model)).
 
-Project-specific domains can be added with `mittens policy set network.extra_domains`. Use `*.` or a leading dot to allow a domain and all nested subdomains, for example:
+Project-specific domains can be added with `mittens policy set network.extra_domains` (replaces the list) or `mittens policy allow <domain...>` (appends and de-duplicates). Use `*.` or a leading dot to allow a domain and all nested subdomains, for example:
 
 ```bash
-mittens policy set network.extra_domains '*.apps.example.test'
+mittens policy allow api.example.com '*.apps.example.test'
 ```
 
+When the firewall blocks a request, the agent receives the exact `mittens policy allow <domain>` command to relay, and the host terminal prints the same hint (deduplicated per host; also in `mittens logs`).
+
 Use `mittens policy set network.firewall dev` for a developer-friendly whitelist that adds cloud APIs and apt repos.
+
+#### Discovering Required Domains (learn mode)
+
+Predicting a project's allowlist up front is the usual friction. Run `mittens --firewall-learn` once to start permissive-but-logging: every domain used outside the allowlist is forwarded *and* recorded instead of blocked, and when the container exits Mittens lists what it saw and offers to add it to `network.extra_domains` (on a non-interactive run it writes `firewall-learn.json` under the project directory and prints the `mittens policy allow` command to apply later). The next run enforces normally. Because the allowlist is not enforced during a learn pass, the launch boundary summary says so explicitly. `mittens init` can arm a one-time learn pass for the next run when you choose an enforcing firewall mode.
 
 ### Launch Boundary Summary
 

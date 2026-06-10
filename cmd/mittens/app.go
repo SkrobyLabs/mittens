@@ -47,6 +47,7 @@ type App struct {
 	NoNotify      bool
 	NetworkHost   bool
 	NoSSHEgress   bool
+	FirewallLearn bool
 	Worktree      bool
 	Shell         bool
 	Profile       string // model profile name (e.g. "planner", "fast")
@@ -107,20 +108,21 @@ type App struct {
 
 // coreFlags maps flag names to a setter function on *App.
 var coreFlags = map[string]func(*App){
-	"--verbose":      func(a *App) { a.Verbose = true },
-	"-v":             func(a *App) { a.Verbose = true },
-	"--no-config":    func(a *App) { a.NoConfig = true },
-	"--no-history":   func(a *App) { a.NoHistory = true },
-	"--no-build":     func(a *App) { a.NoBuild = true },
-	"--rebuild":      func(a *App) { a.Rebuild = true },
-	"--no-yolo":      func(a *App) { a.Yolo = false },
-	"--no-notify":    func(a *App) { a.NoNotify = true },
-	"--network-host": func(a *App) { a.NetworkHost = true },
-	"--worktree":     func(a *App) { a.Worktree = true },
-	"--shell":        func(a *App) { a.Shell = true },
-	"--worker":       func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--planner":      func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--firewall-dev": func(a *App) { firewallext.DevMode = true },
+	"--verbose":        func(a *App) { a.Verbose = true },
+	"-v":               func(a *App) { a.Verbose = true },
+	"--no-config":      func(a *App) { a.NoConfig = true },
+	"--no-history":     func(a *App) { a.NoHistory = true },
+	"--no-build":       func(a *App) { a.NoBuild = true },
+	"--rebuild":        func(a *App) { a.Rebuild = true },
+	"--no-yolo":        func(a *App) { a.Yolo = false },
+	"--no-notify":      func(a *App) { a.NoNotify = true },
+	"--network-host":   func(a *App) { a.NetworkHost = true },
+	"--worktree":       func(a *App) { a.Worktree = true },
+	"--shell":          func(a *App) { a.Shell = true },
+	"--firewall-learn": func(a *App) { a.FirewallLearn = true },
+	"--worker":         func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--planner":        func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--firewall-dev":   func(a *App) { firewallext.DevMode = true },
 }
 
 // coreFlagsWithArg maps flag names that consume the next argument.
@@ -221,6 +223,15 @@ func (a *App) Run() error {
 	a.EffectiveWorkspace = a.Workspace
 	cwd := effectiveCwd()
 	a.WorkspaceMountSrc = cwd
+
+	// A one-time firewall-learn pass armed via the wizard fires exactly once.
+	if !a.FirewallLearn && consumeLearnArm(a.Workspace) {
+		a.FirewallLearn = true
+		logInfo("Firewall learn: armed pass consumed for this run")
+	}
+	if a.FirewallLearn {
+		a.enableFirewallForLearn()
+	}
 
 	// Session persistence setup.
 	if !a.NoHistory {
@@ -356,6 +367,7 @@ func (a *App) Run() error {
 		}
 		a.broker = NewHostBroker("", seed, a.Credentials.Stores())
 		a.broker.Name = a.Provider.Name
+		a.broker.Learn = a.FirewallLearn
 		a.broker.Host = a.HostBridge
 		a.broker.Host.Notifications = a.broker.Host.Notifications && !a.NoNotify
 		if token, err := randomHex(16); err == nil {
@@ -368,8 +380,14 @@ func (a *App) Run() error {
 		a.broker.OnOpen = func(url string) {
 			openOnHost(url, blogFnOpen)
 		}
-		a.broker.OnEgressDeny = func(host string) {
-			logWarn("Firewall blocked egress to %s (not in allowlist; add via 'mittens policy set network.extra_domains')", host)
+		if a.FirewallLearn {
+			a.broker.OnEgressDeny = func(host string) {
+				logInfo("Firewall learn: observed egress to %s (outside allowlist)", host)
+			}
+		} else {
+			a.broker.OnEgressDeny = func(host string) {
+				logWarn("Firewall blocked egress to %s (not in allowlist; allow it with 'mittens policy allow %s')", host, host)
+			}
 		}
 		if a.broker.Host.Notifications {
 			displayName := a.Provider.DisplayName
@@ -1158,6 +1176,21 @@ func appendPolicyMounts(extraDirs []string, mounts []PolicyMount) []string {
 	return extraDirs
 }
 
+// enableFirewallForLearn ensures the firewall proxy runs for a learn pass even
+// when policy disabled it, so out-of-allowlist hosts can be observed. The proxy
+// runs permissive-but-logging; the allowlist itself is not enforced this run.
+func (a *App) enableFirewallForLearn() {
+	for _, ext := range a.Extensions {
+		if ext != nil && ext.Name == "firewall" {
+			if !ext.Enabled {
+				ext.Enabled = true
+				logInfo("Firewall learn: enabled the firewall proxy in permissive mode for discovery")
+			}
+			return
+		}
+	}
+}
+
 func (a *App) applyPolicyCapabilities(policy *ProjectPolicy) {
 	extByName := make(map[string]*registry.Extension, len(a.Extensions))
 	for _, ext := range a.Extensions {
@@ -1264,12 +1297,13 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 	return &initcfg.ContainerConfig{
 		AI: providerPlan.AI,
 		Flags: initcfg.Flags{
-			Verbose:     a.Verbose,
-			Yolo:        a.Yolo,
-			NoNotify:    a.NoNotify,
-			Shell:       a.Shell,
-			PrintMode:   argExists(a.ClaudeArgs, "--print"),
-			NoSSHEgress: a.NoSSHEgress,
+			Verbose:       a.Verbose,
+			Yolo:          a.Yolo,
+			NoNotify:      a.NoNotify,
+			Shell:         a.Shell,
+			PrintMode:     argExists(a.ClaudeArgs, "--print"),
+			NoSSHEgress:   a.NoSSHEgress,
+			FirewallLearn: a.FirewallLearn,
 		},
 		ContainerName:   a.ContainerName,
 		InstanceName:    a.InstanceName,
@@ -1620,6 +1654,7 @@ func (a *App) runContainer(dockerArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("docker run failed: %w", err)
 	}
+	a.maybeLearnReport()
 	if code != 0 {
 		if cleanup != nil {
 			cleanup()
@@ -1627,6 +1662,71 @@ func (a *App) runContainer(dockerArgs []string) error {
 		os.Exit(code)
 	}
 	return nil
+}
+
+// maybeLearnReport prints the firewall-learn summary after the container exits:
+// the out-of-allowlist domains observed during the run, with an offer to add
+// them to network.extra_domains. On a TTY it prompts; otherwise it writes a
+// JSON artifact and prints the copy-pasteable command to apply later.
+func (a *App) maybeLearnReport() {
+	if !a.FirewallLearn || a.broker == nil {
+		return
+	}
+	hosts := a.broker.ObservedHosts()
+	fmt.Fprintln(os.Stderr)
+	if len(hosts) == 0 {
+		logInfo("Firewall learn: no out-of-allowlist domains were used this run")
+		return
+	}
+	logInfo("Firewall learn: %d domain(s) used outside the allowlist:", len(hosts))
+	for _, h := range hosts {
+		fmt.Fprintf(os.Stderr, "    %s\n", h)
+	}
+
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+	if interactive {
+		add := false
+		if err := huh.NewConfirm().
+			Title("Add these to network.extra_domains for this project?").
+			Affirmative("Add").
+			Negative("Skip").
+			Value(&add).
+			Run(); err == nil && add {
+			added, err := addExtraDomains(a.Workspace, a.Extensions, hosts)
+			if err != nil {
+				logWarn("Firewall learn: failed to update policy: %v", err)
+				return
+			}
+			logInfo("Firewall learn: added %d domain(s) to network.extra_domains", len(added))
+			return
+		}
+		logInfo("Firewall learn: left the allowlist unchanged")
+		return
+	}
+
+	// Non-interactive: persist an artifact and print the command to apply later.
+	if path, err := writeLearnArtifact(a.Workspace, hosts); err == nil {
+		logInfo("Firewall learn: wrote observed domains to %s", path)
+	}
+	fmt.Fprintf(os.Stderr, "  Apply with: mittens policy allow %s\n", strings.Join(hosts, " "))
+}
+
+// writeLearnArtifact records the observed domains as JSON under the project dir
+// so a non-interactive run's findings survive and can be applied later.
+func writeLearnArtifact(workspace string, hosts []string) (string, error) {
+	dir := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "firewall-learn.json")
+	data, err := json.MarshalIndent(map[string][]string{"domains": hosts}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // newStdinProxy builds a PTY-based stdin proxy that translates host paths in
@@ -1895,6 +1995,8 @@ Core flags:
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
   --name NAME       Name this instance (default: PID-based)
+  --firewall-learn  Run once permissive-but-logging, then offer to add the
+                    observed domains to network.extra_domains
   --extensions      List loaded capabilities and policy metadata
   --version, -V     Show version information
 

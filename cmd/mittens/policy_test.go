@@ -10,6 +10,55 @@ import (
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
 )
 
+func TestAddExtraDomains(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	workspace := "/repo/learn-app"
+
+	added, err := addExtraDomains(workspace, nil, []string{"api.example.com", "*.cdn.example.net"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"api.example.com", ".cdn.example.net"}; !reflect.DeepEqual(added, want) {
+		t.Fatalf("first add returned %v, want %v (normalized)", added, want)
+	}
+
+	// Case-insensitive dedup against the existing set; only the new one is added.
+	added2, err := addExtraDomains(workspace, nil, []string{"API.EXAMPLE.COM", "new.example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"new.example.org"}; !reflect.DeepEqual(added2, want) {
+		t.Fatalf("second add returned %v, want %v", added2, want)
+	}
+
+	policy, _, err := LoadProjectPolicy(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"api.example.com", ".cdn.example.net", "new.example.org"}
+	if !reflect.DeepEqual(policy.Network.ExtraDomains, want) {
+		t.Fatalf("persisted extra_domains = %v, want %v", policy.Network.ExtraDomains, want)
+	}
+}
+
+func TestConsumeLearnArm(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	workspace := "/repo/learn-app"
+
+	if consumeLearnArm(workspace) {
+		t.Fatal("unarmed workspace should report false")
+	}
+	if err := armLearnPass(workspace); err != nil {
+		t.Fatal(err)
+	}
+	if !consumeLearnArm(workspace) {
+		t.Fatal("armed workspace should report true")
+	}
+	if consumeLearnArm(workspace) {
+		t.Fatal("learn arm must fire exactly once")
+	}
+}
+
 func TestSaveLoadProjectPolicy(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)

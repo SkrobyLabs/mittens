@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -145,8 +146,10 @@ const maxEgressDenySize = 512
 // still recorded in the broker log regardless of the cap.
 const egressDenyWarnCap = 20
 
-// handleEgressDeny records a hostname the in-container firewall blocked. It logs
-// every report and invokes OnEgressDeny once per unique host (up to a cap).
+// handleEgressDeny records a hostname the in-container firewall reported as
+// out-of-allowlist — blocked when enforcing, or observed-but-allowed during a
+// learn pass. It logs every report (wording follows the mode) and invokes
+// OnEgressDeny once per unique host (up to a cap).
 func (b *HostBroker) handleEgressDeny(w http.ResponseWriter, r *http.Request) {
 	if !b.requireMethod(w, r, http.MethodPost) {
 		return
@@ -173,14 +176,32 @@ func (b *HostBroker) handleEgressDeny(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 
 	if first {
-		b.blog("EGRESS-DENY -> %s (blocked, not in allowlist)", host)
+		if b.Learn {
+			b.blog("EGRESS-OBSERVE -> %s (allowed, outside allowlist)", host)
+		} else {
+			b.blog("EGRESS-DENY -> %s (blocked, not in allowlist)", host)
+		}
 		if b.OnEgressDeny != nil && count <= egressDenyWarnCap {
 			b.OnEgressDeny(host)
 		} else if count == egressDenyWarnCap+1 {
-			b.blog("EGRESS-DENY -> further host warnings suppressed (%d+ unique); see mittens logs", egressDenyWarnCap)
+			b.blog("EGRESS -> further host notices suppressed (%d+ unique); see mittens logs", egressDenyWarnCap)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ObservedHosts returns the sorted set of hostnames reported to /egress-deny
+// during the run — blocked under enforcement, or observed-but-allowed under a
+// firewall-learn pass.
+func (b *HostBroker) ObservedHosts() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	hosts := make([]string, 0, len(b.deniedHosts))
+	for h := range b.deniedHosts {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 // interceptOAuthCallback starts a temporary HTTP server on the host at the

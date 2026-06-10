@@ -50,6 +50,33 @@ func ConfigHome() string {
 	return filepath.Join(home, ".mittens")
 }
 
+// learnArmPath is the sentinel file that arms a one-time firewall-learn pass for
+// a workspace. It is transient operational state — deliberately a side file
+// rather than a policy field, so policy.yaml never carries an unenforced mode.
+func learnArmPath(workspace string) string {
+	return filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), ".learn-once")
+}
+
+// armLearnPass writes the one-time learn sentinel for a workspace.
+func armLearnPass(workspace string) error {
+	path := learnArmPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte("armed\n"), 0o644)
+}
+
+// consumeLearnArm reports whether a one-time learn pass is armed for the
+// workspace and removes the sentinel so it fires exactly once.
+func consumeLearnArm(workspace string) bool {
+	path := learnArmPath(workspace)
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	_ = os.Remove(path)
+	return true
+}
+
 // readConfigLines reads a config file and returns non-blank, non-comment lines.
 // Returns (nil, nil) if the file does not exist.
 func readConfigLines(path string) ([]string, error) {

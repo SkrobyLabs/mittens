@@ -119,7 +119,7 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	// ── Step 4: Network boundary ───────────────────────────────────────────
-	networkLines, extraDomains, err := wizardNetworkBoundary(editMode, existFirewall, existOpts, existExtraDomains)
+	networkLines, extraDomains, err := wizardNetworkBoundary(workspace, editMode, existFirewall, existOpts, existExtraDomains)
 	if err != nil {
 		return gracefulAbort(err)
 	}
@@ -236,7 +236,9 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 		return nil, nil, err
 	}
 
-	networkLines, extraDomains, err := wizardNetworkBoundary(editMode, existFirewall, existOpts, existExtraDomains)
+	// Session runs are ephemeral; pass an empty workspace to skip arming a
+	// one-time learn pass for a "next run" that won't share this config.
+	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, existFirewall, existOpts, existExtraDomains)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1369,7 +1371,7 @@ func mapFromValues(values []string) map[string]bool {
 // Step 4: Network boundary
 // ---------------------------------------------------------------------------
 
-func wizardNetworkBoundary(editMode bool, existFirewall, existOpts, existExtraDomains []string) ([]string, []string, error) {
+func wizardNetworkBoundary(workspace string, editMode bool, existFirewall, existOpts, existExtraDomains []string) ([]string, []string, error) {
 	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 4: Network boundary"))
 	state := networkWizardStateFromLines(existFirewall, existOpts, existExtraDomains)
 
@@ -1440,7 +1442,40 @@ func wizardNetworkBoundary(editMode bool, existFirewall, existOpts, existExtraDo
 		return nil, nil, err
 	}
 	state = NetworkWizardState{Network: network, ExtraDomains: extraDomains}
+
+	// Offer a one-time discovery pass for enforcing modes, where predicting the
+	// allowlist by hand is the usual friction. Arming writes a sentinel the next
+	// launch consumes; it does not persist an unenforced mode into policy.yaml.
+	if workspace != "" && (network.Firewall == "strict" || network.Firewall == "custom") {
+		if err := wizardOfferLearnArm(workspace); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	return networkLinesFromState(state), state.ExtraDomains, nil
+}
+
+// wizardOfferLearnArm asks whether to arm a one-time firewall-learn pass and
+// writes the sentinel if so.
+func wizardOfferLearnArm(workspace string) error {
+	arm := false
+	if err := huh.NewConfirm().
+		Title("Discover required domains on your next run?").
+		Description("Arms a one-time learn pass: the next run records domains used\noutside the allowlist and offers to add them, then reverts to\nenforcing. Run a representative build to populate the allowlist.").
+		Affirmative("Arm").
+		Negative("Skip").
+		Value(&arm).
+		Run(); err != nil {
+		return err
+	}
+	if !arm {
+		return nil
+	}
+	if err := armLearnPass(workspace); err != nil {
+		return fmt.Errorf("arming firewall-learn pass: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Armed: your next mittens run will discover and offer to add required domains.")
+	return nil
 }
 
 func wizardFirewallMode(existing NetworkPolicy) (NetworkPolicy, error) {

@@ -79,6 +79,9 @@ func (a *App) networkSummary(cfg *initcfg.ContainerConfig, firewallDomains []str
 		if cfg.Flags.NoSSHEgress {
 			ssh = "SSH egress blocked"
 		}
+		if cfg.Flags.FirewallLearn {
+			return fmt.Sprintf("%s, firewall LEARN mode (allowlist not enforced; observing domains), %s", mode, ssh)
+		}
 		count := len(uniqueSorted(firewallDomains))
 		if count > 0 {
 			return fmt.Sprintf("%s, firewall allowlist (+%d dynamic domains), %s", mode, count, ssh)

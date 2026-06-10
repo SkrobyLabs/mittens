@@ -28,6 +28,12 @@ func runPolicy(args []string) error {
 			return fmt.Errorf("loading extensions: %w", err)
 		}
 		return runPolicySet(args[1:], exts)
+	case "allow":
+		exts, err := loadExtensions()
+		if err != nil {
+			return fmt.Errorf("loading extensions: %w", err)
+		}
+		return runPolicyAllow(args[1:], exts)
 	default:
 		return fmt.Errorf("unknown policy command %q", args[0])
 	}
@@ -116,6 +122,68 @@ func runPolicySet(args []string, extensions []*registry.Extension) error {
 	}
 	fmt.Fprintf(os.Stdout, "Updated %s for %s\n", args[0], ProjectDir(workspace))
 	return nil
+}
+
+// runPolicyAllow appends one or more domains to network.extra_domains. It is the
+// command the in-container firewall denial message points operators at, and the
+// same path the firewall-learn report uses to persist discovered domains.
+func runPolicyAllow(args []string, extensions []*registry.Extension) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: mittens policy allow <domain> [domain...]")
+	}
+	workspace := detectWorkspace()
+	added, err := addExtraDomains(workspace, extensions, args)
+	if err != nil {
+		return err
+	}
+	if len(added) == 0 {
+		fmt.Fprintln(os.Stdout, "All domains already in network.extra_domains; nothing to add")
+		return nil
+	}
+	fmt.Fprintf(os.Stdout, "Added %s to network.extra_domains for %s\n", strings.Join(added, ", "), ProjectDir(workspace))
+	return nil
+}
+
+// addExtraDomains normalizes, de-duplicates against the existing allowlist, and
+// appends the given domains to the project's network.extra_domains, saving the
+// policy. It returns the domains that were actually new (empty if all were
+// already present, in which case the policy file is left untouched).
+func addExtraDomains(workspace string, extensions []*registry.Extension, domains []string) ([]string, error) {
+	incoming := normalizeNetworkDomains(domains)
+	if len(incoming) == 0 {
+		return nil, fmt.Errorf("no valid domains to add")
+	}
+	policy, _, err := LoadProjectPolicy(workspace, extensions)
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		policy = defaultProjectPolicy()
+	}
+	seen := make(map[string]bool, len(policy.Network.ExtraDomains))
+	for _, d := range policy.Network.ExtraDomains {
+		seen[d] = true
+	}
+	var added []string
+	for _, d := range incoming {
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		policy.Network.ExtraDomains = append(policy.Network.ExtraDomains, d)
+		added = append(added, d)
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+	policy.applyDefaults()
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	if err := SaveProjectPolicy(workspace, policy); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 func setPolicyField(policy *ProjectPolicy, field, value string) error {
@@ -222,12 +290,14 @@ func printPolicyHelp() {
 Usage:
   mittens policy show [--json]
   mittens policy set <field> <value>
+  mittens policy allow <domain> [domain...]
 
 Examples:
   mittens policy show
   mittens policy show --json
   mittens policy set provider.name codex
   mittens policy set network.extra_domains '*.apps.example.test'
+  mittens policy allow api.example.com '*.cdn.example.net'
   mittens policy set host.open_urls deny
   mittens policy set host.clipboard_images false`)
 }

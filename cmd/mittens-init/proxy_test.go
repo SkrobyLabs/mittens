@@ -74,8 +74,67 @@ func TestProxyBlockedCONNECT(t *testing.T) {
 		t.Errorf("expected 403 for blocked domain, got %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "not in whitelist") {
-		t.Errorf("expected 'not in whitelist' in body, got: %s", string(body))
+	if !strings.Contains(string(body), "blocked by mittens firewall") {
+		t.Errorf("expected block notice in body, got: %s", string(body))
+	}
+	if !strings.Contains(string(body), "mittens policy allow evil.com") {
+		t.Errorf("expected copy-pasteable allow command in body, got: %s", string(body))
+	}
+}
+
+func TestDenyMessageIncludesGuidance(t *testing.T) {
+	msg := denyMessage("api.example.com")
+	if !strings.Contains(msg, "api.example.com") {
+		t.Errorf("deny message should name the host: %s", msg)
+	}
+	if !strings.Contains(msg, "mittens policy allow api.example.com") {
+		t.Errorf("deny message should give the allow command: %s", msg)
+	}
+}
+
+func TestProxyLearnModeAllowsAndReports(t *testing.T) {
+	wl := newDomainWhitelist([]string{"api.github.com"})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reported := make(chan string, 1)
+	p := &proxyServer{
+		whitelist: wl,
+		listener:  ln,
+		learn:     true,
+		onDeny:    func(host string) { reported <- host },
+	}
+	go p.serve()
+	defer p.close()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// .invalid never resolves, so the upstream dial fails fast (502) without a
+	// real network call — but in learn mode the host must still be reported and
+	// must NOT be refused with 403.
+	fmt.Fprintf(conn, "CONNECT outside.invalid:443 HTTP/1.1\r\nHost: outside.invalid:443\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode == 403 {
+		t.Errorf("learn mode must not refuse out-of-allowlist hosts, got 403")
+	}
+
+	select {
+	case host := <-reported:
+		if host != "outside.invalid" {
+			t.Errorf("reported host = %q, want outside.invalid", host)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("learn mode did not report the out-of-allowlist host")
 	}
 }
 

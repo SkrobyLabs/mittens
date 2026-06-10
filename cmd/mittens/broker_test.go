@@ -260,10 +260,54 @@ func TestBroker_EgressDeny_DedupsAndCallsBack(t *testing.T) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	want := []string{"evil.example.com", "other.example.com"}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("callbacks = %v, want %v", seen, want)
+	}
+	mu.Unlock()
+
+	// ObservedHosts returns the deduplicated, sorted set for the learn report.
+	if got := b.ObservedHosts(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ObservedHosts() = %v, want %v", got, want)
+	}
+}
+
+func TestBroker_EgressDeny_LogWordingFollowsMode(t *testing.T) {
+	post := func(b *HostBroker, client *http.Client, host string) {
+		req, _ := http.NewRequest(http.MethodPost, "http://broker/egress-deny", strings.NewReader(host))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	logContents := func(t *testing.T, learn bool, host string) string {
+		b, client := startBroker(t, "")
+		b.Learn = learn
+		lf, err := os.CreateTemp(t.TempDir(), "broker-*.log")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.LogFile = lf
+		post(b, client, host)
+		data, err := os.ReadFile(lf.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	enforced := logContents(t, false, "blocked.example.com")
+	if !strings.Contains(enforced, "EGRESS-DENY -> blocked.example.com (blocked, not in allowlist)") {
+		t.Errorf("enforcing log should say blocked, got:\n%s", enforced)
+	}
+
+	learned := logContents(t, true, "observed.example.com")
+	if !strings.Contains(learned, "EGRESS-OBSERVE -> observed.example.com (allowed, outside allowlist)") {
+		t.Errorf("learn-mode log should say observed/allowed, got:\n%s", learned)
+	}
+	if strings.Contains(learned, "blocked") {
+		t.Errorf("learn-mode log must not claim traffic was blocked, got:\n%s", learned)
 	}
 }
 
