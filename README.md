@@ -55,10 +55,7 @@ make install  # → /usr/local/bin/mittens (or PREFIX=~/.local)
 
 On Windows, `make build` produces both `mittens.exe` (WSL shim) and `mittens-linux` (real binary). Run `mittens.exe` from PowerShell or cmd — it transparently uses WSL under the hood.
 
-The installed binary carries the built-in Docker runtime files with it. If no
-adjacent `container/` directory is present, Mittens materializes those assets
-under `~/.mittens/runtime/<version>-<commit>/`. For local runtime development,
-set `MITTENS_RUNTIME_ROOT=/path/to/cmd/mittens` to force a source checkout.
+The installed binary carries the built-in Docker runtime files with it. If no adjacent `container/` directory is present, Mittens materializes those assets under `~/.mittens/runtime/<version>-<commit>/`. For local runtime development, set `MITTENS_RUNTIME_ROOT=/path/to/cmd/mittens` to force a source checkout.
 
 ## Quick Start
 
@@ -73,15 +70,9 @@ mittens policy set host.open_urls deny
 mittens help             # see all flags and commands
 ```
 
-Project policies are saved to `~/.mittens/projects/` as `policy.yaml` and loaded automatically next time. Older one-flag-per-line project configs remain readable.
-When an older project config is found at launch, Mittens converts it to
-`policy.yaml` automatically. Policy-shaped launch flags are no longer accepted;
-use `mittens init` or `mittens policy set` instead.
+Project policies are saved to `~/.mittens/projects/` as `policy.yaml` and loaded automatically next time. Older one-flag-per-line project configs remain readable. When an older project config is found at launch, Mittens converts it to `policy.yaml` automatically. Policy-shaped launch flags are no longer accepted; use `mittens init` or `mittens policy set` instead.
 
-Policy can also disable host integrations directly. For example,
-`host.open_urls: deny`, `host.clipboard_images: false`,
-`host.notifications: false`, and `host.path_translation: false` are enforced at
-launch time.
+Policy can also disable host integrations directly. For example, `host.open_urls: deny`, `host.clipboard_images: false`, `host.notifications: false`, and `host.path_translation: false` are enforced at launch time.
 
 ## Providers
 
@@ -154,63 +145,41 @@ This works transparently — the AI CLI sees container-valid paths.
 
 ### Network Firewall
 
-Enabled by default. Use `mittens policy set network.firewall disabled` to
-disable it. Uses a built-in Go forward proxy + iptables to restrict outbound
-HTTP/HTTPS to whitelisted domains only.
+Enabled by default. Use `mittens policy set network.firewall disabled` to disable it. Uses a built-in Go forward proxy + iptables to restrict outbound HTTP/HTTPS to whitelisted domains only.
 
 Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm/PyPI/crates.io/Go proxy, Docker registries, Helm, and Terraform.
 
-Extensions declare additional domains, such as AWS endpoints when the AWS
-capability is enabled in policy. MCP server domains are auto-resolved from
-config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22)
-bypasses the proxy entirely so git-over-SSH works; because that is an
-unrestricted outbound channel, you can close it with `mittens policy set
-network.ssh_egress false` (see [Security Model](#security-model)).
+Extensions declare additional domains, such as AWS endpoints when the AWS capability is enabled in policy. MCP server domains are auto-resolved from config and the built-in `mcp-domains.conf` mapping file. SSH traffic (port 22) bypasses the proxy entirely so git-over-SSH works; because that is an unrestricted outbound channel, you can close it with `mittens policy set network.ssh_egress false` (see [Security Model](#security-model)).
 
-Project-specific domains can be added with `mittens policy set
-network.extra_domains`. Use `*.` or a leading dot to allow a domain and all
-nested subdomains, for example:
+Project-specific domains can be added with `mittens policy set network.extra_domains`. Use `*.` or a leading dot to allow a domain and all nested subdomains, for example:
 
 ```bash
 mittens policy set network.extra_domains '*.apps.example.test'
 ```
 
-Use `mittens policy set network.firewall dev` for a developer-friendly
-whitelist that adds cloud APIs and apt repos.
+Use `mittens policy set network.firewall dev` for a developer-friendly whitelist that adds cloud APIs and apt repos.
 
 ### Launch Boundary Summary
 
-Before starting the container, Mittens prints a compact summary of the boundary
-the agent will run inside: provider, workspace mount, extra directories,
-credential sources, network mode, enabled extensions, host integrations,
-execution mode, and history mode. Sensitive values are not printed.
+Before starting the container, Mittens prints a compact summary of the boundary the agent will run inside: provider, workspace mount, extra directories, credential sources, network mode, enabled extensions, host integrations, execution mode, and history mode. Sensitive values are not printed.
 
 Use `--verbose` to also print the sanitized `docker run` command.
 
-Use `mittens policy show` to inspect the same boundary without launching a
-container. Add `--json` for machine-readable policy output.
+Use `mittens policy show` to inspect the same boundary without launching a container. Add `--json` for machine-readable policy output.
 
 ### Docker-in-Docker
 
-`mittens policy set execution.docker dind` runs the container in `--privileged`
-mode with a dedicated Docker volume. A separate `dockerd` starts inside the
-container, allowing the AI to build and run containers as part of its work. The
-DinD volume is named `<container>-docker` and cleaned up on exit.
+`mittens policy set execution.docker dind` runs the container in `--privileged` mode with a dedicated Docker volume. A separate `dockerd` starts inside the container, allowing the AI to build and run containers as part of its work. The DinD volume is named `<container>-docker` and cleaned up on exit.
 
 ### Worktree Isolation
 
-`mittens policy set execution.worktree true` creates a detached-HEAD git
-worktree for each invocation, so the AI works on a copy instead of the primary
-working tree. On exit, the worktree is removed if clean (no changes, no new
-commits) or kept if dirty. Extra directories configured as policy mounts also
-get their own worktrees when possible.
+`mittens policy set execution.worktree true` creates a detached-HEAD git worktree for each invocation, so the AI works on a copy instead of the primary working tree. On exit, the worktree is removed if clean (no changes, no new commits) or kept if dirty. Extra directories configured as policy mounts also get their own worktrees when possible.
 
 Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only by policy will fail worktree creation entirely.
 
 ### Model Profiles
 
-`mittens policy set provider.profile NAME` selects a saved model + effort
-preset. Profiles are per-provider and per-project.
+`mittens policy set provider.profile NAME` selects a saved model + effort preset. Profiles are per-provider and per-project.
 
 ```bash
 mittens policy set provider.profile planner
@@ -299,10 +268,7 @@ To remove Mittens entirely: uninstall the binary (delete `/usr/local/bin/mittens
 
 ## Extensions
 
-Built-in capabilities include SSH, GitHub, AWS, Azure, GCP, Kubernetes, Helm,
-Docker, .NET, Go, Python, Rust, MCP, and the default firewall. Configure them
-with `mittens init`; legacy extension flags in old project config are converted
-to structured policy automatically.
+Built-in capabilities include SSH, GitHub, AWS, Azure, GCP, Kubernetes, Helm, Docker, .NET, Go, Python, Rust, MCP, and the default firewall. Configure them with `mittens init`; legacy extension flags in old project config are converted to structured policy automatically.
 
 External plugins: drop an executable at `~/.mittens/extensions/<name>/plugin` — no recompilation needed.
 
