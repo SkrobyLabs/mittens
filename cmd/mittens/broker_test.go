@@ -1105,6 +1105,182 @@ func TestBroker_OAuthCallbackIntercept(t *testing.T) {
 	}
 }
 
+func TestBroker_OAuthForwardProxy(t *testing.T) {
+	// Find a free port for the simulated callback.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // free the port for the broker's interceptor
+
+	b := NewHostBroker("", "", nil)
+	b.OnOpen = func(string) {}
+
+	var mu sync.Mutex
+	var forwarded []string
+	b.OnLoginForward = func(port int, requestURI string) (*LoginForwardResponse, error) {
+		mu.Lock()
+		forwarded = append(forwarded, requestURI)
+		mu.Unlock()
+		if strings.HasPrefix(requestURI, "/auth/callback") {
+			// Mimic Codex: redirect the browser to the local success page.
+			return &LoginForwardResponse{
+				Status:   http.StatusFound,
+				Location: fmt.Sprintf("http://localhost:%d/success?login=ok", port),
+			}, nil
+		}
+		return &LoginForwardResponse{
+			Status:      http.StatusOK,
+			ContentType: "text/html; charset=utf-8",
+			Body:        []byte("<html>Provider Success</html>"),
+		}, nil
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	oauthURL := fmt.Sprintf(
+		"https://auth.openai.com/oauth/authorize?client_id=test&redirect_uri=%s&state=teststate",
+		url.QueryEscape(fmt.Sprintf("http://localhost:%d/auth/callback", callbackPort)),
+	)
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(oauthURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /open: status = %d", resp.StatusCode)
+	}
+
+	// Browser redirect hits the callback; the client follows the relayed 302
+	// to /success on the same intercepted port.
+	resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/auth/callback?code=TESTCODE&state=teststate", callbackPort))
+	if err != nil {
+		t.Fatalf("browser callback: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("browser callback final status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Provider Success") {
+		t.Errorf("expected the provider's own success page, got %q", body)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), forwarded...)
+	mu.Unlock()
+	want := []string{
+		"/auth/callback?code=TESTCODE&state=teststate",
+		"/success?login=ok",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("forwarded requests = %v, want %v", got, want)
+	}
+
+	// Nothing should be captured for shim replay when forwarding succeeds.
+	resp, err = client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("GET /login-callback after forward: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestBroker_OAuthForwardFallsBackToCapture(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	b := NewHostBroker("", "", nil)
+	b.OnOpen = func(string) {}
+	b.OnLoginForward = func(int, string) (*LoginForwardResponse, error) {
+		return nil, fmt.Errorf("docker exec failed")
+	}
+
+	port, err := b.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = b.Serve() }()
+	t.Cleanup(func() { _ = b.Close() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	waitForTCPBroker(t, client, base)
+
+	oauthURL := fmt.Sprintf(
+		"https://claude.ai/oauth/authorize?client_id=test&redirect_uri=%s&state=teststate",
+		url.QueryEscape(fmt.Sprintf("http://localhost:%d/callback", callbackPort)),
+	)
+	req, _ := http.NewRequest(http.MethodPost, base+"/open", strings.NewReader(oauthURL))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/callback?code=TESTCODE&state=teststate", callbackPort))
+	if err != nil {
+		t.Fatalf("browser callback: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(body), "Login successful") {
+		t.Errorf("expected static success page fallback, got %q", body)
+	}
+
+	// The callback should be captured for shim replay.
+	resp, err = client.Get(base + "/login-callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	want := fmt.Sprintf("http://localhost:%d/callback?code=TESTCODE&state=teststate", callbackPort)
+	if string(body) != want {
+		t.Errorf("login-callback = %q, want %q", body, want)
+	}
+}
+
+func TestRedirectsToPort(t *testing.T) {
+	tests := []struct {
+		name string
+		resp LoginForwardResponse
+		port int
+		want bool
+	}{
+		{"local redirect same port", LoginForwardResponse{Status: 302, Location: "http://localhost:1455/success?a=b"}, 1455, true},
+		{"loopback IP same port", LoginForwardResponse{Status: 307, Location: "http://127.0.0.1:1455/x"}, 1455, true},
+		{"different port", LoginForwardResponse{Status: 302, Location: "http://localhost:9999/success"}, 1455, false},
+		{"external redirect", LoginForwardResponse{Status: 302, Location: "https://chatgpt.com/success"}, 1455, false},
+		{"non-redirect", LoginForwardResponse{Status: 200, Location: ""}, 1455, false},
+		{"redirect without location", LoginForwardResponse{Status: 302}, 1455, false},
+	}
+	for _, tt := range tests {
+		if got := redirectsToPort(&tt.resp, tt.port); got != tt.want {
+			t.Errorf("%s: redirectsToPort = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestBroker_LoginCallbackEmpty(t *testing.T) {
 	b := NewHostBroker("", "", nil)
 	port, err := b.ListenTCP()

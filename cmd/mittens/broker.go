@@ -93,6 +93,12 @@ type HostBroker struct {
 	// OnOpen is called when a container requests a URL to be opened on the host.
 	OnOpen func(url string)
 
+	// OnLoginForward proxies an OAuth browser request straight into the
+	// container's login callback server and returns its response. When set, the
+	// intercept server relays the provider's real responses (including its own
+	// success page) instead of capturing the callback for shim replay. May be nil.
+	OnLoginForward func(port int, requestURI string) (*LoginForwardResponse, error)
+
 	// OnNotify is called when a container sends a notification to the host.
 	OnNotify func(container, event, message string)
 
@@ -114,6 +120,16 @@ type HostBroker struct {
 
 	// LogFile is an optional file for persistent debug logging.
 	LogFile *os.File
+}
+
+// LoginForwardResponse carries an in-container login server response proxied
+// back to the user's browser. Only the headers the browser needs to continue
+// the flow are relayed.
+type LoginForwardResponse struct {
+	Status      int
+	Location    string
+	ContentType string
+	Body        []byte
 }
 
 // HostBridgeConfig controls optional host integrations exposed to containers.

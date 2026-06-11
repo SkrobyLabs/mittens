@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
@@ -146,6 +148,54 @@ func ExtractCredentials(containerName, containerCredPath, destPath string) error
 	)
 	_ = cmd.Run()
 	return nil
+}
+
+// ForwardLoginRequest proxies an OAuth browser request into the container's
+// login callback server (which is bound to the container's loopback, so it is
+// only reachable from inside the container's network namespace) by running
+// curl via docker exec, and returns the parsed response. --noproxy keeps the
+// request from detouring through the container's FQDN-filtering proxy.
+func ForwardLoginRequest(containerName string, port int, requestURI string) (*LoginForwardResponse, error) {
+	target := fmt.Sprintf("http://127.0.0.1:%d%s", port, requestURI)
+	out, err := exec.Command("docker", "exec", containerName,
+		"curl", "-sS", "-i", "--noproxy", "*", "--max-time", "30", target).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker exec curl: %w", err)
+	}
+	return parseLoginForwardResponse(out)
+}
+
+// parseLoginForwardResponse extracts the status code, redirect target,
+// content type, and body from raw `curl -i` output.
+func parseLoginForwardResponse(out []byte) (*LoginForwardResponse, error) {
+	head, body, found := bytes.Cut(out, []byte("\r\n\r\n"))
+	if !found {
+		return nil, fmt.Errorf("malformed HTTP response from login server")
+	}
+	lines := strings.Split(string(head), "\r\n")
+	fields := strings.Fields(lines[0])
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "HTTP/") {
+		return nil, fmt.Errorf("malformed status line %q", lines[0])
+	}
+	status, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf("malformed status code %q", fields[1])
+	}
+	resp := &LoginForwardResponse{Status: status, Body: body}
+	for _, line := range lines[1:] {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.ToLower(name) {
+		case "location":
+			resp.Location = value
+		case "content-type":
+			resp.ContentType = value
+		}
+	}
+	return resp, nil
 }
 
 // InspectContainerRunning checks if a container exists and whether it is running.

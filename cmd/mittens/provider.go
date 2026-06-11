@@ -268,6 +268,15 @@ func CodexProvider() *Provider {
 		EffortFlag: "",
 		// Codex expects reasoning effort via -c key-value configuration.
 		EffortTemplate: "-c model_reasoning_effort=%s",
+
+		ContainerEnv: map[string]string{
+			// codex login opens the auth URL via the Rust webbrowser crate, which
+			// tries $BROWSER first and otherwise needs xdg-settings/a desktop
+			// environment/x-www-browser — none of which exist in the container.
+			// Point it at the broker shim so the URL is forwarded to the host and
+			// the OAuth callback intercept gets armed.
+			"BROWSER": "/usr/local/bin/xdg-open",
+		},
 	}
 }
 

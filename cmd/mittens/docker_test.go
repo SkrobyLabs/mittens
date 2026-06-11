@@ -429,3 +429,50 @@ func TestBuildImageArgs(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// parseLoginForwardResponse
+
+func TestParseLoginForwardResponse(t *testing.T) {
+	t.Run("redirect with location", func(t *testing.T) {
+		raw := []byte("HTTP/1.1 302 Found\r\nLocation: http://localhost:1455/success?a=b\r\nContent-Length: 0\r\n\r\n")
+		resp, err := parseLoginForwardResponse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != 302 {
+			t.Errorf("Status = %d, want 302", resp.Status)
+		}
+		if resp.Location != "http://localhost:1455/success?a=b" {
+			t.Errorf("Location = %q", resp.Location)
+		}
+		if len(resp.Body) != 0 {
+			t.Errorf("Body = %q, want empty", resp.Body)
+		}
+	})
+
+	t.Run("html body with content type", func(t *testing.T) {
+		raw := []byte("HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n<html>hi</html>")
+		resp, err := parseLoginForwardResponse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != 200 {
+			t.Errorf("Status = %d, want 200", resp.Status)
+		}
+		if resp.ContentType != "text/html; charset=utf-8" {
+			t.Errorf("ContentType = %q", resp.ContentType)
+		}
+		if string(resp.Body) != "<html>hi</html>" {
+			t.Errorf("Body = %q", resp.Body)
+		}
+	})
+
+	t.Run("malformed input", func(t *testing.T) {
+		for _, raw := range []string{"", "not http at all", "HTTP/1.1 abc\r\n\r\n"} {
+			if _, err := parseLoginForwardResponse([]byte(raw)); err == nil {
+				t.Errorf("parseLoginForwardResponse(%q): expected error", raw)
+			}
+		}
+	})
+}

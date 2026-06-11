@@ -380,6 +380,10 @@ func (a *App) Run() error {
 		a.broker.OnOpen = func(url string) {
 			openOnHost(url, blogFnOpen)
 		}
+		containerName := a.ContainerName
+		a.broker.OnLoginForward = func(port int, requestURI string) (*LoginForwardResponse, error) {
+			return ForwardLoginRequest(containerName, port, requestURI)
+		}
 		if a.FirewallLearn {
 			a.broker.OnEgressDeny = func(host string) {
 				logInfo("Firewall learn: observed egress to %s (outside allowlist)", host)
