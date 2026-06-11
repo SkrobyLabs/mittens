@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -561,6 +562,42 @@ func TestDropItoa(t *testing.T) {
 // ---------------------------------------------------------------------------
 // DropProxy with bytes.Reader (simulates paste with EOF at end)
 // ---------------------------------------------------------------------------
+
+func TestDropProxy_BareEscFlushedAfterTimeout(t *testing.T) {
+	// A lone ESC keypress with no follow-up byte must be forwarded after the
+	// flush timeout, not held until the next keystroke.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	proxy := NewDropProxy(pr, &PathMapper{})
+	proxy.escDelay = 10 * time.Millisecond
+
+	go pw.Write([]byte{0x1b})
+
+	buf := make([]byte, 8)
+	n, err := proxy.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || buf[0] != 0x1b {
+		t.Errorf("read = %d %q, want lone ESC", n, buf[:n])
+	}
+
+	// The proxy must be back in normal mode: a paste after the flush still
+	// gets translated.
+	paste := string(pasteStart) + "text" + string(pasteEnd)
+	go pw.Write([]byte(paste))
+	out := make([]byte, 0, len(paste))
+	for len(out) < len(paste) {
+		n, err := proxy.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, buf[:n]...)
+	}
+	if string(out) != paste {
+		t.Errorf("output = %q, want %q", out, paste)
+	}
+}
 
 func TestDropProxy_IncompleteEscapeAtEOF(t *testing.T) {
 	// An ESC byte at the very end — should be flushed.

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/fileutil"
 	"github.com/creack/pty"
@@ -148,6 +149,13 @@ func dropItoa(n int) string {
 	return string(buf[i:])
 }
 
+// escFlushTimeout bounds how long a partial escape sequence is held while
+// waiting for follow-up bytes. A real escape sequence (paste start, arrow key)
+// arrives as one burst within microseconds; a bare ESC keypress never gets a
+// follow-up, so after this delay it is forwarded as-is instead of being held
+// hostage until the next keystroke.
+const escFlushTimeout = 50 * time.Millisecond
+
 // DropProxy wraps an io.Reader (typically os.Stdin) and intercepts
 // bracketed paste sequences to translate host paths to container paths.
 type DropProxy struct {
@@ -158,6 +166,14 @@ type DropProxy struct {
 	escBuf   []byte       // accumulates potential escape sequence bytes
 	pasteBuf bytes.Buffer // accumulates pasted content
 	outBuf   bytes.Buffer // buffered translated output ready to be read
+
+	// Reader goroutine plumbing, started lazily on first Read, so a partial
+	// escape sequence can be flushed on timeout rather than blocking in the
+	// inner read.
+	dataCh     chan []byte
+	errCh      chan error
+	pendingErr error
+	escDelay   time.Duration // 0 means escFlushTimeout (overridable in tests)
 }
 
 type dropState int
@@ -178,37 +194,71 @@ func NewDropProxy(inner io.Reader, mapper *PathMapper) *DropProxy {
 
 // Read implements io.Reader. Normal keystrokes pass through directly.
 // Bracketed paste content is buffered, paths are translated, then forwarded.
+// A reader goroutine feeds chunks through a channel so that a partial escape
+// sequence (e.g. a bare ESC keypress) can be flushed after escFlushTimeout
+// instead of being held until the next keystroke arrives.
 func (d *DropProxy) Read(p []byte) (int, error) {
 	// Drain any buffered output first.
 	if d.outBuf.Len() > 0 {
 		return d.outBuf.Read(p)
 	}
-
-	// Read from inner.
-	buf := make([]byte, len(p))
-	n, err := d.inner.Read(buf)
-	if n == 0 && err != nil {
-		// EOF/error with no data — flush any incomplete state.
-		if len(d.escBuf) > 0 {
-			d.outBuf.Write(d.escBuf)
-			d.escBuf = d.escBuf[:0]
-		}
-		if d.pasteBuf.Len() > 0 {
-			d.outBuf.Write(d.pasteBuf.Bytes())
-			d.pasteBuf.Reset()
-		}
-		d.state = stateNormal
-		if d.outBuf.Len() > 0 {
-			rn, _ := d.outBuf.Read(p)
-			return rn, err
-		}
-		return 0, err
+	if d.pendingErr != nil {
+		return 0, d.pendingErr
 	}
-	if n == 0 {
-		return 0, nil
+	if d.dataCh == nil {
+		d.dataCh = make(chan []byte)
+		d.errCh = make(chan error, 1)
+		go d.readLoop()
 	}
-	data := buf[:n]
 
+	for d.outBuf.Len() == 0 {
+		// While holding a partial escape sequence, arm a flush timeout: a real
+		// sequence's remaining bytes arrive within microseconds, a bare ESC
+		// keypress never gets a follow-up.
+		var timeout <-chan time.Time
+		if d.state == stateEscSeq && len(d.escBuf) > 0 {
+			delay := d.escDelay
+			if delay == 0 {
+				delay = escFlushTimeout
+			}
+			timeout = time.After(delay)
+		}
+
+		select {
+		case data := <-d.dataCh:
+			d.process(data)
+		case err := <-d.errCh:
+			// EOF/error — flush any incomplete state, then surface the error.
+			d.pendingErr = err
+			d.flushPartial()
+			if d.outBuf.Len() == 0 {
+				return 0, err
+			}
+		case <-timeout:
+			d.flushPartial()
+		}
+	}
+	return d.outBuf.Read(p)
+}
+
+// readLoop reads from the inner reader and forwards chunks to Read.
+// Runs until the inner reader returns an error.
+func (d *DropProxy) readLoop() {
+	for {
+		buf := make([]byte, 4096)
+		n, err := d.inner.Read(buf)
+		if n > 0 {
+			d.dataCh <- buf[:n]
+		}
+		if err != nil {
+			d.errCh <- err
+			return
+		}
+	}
+}
+
+// process runs the bracketed-paste state machine over a chunk of input.
+func (d *DropProxy) process(data []byte) {
 	for i := 0; i < len(data); i++ {
 		b := data[i]
 
@@ -264,29 +314,20 @@ func (d *DropProxy) Read(p []byte) (int, error) {
 			}
 		}
 	}
+}
 
-	// On EOF/error, flush any incomplete escape or paste state.
-	if err != nil {
-		if len(d.escBuf) > 0 {
-			d.outBuf.Write(d.escBuf)
-			d.escBuf = d.escBuf[:0]
-		}
-		if d.pasteBuf.Len() > 0 {
-			d.outBuf.Write(d.pasteBuf.Bytes())
-			d.pasteBuf.Reset()
-		}
-		d.state = stateNormal
+// flushPartial forwards any incomplete escape or paste state verbatim and
+// returns to normal mode.
+func (d *DropProxy) flushPartial() {
+	if len(d.escBuf) > 0 {
+		d.outBuf.Write(d.escBuf)
+		d.escBuf = d.escBuf[:0]
 	}
-
-	if d.outBuf.Len() > 0 {
-		n, _ := d.outBuf.Read(p)
-		return n, err
+	if d.pasteBuf.Len() > 0 {
+		d.outBuf.Write(d.pasteBuf.Bytes())
+		d.pasteBuf.Reset()
 	}
-	if err != nil {
-		return 0, err
-	}
-	// All input consumed into state buffers; need more data.
-	return 0, nil
+	d.state = stateNormal
 }
 
 // translatePaths finds absolute paths in the pasted content and translates them.

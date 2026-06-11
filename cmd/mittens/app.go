@@ -1351,6 +1351,14 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		args = append(args, "-e", "OLLAMA_HOST="+os.Getenv("OLLAMA_HOST"))
 	}
 	args = append(args, "-e", "TERM="+envOrDefault("TERM", "xterm-256color"))
+	// Forward terminal identity so the agent CLI can detect the real terminal
+	// through the PTY chain and enable terminal-specific features (e.g.
+	// shift+enter newline handling).
+	for _, k := range []string{"TERM_PROGRAM", "TERM_PROGRAM_VERSION"} {
+		if v := os.Getenv(k); v != "" {
+			args = append(args, "-e", k+"="+v)
+		}
+	}
 	for k, v := range providerPlan.ContainerEnv {
 		args = append(args, "-e", k+"="+v)
 	}
