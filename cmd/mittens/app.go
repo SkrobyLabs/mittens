@@ -216,6 +216,9 @@ func (a *App) Run() error {
 
 	home := os.Getenv("HOME")
 	providerPlan := a.Provider.RuntimePlan()
+	if providerPlan.ManagedProxyCmd != "" && !hasManagedOpenAICredentials() {
+		return fmt.Errorf("%s", managedOpenAICredentialsError(a.Provider.DisplayName))
+	}
 	ensureDir(a.Provider.HostConfigDir(home))
 
 	// Detect workspace.
@@ -1309,11 +1312,16 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 			NoSSHEgress:   a.NoSSHEgress,
 			FirewallLearn: a.FirewallLearn,
 		},
-		ContainerName:   a.ContainerName,
-		InstanceName:    a.InstanceName,
-		HostWorkspace:   a.EffectiveWorkspace,
-		ImagePasteKey:   a.ImagePasteKey,
-		CredStagingDirs: a.credStagingDirs,
+		ContainerName:     a.ContainerName,
+		InstanceName:      a.InstanceName,
+		HostWorkspace:     a.EffectiveWorkspace,
+		FirewallHostPorts: providerPlan.FirewallHostPorts,
+		ImagePasteKey:     a.ImagePasteKey,
+		CredStagingDirs:   a.credStagingDirs,
+		ManagedProxy: initcfg.ProxyConfig{
+			Command: providerPlan.ManagedProxyCmd,
+			Port:    providerPlan.ManagedProxyPort,
+		},
 	}
 }
 

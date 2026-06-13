@@ -27,8 +27,13 @@ type ContainerConfig struct {
 	HostWorkspace string   `json:"hostWorkspace,omitempty"`
 	ExtraDirs     []string `json:"extraDirs,omitempty"`
 	FirewallExtra []string `json:"firewallExtra,omitempty"`
-	ImagePasteKey string   `json:"imagePasteKey,omitempty"`
-	MCP           string   `json:"mcp,omitempty"`
+	// FirewallHostPorts are direct host:port endpoints allowed through
+	// iptables, used for local host services intentionally bypassing the
+	// domain proxy.
+	FirewallHostPorts []string    `json:"firewallHostPorts,omitempty"`
+	ImagePasteKey     string      `json:"imagePasteKey,omitempty"`
+	MCP               string      `json:"mcp,omitempty"`
+	ManagedProxy      ProxyConfig `json:"managedProxy,omitempty"`
 
 	// Credential staging: each entry is "staging_path:target_dir" (e.g.
 	// "/mnt/mittens-creds-azure:.azure"). mittens-init copies the read-only
@@ -51,6 +56,13 @@ type ExtensionPrompt struct {
 	Name  string `json:"name"`
 	Short string `json:"short"`
 	Guide string `json:"guide,omitempty"`
+}
+
+// ProxyConfig describes an optional in-container sidecar process that should
+// be started before the AI CLI.
+type ProxyConfig struct {
+	Command string `json:"command,omitempty"`
+	Port    int    `json:"port,omitempty"`
 }
 
 // AIConfig describes the AI CLI binary, its config directory layout, and

@@ -35,6 +35,7 @@ type ProjectPolicy struct {
 
 type ProviderPolicy struct {
 	Name     string `yaml:"name,omitempty"`
+	Backend  string `yaml:"backend,omitempty"`
 	Profile  string `yaml:"profile,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Model    string `yaml:"model,omitempty"`
@@ -411,6 +412,11 @@ func (p *ProjectPolicy) Validate() error {
 	}
 	if p.Execution.Docker != "" && p.Execution.Docker != "dind" && p.Execution.Docker != "host" {
 		return fmt.Errorf("invalid docker mode %q", p.Execution.Docker)
+	}
+	switch p.Provider.Backend {
+	case "", "claude", "openai":
+	default:
+		return fmt.Errorf("invalid provider backend %q", p.Provider.Backend)
 	}
 	if p.Host.OpenURLs != "" && p.Host.OpenURLs != "allow" && p.Host.OpenURLs != "ask" && p.Host.OpenURLs != "deny" {
 		return fmt.Errorf("invalid open_urls mode %q", p.Host.OpenURLs)

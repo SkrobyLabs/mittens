@@ -190,6 +190,8 @@ func setPolicyField(policy *ProjectPolicy, field, value string) error {
 	switch field {
 	case "provider.name":
 		policy.Provider.Name = value
+	case "provider.backend":
+		policy.Provider.Backend = canonicalProviderBackend(value)
 	case "provider.profile":
 		policy.Provider.Profile = value
 	case "provider.endpoint":
@@ -296,6 +298,8 @@ Examples:
   mittens policy show
   mittens policy show --json
   mittens policy set provider.name codex
+  mittens policy set provider.backend openai
+  mittens policy set provider.endpoint http://host.docker.internal:9223
   mittens policy set network.extra_domains '*.apps.example.test'
   mittens policy allow api.example.com '*.cdn.example.net'
   mittens policy set host.open_urls deny
@@ -323,6 +327,7 @@ func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string) LaunchSumm
 	provider, err := providerByName(policy.Provider.Name)
 	providerName := policy.Provider.Name
 	if err == nil {
+		provider.ApplyPolicy(policy.Provider)
 		providerName = provider.DisplayName
 	}
 	workspaceMode := "rw"
@@ -373,7 +378,7 @@ func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string) LaunchSumm
 
 func credentialsFromPolicy(policy *ProjectPolicy) []string {
 	var out []string
-	if policy.Credentials.ProviderOAuth {
+	if policy.Credentials.ProviderOAuth && !(policy.Provider.Name == "claude" && canonicalProviderBackend(policy.Provider.Backend) == "openai") {
 		out = append(out, "provider OAuth")
 	}
 	for name, selector := range policy.Credentials.Cloud {

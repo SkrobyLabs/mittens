@@ -228,6 +228,29 @@ func setupIPTables(cfg *config) error {
 			c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", cfg.BrokerPort, "-j", "ACCEPT")
 			_ = c.Run()
 		}
+
+		for _, hostPort := range cfg.FirewallHostPorts {
+			host, port, err := net.SplitHostPort(hostPort)
+			if err != nil || host == "" || port == "" {
+				logWarn("Skipping invalid firewall host port %q", hostPort)
+				continue
+			}
+			ips, err := net.LookupIP(host)
+			if err != nil || len(ips) == 0 {
+				logWarn("Skipping unresolved firewall host port %q", hostPort)
+				continue
+			}
+			for _, ip := range ips {
+				if cmd == "iptables" && ip.To4() == nil {
+					continue
+				}
+				if cmd == "ip6tables" && ip.To4() != nil {
+					continue
+				}
+				c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "-d", ip.String(), "--dport", port, "-j", "ACCEPT")
+				_ = c.Run()
+			}
+		}
 	}
 	return nil
 }

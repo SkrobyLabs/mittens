@@ -87,6 +87,28 @@ Mittens supports multiple AI coding agents configured in project policy:
 
 Each provider brings its own credential layout, firewall domains, agent CLI args, and config format. Mittens handles all the differences — same workflow regardless of provider.
 
+Claude can also run against an Anthropic-compatible proxy that routes to OpenAI. In `mittens init`, choose Claude, then choose the OpenAI proxy backend. By default Mittens manages the proxy inside the container:
+
+```yaml
+provider:
+  name: claude
+  backend: openai
+  model: opus # optional proxy alias
+```
+
+Managed mode starts UniClaudeProxy on `127.0.0.1:9223` in the container. It uses `OPENAI_API_KEY` when set, otherwise it can read `OPENAI_API_KEY` or a ChatGPT `tokens.access_token` from `~/.codex/auth.json`. Missing credentials produce a `codex login` prompt; invalid or expired credentials are left for the proxy's upstream request to reject. By default, Mittens maps Claude-side aliases by tier: `fable` to `gpt-5.5` with `xhigh` reasoning, `opus` to `gpt-5.5` with `medium`, `sonnet` to `gpt-5.5` with `low`, and `haiku` to `gpt-5.4-mini` with `low`. The `fable`, `opus`, and `sonnet` defaults are advertised to Claude Code with its `[1m]` suffix because those routes use 1M-context OpenAI models; `haiku` stays unsuffixed because its mini route is 400K context. Set `MITTENS_CLAUDE_OPENAI_UPSTREAM_MODEL` or `MITTENS_CLAUDE_OPENAI_REASONING_EFFORT` to override all managed alias routes.
+
+To use your own proxy instead, set `provider.endpoint`:
+
+```yaml
+provider:
+  name: claude
+  backend: openai
+  endpoint: http://host.docker.internal:9223
+```
+
+This still runs Claude Code inside the container; external proxies must implement Anthropic Messages API translation and handle OpenAI upstream credentials.
+
 ## How It Works
 
 ### Container Isolation

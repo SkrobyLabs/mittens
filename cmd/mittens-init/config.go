@@ -58,15 +58,18 @@ type config struct {
 	BrokerToken string
 
 	// Misc
-	ContainerName    string
-	InstanceName     string
-	HostWorkspace    string
-	ExtraDirs        []string
-	FirewallExtra    []string
-	ImagePasteKey    string
-	MCP              string
-	CredStagingDirs  []string // "staging_path:target_dir" entries
-	ExtensionPrompts []initcfg.ExtensionPrompt
+	ContainerName     string
+	InstanceName      string
+	HostWorkspace     string
+	ExtraDirs         []string
+	FirewallExtra     []string
+	FirewallHostPorts []string
+	ImagePasteKey     string
+	MCP               string
+	ManagedProxyCmd   string
+	ManagedProxyPort  int
+	CredStagingDirs   []string // "staging_path:target_dir" entries
+	ExtensionPrompts  []initcfg.ExtensionPrompt
 
 	// X11 clipboard
 	X11ClipboardImage      string
@@ -133,15 +136,18 @@ func loadConfig() *config {
 		BrokerSock:  jcfg.Broker.Sock,
 		BrokerToken: jcfg.Broker.Token,
 
-		ContainerName:    jcfg.ContainerName,
-		InstanceName:     jcfg.InstanceName,
-		HostWorkspace:    jcfg.HostWorkspace,
-		ExtraDirs:        jcfg.ExtraDirs,
-		FirewallExtra:    jcfg.FirewallExtra,
-		ImagePasteKey:    jcfg.ImagePasteKey,
-		MCP:              jcfg.MCP,
-		CredStagingDirs:  jcfg.CredStagingDirs,
-		ExtensionPrompts: jcfg.ExtensionPrompts,
+		ContainerName:     jcfg.ContainerName,
+		InstanceName:      jcfg.InstanceName,
+		HostWorkspace:     jcfg.HostWorkspace,
+		ExtraDirs:         jcfg.ExtraDirs,
+		FirewallExtra:     jcfg.FirewallExtra,
+		FirewallHostPorts: jcfg.FirewallHostPorts,
+		ImagePasteKey:     jcfg.ImagePasteKey,
+		MCP:               jcfg.MCP,
+		ManagedProxyCmd:   jcfg.ManagedProxy.Command,
+		ManagedProxyPort:  jcfg.ManagedProxy.Port,
+		CredStagingDirs:   jcfg.CredStagingDirs,
+		ExtensionPrompts:  jcfg.ExtensionPrompts,
 
 		X11ClipboardImage:      jcfg.X11ClipboardImage,
 		X11ClipboardMaxAgeSecs: jcfg.X11ClipboardMaxAgeSecs,

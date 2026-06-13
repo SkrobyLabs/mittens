@@ -95,6 +95,25 @@ func TestProviderWizardStateFromPolicy(t *testing.T) {
 	}
 }
 
+func TestProviderWizardStateFromPolicy_ClaudeOpenAIBackend(t *testing.T) {
+	state := providerWizardStateFromPolicy(ProviderPolicy{
+		Name:     "claude",
+		Backend:  "openai",
+		Endpoint: "http://host.docker.internal:9223",
+		Model:    "claude-sonnet-4-6",
+	})
+
+	if !reflect.DeepEqual(state.Selected, []string{"claude"}) {
+		t.Fatalf("selected = %#v", state.Selected)
+	}
+	if state.Default != "claude" {
+		t.Fatalf("default = %q, want claude", state.Default)
+	}
+	if state.Config.Backend != "openai" || state.Config.Endpoint != "http://host.docker.internal:9223" || state.Config.Model != "claude-sonnet-4-6" {
+		t.Fatalf("config = %#v", state.Config)
+	}
+}
+
 func TestProviderWizardStateNormalizesDefaultProvider(t *testing.T) {
 	state := normalizeProviderWizardState(ProviderWizardState{
 		Selected: []string{"codex", "gemini"},
@@ -442,6 +461,25 @@ func TestAssembleWizardPolicy(t *testing.T) {
 	}
 	if boolValue(policy.Execution.Yolo, true) || !policy.Execution.Worktree || !policy.Execution.NetworkHost {
 		t.Fatalf("execution = %#v", policy.Execution)
+	}
+}
+
+func TestAssembleWizardPolicy_ClaudeOpenAIBackend(t *testing.T) {
+	input := WizardAssemblyInput{
+		ProviderLines: []string{"--provider claude"},
+		ProviderConfig: ProviderWizardConfig{
+			Backend:  "openai",
+			Endpoint: "http://host.docker.internal:9223",
+			Model:    "claude-sonnet-4-6",
+		},
+	}
+
+	policy, _, err := assembleWizardPolicy(input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Provider.Name != "claude" || policy.Provider.Backend != "openai" || policy.Provider.Endpoint != "http://host.docker.internal:9223" || policy.Provider.Model != "claude-sonnet-4-6" {
+		t.Fatalf("provider = %#v", policy.Provider)
 	}
 }
 

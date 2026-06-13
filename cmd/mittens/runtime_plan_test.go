@@ -24,6 +24,9 @@ func TestProviderRuntimePlan_DefaultProviderHasBuildArgs(t *testing.T) {
 	if !reflect.DeepEqual(plan.FirewallDomains, p.FirewallDomains) {
 		t.Fatalf("FirewallDomains = %v, want %v", plan.FirewallDomains, p.FirewallDomains)
 	}
+	if !reflect.DeepEqual(plan.FirewallHostPorts, p.FirewallHostPorts) {
+		t.Fatalf("FirewallHostPorts = %v, want %v", plan.FirewallHostPorts, p.FirewallHostPorts)
+	}
 	if plan.AI.Binary != "claude" {
 		t.Fatalf("AI.Binary = %q, want claude", plan.AI.Binary)
 	}

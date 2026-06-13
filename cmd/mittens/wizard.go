@@ -616,6 +616,7 @@ func mountsFromDirSelections(selections []dirMountSelection) []PolicyMount {
 // ---------------------------------------------------------------------------
 
 type ProviderWizardConfig struct {
+	Backend  string
 	Endpoint string
 	Model    string
 }
@@ -713,9 +714,20 @@ func wizardProvider(workspace string, editMode bool, existing ProviderWizardStat
 	}
 
 	config := ProviderWizardConfig{}
-	if defaultChoice == "ollama" {
+	existingConfig := ProviderWizardConfig{}
+	if state.Default == defaultChoice {
+		existingConfig = state.Config
+	}
+	switch defaultChoice {
+	case "claude":
 		var cfgErr error
-		config, cfgErr = wizardOllamaProviderConfig(state.Config)
+		config, cfgErr = wizardClaudeProviderConfig(existingConfig)
+		if cfgErr != nil {
+			return nil, ProviderWizardConfig{}, cfgErr
+		}
+	case "ollama":
+		var cfgErr error
+		config, cfgErr = wizardOllamaProviderConfig(existingConfig)
 		if cfgErr != nil {
 			return nil, ProviderWizardConfig{}, cfgErr
 		}
@@ -805,8 +817,90 @@ func wizardOllamaProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 	return cfg, nil
 }
 
+func wizardClaudeProviderConfig(existing ProviderWizardConfig) (ProviderWizardConfig, error) {
+	cfg := ProviderWizardConfig{
+		Backend: canonicalProviderBackend(existing.Backend),
+	}
+	if cfg.Backend == "" {
+		cfg.Backend = "claude"
+	}
+	if cfg.Backend != "openai" {
+		cfg.Backend = "claude"
+	}
+	if existing.Endpoint != "" {
+		cfg.Endpoint = existing.Endpoint
+	}
+	if existing.Model != "" {
+		cfg.Model = existing.Model
+	}
+
+	backend := cfg.Backend
+	if err := huh.NewSelect[string]().
+		Title("Claude backend").
+		Options(
+			huh.NewOption("Claude (Anthropic)", "claude"),
+			huh.NewOption("OpenAI via Anthropic-compatible proxy", "openai"),
+		).
+		Value(&backend).
+		Run(); err != nil {
+		return ProviderWizardConfig{}, err
+	}
+	cfg.Backend = backend
+	if backend != "openai" {
+		cfg.Endpoint = ""
+		cfg.Model = ""
+		return cfg, nil
+	}
+
+	proxyMode := "managed"
+	if cfg.Endpoint != "" {
+		proxyMode = "external"
+	}
+	if err := huh.NewSelect[string]().
+		Title("OpenAI proxy").
+		Options(
+			huh.NewOption("Managed inside the Mittens container", "managed"),
+			huh.NewOption("External/custom endpoint", "external"),
+		).
+		Value(&proxyMode).
+		Run(); err != nil {
+		return ProviderWizardConfig{}, err
+	}
+	model := cfg.Model
+	if proxyMode == "external" {
+		endpoint := cfg.Endpoint
+		if endpoint == "" {
+			endpoint = normalizeClaudeOpenAIProxyURL("")
+		}
+		if err := huh.NewInput().
+			Title("OpenAI proxy endpoint").
+			Description("Must expose Anthropic Messages API for Claude Code; the proxy itself talks to OpenAI.").
+			Placeholder("http://host.docker.internal:9223").
+			Value(&endpoint).
+			Run(); err != nil {
+			return ProviderWizardConfig{}, err
+		}
+		cfg.Endpoint = normalizeClaudeOpenAIProxyURL(endpoint)
+	} else {
+		cfg.Endpoint = ""
+	}
+	if err := huh.NewInput().
+		Title("Claude model alias").
+		Description("Optional Claude-facing alias. Managed proxy maps opus to gpt-5.5 medium, sonnet to gpt-5.5 low, fable to xhigh, and haiku to a fast mini route.").
+		Placeholder("opus").
+		Value(&model).
+		Run(); err != nil {
+		return ProviderWizardConfig{}, err
+	}
+	cfg.Model = strings.TrimSpace(model)
+	return cfg, nil
+}
+
 func providerSetupLines(providerLines []string, cfg ProviderWizardConfig) []string {
 	lines := append([]string(nil), providerLines...)
+	if cfg.Backend != "" && cfg.Backend != "claude" {
+		lines = append(lines, "provider.backend "+cfg.Backend)
+	}
 	if cfg.Endpoint != "" {
 		lines = append(lines, "provider.endpoint "+cfg.Endpoint)
 	}
@@ -830,6 +924,7 @@ func providerWizardStateFromPolicy(policy ProviderPolicy) ProviderWizardState {
 		Selected: []string{name},
 		Default:  name,
 		Config: ProviderWizardConfig{
+			Backend:  policy.Backend,
 			Endpoint: policy.Endpoint,
 			Model:    policy.Model,
 		},
@@ -1721,6 +1816,9 @@ func assembleWizardPolicy(input WizardAssemblyInput, extensions []*registry.Exte
 	if err != nil {
 		return nil, nil, err
 	}
+	if input.ProviderConfig.Backend != "claude" {
+		policy.Provider.Backend = input.ProviderConfig.Backend
+	}
 	policy.Provider.Endpoint = input.ProviderConfig.Endpoint
 	policy.Provider.Model = input.ProviderConfig.Model
 	policy.Network.ExtraDomains = normalizeNetworkDomains(input.ExtraDomains)
@@ -1777,6 +1875,7 @@ func loadWizardProviderConfig(workspace string, extensions []*registry.Extension
 		return ProviderWizardConfig{}
 	}
 	return ProviderWizardConfig{
+		Backend:  policy.Provider.Backend,
 		Endpoint: policy.Provider.Endpoint,
 		Model:    policy.Provider.Model,
 	}

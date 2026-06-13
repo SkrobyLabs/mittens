@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1613,6 +1614,91 @@ func TestAssembleDockerArgs_OllamaProvider(t *testing.T) {
 	}
 	if !argExists(a.ClaudeArgs, "--oss") || !argPairExists(a.ClaudeArgs, "--local-provider", "ollama") || !argPairExists(a.ClaudeArgs, "--model", "qwen3-coder:30b") {
 		t.Fatalf("unexpected Ollama default args: %#v", a.ClaudeArgs)
+	}
+}
+
+func TestAssembleDockerArgs_ClaudeOpenAIManagedBackend(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-test")
+
+	p := ClaudeProvider()
+	p.ApplyPolicy(ProviderPolicy{
+		Backend: "openai",
+		Model:   "claude-sonnet-4-6",
+	})
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-claude-openai",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+	a.applyProviderDefaultArgs(p.RuntimePlan())
+	args := a.assembleDockerArgs(nil, nil)
+
+	if argPairExists(args, "--add-host", "host.docker.internal:host-gateway") {
+		t.Error("managed proxy should not require host.docker.internal mapping")
+	}
+	if !argPairExists(args, "-e", "ANTHROPIC_BASE_URL=http://127.0.0.1:9223") {
+		t.Error("missing ANTHROPIC_BASE_URL proxy env var")
+	}
+	if !argPairExists(args, "-e", "OPENAI_API_KEY=sk-openai-test") {
+		t.Error("missing OPENAI_API_KEY env var")
+	}
+	if !argPairExists(args, "-e", "ANTHROPIC_API_KEY=sk-proxy-0") {
+		t.Error("missing dummy ANTHROPIC_API_KEY env var")
+	}
+	if !argPairExists(a.ClaudeArgs, "--model", "claude-sonnet-4-6") {
+		t.Fatalf("unexpected Claude default args: %#v", a.ClaudeArgs)
+	}
+	cfg := extractInitConfig(t, args)
+	if len(cfg.FirewallHostPorts) != 0 {
+		t.Fatalf("FirewallHostPorts = %#v", cfg.FirewallHostPorts)
+	}
+	if cfg.ManagedProxy.Command == "" || cfg.ManagedProxy.Port != 9223 {
+		t.Fatalf("ManagedProxy = %#v", cfg.ManagedProxy)
+	}
+}
+
+func TestAssembleDockerArgs_ClaudeOpenAIExternalBackend(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	p := ClaudeProvider()
+	p.ApplyPolicy(ProviderPolicy{
+		Backend:  "openai",
+		Endpoint: "http://host.docker.internal:9223",
+		Model:    "claude-sonnet-4-6",
+	})
+	os.MkdirAll(filepath.Join(home, p.ConfigDir), 0o755)
+
+	a := &App{
+		Provider:          p,
+		NoHistory:         true,
+		ContainerName:     "mittens-claude-openai-external",
+		WorkspaceMountSrc: "/tmp/ws",
+		Credentials:       &CredentialManager{},
+	}
+	a.applyProviderDefaultArgs(p.RuntimePlan())
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "--add-host", "host.docker.internal:host-gateway") {
+		t.Error("missing host.docker.internal host-gateway mapping")
+	}
+	if !argPairExists(args, "-e", "ANTHROPIC_BASE_URL=http://host.docker.internal:9223") {
+		t.Error("missing ANTHROPIC_BASE_URL proxy env var")
+	}
+	cfg := extractInitConfig(t, args)
+	if !reflect.DeepEqual(cfg.FirewallHostPorts, []string{"host.docker.internal:9223"}) {
+		t.Fatalf("FirewallHostPorts = %#v", cfg.FirewallHostPorts)
+	}
+	if cfg.ManagedProxy.Command != "" || cfg.ManagedProxy.Port != 0 {
+		t.Fatalf("ManagedProxy = %#v", cfg.ManagedProxy)
 	}
 }
 

@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/SkrobyLabs/mittens/internal/fileutil"
 )
@@ -84,6 +86,12 @@ func runPhase2(cfg *config) error {
 		}
 	}
 
+	if cfg.ManagedProxyCmd != "" {
+		if err := startManagedProxy(cfg); err != nil {
+			return err
+		}
+	}
+
 	// cd to host workspace path (always the real path with identity mount).
 	if cfg.HostWorkspace != "" {
 		os.Chdir(cfg.HostWorkspace)
@@ -91,6 +99,57 @@ func runPhase2(cfg *config) error {
 
 	// Exec the remaining args (typically the AI CLI binary).
 	return execArgs(cfg.AIBinary)
+}
+
+func startManagedProxy(cfg *config) error {
+	logInfo("Starting managed provider proxy...")
+	cmd := exec.Command("bash", "-lc", cfg.ManagedProxyCmd)
+	logPath := "/tmp/mittens-managed-proxy.log"
+	logFile, _ := os.Create(logPath)
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("managed proxy start: %w", err)
+	}
+	if cfg.ManagedProxyPort <= 0 {
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.ManagedProxyPort)
+	for i := 0; i < 300; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			logInfo("Managed provider proxy ready on %s", addr)
+			return nil
+		}
+		select {
+		case err := <-done:
+			return fmt.Errorf("managed proxy exited before listening on %s: %v%s", addr, err, logTail(logPath))
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	<-done
+	return fmt.Errorf("timed out waiting for managed proxy on %s%s", addr, logTail(logPath))
+}
+
+func logTail(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return fmt.Sprintf("; see %s", path)
+	}
+	const max = 4000
+	if len(data) > max {
+		data = data[len(data)-max:]
+	}
+	return fmt.Sprintf("\n--- %s ---\n%s", path, strings.TrimSpace(string(data)))
 }
 
 func sourceProfileD() {

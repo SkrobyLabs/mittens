@@ -14,11 +14,14 @@ type ProviderRuntimePlan struct {
 	ImageTagParts            []string
 	BuildArgs                map[string]string
 	FirewallDomains          []string
+	FirewallHostPorts        []string
 	AI                       initcfg.AIConfig
 	ContainerEnv             map[string]string
 	ContainerHostname        string
 	DockerArgs               []string
 	DefaultArgs              []string
+	ManagedProxyCmd          string
+	ManagedProxyPort         int
 	HistoryMountsWholeConfig bool
 	HistoryMountsProjectDirs bool
 	LiveMountFiles           []string
@@ -38,11 +41,14 @@ func (p *Provider) RuntimePlan() ProviderRuntimePlan {
 			"AI_CONFIG_DIR":  p.ConfigDir,
 		},
 		FirewallDomains:          append([]string(nil), p.FirewallDomains...),
+		FirewallHostPorts:        append([]string(nil), p.FirewallHostPorts...),
 		AI:                       p.initConfigPlan(),
 		ContainerEnv:             copyStringMap(p.ContainerEnv),
 		ContainerHostname:        p.ContainerHostname,
 		DockerArgs:               append([]string(nil), p.DockerArgs...),
 		DefaultArgs:              append([]string(nil), p.DefaultArgs...),
+		ManagedProxyCmd:          p.ManagedProxyCmd,
+		ManagedProxyPort:         p.ManagedProxyPort,
 		HistoryMountsWholeConfig: p.HistoryMountsWholeConfig,
 		HistoryMountsProjectDirs: p.HistoryMountsProjectDirs,
 		LiveMountFiles:           append([]string(nil), p.LiveMountFiles...),
@@ -50,6 +56,9 @@ func (p *Provider) RuntimePlan() ProviderRuntimePlan {
 		SkipCredentials:          p.SkipCredentials,
 		LocalModelSource:         p.LocalModelSource,
 		DefaultModel:             p.DefaultModel,
+	}
+	if len(p.ImageTagParts) > 0 {
+		plan.ImageTagParts = append(plan.ImageTagParts, p.ImageTagParts...)
 	}
 	if p.Name != "" && p.Name != "claude" {
 		plan.ImageTagParts = append(plan.ImageTagParts, p.Name)
