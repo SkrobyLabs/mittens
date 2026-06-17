@@ -54,6 +54,9 @@ func (p *Provider) RuntimePlan() ProviderRuntimePlan {
 	if p.Name != "" && p.Name != "claude" {
 		plan.ImageTagParts = append(plan.ImageTagParts, p.Name)
 	}
+	if p.EnableX11 {
+		plan.BuildArgs["INSTALL_X11"] = "true"
+	}
 	return plan
 }
 

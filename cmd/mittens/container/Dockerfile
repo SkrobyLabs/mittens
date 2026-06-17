@@ -1,5 +1,6 @@
 # Mittens - Isolated Claude Code Environment
-FROM node:22-bookworm
+# Slim base: every tool we rely on is installed explicitly below.
+FROM node:22-bookworm-slim
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -28,35 +29,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     # For some language servers and tools
     unzip \
-    # X11 clipboard bridge for Codex image paste
-    xclip \
-    xvfb \
     # Network firewall (--firewall mode)
     iptables \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yq for YAML processing (architecture-aware)
+# Install yq for YAML processing (architecture-aware).
+# Pinned for reproducible builds; bump deliberately.
+ARG YQ_VERSION="v4.53.3"
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}" && \
     chmod +x /usr/local/bin/yq
 
 # Install GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
-    apt-get update && apt-get install -y gh && \
+    apt-get update && apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker CE (for Docker-in-Docker support)
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
-    > /etc/apt/sources.list.d/docker.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    docker-ce \
-    docker-ce-cli \
-    docker-buildx-plugin \
-    containerd.io \
-    && rm -rf /var/lib/apt/lists/*
+# Docker CE is installed by the docker extension (extensions/docker/build.sh),
+# only when the docker capability is enabled.
 
 # Install AI CLI (default: Claude Code)
 # The installer may create a symlink; cp -L follows it to copy the real binary.
@@ -86,6 +78,15 @@ RUN if [ -n "$INSTALL_EXTENSIONS" ]; then \
     done; \
 fi && rm -rf /tmp/ext-builds/
 
+# Codex's clipboard image paste runs an Xvfb/xclip bridge at runtime; install
+# that stack (and save the real xclip) only when a provider opts in.
+ARG INSTALL_X11=""
+RUN if [ -n "$INSTALL_X11" ]; then \
+    apt-get update && apt-get install -y --no-install-recommends xclip xvfb && \
+    cp /usr/bin/xclip /usr/local/bin/xclip-real && chmod +x /usr/local/bin/xclip-real && \
+    rm -rf /var/lib/apt/lists/*; \
+fi
+
 # Create a non-root user matching typical host UID
 # The node base image has a 'node' user at UID 1000 — if the requested UID
 # collides, rename that user instead of silently failing.
@@ -114,9 +115,6 @@ ENV AI_USERNAME=${AI_USERNAME}
 
 # Add MCP domain mappings
 COPY container/mcp-domains.conf /etc/mittens/mcp-domains.conf
-
-# Save real xclip before symlinking our shim
-RUN cp /usr/bin/xclip /usr/local/bin/xclip-real && chmod +x /usr/local/bin/xclip-real
 
 # Container entrypoint binary — handles root setup (firewall proxy, iptables,
 # DinD, privilege drop) and user setup (config staging, JSON settings, cred sync).

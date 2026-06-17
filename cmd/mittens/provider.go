@@ -82,6 +82,7 @@ type Provider struct {
 	SkipCredentials   bool              // skip provider OAuth/API credential staging.
 	LocalModelSource  string            // optional local model detector name, e.g. "ollama".
 	DefaultModel      string            // provider default model applied when no --model arg is supplied.
+	EnableX11         bool              // install the X11 stack (xvfb/xclip) at build time for clipboard image paste.
 }
 
 // HomePath returns the home directory for this provider's user inside the container.
@@ -221,6 +222,7 @@ func CodexProvider() *Provider {
 		APIKeyEnv:      "OPENAI_API_KEY",
 		BaseURLEnv:     "OPENAI_BASE_URL",
 		SettingsFormat: "toml",
+		EnableX11:      true, // Codex pastes clipboard images via the Xvfb/xclip bridge.
 
 		ConfigDir:      ".codex",
 		CredentialFile: "auth.json",

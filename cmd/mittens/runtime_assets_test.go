@@ -52,12 +52,23 @@ func TestMaterializeRuntimeAssetsWritesRequiredFiles(t *testing.T) {
 	}
 }
 
-func TestContainerDockerfileInstallsBuildxPlugin(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("container", "Dockerfile"))
+func TestDockerExtensionInstallsBuildxPlugin(t *testing.T) {
+	// Docker CE (including the buildx plugin) belongs to the docker extension,
+	// so buildx is available inside Docker-enabled agents.
+	data, err := os.ReadFile(filepath.Join("extensions", "docker", "build.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "docker-buildx-plugin") {
-		t.Fatal("container Dockerfile must install docker-buildx-plugin so docker buildx is available inside Docker-enabled agents")
+		t.Fatal("docker extension build.sh must install docker-buildx-plugin so docker buildx is available inside Docker-enabled agents")
+	}
+
+	// The base Dockerfile must not install Docker CE; it belongs to the extension.
+	dockerfile, err := os.ReadFile(filepath.Join("container", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(dockerfile), "docker-ce") {
+		t.Fatal("base Dockerfile must not install docker-ce; it belongs to the docker extension build script")
 	}
 }
