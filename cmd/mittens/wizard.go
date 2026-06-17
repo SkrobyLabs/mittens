@@ -675,6 +675,7 @@ func wizardProvider(workspace string, editMode bool, existing ProviderWizardStat
 		Run(); err != nil {
 		return nil, ProviderWizardConfig{}, err
 	}
+	selected = normalizeProviderSelection(selected, state.Default)
 
 	defaultChoice := state.Default
 	containsDefault := false
@@ -1006,6 +1007,27 @@ func isWizardProvider(provider string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeProviderSelection(selected []string, fallbackDefault string) []string {
+	out := make([]string, 0, len(selected))
+	seen := map[string]bool{}
+	for _, provider := range selected {
+		provider = strings.TrimSpace(provider)
+		if !isWizardProvider(provider) || seen[provider] {
+			continue
+		}
+		out = append(out, provider)
+		seen[provider] = true
+	}
+	if len(out) > 0 {
+		return out
+	}
+	fallbackDefault = strings.TrimSpace(fallbackDefault)
+	if isWizardProvider(fallbackDefault) {
+		return []string{fallbackDefault}
+	}
+	return []string{"claude"}
 }
 
 func parseProviderLines(lines []string) (selected map[string]bool, defaultProvider string) {

@@ -134,6 +134,33 @@ func TestProviderWizardStateNormalizesDefaultProvider(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderSelectionFallsBackToDefault(t *testing.T) {
+	got := normalizeProviderSelection(nil, "codex")
+	want := []string{"codex"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeProviderSelectionFiltersInvalidAndDuplicates(t *testing.T) {
+	got := normalizeProviderSelection([]string{"codex", "unknown", "codex", "gemini"}, "claude")
+	want := []string{"codex", "gemini"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeProviderSelectionFallsBackToClaudeForInvalidDefault(t *testing.T) {
+	got := normalizeProviderSelection([]string{"unknown"}, "unknown")
+	want := []string{"claude"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection = %#v, want %#v", got, want)
+	}
+}
+
 func TestProviderLinesUseCodexHarness(t *testing.T) {
 	cases := []struct {
 		name  string
