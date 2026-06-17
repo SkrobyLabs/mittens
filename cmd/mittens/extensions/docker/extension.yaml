@@ -6,3 +6,8 @@ flags:
     description: "Docker engine: dind (isolated daemon) or host (share host socket)"
     arg: "enum"
     enum_values: ["dind", "host"]
+
+# Installs Docker CE at build time; runs only when this capability is enabled.
+build:
+  script: "docker.sh"
+  image_tag: "docker"

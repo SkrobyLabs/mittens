@@ -9,7 +9,63 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/SkrobyLabs/mittens/internal/initcfg"
 )
+
+// testConfigPath points at a minimal mittens-init JSON config written by
+// TestMain. The container entrypoint hard-requires this file (the host CLI
+// normally writes and mounts it per run), so dockerRun/dockerRunKeep inject it
+// automatically unless a test supplies its own.
+var testConfigPath string
+
+// defaultContainerConfig is a minimal claude-flavored entrypoint config —
+// enough for mittens-init to stage config and drop privileges without any
+// feature flags enabled.
+func defaultContainerConfig() *initcfg.ContainerConfig {
+	return &initcfg.ContainerConfig{
+		AI: initcfg.AIConfig{
+			Binary:         "claude",
+			ConfigDir:      ".claude",
+			CredFile:       ".credentials.json",
+			SettingsFile:   "settings.json",
+			ProjectFile:    "CLAUDE.md",
+			SettingsFormat: "json",
+		},
+		ContainerName: "mittens-integration-test",
+	}
+}
+
+// writeContainerConfigFile marshals an entrypoint config to a world-readable
+// temp file (the container user's UID differs from the host's).
+func writeContainerConfigFile(cfg *initcfg.ContainerConfig) (string, error) {
+	f, err := os.CreateTemp("", "mittens-it-config.*.json")
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	if err := cfg.Write(f.Name()); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(f.Name(), 0644); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// withDefaultConfig prepends the shared entrypoint-config mount unless the
+// caller already mounts one at the well-known path.
+func withDefaultConfig(runArgs []string) []string {
+	for _, a := range runArgs {
+		if strings.Contains(a, initcfg.ConfigPath) {
+			return runArgs
+		}
+	}
+	return append([]string{
+		"-v", testConfigPath + ":" + initcfg.ConfigPath + ":ro",
+		"-e", "MITTENS_CONFIG=" + initcfg.ConfigPath,
+	}, runArgs...)
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,7 +109,7 @@ func dockerRun(t *testing.T, image string, runArgs []string, cmd ...string) stri
 	t.Helper()
 
 	args := []string{"run", "--rm"}
-	args = append(args, runArgs...)
+	args = append(args, withDefaultConfig(runArgs)...)
 	args = append(args, image)
 	args = append(args, cmd...)
 
@@ -71,7 +127,7 @@ func dockerRunKeep(t *testing.T, image, name string, runArgs []string, cmd ...st
 	t.Helper()
 
 	args := []string{"run", "--name", name}
-	args = append(args, runArgs...)
+	args = append(args, withDefaultConfig(runArgs)...)
 	args = append(args, image)
 	args = append(args, cmd...)
 
@@ -164,7 +220,18 @@ func TestMain(m *testing.M) {
 	fmt.Fprintln(os.Stderr, "[integration] Image built successfully")
 
 	testImage = tag
-	os.Exit(m.Run())
+
+	// Write the shared entrypoint config the container requires.
+	cfgPath, err := writeContainerConfigFile(defaultContainerConfig())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: writing entrypoint config: %v\n", err)
+		os.Exit(1)
+	}
+	testConfigPath = cfgPath
+
+	code := m.Run()
+	os.Remove(cfgPath)
+	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +328,27 @@ func TestDockerRun_ConfigSubdirCopyDoesNotNest(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cfgPath, err := writeContainerConfigFile(&initcfg.ContainerConfig{
+		AI: initcfg.AIConfig{
+			Binary:         "codex",
+			ConfigDir:      ".codex",
+			CredFile:       "auth.json",
+			SettingsFile:   "config.toml",
+			ProjectFile:    "AGENTS.md",
+			SettingsFormat: "toml",
+			ConfigSubdirs:  []string{"skills", "hooks", "agents", "output-styles"},
+		},
+		ContainerName: "mittens-integration-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(cfgPath)
+
 	runArgs := []string{
 		"-v", codexDir + ":/mnt/mittens-staging/.codex:ro",
-		"-e", "MITTENS_AI_CONFIG_DIR=.codex",
+		"-v", cfgPath + ":" + initcfg.ConfigPath + ":ro",
+		"-e", "MITTENS_CONFIG=" + initcfg.ConfigPath,
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", `
@@ -379,9 +464,20 @@ func TestDockerRun_NotificationHookInjection(t *testing.T) {
 	os.MkdirAll(claudeDir, 0o755)
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
 
+	// A config with a broker port and a Stop hook event triggers hook injection.
+	cfg := defaultContainerConfig()
+	cfg.AI.StopHookEvent = "Stop"
+	cfg.Broker.Port = 12345
+	cfgPath, err := writeContainerConfigFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(cfgPath)
+
 	runArgs := []string{
 		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
-		"-e", "MITTENS_BROKER_PORT=12345",
+		"-v", cfgPath + ":" + initcfg.ConfigPath + ":ro",
+		"-e", "MITTENS_CONFIG=" + initcfg.ConfigPath,
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
@@ -414,13 +510,13 @@ func TestDockerRun_NotificationHookNotInjectedWithoutBroker(t *testing.T) {
 
 	runArgs := []string{
 		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
-		// No MITTENS_BROKER_PORT set.
+		// Default config has no broker, so hooks must not be injected.
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
 
 	if strings.Contains(out, "notify.sh") {
-		t.Error("hooks should not be injected when MITTENS_BROKER_PORT is unset")
+		t.Error("hooks should not be injected when no broker is configured")
 	}
 }
 
@@ -431,16 +527,27 @@ func TestDockerRun_NotificationHookSuppressedByNoNotify(t *testing.T) {
 	os.MkdirAll(claudeDir, 0o755)
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0644)
 
+	// Broker present (would normally inject hooks) but NoNotify suppresses them.
+	cfg := defaultContainerConfig()
+	cfg.AI.StopHookEvent = "Stop"
+	cfg.Broker.Port = 12345
+	cfg.Flags.NoNotify = true
+	cfgPath, err := writeContainerConfigFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(cfgPath)
+
 	runArgs := []string{
 		"-v", claudeDir + ":/mnt/mittens-staging/.claude:ro",
-		"-e", "MITTENS_BROKER_PORT=12345",
-		"-e", "MITTENS_NO_NOTIFY=1",
+		"-v", cfgPath + ":" + initcfg.ConfigPath + ":ro",
+		"-e", "MITTENS_CONFIG=" + initcfg.ConfigPath,
 	}
 
 	out := dockerRun(t, testImage, runArgs, "bash", "-c", "cat ~/.claude/settings.json")
 
 	if strings.Contains(out, "notify.sh") {
-		t.Error("hooks should not be injected when MITTENS_NO_NOTIFY is set")
+		t.Error("hooks should not be injected when NoNotify is set")
 	}
 }
 

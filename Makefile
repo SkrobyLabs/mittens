@@ -152,6 +152,15 @@ test-v: ## Run tests with verbose output
 test-race: ## Run tests with race detector
 	$(GO) test -race ./...
 
+# Integration tests build the container image(s) and assert behavior inside them.
+# They require a working Docker daemon and are gated behind the `integration`
+# build tag so plain `make test` stays fast and Docker-free.
+test-integration: build ## Build container and run full integration suite (slow; needs Docker)
+	$(GO) test -tags integration -timeout 45m ./cmd/mittens/...
+
+test-integration-short: build ## Run integration tests, skipping slow extension-build cases
+	$(GO) test -tags integration -short -timeout 20m ./cmd/mittens/...
+
 lint: ## Run golangci-lint (install: https://golangci-lint.run/welcome/install)
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not found – install from https://golangci-lint.run"; exit 1; }
 	golangci-lint run ./...
@@ -223,4 +232,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build init init-windows install tidy docker test test-v test-race lint fmt vet check release dist clean run help init-binary
+.PHONY: all build init init-windows install tidy docker test test-v test-race test-integration test-integration-short lint fmt vet check release dist clean run help init-binary
