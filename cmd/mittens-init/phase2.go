@@ -94,7 +94,9 @@ func runPhase2(cfg *config) error {
 
 	// cd to host workspace path (always the real path with identity mount).
 	if cfg.HostWorkspace != "" {
-		os.Chdir(cfg.HostWorkspace)
+		if err := os.Chdir(cfg.HostWorkspace); err != nil {
+			return fmt.Errorf("chdir workspace %s: %w", cfg.HostWorkspace, err)
+		}
 	}
 
 	// Exec the remaining args (typically the AI CLI binary).

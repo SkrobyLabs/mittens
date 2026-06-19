@@ -1301,6 +1301,10 @@ func (a *App) buildImage() error {
 // later in assembleDockerArgs as they depend on further processing.
 func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 	providerPlan := a.Provider.RuntimePlan()
+	hostWorkspace := a.WorkspaceMountSrc
+	if hostWorkspace == "" {
+		hostWorkspace = a.EffectiveWorkspace
+	}
 	return &initcfg.ContainerConfig{
 		AI: providerPlan.AI,
 		Flags: initcfg.Flags{
@@ -1314,7 +1318,7 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 		},
 		ContainerName:     a.ContainerName,
 		InstanceName:      a.InstanceName,
-		HostWorkspace:     a.EffectiveWorkspace,
+		HostWorkspace:     hostWorkspace,
 		FirewallHostPorts: providerPlan.FirewallHostPorts,
 		ImagePasteKey:     a.ImagePasteKey,
 		CredStagingDirs:   a.credStagingDirs,
@@ -1343,6 +1347,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	// Primary workspace mount (identity: host path = container path).
 	args = append(args, "-v", a.WorkspaceMountSrc+":"+a.WorkspaceMountSrc)
+	if a.WorkspaceMountSrc != "" {
+		args = append(args, "-w", a.WorkspaceMountSrc)
+	}
 
 	// AI config staging (read-only). Providers that mount the whole config
 	// directory for session persistence should not also mount the same host

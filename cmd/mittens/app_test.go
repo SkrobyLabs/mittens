@@ -700,6 +700,9 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	if !argPairExists(args, "-v", "/tmp/workspace:/tmp/workspace") {
 		t.Error("missing workspace mount")
 	}
+	if !argPairExists(args, "-w", "/tmp/workspace") {
+		t.Error("missing workspace working directory")
+	}
 
 	// Environment variables.
 	if !argPairExists(args, "-e", "ANTHROPIC_API_KEY=sk-test-key") {
@@ -802,10 +805,39 @@ func TestAssembleDockerArgs_SessionPersistence(t *testing.T) {
 		t.Error("missing tasks mount")
 	}
 
-	// HostWorkspace is always set to EffectiveWorkspace.
+	// HostWorkspace is the mounted launch directory, so mittens-init can cd into it.
 	cfg := extractInitConfig(t, args)
-	if cfg.HostWorkspace != workspace {
-		t.Errorf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
+	if cfg.HostWorkspace != "/tmp/ws" {
+		t.Errorf("HostWorkspace = %q, want %q", cfg.HostWorkspace, "/tmp/ws")
+	}
+}
+
+func TestAssembleDockerArgs_HostWorkspaceUsesMountedLaunchDir(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	a := &App{
+		Provider:           DefaultProvider(),
+		NoHistory:          true,
+		ContainerName:      "mittens-subdir",
+		Workspace:          "/repo",
+		EffectiveWorkspace: "/repo",
+		WorkspaceMountSrc:  "/repo/subdir",
+		Credentials:        &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	if !argPairExists(args, "-v", "/repo/subdir:/repo/subdir") {
+		t.Fatalf("missing launch directory mount: %v", args)
+	}
+	if !argPairExists(args, "-w", "/repo/subdir") {
+		t.Fatalf("missing launch working directory: %v", args)
+	}
+	cfg := extractInitConfig(t, args)
+	if cfg.HostWorkspace != "/repo/subdir" {
+		t.Fatalf("HostWorkspace = %q, want /repo/subdir", cfg.HostWorkspace)
 	}
 }
 
@@ -845,8 +877,8 @@ func TestAssembleDockerArgs_CodexSessionPersistenceUsesStagingCopy(t *testing.T)
 	}
 
 	cfg := extractInitConfig(t, args)
-	if cfg.HostWorkspace != workspace {
-		t.Fatalf("HostWorkspace = %q, want %q", cfg.HostWorkspace, workspace)
+	if cfg.HostWorkspace != "/tmp/ws" {
+		t.Fatalf("HostWorkspace = %q, want %q", cfg.HostWorkspace, "/tmp/ws")
 	}
 	if len(cfg.AI.PersistFiles) != 0 {
 		t.Fatalf("PersistFiles = %v, want empty", cfg.AI.PersistFiles)
