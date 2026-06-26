@@ -63,6 +63,9 @@ func runPhase2(cfg *config) error {
 	// Copy user preferences.
 	copyUserPrefs(cfg)
 
+	// Remap host config-dir paths recorded in staged config to the container.
+	rewriteHostConfigPaths(cfg)
+
 	// Write OAuth credentials.
 	setupCredentials(cfg)
 
@@ -275,22 +278,17 @@ func copyConfigFiles(cfg *config) {
 		}
 	}
 
-	// Plugin config files.
+	// Plugins: copy the whole directory, not just the registry files. Enabled
+	// plugins load their manifests, hooks, and skills from the installPath
+	// recorded in installed_plugins.json, which lives under cache/. Copying only
+	// the registry + marketplaces leaves cache/ missing, so every enabled
+	// plugin's hooks silently fail to load inside the container.
 	if cfg.AIPluginDir != "" {
 		srcPluginDir := staging + "/" + cfg.AIPluginDir
 		if info, err := os.Stat(srcPluginDir); err == nil && info.IsDir() {
 			dstPluginDir := cfg.AIDir + "/" + cfg.AIPluginDir
 			os.MkdirAll(dstPluginDir, 0755)
-			for _, file := range cfg.AIPluginFiles {
-				copyIfExists(srcPluginDir+"/"+file, dstPluginDir+"/"+file)
-			}
-			// Marketplaces directory.
-			mktDir := srcPluginDir + "/marketplaces"
-			if info, err := os.Stat(mktDir); err == nil && info.IsDir() {
-				dstMktDir := dstPluginDir + "/marketplaces"
-				os.MkdirAll(dstMktDir, 0755)
-				fileutil.CopyDir(mktDir, dstMktDir)
-			}
+			fileutil.CopyDir(srcPluginDir, dstPluginDir)
 		}
 	}
 
@@ -317,6 +315,57 @@ func copyConfigFiles(cfg *config) {
 	for _, pattern := range cfg.AIPersistGlobs {
 		copyGlobIfExists(staging, cfg.AIDir, pattern)
 	}
+}
+
+// rewriteHostConfigPaths remaps absolute paths under the host config directory
+// (e.g. /Users/alice/.claude) to the container config directory inside staged
+// config files. Plugin registries record absolute installPaths/installLocations
+// under the host home; the container home differs, so without remapping those
+// paths point at nothing and enabled plugins (and their hooks) fail to load.
+// Only the <hostHome>/<configDir> prefix is remapped — bare host-home paths are
+// left intact so identity-mounted workspace references keep working.
+func rewriteHostConfigPaths(cfg *config) {
+	if cfg.HostHome == "" || cfg.AIConfigDir == "" {
+		return
+	}
+	oldPrefix := cfg.HostHome + "/" + cfg.AIConfigDir
+	newPrefix := cfg.AIDir
+	if oldPrefix == newPrefix {
+		return
+	}
+
+	files := []string{cfg.settingsFilePath()}
+	if cfg.AIPrefsFile != "" {
+		files = append(files, cfg.AIHome+"/"+cfg.AIPrefsFile)
+	}
+	if cfg.AIPluginDir != "" {
+		pluginDir := cfg.AIDir + "/" + cfg.AIPluginDir
+		for _, f := range cfg.AIPluginFiles {
+			files = append(files, pluginDir+"/"+f)
+		}
+	}
+	for _, f := range files {
+		replaceInFile(f, oldPrefix, newPrefix)
+	}
+}
+
+// replaceInFile rewrites every occurrence of old with new in the file at path,
+// preserving the existing file mode. Missing files and no-op replacements are
+// skipped silently.
+func replaceInFile(path, old, new string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	replaced := strings.ReplaceAll(string(data), old, new)
+	if replaced == string(data) {
+		return
+	}
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	os.WriteFile(path, []byte(replaced), mode)
 }
 
 func setupTrustedDirs(cfg *config) {

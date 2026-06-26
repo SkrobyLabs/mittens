@@ -1326,6 +1326,7 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 		ContainerName:     a.ContainerName,
 		InstanceName:      a.InstanceName,
 		HostWorkspace:     hostWorkspace,
+		HostHome:          homeDir(),
 		FirewallHostPorts: providerPlan.FirewallHostPorts,
 		ImagePasteKey:     a.ImagePasteKey,
 		CredStagingDirs:   a.credStagingDirs,

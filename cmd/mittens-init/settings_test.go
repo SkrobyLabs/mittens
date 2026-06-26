@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -167,6 +168,90 @@ func TestCopyConfigFilesCopiesPersistedDirsAndGlobs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(aidir, rel)); err != nil {
 			t.Fatalf("expected copied path %s: %v", rel, err)
 		}
+	}
+}
+
+func TestCopyConfigFilesCopiesWholePluginDir(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	aidir := filepath.Join(root, "home", ".claude")
+	// Installed plugin payload lives under cache/ — this is where enabled
+	// plugins load their hooks from and must come along.
+	cacheHook := filepath.Join(staging, ".claude", "plugins", "cache", "mp", "plug", "1.0.0", "hooks", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cacheHook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheHook, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, ".claude", "plugins", "installed_plugins.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(aidir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config{
+		ConfigMount:    staging,
+		AIConfigDir:    ".claude",
+		AIDir:          aidir,
+		AISettingsFile: "settings.json",
+		AIProjectFile:  "CLAUDE.md",
+		AIPluginDir:    "plugins",
+	}
+
+	copyConfigFiles(cfg)
+
+	for _, rel := range []string{"plugins/cache/mp/plug/1.0.0/hooks/hooks.json", "plugins/installed_plugins.json"} {
+		if _, err := os.Stat(filepath.Join(aidir, rel)); err != nil {
+			t.Fatalf("expected copied plugin path %s: %v", rel, err)
+		}
+	}
+}
+
+func TestRewriteHostConfigPathsRemapsConfigDirButNotWorkspace(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "claude")
+	aidir := filepath.Join(home, ".claude")
+	pluginDir := filepath.Join(aidir, "plugins")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// installPath under the host config dir must be remapped; an
+	// identity-mounted workspace path under the host home must NOT be.
+	registry := `{"installPath":"/Users/alice/.claude/plugins/cache/mp/plug/1.0.0"}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "installed_plugins.json"), []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"extraKnownMarketplaces":{"x":{"source":{"path":"/Users/alice/.claude/plugins/marketplaces/x"}}},"workspace":"/Users/alice/Documents/proj"}`
+	if err := os.WriteFile(filepath.Join(aidir, "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config{
+		HostHome:       "/Users/alice",
+		AIHome:         home,
+		AIConfigDir:    ".claude",
+		AIDir:          aidir,
+		AISettingsFile: "settings.json",
+		AIPluginDir:    "plugins",
+		AIPluginFiles:  []string{"installed_plugins.json"},
+	}
+
+	rewriteHostConfigPaths(cfg)
+
+	gotReg, _ := os.ReadFile(filepath.Join(pluginDir, "installed_plugins.json"))
+	wantInstall := aidir + "/plugins/cache/mp/plug/1.0.0"
+	if !strings.Contains(string(gotReg), wantInstall) {
+		t.Fatalf("installPath not remapped: %s", gotReg)
+	}
+	gotSet, _ := os.ReadFile(filepath.Join(aidir, "settings.json"))
+	if !strings.Contains(string(gotSet), aidir+"/plugins/marketplaces/x") {
+		t.Fatalf("marketplace path not remapped: %s", gotSet)
+	}
+	if !strings.Contains(string(gotSet), "/Users/alice/Documents/proj") {
+		t.Fatalf("identity-mounted workspace path was wrongly remapped: %s", gotSet)
 	}
 }
 

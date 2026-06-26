@@ -61,6 +61,7 @@ type config struct {
 	ContainerName     string
 	InstanceName      string
 	HostWorkspace     string
+	HostHome          string
 	ExtraDirs         []string
 	FirewallExtra     []string
 	FirewallHostPorts []string
@@ -139,6 +140,7 @@ func loadConfig() *config {
 		ContainerName:     jcfg.ContainerName,
 		InstanceName:      jcfg.InstanceName,
 		HostWorkspace:     jcfg.HostWorkspace,
+		HostHome:          jcfg.HostHome,
 		ExtraDirs:         jcfg.ExtraDirs,
 		FirewallExtra:     jcfg.FirewallExtra,
 		FirewallHostPorts: jcfg.FirewallHostPorts,

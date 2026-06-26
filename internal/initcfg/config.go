@@ -25,6 +25,11 @@ type ContainerConfig struct {
 	ContainerName string   `json:"containerName"`
 	InstanceName  string   `json:"instanceName,omitempty"`
 	HostWorkspace string   `json:"hostWorkspace,omitempty"`
+	// HostHome is the host user's home directory (e.g. /Users/alice). Staged
+	// provider config records absolute paths under it (plugin installPaths,
+	// marketplace installLocations); the container home differs, so mittens-init
+	// remaps the <HostHome>/<configDir> prefix to the container config dir.
+	HostHome string `json:"hostHome,omitempty"`
 	ExtraDirs     []string `json:"extraDirs,omitempty"`
 	FirewallExtra []string `json:"firewallExtra,omitempty"`
 	// FirewallHostPorts are direct host:port endpoints allowed through
