@@ -50,6 +50,45 @@ func TestLookupSupplementaryGroupsInFileNoMemberships(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectsDirWritable(t *testing.T) {
+	home := t.TempDir()
+	cfg := &config{AIUsername: "root", AIDir: filepath.Join(home, ".claude")}
+
+	// Simulate a pre-existing per-project history bind mount: its contents map
+	// to host files and must survive untouched (the chown is non-recursive).
+	child := filepath.Join(cfg.AIDir, "projects", "mounted-project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(child, "history.jsonl")
+	if err := os.WriteFile(marker, []byte("host data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ensureProjectsDirWritable(cfg)
+
+	// The projects parent must exist so the agent CLI can create sibling
+	// transcript directories at runtime (e.g. during compaction).
+	if fi, err := os.Stat(filepath.Join(cfg.AIDir, "projects")); err != nil || !fi.IsDir() {
+		t.Fatalf("projects dir missing: %v", err)
+	}
+	// Pre-existing bind-mount content is left intact.
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "host data" {
+		t.Fatalf("mounted project content disturbed: data=%q err=%v", data, err)
+	}
+}
+
+func TestEnsureProjectsDirWritableCreatesMissingParent(t *testing.T) {
+	home := t.TempDir()
+	cfg := &config{AIUsername: "root", AIDir: filepath.Join(home, ".claude")}
+
+	ensureProjectsDirWritable(cfg)
+
+	if fi, err := os.Stat(filepath.Join(cfg.AIDir, "projects")); err != nil || !fi.IsDir() {
+		t.Fatalf("projects dir not created: %v", err)
+	}
+}
+
 func TestExtractMCPJSONServerNames_ProjectScopedClaudeConfig(t *testing.T) {
 	tmp := t.TempDir()
 	project := filepath.Join(tmp, "project")

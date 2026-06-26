@@ -237,13 +237,8 @@ func (a *App) Run() error {
 	}
 
 	// Session persistence setup.
-	if !a.NoHistory {
-		if providerPlan.HistoryMountsWholeConfig {
-			ensureDir(a.Provider.HostConfigDir(home))
-		} else if providerPlan.HistoryMountsProjectDirs {
-			a.HostProjectDir = ProjectDir(a.Workspace)
-			ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
-		}
+	if !a.NoHistory && providerPlan.HistoryMountsWholeConfig {
+		ensureDir(a.Provider.HostConfigDir(home))
 	}
 
 	// Worktree setup for primary workspace.
@@ -269,6 +264,18 @@ func (a *App) Run() error {
 			a.WorkspaceMountSrc = wtPath
 		}
 		logInfo("Worktree: %s", wtPath)
+	}
+
+	// Project-scoped history mount. Keyed on WorkspaceMountSrc -- the directory
+	// the container actually launches from -- because that is what the agent CLI
+	// encodes into its ~/.claude/projects/<dir> transcript path. Computed after
+	// worktree setup so it reflects the final launch directory. Keying it on the
+	// git root instead would mount the wrong project dir whenever the agent runs
+	// from a subdirectory or worktree, leaving the real transcript dir unmounted
+	// (and unwritable) -- which surfaces as EACCES during compaction.
+	if !a.NoHistory && providerPlan.HistoryMountsProjectDirs {
+		a.HostProjectDir = ProjectDir(a.WorkspaceMountSrc)
+		ensureDir(filepath.Join(a.Provider.HostConfigDir(home), "projects", a.HostProjectDir))
 	}
 
 	// Container name (must be set before resolvers so SetupContext carries it).

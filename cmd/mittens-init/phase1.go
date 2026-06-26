@@ -28,8 +28,32 @@ func runPhase1(cfg *config) error {
 		}
 	}
 
+	ensureProjectsDirWritable(cfg)
+
 	// Drop privileges and re-exec this binary as the AI user.
 	return dropPrivileges(cfg)
+}
+
+// ensureProjectsDirWritable makes ~/.claude/projects owned by the AI user.
+// Docker creates the intermediate directory for the per-project history bind
+// mount as root, so without this the agent CLI cannot create sibling project
+// directories at runtime (e.g. the transcript dir it writes during compaction)
+// and fails with EACCES. The chown is non-recursive: the bind-mounted project
+// subdir's contents map to host files and must be left untouched.
+func ensureProjectsDirWritable(cfg *config) {
+	uid, gid, err := lookupUser(cfg.AIUsername)
+	if err != nil {
+		logWarn("projects dir ownership: %v", err)
+		return
+	}
+	projects := cfg.AIDir + "/projects"
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		logWarn("creating %s: %v", projects, err)
+		return
+	}
+	if err := os.Chown(projects, uid, gid); err != nil {
+		logWarn("chown %s: %v", projects, err)
+	}
 }
 
 // startDinD starts the Docker daemon for Docker-in-Docker mode.
