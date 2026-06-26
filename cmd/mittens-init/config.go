@@ -20,7 +20,7 @@ type config struct {
 	AISettingsFile    string
 	AIProjectFile     string
 	AITrustedDirsKey  string
-	AIYoloKey         string
+	AIYoloSettingsJQ  string
 	AIMCPServersKey   string
 	AIMCPConfigFile   string
 	AIMCPConfigFormat string
@@ -102,7 +102,7 @@ func loadConfig() *config {
 		AISettingsFile:    jcfg.AI.SettingsFile,
 		AIProjectFile:     jcfg.AI.ProjectFile,
 		AITrustedDirsKey:  jcfg.AI.TrustedDirsKey,
-		AIYoloKey:         jcfg.AI.YoloKey,
+		AIYoloSettingsJQ:  jcfg.AI.YoloSettingsJQ,
 		AIMCPServersKey:   jcfg.AI.MCPServersKey,
 		AIMCPConfigFile:   jcfg.AI.MCPConfigFile,
 		AIMCPConfigFormat: jcfg.AI.MCPConfigFormat,

@@ -47,9 +47,15 @@ func runPhase2(cfg *config) error {
 	// Write trusted dirs file (for providers that use a separate file).
 	setupTrustedDirsFile(cfg)
 
-	// Auto-accept yolo permission prompt.
-	if cfg.Yolo && cfg.AIYoloKey != "" && cfg.AISettingsFormat == "json" {
-		setJSONKey(cfg.settingsFilePath(), cfg.AIYoloKey, true)
+	// Auto-accept yolo permission prompt by pinning the bypass-permissions
+	// default mode in settings, which also suppresses the one-time acceptance
+	// dialog on a fresh container home.
+	if cfg.Yolo && cfg.AIYoloSettingsJQ != "" && cfg.AISettingsFormat == "json" {
+		settingsFile := cfg.settingsFilePath()
+		ensureJSONFile(settingsFile)
+		settings := readJSONFile(settingsFile)
+		applyJQAssignment(settings, cfg.AIYoloSettingsJQ)
+		writeJSONFile(settingsFile, settings)
 	}
 
 	// Provider-specific settings init.

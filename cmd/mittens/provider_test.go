@@ -214,7 +214,7 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 		"KeychainService": p.KeychainService,
 		"PluginDir":       p.PluginDir,
 		"TrustedDirsKey":  p.TrustedDirsKey,
-		"YoloKey":         p.YoloKey,
+		"YoloSettingsJQ":  p.YoloSettingsJQ,
 	}
 	for name, val := range intentionallyEmpty {
 		if val != "" {

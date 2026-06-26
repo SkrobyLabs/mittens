@@ -52,7 +52,7 @@ type Provider struct {
 
 	// Settings keys (used in jq operations inside the container)
 	TrustedDirsKey  string // e.g. "trustedDirectories"
-	YoloKey         string // e.g. "skipDangerousModePermissionPrompt"
+	YoloSettingsJQ  string // jq assignment applied to settings.json when yolo is enabled, e.g. `.permissions.defaultMode = "bypassPermissions"`
 	MCPServersKey   string // e.g. "mcpServers"
 	MCPConfigFile   string // MCP config file relative to $HOME, e.g. ".claude.json" or ".codex/config.toml"
 	MCPConfigFormat string // "json" or "toml"
@@ -201,7 +201,7 @@ func ClaudeProvider() *Provider {
 		PluginFiles: []string{"installed_plugins.json", "known_marketplaces.json", "config.json"},
 
 		TrustedDirsKey:  "trustedDirectories",
-		YoloKey:         "skipDangerousModePermissionPrompt",
+		YoloSettingsJQ:  `.permissions.defaultMode = "bypassPermissions"`,
 		MCPServersKey:   "mcpServers",
 		MCPConfigFile:   ".claude.json",
 		MCPConfigFormat: "json",
@@ -252,7 +252,7 @@ func CodexProvider() *Provider {
 		PluginFiles: []string{},
 
 		TrustedDirsKey:  "",
-		YoloKey:         "",
+		YoloSettingsJQ:  "",
 		MCPServersKey:   "mcp_servers",
 		MCPConfigFile:   ".codex/config.toml",
 		MCPConfigFormat: "toml",
@@ -337,7 +337,7 @@ func GeminiProvider() *Provider {
 		PluginFiles: []string{},
 
 		TrustedDirsKey:  "",
-		YoloKey:         "",
+		YoloSettingsJQ:  "",
 		MCPServersKey:   "mcpServers",
 		MCPConfigFile:   ".gemini/settings.json",
 		MCPConfigFormat: "json",

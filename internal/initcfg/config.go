@@ -80,7 +80,7 @@ type AIConfig struct {
 	SettingsFile    string   `json:"settingsFile"`
 	ProjectFile     string   `json:"projectFile"`
 	TrustedDirsKey  string   `json:"trustedDirsKey,omitempty"`
-	YoloKey         string   `json:"yoloKey,omitempty"`
+	YoloSettingsJQ  string   `json:"yoloSettingsJQ,omitempty"`
 	MCPServersKey   string   `json:"mcpServersKey,omitempty"`
 	MCPConfigFile   string   `json:"mcpConfigFile,omitempty"`
 	MCPConfigFormat string   `json:"mcpConfigFormat,omitempty"`

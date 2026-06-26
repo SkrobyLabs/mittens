@@ -78,7 +78,7 @@ func (p *Provider) initConfigPlan() initcfg.AIConfig {
 		SettingsFile:    p.SettingsFile,
 		ProjectFile:     p.ProjectFile,
 		TrustedDirsKey:  p.TrustedDirsKey,
-		YoloKey:         p.YoloKey,
+		YoloSettingsJQ:  p.YoloSettingsJQ,
 		MCPServersKey:   p.MCPServersKey,
 		MCPConfigFile:   p.MCPConfigFile,
 		MCPConfigFormat: p.MCPConfigFormat,

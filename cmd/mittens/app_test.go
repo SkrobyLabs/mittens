@@ -1482,8 +1482,8 @@ func TestAssembleDockerArgs_ProviderEnvVars(t *testing.T) {
 	if cfg.AI.TrustedDirsKey != "trustedDirectories" {
 		t.Errorf("AI.TrustedDirsKey = %q, want trustedDirectories", cfg.AI.TrustedDirsKey)
 	}
-	if cfg.AI.YoloKey != "skipDangerousModePermissionPrompt" {
-		t.Errorf("AI.YoloKey = %q, want skipDangerousModePermissionPrompt", cfg.AI.YoloKey)
+	if cfg.AI.YoloSettingsJQ != `.permissions.defaultMode = "bypassPermissions"` {
+		t.Errorf("AI.YoloSettingsJQ = %q, want .permissions.defaultMode = \"bypassPermissions\"", cfg.AI.YoloSettingsJQ)
 	}
 	if cfg.AI.MCPServersKey != "mcpServers" {
 		t.Errorf("AI.MCPServersKey = %q, want mcpServers", cfg.AI.MCPServersKey)
