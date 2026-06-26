@@ -66,6 +66,9 @@ func runPhase2(cfg *config) error {
 	// Copy git config.
 	copyGitConfig(cfg)
 
+	// Reconcile core.hooksPath against the container filesystem.
+	fixGitHooksPath(cfg)
+
 	// Copy user preferences.
 	copyUserPrefs(cfg)
 
@@ -442,6 +445,62 @@ func applyInitSettings(cfg *config) {
 func copyGitConfig(cfg *config) {
 	copyIfExists(cfg.ConfigMount+"/.gitconfig", cfg.AIHome+"/.gitconfig")
 	exec.Command("git", "config", "--global", "--add", "safe.directory", "*").Run()
+}
+
+// fixGitHooksPath reconciles the workspace repo's effective core.hooksPath with
+// the container filesystem. Git silently skips ALL hooks when hooksPath points
+// at a directory that does not exist, so a host-absolute hooksPath that was
+// never mounted into the container disables commit-msg/pre-commit/etc.
+// validation without any warning. Behaviour:
+//   - reachable in-container (identity-mounted repo or extra dirs): left as-is.
+//   - under the host config dir: remapped onto the container config dir.
+//   - anywhere else (not mounted): an explicit launch warning is emitted so
+//     unvalidated commits are not a silent surprise.
+//
+// The repo-local .git/config is the host's identity-mounted file, so we never
+// rewrite it (that would corrupt host-side git); the remap is applied only via
+// the container-only global gitconfig copy, and only when no repo-local value
+// would shadow it.
+func fixGitHooksPath(cfg *config) {
+	if cfg.HostWorkspace == "" {
+		return
+	}
+	out, err := exec.Command("git", "-C", cfg.HostWorkspace, "config", "--get", "core.hooksPath").Output()
+	if err != nil {
+		return // unset, not a git repo, or git unavailable
+	}
+	hooksPath := strings.TrimSpace(string(out))
+	// Relative paths resolve within the identity-mounted repo; leave them to git.
+	if hooksPath == "" || !filepath.IsAbs(hooksPath) {
+		return
+	}
+	if isDir(hooksPath) {
+		return // reachable in-container — hooks run as configured
+	}
+
+	// Unreachable. Try to remap a host config-dir path onto the container config
+	// dir (the only mount whose container path differs from the host path).
+	if cfg.HostHome != "" && cfg.AIConfigDir != "" {
+		oldPrefix := cfg.HostHome + "/" + cfg.AIConfigDir
+		if rest := strings.TrimPrefix(hooksPath, oldPrefix); rest != hooksPath && isDir(cfg.AIDir+rest) {
+			remapped := cfg.AIDir + rest
+			local, _ := exec.Command("git", "-C", cfg.HostWorkspace, "config", "--local", "--get", "core.hooksPath").Output()
+			if strings.TrimSpace(string(local)) != "" {
+				// A repo-local value would shadow the global override and we must
+				// not rewrite the host's mounted .git/config; fall through to warn.
+			} else if err := exec.Command("git", "config", "--global", "core.hooksPath", remapped).Run(); err == nil {
+				logInfo("Remapped git core.hooksPath %s -> %s", hooksPath, remapped)
+				return
+			}
+		}
+	}
+
+	logWarn("git core.hooksPath %q does not exist in the container; git hooks (commit-msg, pre-commit, etc.) will NOT run", hooksPath)
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func copyUserPrefs(cfg *config) {
