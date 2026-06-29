@@ -141,6 +141,9 @@ func (a *App) executionSummary(cfg *initcfg.ContainerConfig) []string {
 	if a.Shell {
 		out = append(out, "shell")
 	}
+	if a.Headless {
+		out = append(out, "headless")
+	}
 	if a.Worktree {
 		out = append(out, "worktree")
 	}

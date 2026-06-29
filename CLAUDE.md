@@ -136,9 +136,24 @@ Commands:
 
 Launch/runtime flags are intentionally small:
 
-`--verbose`, `--session`, `--no-config`, `--no-history`,
-`--no-build`, `--rebuild`, `--name NAME`, `--firewall-learn`, `--extensions`,
-`--json-caps`, `--version`, `--help`
+`--verbose`, `--session`, `--no-config`, `--policy PATH`, `--headless`,
+`--no-headless`, `--no-history`, `--no-build`, `--rebuild`, `--name NAME`,
+`--firewall-learn`, `--extensions`, `--json-caps`, `--version`, `--help`
+
+`--headless` runs non-interactively: no pseudo-TTY (`-i` instead of `-it`), no
+interactive prompts (profile picker and firewall-learn take their
+non-interactive paths), and the process exits with the agent's exit code after
+cleanup. It auto-enables when stdin is not a terminal; `--no-headless` forces it
+off. The policy equivalent is `execution.headless` (mirrors `execution.yolo`).
+In yolo mode, providers that bypass permissions via `settings.json`
+(`YoloSettingsJQ`, e.g. Claude's `bypassPermissions`) no longer also receive the
+deprecated `SkipPermsFlag` on the CLI.
+
+`--policy PATH` loads policy from an explicit file instead of the
+workspace-derived `~/.mittens/projects/<project>/policy.yaml`. It fully replaces
+the project-policy lookup, is never written back (safe under concurrency for
+throwaway per-task files), and still merges user defaults underneath (the policy
+file wins). Mutually exclusive with `--no-config` and `--session`.
 
 `--firewall-learn` runs one permissive-but-logging pass that records out-of-allowlist domains and offers to add them to `network.extra_domains`; `mittens init` can arm a one-time pass via a `.learn-once` sentinel under the project dir (transient operational state, deliberately not a policy field).
 

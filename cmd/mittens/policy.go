@@ -90,6 +90,7 @@ type CapabilityPolicy struct {
 type ExecutionPolicy struct {
 	Yolo        *bool  `yaml:"yolo,omitempty"`
 	History     *bool  `yaml:"history,omitempty"`
+	Headless    *bool  `yaml:"headless,omitempty"`
 	Worktree    bool   `yaml:"worktree,omitempty"`
 	Shell       bool   `yaml:"shell,omitempty"`
 	Docker      string `yaml:"docker,omitempty"`
@@ -124,7 +125,12 @@ func LoadProjectPolicy(workspace string, extensions []*registry.Extension) (*Pro
 }
 
 func loadProjectPolicyFile(workspace string) (*ProjectPolicy, error) {
-	path := projectPolicyPath(workspace)
+	return loadPolicyFile(projectPolicyPath(workspace))
+}
+
+// loadPolicyFile reads, defaults, and validates a policy from an explicit path.
+// Returns (nil, nil) when the file does not exist so callers can fall back.
+func loadPolicyFile(path string) (*ProjectPolicy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -513,6 +519,9 @@ func (p *ProjectPolicy) applyDefaults() {
 	}
 	if p.Execution.History == nil {
 		p.Execution.History = defaults.Execution.History
+	}
+	if p.Execution.Headless == nil {
+		p.Execution.Headless = defaults.Execution.Headless
 	}
 	if p.Execution.Notify == nil {
 		p.Execution.Notify = defaults.Execution.Notify

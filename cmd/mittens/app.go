@@ -48,6 +48,9 @@ type App struct {
 	NetworkHost   bool
 	NoSSHEgress   bool
 	FirewallLearn bool
+	Headless      bool
+	headlessSet   bool   // true once --headless/--no-headless or policy set it explicitly
+	PolicyPath    string // explicit per-run policy file (--policy); empty uses the workspace-derived path
 	Worktree      bool
 	Shell         bool
 	Profile       string // model profile name (e.g. "planner", "fast")
@@ -120,6 +123,8 @@ var coreFlags = map[string]func(*App){
 	"--worktree":       func(a *App) { a.Worktree = true },
 	"--shell":          func(a *App) { a.Shell = true },
 	"--firewall-learn": func(a *App) { a.FirewallLearn = true },
+	"--headless":       func(a *App) { a.Headless = true; a.headlessSet = true },
+	"--no-headless":    func(a *App) { a.Headless = false; a.headlessSet = true },
 	"--worker":         func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	"--planner":        func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
 	"--firewall-dev":   func(a *App) { firewallext.DevMode = true },
@@ -133,6 +138,7 @@ var coreFlagsWithArg = map[string]func(*App, string){
 	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
 	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
 	"--profile":         func(a *App, val string) { a.Profile = val },
+	"--policy":          func(a *App, val string) { a.PolicyPath = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -205,6 +211,16 @@ func (a *App) Run() error {
 
 	// Compute worktree suffix once for consistent naming across all worktrees.
 	a.worktreeSuffix = fmt.Sprintf("wt-%d", os.Getpid())
+
+	// Resolve headless mode: explicit flag/policy wins, otherwise auto-detect
+	// from whether stdin is a TTY. Headless runs allocate no pseudo-terminal,
+	// skip the stdin proxy, and never reach an interactive prompt.
+	if !a.headlessSet {
+		a.Headless = !term.IsTerminal(int(os.Stdin.Fd()))
+	}
+	if a.Headless {
+		logInfo("Headless mode: no TTY, non-interactive run")
+	}
 
 	// Precondition checks.
 	if os.Getenv("HOME") == "" {
@@ -443,9 +459,15 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Yolo mode: prepend skip-permissions flag.
+	// Yolo mode: bypass permission prompts. Providers that can express the
+	// bypass durably via settings.json (YoloSettingsJQ) rely on that alone —
+	// mittens-init writes it before launch. Prepending the CLI permission flag
+	// on top is redundant and recent Claude Code rejects it in --print mode, so
+	// only providers without a settings.json bypass get the CLI flag.
 	if a.Yolo {
-		a.ClaudeArgs = append([]string{a.Provider.SkipPermsFlag}, a.ClaudeArgs...)
+		if a.Provider.YoloSettingsJQ == "" && a.Provider.SkipPermsFlag != "" {
+			a.ClaudeArgs = append([]string{a.Provider.SkipPermsFlag}, a.ClaudeArgs...)
+		}
 		logWarn("YOLO mode: all permission prompts will be skipped")
 	}
 
@@ -467,7 +489,7 @@ func (a *App) Run() error {
 func (a *App) maybeApplyProfile() error {
 	if a.Profile == "" {
 		// If profiles exist and we're interactive, offer to pick one.
-		if a.Shell || argExists(a.ClaudeArgs, "--print") || !term.IsTerminal(int(os.Stdin.Fd())) {
+		if a.Shell || a.Headless || argExists(a.ClaudeArgs, "--print") || !term.IsTerminal(int(os.Stdin.Fd())) {
 			return nil
 		}
 		profile, err := a.promptProfilePicker()
@@ -483,7 +505,7 @@ func (a *App) maybeApplyProfile() error {
 	preset, ok := loadProfile(a.Workspace, a.Provider, a.Profile)
 	if !ok {
 		// Profile doesn't exist — prompt to create it.
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
+		if a.Headless || !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("profile %q not found for provider %s (run: mittens init --profile %s)", a.Profile, a.Provider.Name, a.Profile)
 		}
 		var err error
@@ -1154,6 +1176,10 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	if policy.Execution.History != nil {
 		a.NoHistory = !*policy.Execution.History
 	}
+	if policy.Execution.Headless != nil {
+		a.Headless = *policy.Execution.Headless
+		a.headlessSet = true
+	}
 	if policy.Execution.Notify != nil {
 		a.NoNotify = !*policy.Execution.Notify
 	}
@@ -1344,8 +1370,15 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	home := os.Getenv("HOME")
 	providerPlan := a.Provider.RuntimePlan()
+	// Headless runs have no controlling terminal, so allocate no pseudo-TTY
+	// (-t would fail with "the input device is not a TTY"); keep stdin attached
+	// (-i) so a prompt can still be piped in.
+	ttyFlag := "-it"
+	if a.Headless {
+		ttyFlag = "-i"
+	}
 	args := []string{
-		"-it",
+		ttyFlag,
 		"--name", a.ContainerName,
 	}
 	if providerPlan.ContainerHostname != "" {
@@ -1678,11 +1711,27 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	return args
 }
 
+// exitCodeError carries the agent's non-zero exit code up to main so the
+// process can exit with that code *after* deferred cleanup (container removal,
+// credential persistence) has run. Returning it instead of calling os.Exit
+// inside runContainer is what keeps cleanup from being skipped on a non-zero
+// exit — which matters for headless runs, where agents routinely exit non-zero.
+type exitCodeError struct{ code int }
+
+func (e *exitCodeError) Error() string { return fmt.Sprintf("agent exited with code %d", e.code) }
+
 // runContainer runs docker run with the assembled args.
 func (a *App) runContainer(dockerArgs []string) error {
-	stdin, cleanup := a.newStdinProxy()
-	if cleanup != nil {
-		defer cleanup()
+	// The PTY stdin proxy translates host paths in pasted content, which only
+	// applies to interactive sessions. Headless runs attach stdin directly so a
+	// prompt can be piped in without a controlling terminal.
+	var stdin *os.File
+	if !a.Headless {
+		s, cleanup := a.newStdinProxy()
+		if cleanup != nil {
+			defer cleanup()
+		}
+		stdin = s
 	}
 
 	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.Provider.Binary, a.ClaudeArgs, stdin)
@@ -1691,10 +1740,7 @@ func (a *App) runContainer(dockerArgs []string) error {
 	}
 	a.maybeLearnReport()
 	if code != 0 {
-		if cleanup != nil {
-			cleanup()
-		}
-		os.Exit(code)
+		return &exitCodeError{code: code}
 	}
 	return nil
 }
@@ -1718,7 +1764,7 @@ func (a *App) maybeLearnReport() {
 		fmt.Fprintf(os.Stderr, "    %s\n", h)
 	}
 
-	interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+	interactive := !a.Headless && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 	if interactive {
 		add := false
 		if err := huh.NewConfirm().
@@ -2026,6 +2072,11 @@ Core flags:
   --verbose, -v     Show detailed output (Docker build, extension setup)
   --session         Tweak settings for this run only (opens wizard, doesn't save)
   --no-config       Skip config file loading (user defaults + project policy)
+  --policy PATH     Load policy from PATH instead of the workspace-derived file
+                    (never written back; conflicts with --no-config/--session)
+  --headless        Run non-interactively: no TTY, no prompts, exit with the
+                    agent's code (auto-enabled when stdin is not a terminal)
+  --no-headless     Force interactive mode even without a terminal
   --no-history      Disable session persistence for this run
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache

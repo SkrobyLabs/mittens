@@ -740,6 +740,32 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	}
 }
 
+func TestAssembleDockerArgs_Headless(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test-key")
+	t.Setenv("TERM", "xterm-256color")
+
+	a := &App{
+		Provider:          DefaultProvider(),
+		NoHistory:         true,
+		Headless:          true,
+		ContainerName:     "mittens-test",
+		WorkspaceMountSrc: "/tmp/workspace",
+		Credentials:       &CredentialManager{},
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+
+	// Headless allocates no pseudo-TTY: -i only, never -it.
+	if argSliceContains(args, "-it") {
+		t.Error("headless must not pass -it")
+	}
+	if !argSliceContains(args, "-i") {
+		t.Error("headless should keep stdin attached with -i")
+	}
+}
+
 func TestAssembleDockerArgs_WithCredentials(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

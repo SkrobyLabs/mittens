@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,6 +54,12 @@ func main() {
 	// this entirely.
 
 	if err := rootCmd.Execute(); err != nil {
+		// A non-zero agent exit is not a mittens failure: propagate the code
+		// silently (cleanup has already run via Run's deferred Cleanup).
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			os.Exit(ec.code)
+		}
 		fmt.Fprintf(os.Stderr, "%s %v\n", colorRed("[mittens]"), err)
 		os.Exit(1)
 	}
@@ -102,6 +109,18 @@ func runMain(args []string) error {
 		}
 		if hasSubFlag(args, "--init") {
 			return fmt.Errorf("--session and --init cannot be used together")
+		}
+	}
+
+	// Pre-scan for --policy: an explicit per-run policy file replacing the
+	// workspace-derived project policy. Resolved before config loading below.
+	policyPath := getSubFlagValue(args, "--policy")
+	if policyPath != "" {
+		if hasSubFlag(args, "--no-config") {
+			return fmt.Errorf("--policy and --no-config cannot be used together")
+		}
+		if sessionMode {
+			return fmt.Errorf("--policy and --session cannot be used together")
 		}
 	}
 
@@ -185,20 +204,36 @@ func runMain(args []string) error {
 				logInfo("Loaded user defaults")
 			}
 
-			workspace := detectWorkspace()
-			policy, source, err := LoadProjectPolicy(workspace, app.Extensions)
-			if err != nil {
-				return fmt.Errorf("loading project config: %w", err)
-			}
-			if policy != nil {
-				projectPolicy = policy
-				if source == PolicySourceLegacy {
-					if err := SaveProjectPolicy(workspace, policy); err != nil {
-						return fmt.Errorf("migrating legacy project config: %w", err)
-					}
-					logInfo("Migrated legacy project config to policy.yaml")
+			if policyPath != "" {
+				// Explicit per-run policy file. It fully replaces the
+				// workspace-derived project policy and is never written back
+				// (so concurrent runs can pass distinct throwaway files safely);
+				// user defaults still merge underneath, then this policy wins.
+				policy, err := loadPolicyFile(policyPath)
+				if err != nil {
+					return fmt.Errorf("loading --policy file: %w", err)
 				}
-				logInfo("Loaded project config for %s", ProjectDir(workspace))
+				if policy == nil {
+					return fmt.Errorf("--policy file not found: %s", policyPath)
+				}
+				projectPolicy = policy
+				logInfo("Loaded policy from %s", policyPath)
+			} else {
+				workspace := detectWorkspace()
+				policy, source, err := LoadProjectPolicy(workspace, app.Extensions)
+				if err != nil {
+					return fmt.Errorf("loading project config: %w", err)
+				}
+				if policy != nil {
+					projectPolicy = policy
+					if source == PolicySourceLegacy {
+						if err := SaveProjectPolicy(workspace, policy); err != nil {
+							return fmt.Errorf("migrating legacy project config: %w", err)
+						}
+						logInfo("Migrated legacy project config to policy.yaml")
+					}
+					logInfo("Loaded project config for %s", ProjectDir(workspace))
+				}
 			}
 		}
 	}

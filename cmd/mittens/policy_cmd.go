@@ -249,6 +249,12 @@ func setPolicyField(policy *ProjectPolicy, field, value string) error {
 			return fmt.Errorf("%s: %w", field, err)
 		}
 		policy.Execution.History = &v
+	case "execution.headless":
+		v, err := parsePolicyBool(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+		policy.Execution.Headless = &v
 	case "execution.worktree":
 		v, err := parsePolicyBool(value)
 		if err != nil {
@@ -436,6 +442,9 @@ func executionFromPolicy(policy *ProjectPolicy) []string {
 	}
 	if policy.Execution.Shell {
 		out = append(out, "shell")
+	}
+	if policy.Execution.Headless != nil && *policy.Execution.Headless {
+		out = append(out, "headless")
 	}
 	if policy.Execution.Worktree || policy.Workspace.Mode == "worktree" {
 		out = append(out, "worktree")
