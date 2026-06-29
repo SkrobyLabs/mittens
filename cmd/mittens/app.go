@@ -38,29 +38,30 @@ type App struct {
 	Provider *Provider
 
 	// Core flags
-	Verbose       bool
-	NoConfig      bool
-	NoHistory     bool
-	NoBuild       bool
-	Rebuild       bool
-	Yolo          bool
-	NoNotify      bool
-	NetworkHost   bool
-	NoSSHEgress   bool
-	FirewallLearn bool
-	Headless      bool
-	headlessSet   bool   // true once --headless/--no-headless or policy set it explicitly
-	PolicyPath    string // explicit per-run policy file (--policy); empty uses the workspace-derived path
-	Worktree      bool
-	Shell         bool
-	Profile       string // model profile name (e.g. "planner", "fast")
-	ImagePasteKey string // "ctrl+v" or "meta+v"
-	HostBridge    HostBridgeConfig
-	PathTranslate bool
-	ExtraDirs     []string
-	FirewallExtra []string
-	InstanceName  string // user-provided name via --name
-	ClaudeArgs    []string
+	Verbose        bool
+	NoConfig       bool
+	NoHistory      bool
+	NoBuild        bool
+	Rebuild        bool
+	Yolo           bool
+	NoNotify       bool
+	NetworkHost    bool
+	NoSSHEgress    bool
+	FirewallLearn  bool
+	Headless       bool
+	headlessSet    bool // true once --headless/--no-headless or policy set it explicitly
+	ReportProgress bool
+	PolicyPath     string // explicit per-run policy file (--policy); empty uses the workspace-derived path
+	Worktree       bool
+	Shell          bool
+	Profile        string // model profile name (e.g. "planner", "fast")
+	ImagePasteKey  string // "ctrl+v" or "meta+v"
+	HostBridge     HostBridgeConfig
+	PathTranslate  bool
+	ExtraDirs      []string
+	FirewallExtra  []string
+	InstanceName   string // user-provided name via --name
+	ClaudeArgs     []string
 
 	// Computed state
 	Workspace          string // git root or cwd
@@ -111,23 +112,24 @@ type App struct {
 
 // coreFlags maps flag names to a setter function on *App.
 var coreFlags = map[string]func(*App){
-	"--verbose":        func(a *App) { a.Verbose = true },
-	"-v":               func(a *App) { a.Verbose = true },
-	"--no-config":      func(a *App) { a.NoConfig = true },
-	"--no-history":     func(a *App) { a.NoHistory = true },
-	"--no-build":       func(a *App) { a.NoBuild = true },
-	"--rebuild":        func(a *App) { a.Rebuild = true },
-	"--no-yolo":        func(a *App) { a.Yolo = false },
-	"--no-notify":      func(a *App) { a.NoNotify = true },
-	"--network-host":   func(a *App) { a.NetworkHost = true },
-	"--worktree":       func(a *App) { a.Worktree = true },
-	"--shell":          func(a *App) { a.Shell = true },
-	"--firewall-learn": func(a *App) { a.FirewallLearn = true },
-	"--headless":       func(a *App) { a.Headless = true; a.headlessSet = true },
-	"--no-headless":    func(a *App) { a.Headless = false; a.headlessSet = true },
-	"--worker":         func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--planner":        func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
-	"--firewall-dev":   func(a *App) { firewallext.DevMode = true },
+	"--verbose":         func(a *App) { a.Verbose = true },
+	"-v":                func(a *App) { a.Verbose = true },
+	"--no-config":       func(a *App) { a.NoConfig = true },
+	"--no-history":      func(a *App) { a.NoHistory = true },
+	"--no-build":        func(a *App) { a.NoBuild = true },
+	"--rebuild":         func(a *App) { a.Rebuild = true },
+	"--no-yolo":         func(a *App) { a.Yolo = false },
+	"--no-notify":       func(a *App) { a.NoNotify = true },
+	"--network-host":    func(a *App) { a.NetworkHost = true },
+	"--worktree":        func(a *App) { a.Worktree = true },
+	"--shell":           func(a *App) { a.Shell = true },
+	"--firewall-learn":  func(a *App) { a.FirewallLearn = true },
+	"--headless":        func(a *App) { a.Headless = true; a.headlessSet = true },
+	"--no-headless":     func(a *App) { a.Headless = false; a.headlessSet = true },
+	"--report-progress": func(a *App) { a.ReportProgress = true },
+	"--worker":          func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--planner":         func(a *App) {}, // legacy, ignored //legacy-delete-after:2026-04-21
+	"--firewall-dev":    func(a *App) { firewallext.DevMode = true },
 }
 
 // coreFlagsWithArg maps flag names that consume the next argument.
@@ -471,6 +473,8 @@ func (a *App) Run() error {
 		logWarn("YOLO mode: all permission prompts will be skipped")
 	}
 
+	a.applyReportProgress()
+
 	// Assemble docker run args and run.
 	dockerArgs := a.assembleDockerArgs(resolverDockerArgs, resolverFirewallExtra)
 
@@ -718,6 +722,28 @@ func (a *App) applyProviderDefaultArgs(plan ProviderRuntimePlan) {
 		}
 	}
 	a.ClaudeArgs = appendMissingProviderArgs(a.ClaudeArgs, defaults)
+}
+
+// applyReportProgress appends the provider's streaming flags so a non-interactive
+// run emits live events (tool calls, messages) instead of only a final result.
+// It is provider-specific (claude/gemini use --output-format stream-json, codex
+// uses --json) and a no-op when the provider has no progress flags or the user
+// already chose an output format. These flags only take effect in the agent's
+// print/exec mode — combine with --headless or a -p/exec invocation.
+func (a *App) applyReportProgress() {
+	if !a.ReportProgress {
+		return
+	}
+	if len(a.Provider.ProgressArgs) == 0 {
+		logWarn("--report-progress: not supported for provider %s", a.Provider.DisplayName)
+		return
+	}
+	if a.Provider.ProgressConflictFlag != "" && argExists(a.ClaudeArgs, a.Provider.ProgressConflictFlag) {
+		logInfo("--report-progress: %s already set; leaving the agent's output format unchanged", a.Provider.ProgressConflictFlag)
+		return
+	}
+	a.ClaudeArgs = append(a.ClaudeArgs, a.Provider.ProgressArgs...)
+	logInfo("--report-progress: streaming agent events (%s)", strings.Join(a.Provider.ProgressArgs, " "))
 }
 
 func appendMissingProviderArgs(args, defaults []string) []string {
@@ -2077,6 +2103,8 @@ Core flags:
   --headless        Run non-interactively: no TTY, no prompts, exit with the
                     agent's code (auto-enabled when stdin is not a terminal)
   --no-headless     Force interactive mode even without a terminal
+  --report-progress Append the provider's streaming flags so a print/exec run
+                    emits live events (claude/gemini stream-json, codex --json)
   --no-history      Disable session persistence for this run
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache

@@ -137,8 +137,18 @@ Commands:
 Launch/runtime flags are intentionally small:
 
 `--verbose`, `--session`, `--no-config`, `--policy PATH`, `--headless`,
-`--no-headless`, `--no-history`, `--no-build`, `--rebuild`, `--name NAME`,
-`--firewall-learn`, `--extensions`, `--json-caps`, `--version`, `--help`
+`--no-headless`, `--report-progress`, `--no-history`, `--no-build`, `--rebuild`,
+`--name NAME`, `--firewall-learn`, `--extensions`, `--json-caps`, `--version`,
+`--help`
+
+`--report-progress` appends the selected provider's streaming flags to the agent
+invocation so a non-interactive run emits live events (tool calls, messages)
+instead of only a final result: Claude/Gemini get `--output-format stream-json`
+(Claude also `--verbose`), Codex gets `--json` on `codex exec`. It only takes
+effect in the agent's print/exec mode, so combine it with `--headless` or a
+`-p`/`exec` invocation; it is skipped if the user already passed the provider's
+output-format flag. The per-provider flags live on `Provider.ProgressArgs` /
+`Provider.ProgressConflictFlag`.
 
 `--headless` runs non-interactively: no pseudo-TTY (`-i` instead of `-it`), no
 interactive prompts (profile picker and firewall-learn take their

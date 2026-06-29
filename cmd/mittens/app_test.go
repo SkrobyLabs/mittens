@@ -766,6 +766,34 @@ func TestAssembleDockerArgs_Headless(t *testing.T) {
 	}
 }
 
+func TestApplyReportProgress(t *testing.T) {
+	t.Run("appends provider progress flags for claude", func(t *testing.T) {
+		a := &App{Provider: DefaultProvider(), ReportProgress: true, ClaudeArgs: []string{"-p", "do it"}}
+		a.applyReportProgress()
+		for _, want := range []string{"--output-format", "stream-json", "--verbose"} {
+			if !argSliceContains(a.ClaudeArgs, want) {
+				t.Errorf("expected %q appended, got %v", want, a.ClaudeArgs)
+			}
+		}
+	})
+
+	t.Run("no-op without the flag", func(t *testing.T) {
+		a := &App{Provider: DefaultProvider(), ClaudeArgs: []string{"-p", "x"}}
+		a.applyReportProgress()
+		if argSliceContains(a.ClaudeArgs, "stream-json") {
+			t.Errorf("should not append without --report-progress: %v", a.ClaudeArgs)
+		}
+	})
+
+	t.Run("leaves user output-format untouched", func(t *testing.T) {
+		a := &App{Provider: DefaultProvider(), ReportProgress: true, ClaudeArgs: []string{"-p", "--output-format", "json"}}
+		a.applyReportProgress()
+		if argSliceContains(a.ClaudeArgs, "stream-json") {
+			t.Errorf("should not override an explicit --output-format: %v", a.ClaudeArgs)
+		}
+	})
+}
+
 func TestAssembleDockerArgs_WithCredentials(t *testing.T) {
 	home := setupTestHome(t)
 	t.Setenv("HOME", home)

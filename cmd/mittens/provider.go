@@ -75,6 +75,8 @@ type Provider struct {
 	ModelFlag                string
 	EffortFlag               string
 	EffortTemplate           string
+	ProgressArgs             []string // CLI args appended for --report-progress to stream live events (tool calls, messages); empty = unsupported
+	ProgressConflictFlag     string   // if this flag is already present in the agent args, --report-progress leaves output formatting untouched
 
 	// Container settings
 	ContainerHostname string            // fixed Docker hostname; empty = Docker default. Required when credential file encryption is hostname-dependent (e.g. Gemini).
@@ -214,6 +216,8 @@ func ClaudeProvider() *Provider {
 		StopHookEvent:            "Stop",
 		ModelFlag:                "--model",
 		EffortFlag:               "--effort",
+		ProgressArgs:             []string{"--output-format", "stream-json", "--verbose"},
+		ProgressConflictFlag:     "--output-format",
 	}
 }
 
@@ -276,6 +280,9 @@ func CodexProvider() *Provider {
 		EffortFlag: "",
 		// Codex expects reasoning effort via -c key-value configuration.
 		EffortTemplate: "-c model_reasoning_effort=%s",
+		// Codex streams JSON events under `codex exec --json`.
+		ProgressArgs:         []string{"--json"},
+		ProgressConflictFlag: "--json",
 
 		ContainerEnv: map[string]string{
 			// codex login opens the auth URL via the Rust webbrowser crate, which
@@ -348,6 +355,8 @@ func GeminiProvider() *Provider {
 		ContinueArgs:             []string{"--resume", "latest"},
 		ModelFlag:                "--model",
 		HistoryMountsProjectDirs: true,
+		ProgressArgs:             []string{"--output-format", "stream-json"},
+		ProgressConflictFlag:     "--output-format",
 
 		ContainerHostname: "gemini-cli",
 		ContainerEnv: map[string]string{
