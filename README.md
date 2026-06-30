@@ -205,6 +205,39 @@ Use `mittens policy show` to inspect the same boundary without launching a conta
 
 Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only by policy will fail worktree creation entirely.
 
+#### Orchestration: explicit worktree root, branch, and manifest
+
+For tools that launch many isolated agent runs, four per-run launch flags make
+worktree placement, branching, and accounting deterministic (worktree mode must
+be enabled via `execution.worktree: true`, typically in a per-run `--policy`
+file):
+
+```bash
+mittens \
+  --headless --report-progress \
+  --policy /path/to/run/policy.yaml \
+  --worktree-root /path/to/run/worktrees \
+  --worktree-branch feature/123-story-title \
+  --worktree-manifest /path/to/run/worktrees.json \
+  --worktree-cleanup keep \
+  --name sm-implement-sc-123 \
+  -- <provider args>
+```
+
+- `--worktree-root PATH` nests worktrees under `PATH` (named by repo base name,
+  with a short hash on collision) instead of sibling `<repo>.wt-<pid>` dirs.
+- `--worktree-branch NAME` creates-or-checks-out `NAME` in every repo worktree
+  instead of a detached HEAD; the branch is committed into the source repo's git
+  metadata, so no fetch-back is needed.
+- `--worktree-manifest PATH` writes a JSON manifest of every worktree created
+  (paths, branch, start/end commits, dirty, kept, primary).
+- `--worktree-cleanup keep|keep-dirty` controls removal; `keep` is best for
+  orchestrators that own run-directory cleanup.
+
+Sibling placement and detached-HEAD behavior are unchanged when these flags are
+omitted. See [docs/WORKTREE-ORCHESTRATION.md](docs/WORKTREE-ORCHESTRATION.md) for
+the full integration guide.
+
 ### Model Profiles
 
 `mittens policy set provider.profile NAME` selects a saved model + effort preset. Profiles are per-provider and per-project.

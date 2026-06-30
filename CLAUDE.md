@@ -134,12 +134,18 @@ Commands:
 - `mittens doctor [--migrate-all]` checks environment health (Docker, runtime assets, broker transport) and migrates legacy per-project config to `policy.yaml`.
 - `mittens logs [-f]`, `mittens clean`, and `mittens version`.
 
-Launch/runtime flags are intentionally small:
+Launch/runtime flags are restricted to per-run operational concerns —
+diagnostics, config source selection, headless/progress behavior, and worktree
+orchestration. Anything that shapes the run's capabilities, network, or workspace
+posture lives in policy, not a flag (policy-shaped launch flags are rejected).
+The full set:
 
 `--verbose`, `--session`, `--no-config`, `--policy PATH`, `--headless`,
 `--no-headless`, `--report-progress`, `--no-history`, `--no-build`, `--rebuild`,
-`--name NAME`, `--firewall-learn`, `--extensions`, `--json-caps`, `--version`,
-`--help`
+`--name NAME`, `--firewall-learn`, `--worktree-root PATH`,
+`--worktree-branch NAME`, `--worktree-manifest PATH`,
+`--worktree-cleanup keep|keep-dirty`, `--extensions`, `--json-caps`,
+`--version`, `--help`
 
 `--report-progress` appends the selected provider's streaming flags to the agent
 invocation so a non-interactive run emits live events (tool calls, messages)
@@ -166,6 +172,33 @@ throwaway per-task files), and still merges user defaults underneath (the policy
 file wins). Mutually exclusive with `--no-config` and `--session`.
 
 `--firewall-learn` runs one permissive-but-logging pass that records out-of-allowlist domains and offers to add them to `network.extra_domains`; `mittens init` can arm a one-time pass via a `.learn-once` sentinel under the project dir (transient operational state, deliberately not a policy field).
+
+The `--worktree-*` flags are per-run orchestration knobs (transient operational
+state, like `--name`/`--policy`/`--firewall-learn` — deliberately not policy
+fields). They require worktree mode, which is enabled via policy
+(`execution.worktree: true` or `workspace.mode: worktree`) since `--worktree`
+itself is policy-shaped; they error if given without it.
+
+- `--worktree-root PATH`: create worktrees nested under `PATH` (named by the
+  repo's base name, with a short repo-path hash appended on collision) instead
+  of the default sibling `<repo>.wt-<pid>` placement. The directory is created
+  if missing.
+- `--worktree-branch NAME`: create-or-checkout branch `NAME` in each worktree
+  instead of a detached HEAD. A missing branch is created from the source repo's
+  current HEAD; an existing branch is checked out (git fails clearly if it is
+  already checked out in another worktree). The same name applies to the primary
+  workspace and every extra-directory repo. The branch lives in the source
+  repo's git metadata, so no fetch-back step is needed.
+- `--worktree-manifest PATH`: write a JSON manifest of every worktree created
+  (repo, worktree path, mountPath, branch, startHead, endHead, dirty, kept,
+  primary). Written on success, on a non-zero agent exit, and on any cleanup
+  path that reached worktree setup; the `worktreeRecord` JSON shape is the
+  documented contract (see `docs/WORKTREE-ORCHESTRATION.md`).
+- `--worktree-cleanup MODE`: `keep-dirty` (default) removes a worktree only when
+  it is clean and still at its starting commit, keeping anything dirty or with
+  new commits; `keep` retains all worktrees (useful when the orchestrator owns
+  run-directory cleanup). `endHead`/`dirty`/`kept` in the manifest reflect the
+  outcome.
 
 Unrecognised arguments after Mittens parsing are forwarded to the selected
 provider CLI. Use `--` when passing provider args explicitly, for example:

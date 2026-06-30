@@ -125,14 +125,12 @@ func runMain(args []string) error {
 	}
 
 	app := &App{
-		Provider:        DefaultProvider(),
-		ImageName:       "mittens",
-		ImageTag:        "latest",
-		Yolo:            true,
-		HostBridge:      defaultHostBridgeConfig(),
-		PathTranslate:   true,
-		worktreeOrigins: make(map[string]string),
-		worktreeRepos:   make(map[string]string),
+		Provider:      DefaultProvider(),
+		ImageName:     "mittens",
+		ImageTag:      "latest",
+		Yolo:          true,
+		HostBridge:    defaultHostBridgeConfig(),
+		PathTranslate: true,
 	}
 
 	// Load all extensions: bundled (disk-first, embed fallback) + user-installed.

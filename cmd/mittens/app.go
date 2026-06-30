@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,30 +40,34 @@ type App struct {
 	Provider *Provider
 
 	// Core flags
-	Verbose        bool
-	NoConfig       bool
-	NoHistory      bool
-	NoBuild        bool
-	Rebuild        bool
-	Yolo           bool
-	NoNotify       bool
-	NetworkHost    bool
-	NoSSHEgress    bool
-	FirewallLearn  bool
-	Headless       bool
-	headlessSet    bool // true once --headless/--no-headless or policy set it explicitly
-	ReportProgress bool
-	PolicyPath     string // explicit per-run policy file (--policy); empty uses the workspace-derived path
-	Worktree       bool
-	Shell          bool
-	Profile        string // model profile name (e.g. "planner", "fast")
-	ImagePasteKey  string // "ctrl+v" or "meta+v"
-	HostBridge     HostBridgeConfig
-	PathTranslate  bool
-	ExtraDirs      []string
-	FirewallExtra  []string
-	InstanceName   string // user-provided name via --name
-	ClaudeArgs     []string
+	Verbose          bool
+	NoConfig         bool
+	NoHistory        bool
+	NoBuild          bool
+	Rebuild          bool
+	Yolo             bool
+	NoNotify         bool
+	NetworkHost      bool
+	NoSSHEgress      bool
+	FirewallLearn    bool
+	Headless         bool
+	headlessSet      bool // true once --headless/--no-headless or policy set it explicitly
+	ReportProgress   bool
+	PolicyPath       string // explicit per-run policy file (--policy); empty uses the workspace-derived path
+	Worktree         bool
+	WorktreeRoot     string // --worktree-root: parent dir for worktrees instead of sibling paths
+	WorktreeBranch   string // --worktree-branch: create/checkout this branch instead of detached HEAD
+	WorktreeManifest string // --worktree-manifest: write a JSON manifest describing created worktrees
+	WorktreeCleanup  string // --worktree-cleanup: keep|keep-dirty (default keep-dirty)
+	Shell            bool
+	Profile          string // model profile name (e.g. "planner", "fast")
+	ImagePasteKey    string // "ctrl+v" or "meta+v"
+	HostBridge       HostBridgeConfig
+	PathTranslate    bool
+	ExtraDirs        []string
+	FirewallExtra    []string
+	InstanceName     string // user-provided name via --name
+	ClaudeArgs       []string
 
 	// Computed state
 	Workspace          string // git root or cwd
@@ -79,12 +85,10 @@ type App struct {
 	buildArgs     map[string]string
 
 	// Cleanup tracking
-	tempDirs        []string
-	worktreeDirs    []string
-	worktreeOrigins map[string]string // worktree path -> original HEAD sha
-	worktreeRepos   map[string]string // worktree path -> original repo root
-	clipboardDir    string
-	clipboardReg    string
+	tempDirs     []string
+	worktrees    []*worktreeRecord // every worktree created this run (primary + extra dirs)
+	clipboardDir string
+	clipboardReg string
 
 	// Worktree suffix (computed once per Run)
 	worktreeSuffix string
@@ -134,13 +138,17 @@ var coreFlags = map[string]func(*App){
 
 // coreFlagsWithArg maps flag names that consume the next argument.
 var coreFlagsWithArg = map[string]func(*App, string){
-	"--dir":             func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
-	"--dir-ro":          func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
-	"--name":            func(a *App, val string) { a.InstanceName = val },
-	"--provider":        func(a *App, val string) {}, // already applied in main.go pre-scan
-	"--image-paste-key": func(a *App, val string) { a.ImagePasteKey = val },
-	"--profile":         func(a *App, val string) { a.Profile = val },
-	"--policy":          func(a *App, val string) { a.PolicyPath = val },
+	"--dir":               func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, val) },
+	"--dir-ro":            func(a *App, val string) { a.ExtraDirs = append(a.ExtraDirs, "ro:"+val) },
+	"--name":              func(a *App, val string) { a.InstanceName = val },
+	"--provider":          func(a *App, val string) {}, // already applied in main.go pre-scan
+	"--image-paste-key":   func(a *App, val string) { a.ImagePasteKey = val },
+	"--profile":           func(a *App, val string) { a.Profile = val },
+	"--policy":            func(a *App, val string) { a.PolicyPath = val },
+	"--worktree-root":     func(a *App, val string) { a.WorktreeRoot = val },
+	"--worktree-branch":   func(a *App, val string) { a.WorktreeBranch = val },
+	"--worktree-manifest": func(a *App, val string) { a.WorktreeManifest = val },
+	"--worktree-cleanup":  func(a *App, val string) { a.WorktreeCleanup = val },
 }
 
 // ParseFlags parses all flags (core + extension) from the given args.
@@ -259,20 +267,31 @@ func (a *App) Run() error {
 		ensureDir(a.Provider.HostConfigDir(home))
 	}
 
+	// Validate worktree orchestration options.
+	if err := a.validateWorktreeOptions(); err != nil {
+		return err
+	}
+
 	// Worktree setup for primary workspace.
 	if a.Worktree {
 		gitRoot := a.Workspace
-		if gitRoot == cwd {
+		if gitRoot == cwd && !isInsideGitWorkTree(cwd) {
 			return fmt.Errorf("--worktree requires a git repository")
+		}
+		if a.WorktreeRoot != "" {
+			if err := os.MkdirAll(a.WorktreeRoot, 0o755); err != nil {
+				return fmt.Errorf("--worktree-root: %w", err)
+			}
 		}
 		dirty, _ := captureCommand("git", "-C", gitRoot, "status", "--porcelain")
 		if dirty != "" {
 			logWarn("Working tree is dirty -- worktree will start clean from HEAD")
 		}
-		wtPath, err := a.createWorktree(gitRoot, a.worktreeSuffix)
+		rec, err := a.createWorktree(gitRoot, a.worktreeSuffix, true)
 		if err != nil {
 			return fmt.Errorf("failed to create worktree: %w", err)
 		}
+		wtPath := rec.Path
 		a.EffectiveWorkspace = wtPath
 		rel := strings.TrimPrefix(cwd, gitRoot)
 		rel = strings.TrimPrefix(rel, "/")
@@ -281,6 +300,7 @@ func (a *App) Run() error {
 		} else {
 			a.WorkspaceMountSrc = wtPath
 		}
+		rec.MountPath = a.WorkspaceMountSrc
 		logInfo("Worktree: %s", wtPath)
 	}
 
@@ -862,23 +882,11 @@ func (a *App) Cleanup() {
 		a.Credentials.Cleanup()
 	}
 
-	// Clean up worktrees: remove if clean, keep if dirty/new commits.
-	for _, wt := range a.worktreeDirs {
-		info, err := os.Stat(wt)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		dirty, _ := captureCommand("git", "-C", wt, "status", "--porcelain")
-		cur, _ := captureCommand("git", "-C", wt, "rev-parse", "HEAD")
-		orig := a.worktreeOrigins[wt]
-		if dirty == "" && cur == orig {
-			if err := exec.Command("git", "worktree", "remove", wt).Run(); err == nil {
-				logInfo("Removed clean worktree: %s", wt)
-			}
-		} else {
-			logInfo("Keeping worktree with changes: %s", wt)
-		}
-	}
+	// Clean up worktrees per policy and write the manifest afterwards. Written
+	// on success, failed agent runs, and any cleanup path that reached worktree
+	// setup (Cleanup is deferred from Run).
+	a.cleanupWorktrees()
+	a.writeWorktreeManifest()
 
 	// Clean up temp dirs.
 	for _, d := range a.tempDirs {
@@ -1559,8 +1567,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 			if a.Worktree {
 				gitRoot, err := captureCommand("git", "-C", resolved, "rev-parse", "--show-toplevel")
 				if err == nil && gitRoot != "" {
-					wtPath, err := a.createWorktree(gitRoot, wtSuffix)
+					rec, err := a.createWorktree(gitRoot, wtSuffix, false)
 					if err == nil {
+						wtPath := rec.Path
 						rel := strings.TrimPrefix(resolved, gitRoot)
 						rel = strings.TrimPrefix(rel, "/")
 						if rel != "" {
@@ -1602,13 +1611,13 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// Worktree git metadata mounts.
-	if len(a.worktreeRepos) > 0 {
+	if len(a.worktrees) > 0 {
 		mounted := make(map[string]bool)
-		for _, repo := range a.worktreeRepos {
-			if !mounted[repo] {
-				gitDir := filepath.Join(repo, ".git")
+		for _, rec := range a.worktrees {
+			if !mounted[rec.Repo] {
+				gitDir := filepath.Join(rec.Repo, ".git")
 				args = append(args, "-v", gitDir+":"+gitDir)
-				mounted[repo] = true
+				mounted[rec.Repo] = true
 			}
 		}
 	}
@@ -1888,23 +1897,191 @@ func (a *App) newStdinProxy() (stdin *os.File, cleanup func()) {
 	return slave, cleanupFn
 }
 
-// createWorktree creates a detached-HEAD git worktree as a sibling directory.
-func (a *App) createWorktree(repoRoot, suffix string) (string, error) {
+// validateWorktreeOptions rejects worktree orchestration flags that were given
+// without --worktree, and an invalid --worktree-cleanup mode.
+func (a *App) validateWorktreeOptions() error {
+	if !a.Worktree {
+		switch {
+		case a.WorktreeRoot != "":
+			return fmt.Errorf("--worktree-root requires --worktree")
+		case a.WorktreeBranch != "":
+			return fmt.Errorf("--worktree-branch requires --worktree")
+		case a.WorktreeManifest != "":
+			return fmt.Errorf("--worktree-manifest requires --worktree")
+		case a.WorktreeCleanup != "":
+			return fmt.Errorf("--worktree-cleanup requires --worktree")
+		}
+		return nil
+	}
+	switch a.WorktreeCleanup {
+	case "", "keep", "keep-dirty":
+		return nil
+	default:
+		return fmt.Errorf("--worktree-cleanup must be one of keep, keep-dirty (got %q)", a.WorktreeCleanup)
+	}
+}
+
+// worktreeRecord tracks one worktree created for this run. It doubles as the
+// public manifest entry shape (see WorktreeManifest); its JSON encoding is the
+// documented contract for orchestration tools.
+type worktreeRecord struct {
+	Repo      string `json:"repo"`      // original repo root
+	Path      string `json:"worktree"`  // worktree directory on the host
+	MountPath string `json:"mountPath"` // path the worktree is mounted at inside the container
+	Branch    string `json:"branch"`    // branch name; empty means detached HEAD
+	StartHead string `json:"startHead"` // HEAD sha at creation time
+	EndHead   string `json:"endHead"`   // HEAD sha at cleanup time (empty if unknown)
+	Dirty     bool   `json:"dirty"`     // working tree dirty at cleanup time
+	Kept      bool   `json:"kept"`      // true if mittens left the worktree on disk
+	Primary   bool   `json:"primary"`   // true for the primary workspace worktree
+}
+
+// WorktreeManifest is the JSON document written to --worktree-manifest.
+type WorktreeManifest struct {
+	Worktrees []*worktreeRecord `json:"worktrees"`
+}
+
+// createWorktree creates a git worktree for repoRoot and records it for cleanup
+// and manifest output. Placement follows --worktree-root when set (otherwise a
+// sibling directory); branch handling follows --worktree-branch (otherwise a
+// detached HEAD). The suffix is used only for the sibling naming scheme.
+func (a *App) createWorktree(repoRoot, suffix string, primary bool) (*worktreeRecord, error) {
 	headSHA, err := captureCommand("git", "-C", repoRoot, "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("rev-parse HEAD: %w", err)
+		return nil, fmt.Errorf("rev-parse HEAD: %w", err)
 	}
 
-	wtPath := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+"."+suffix)
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", wtPath, "HEAD")
+	wtPath := a.worktreePath(repoRoot, suffix)
+
+	addArgs := []string{"-C", repoRoot, "worktree", "add"}
+	branch := a.WorktreeBranch
+	if branch != "" {
+		if branchExists(repoRoot, branch) {
+			// Existing branch: check it out in the worktree. git fails with a
+			// clear message if the branch is already checked out elsewhere.
+			addArgs = append(addArgs, wtPath, branch)
+		} else {
+			// New branch created from the source repo's current HEAD.
+			addArgs = append(addArgs, "-b", branch, wtPath, "HEAD")
+		}
+	} else {
+		addArgs = append(addArgs, "--detach", wtPath, "HEAD")
+	}
+
+	cmd := exec.Command("git", addArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git worktree add: %w: %s", err, out)
+		return nil, fmt.Errorf("git worktree add: %w: %s", err, out)
 	}
 
-	a.worktreeDirs = append(a.worktreeDirs, wtPath)
-	a.worktreeOrigins[wtPath] = headSHA
-	a.worktreeRepos[wtPath] = repoRoot
-	return wtPath, nil
+	rec := &worktreeRecord{
+		Repo:      repoRoot,
+		Path:      wtPath,
+		MountPath: wtPath,
+		Branch:    branch,
+		StartHead: headSHA,
+		Primary:   primary,
+	}
+	a.worktrees = append(a.worktrees, rec)
+	return rec, nil
+}
+
+func isInsideGitWorkTree(dir string) bool {
+	out, err := captureCommand("git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	return err == nil && strings.TrimSpace(out) == "true"
+}
+
+// worktreePath chooses the on-disk location for a worktree of repoRoot. With
+// --worktree-root it nests under that root using the repo's base name, falling
+// back to a short-hash suffix on collision; otherwise it uses the legacy
+// sibling path (base + "." + suffix).
+func (a *App) worktreePath(repoRoot, suffix string) string {
+	if a.WorktreeRoot == "" {
+		return filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+"."+suffix)
+	}
+	candidate := filepath.Join(a.WorktreeRoot, filepath.Base(repoRoot))
+	if a.worktreePathTaken(candidate) {
+		h := sha256.Sum256([]byte(repoRoot))
+		candidate = candidate + "-" + hex.EncodeToString(h[:])[:6]
+	}
+	return candidate
+}
+
+// worktreePathTaken reports whether a worktree path is already allocated this
+// run or already exists on disk.
+func (a *App) worktreePathTaken(path string) bool {
+	for _, rec := range a.worktrees {
+		if rec.Path == path {
+			return true
+		}
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// branchExists reports whether refs/heads/<branch> exists in repoRoot.
+func branchExists(repoRoot, branch string) bool {
+	err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch).Run()
+	return err == nil
+}
+
+// cleanupWorktrees applies the --worktree-cleanup policy to every worktree
+// created this run and records the final state (end HEAD, dirty, kept) on each
+// record for the manifest.
+func (a *App) cleanupWorktrees() {
+	for _, rec := range a.worktrees {
+		rec.Kept = true // default; flipped to false only on successful removal
+		info, err := os.Stat(rec.Path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		dirty, _ := captureCommand("git", "-C", rec.Path, "status", "--porcelain")
+		cur, _ := captureCommand("git", "-C", rec.Path, "rev-parse", "HEAD")
+		rec.EndHead = cur
+		rec.Dirty = dirty != ""
+		clean := dirty == "" && cur == rec.StartHead
+
+		remove := false
+		switch a.WorktreeCleanup {
+		case "keep":
+			// Keep all worktrees regardless of state.
+		default: // "keep-dirty" (default)
+			// Remove only when clean and still at the starting commit; keep
+			// anything dirty or with new commits so work is never lost.
+			remove = clean
+		}
+
+		if remove {
+			if err := exec.Command("git", "-C", rec.Repo, "worktree", "remove", rec.Path).Run(); err == nil {
+				rec.Kept = false
+				logInfo("Removed clean worktree: %s", rec.Path)
+			} else {
+				logInfo("Keeping worktree (removal failed): %s", rec.Path)
+			}
+		} else {
+			logInfo("Keeping worktree: %s", rec.Path)
+		}
+	}
+}
+
+// writeWorktreeManifest writes the JSON manifest for all worktrees created this
+// run. It is a no-op when --worktree-manifest is unset or no worktree was
+// created (worktree setup never reached).
+func (a *App) writeWorktreeManifest() {
+	if a.WorktreeManifest == "" || len(a.worktrees) == 0 {
+		return
+	}
+	manifest := WorktreeManifest{Worktrees: a.worktrees}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		logWarn("Failed to encode worktree manifest: %v", err)
+		return
+	}
+	ensureDir(filepath.Dir(a.WorktreeManifest))
+	if err := os.WriteFile(a.WorktreeManifest, data, 0o644); err != nil {
+		logWarn("Failed to write worktree manifest %s: %v", a.WorktreeManifest, err)
+		return
+	}
+	logInfo("Wrote worktree manifest: %s", a.WorktreeManifest)
 }
 
 // ---------------------------------------------------------------------------
@@ -2112,6 +2289,12 @@ Core flags:
   --firewall-learn  Run once permissive-but-logging, then offer to add the
                     observed domains to network.extra_domains
   --extensions      List loaded capabilities and policy metadata
+
+Worktree orchestration (require worktree mode via policy execution.worktree):
+  --worktree-root PATH      Create worktrees under PATH instead of sibling dirs
+  --worktree-branch NAME    Create/checkout NAME in each worktree (vs detached)
+  --worktree-manifest PATH  Write a JSON manifest of created worktrees to PATH
+  --worktree-cleanup MODE   keep | keep-dirty (default: keep-dirty)
   --version, -V     Show version information
 
 Project policy:
