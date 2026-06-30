@@ -139,7 +139,7 @@ import (
 
 **Current built-in extensions with resolvers:** aws, azure, docker, firewall, gcp, gh, helm, kubectl, mcp, trivy
 
-**Current built-in extensions without resolvers (YAML-only):** dotnet, go, python, rust, ssh
+**Current built-in extensions without resolvers (YAML-only):** dotnet, go, opentofu, python, rust, ssh
 
 ### 3. Build Script (`build.sh`) -- optional
 
