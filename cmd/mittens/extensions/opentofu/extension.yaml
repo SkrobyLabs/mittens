@@ -1,0 +1,23 @@
+# opentofu extension for mittens
+# Installs the OpenTofu CLI (`tofu`), the open-source Terraform-compatible
+# infrastructure-as-code tool. Firewall domains cover the default OpenTofu
+# provider/module registry and the GitHub-hosted provider binaries that
+# `tofu init` downloads. The Terraform registry and HashiCorp release domains
+# are already in the base firewall, so Terraform-compatible providers work too.
+
+name: opentofu
+description: Install the OpenTofu CLI (tofu)
+
+flags:
+  - name: "--tofu"
+    description: "Install the OpenTofu CLI"
+    arg: "none"
+
+firewall:
+  - "registry.opentofu.org"      # OpenTofu provider/module registry
+  - "get.opentofu.org"           # OpenTofu install / release endpoint
+  - "objects.githubusercontent.com" # GitHub release assets (provider binaries)
+
+build:
+  script: "build.sh"
+  image_tag: "opentofu"
