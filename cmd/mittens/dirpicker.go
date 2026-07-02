@@ -174,20 +174,10 @@ func (m dirPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
-				}
-			}
+			m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.entries), m.height, -1)
 
 		case "down", "j":
-			if m.cursor < len(m.entries)-1 {
-				m.cursor++
-				if m.cursor >= m.offset+m.height {
-					m.offset = m.cursor - m.height + 1
-				}
-			}
+			m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.entries), m.height, 1)
 
 		case "right", "l":
 			if len(m.entries) > 0 {
@@ -250,10 +240,13 @@ func (m dirPickerModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "enter":
 		m.searching = false
 		return m, nil
-	case "down", "j":
+	case "up":
 		m.searching = false
-		m.cursor = 0
-		m.offset = 0
+		m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.entries), m.height, -1)
+		return m, nil
+	case "down":
+		m.searching = false
+		m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.entries), m.height, 1)
 		return m, nil
 	case "backspace", "ctrl+h":
 		if len(m.search) > 0 {
@@ -350,7 +343,7 @@ func (m dirPickerModel) View() string {
 	// Footer
 	b.WriteString("\n")
 	if m.searching {
-		b.WriteString(dpStyleHelp.Render("  type to search  down results  enter/esc close search  backspace delete"))
+		b.WriteString(dpStyleHelp.Render("  type to search  up/down results  enter/esc close search  backspace delete"))
 	} else {
 		b.WriteString(dpStyleHelp.Render("  enter done  ←/→ navigate  ctrl+enter enter folder  f search  space toggle rw  r toggle read-only  esc cancel"))
 	}
@@ -359,6 +352,39 @@ func (m dirPickerModel) View() string {
 		return fixedTerminalBlock(b.String(), m.termWidth, m.termHeight)
 	}
 	return b.String()
+}
+
+// stepCursor moves cursor by delta over a list of length n with wrap-around
+// (past the last item -> first, before the first -> last) and returns the
+// cursor together with a scroll offset that keeps it within a window of the
+// given height. It is a no-op returning (0, 0) for an empty list.
+func stepCursor(cursor, offset, length, height, delta int) (int, int) {
+	if length == 0 {
+		return 0, 0
+	}
+	if height <= 0 {
+		height = 1
+	}
+	cursor += delta
+	if cursor < 0 {
+		cursor = length - 1
+	} else if cursor >= length {
+		cursor = 0
+	}
+	// Bidirectional viewport clamp — both branches are required because wrap
+	// can move the cursor either direction in a single step. Mirrors the full
+	// clamp used in applySearch, not the one-directional inline snippets in the
+	// old up/down cases.
+	if cursor < offset {
+		offset = cursor
+	}
+	if cursor >= offset+height {
+		offset = cursor - height + 1
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return cursor, offset
 }
 
 func fixedTerminalBlock(content string, width, height int) string {

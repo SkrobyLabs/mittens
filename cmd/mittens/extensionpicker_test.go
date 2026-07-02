@@ -60,25 +60,50 @@ func TestExtensionPickerEscapeClosesSearch(t *testing.T) {
 	}
 }
 
-func TestExtensionPickerDownLeavesSearchAndFocusesFirstResult(t *testing.T) {
-	model := newExtensionPickerModel("Extensions", testPickerExtensions(), nil)
-	model.searching = true
-	model.search = "install"
-	model.applySearch()
-	model.cursor = 1
-	model.offset = 1
+func TestExtensionPickerArrowsLeaveSearchAndContinueFromCursor(t *testing.T) {
+	// Empty query keeps the full 3-item list (aws, dotnet, go) so the result
+	// set is deterministic and does not depend on which letters match.
+	newModel := func(cursor int) extensionPickerModel {
+		m := newExtensionPickerModel("Extensions", testPickerExtensions(), nil)
+		m.searching = true
+		m.search = ""
+		m.applySearch()
+		m.cursor = cursor
+		return m
+	}
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(extensionPickerModel)
-
+	// Down continues from the cursor (1 -> 2), leaving search.
+	updated, _ := newModel(1).Update(tea.KeyMsg{Type: tea.KeyDown})
+	model := updated.(extensionPickerModel)
 	if model.searching {
 		t.Fatal("down should close search mode")
 	}
-	if model.cursor != 0 || model.offset != 0 {
-		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
+	if model.cursor != 2 {
+		t.Fatalf("down cursor = %d, want 2", model.cursor)
 	}
-	if len(model.items) != 2 || model.items[0].name != "dotnet" {
-		t.Fatalf("items = %#v, want dotnet first", model.items)
+
+	// Up continues from the cursor (1 -> 0), leaving search.
+	updated, _ = newModel(1).Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(extensionPickerModel)
+	if model.searching {
+		t.Fatal("up should close search mode")
+	}
+	if model.cursor != 0 {
+		t.Fatalf("up cursor = %d, want 0", model.cursor)
+	}
+
+	// Search-exit wraps: Down from the last item -> first.
+	updated, _ = newModel(2).Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(extensionPickerModel)
+	if model.cursor != 0 {
+		t.Fatalf("down-wrap cursor = %d, want 0", model.cursor)
+	}
+
+	// Search-exit wraps: Up from the first item -> last.
+	updated, _ = newModel(0).Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(extensionPickerModel)
+	if model.cursor != 2 {
+		t.Fatalf("up-wrap cursor = %d, want 2", model.cursor)
 	}
 }
 
@@ -94,11 +119,36 @@ func TestExtensionPickerDownLeavesSearchWithNoResults(t *testing.T) {
 	if model.searching {
 		t.Fatal("down should close search mode")
 	}
+	// Exit now goes through stepCursor's empty-list no-op, leaving cursor/offset 0.
 	if model.cursor != 0 || model.offset != 0 {
 		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
 	}
 	if len(model.items) != 0 {
 		t.Fatalf("items = %#v, want none", model.items)
+	}
+}
+
+func TestExtensionPickerMainListWrapsAround(t *testing.T) {
+	// Down from the last item wraps to the first.
+	model := newExtensionPickerModel("Extensions", testPickerExtensions(), nil)
+	model.cursor = 2
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(extensionPickerModel)
+	if model.cursor != 0 {
+		t.Fatalf("down-wrap cursor = %d, want 0", model.cursor)
+	}
+
+	// Up from the first item wraps to the last, keeping it visible.
+	model = newExtensionPickerModel("Extensions", testPickerExtensions(), nil)
+	model.height = 2
+	model.cursor = 0
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(extensionPickerModel)
+	if model.cursor != 2 {
+		t.Fatalf("up-wrap cursor = %d, want 2", model.cursor)
+	}
+	if model.cursor < model.offset || model.cursor >= model.offset+model.height {
+		t.Fatalf("cursor %d outside viewport [%d,%d)", model.cursor, model.offset, model.offset+model.height)
 	}
 }
 

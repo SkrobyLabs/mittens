@@ -54,30 +54,85 @@ func TestDirPickerSearchFiltersAndCloses(t *testing.T) {
 	}
 }
 
-func TestDirPickerDownLeavesSearchAndFocusesFirstResult(t *testing.T) {
+func TestDirPickerArrowsLeaveSearchAndContinueFromCursor(t *testing.T) {
+	// Empty query keeps the full sorted list (.config, deployments, workspace).
+	// dirpicker search matches on the full path, which embeds the temp-dir name,
+	// so an empty query is used to keep the result set deterministic.
 	root := t.TempDir()
 	mkdir(t, filepath.Join(root, ".config"))
 	mkdir(t, filepath.Join(root, "deployments"))
 	mkdir(t, filepath.Join(root, "workspace"))
 
-	model := newDirPickerModel(root, nil, "")
-	model.searching = true
-	model.search = "e"
-	model.applySearch()
-	model.cursor = 1
-	model.offset = 1
+	newModel := func(cursor int) dirPickerModel {
+		m := newDirPickerModel(root, nil, "")
+		m.searching = true
+		m.search = ""
+		m.applySearch()
+		m.cursor = cursor
+		return m
+	}
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(dirPickerModel)
-
+	// Down continues from the cursor (1 -> 2), leaving search.
+	updated, _ := newModel(1).Update(tea.KeyMsg{Type: tea.KeyDown})
+	model := updated.(dirPickerModel)
 	if model.searching {
 		t.Fatal("down should close search mode")
 	}
-	if model.cursor != 0 || model.offset != 0 {
-		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
+	if model.cursor != 2 {
+		t.Fatalf("down cursor = %d, want 2", model.cursor)
 	}
-	if len(model.entries) == 0 || model.entries[0].name != ".config" {
-		t.Fatalf("entries = %#v, want .config first", model.entries)
+
+	// Up continues from the cursor (1 -> 0), leaving search.
+	updated, _ = newModel(1).Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(dirPickerModel)
+	if model.searching {
+		t.Fatal("up should close search mode")
+	}
+	if model.cursor != 0 {
+		t.Fatalf("up cursor = %d, want 0", model.cursor)
+	}
+
+	// Search-exit wraps: Down from the last entry -> first.
+	updated, _ = newModel(2).Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dirPickerModel)
+	if model.cursor != 0 {
+		t.Fatalf("down-wrap cursor = %d, want 0", model.cursor)
+	}
+
+	// Search-exit wraps: Up from the first entry -> last.
+	updated, _ = newModel(0).Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(dirPickerModel)
+	if model.cursor != 2 {
+		t.Fatalf("up-wrap cursor = %d, want 2", model.cursor)
+	}
+}
+
+func TestDirPickerMainListWrapsAround(t *testing.T) {
+	root := t.TempDir()
+	mkdir(t, filepath.Join(root, "alpha"))
+	mkdir(t, filepath.Join(root, "beta"))
+	mkdir(t, filepath.Join(root, "gamma"))
+
+	// Down from the last entry wraps to the first.
+	model := newDirPickerModel(root, nil, "")
+	model.cursor = 2
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dirPickerModel)
+	if model.cursor != 0 {
+		t.Fatalf("down-wrap cursor = %d, want 0", model.cursor)
+	}
+
+	// Up from the first entry wraps to the last, keeping it visible.
+	model = newDirPickerModel(root, nil, "")
+	model.height = 2
+	model.cursor = 0
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(dirPickerModel)
+	if model.cursor != 2 {
+		t.Fatalf("up-wrap cursor = %d, want 2", model.cursor)
+	}
+	if model.cursor < model.offset || model.cursor >= model.offset+model.height {
+		t.Fatalf("cursor %d outside viewport [%d,%d)", model.cursor, model.offset, model.offset+model.height)
 	}
 }
 
@@ -96,6 +151,7 @@ func TestDirPickerDownLeavesSearchWithNoResults(t *testing.T) {
 	if model.searching {
 		t.Fatal("down should close search mode")
 	}
+	// Exit now goes through stepCursor's empty-list no-op, leaving cursor/offset 0.
 	if model.cursor != 0 || model.offset != 0 {
 		t.Fatalf("cursor/offset = %d/%d, want 0/0", model.cursor, model.offset)
 	}

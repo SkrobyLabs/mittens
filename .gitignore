@@ -34,3 +34,4 @@ clipboard-sync.exe
 .gomodcache/*
 .gotmp/*
 .gopath/*
+.worktrees/

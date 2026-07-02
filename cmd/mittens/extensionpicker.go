@@ -111,19 +111,9 @@ func (m extensionPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
-				}
-			}
+			m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.items), m.height, -1)
 		case "down", "j":
-			if m.cursor < len(m.items)-1 {
-				m.cursor++
-				if m.cursor >= m.offset+m.height {
-					m.offset = m.cursor - m.height + 1
-				}
-			}
+			m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.items), m.height, 1)
 		case "f":
 			m.searching = true
 			m.search = ""
@@ -138,10 +128,13 @@ func (m extensionPickerModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case "esc", "enter":
 		m.searching = false
 		return m, nil
-	case "down", "j":
+	case "up":
 		m.searching = false
-		m.cursor = 0
-		m.offset = 0
+		m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.items), m.height, -1)
+		return m, nil
+	case "down":
+		m.searching = false
+		m.cursor, m.offset = stepCursor(m.cursor, m.offset, len(m.items), m.height, 1)
 		return m, nil
 	case "backspace", "ctrl+h":
 		if len(m.search) > 0 {
@@ -209,7 +202,7 @@ func (m extensionPickerModel) View() string {
 
 	b.WriteString("\n")
 	if m.searching {
-		b.WriteString(dpStyleHelp.Render("  type to search  down results  enter/esc close search  backspace delete"))
+		b.WriteString(dpStyleHelp.Render("  type to search  up/down results  enter/esc close search  backspace delete"))
 	} else {
 		b.WriteString(dpStyleHelp.Render("  enter select  f search  esc cancel"))
 	}
