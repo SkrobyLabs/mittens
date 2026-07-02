@@ -57,7 +57,6 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 		displayCurrentMCP(existing, existingAll)
 		var action string
 		if err := huh.NewSelect[string]().
-			Title("MCP servers (experimental)").
 			Options(huh.NewOption("Keep", "keep"), huh.NewOption("Edit", "edit")).
 			Value(&action).
 			Run(); err != nil {
