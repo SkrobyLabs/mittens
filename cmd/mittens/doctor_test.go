@@ -60,3 +60,59 @@ func TestMigrateAllProjects(t *testing.T) {
 		t.Errorf("v2 policy.yaml was modified:\n%s", after)
 	}
 }
+
+func TestMigrateUserDefaults(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmpHome)
+
+	// A legacy flat defaults file with no defaults.yaml.
+	if err := SaveUserDefaults([]string{"--provider codex", "--firewall-dev"}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &doctorReport{}
+	d.migrateUserDefaults(nil)
+	if d.problems != 0 {
+		t.Fatalf("migrateUserDefaults reported %d problems, want 0", d.problems)
+	}
+
+	data, err := os.ReadFile(UserDefaultsPolicyPath())
+	if err != nil {
+		t.Fatalf("expected migrated defaults.yaml: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{"name: codex", "firewall: dev"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("migrated defaults missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestMigrateUserDefaults_AlreadyStructured(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmpHome)
+
+	policy := defaultProjectPolicy()
+	policy.Provider.Name = "gemini"
+	if err := SaveUserDefaultsPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(UserDefaultsPolicyPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &doctorReport{}
+	d.migrateUserDefaults(nil)
+	if d.problems != 0 {
+		t.Fatalf("reported %d problems, want 0", d.problems)
+	}
+
+	after, err := os.ReadFile(UserDefaultsPolicyPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("structured defaults.yaml was modified:\n%s", after)
+	}
+}

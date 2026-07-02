@@ -58,16 +58,10 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	editMode := false
-	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
-	var existMCPServers []MCPServerPolicy
-	var existMCPAll bool
-	var existProviderConfig ProviderWizardConfig
-	var existProviderState ProviderWizardState
+	var seed wizardSeed
 
 	if len(existing) > 0 {
 		displayWizardExistingConfig(workspace, source, existing, extensions)
-		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
-		existProviderConfig = loadWizardProviderConfig(workspace, extensions)
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -96,46 +90,53 @@ func runWizard(extensions []*registry.Extension) error {
 			return nil
 		case "edit":
 			editMode = true
-			existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
-			existExts, _ = splitMCPLines(existExts)
-			existMCPServers, existMCPAll = loadWizardMCP(workspace, extensions)
-			existProviderState = loadWizardProviderState(workspace, extensions, existProviders, existProviderConfig)
+			seed = wizardEditSeed(workspace, extensions, existing)
+		case "overwrite":
+			// Start fresh == init-from-default: seed from the user defaults baseline.
+			seed, editMode = defaultsSeed(extensions)
 		}
 		fmt.Fprintln(os.Stderr)
+	} else {
+		// No project policy: pre-seed every step from the user defaults baseline.
+		seed, editMode = defaultsSeed(extensions)
+		if editMode {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("Starting from your user defaults."))
+			fmt.Fprintln(os.Stderr)
+		}
 	}
 
 	// ── Step 1: Provider ───────────────────────────────────────────────────
-	providerLines, providerConfig, err := wizardProvider(workspace, editMode, existProviderState)
+	providerLines, providerConfig, err := wizardProvider(workspace, editMode, seed.providerState)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
 	// ── Step 2: Extra directories ──────────────────────────────────────────
-	dirLines, err := wizardDirs(workspace, editMode, existDirs)
+	dirLines, err := wizardDirs(workspace, editMode, seed.dirs)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
 	// ── Step 3: Extensions ─────────────────────────────────────────────────
-	extLines, err := wizardExtensions(extensions, editMode, existExts)
+	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
 	// ── Step 4: MCP servers ────────────────────────────────────────────────
-	mcpServers, mcpAll, err := wizardMCP(editMode, existMCPServers, existMCPAll, providerNameFromLines(providerLines), workspace)
+	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), workspace)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
 	// ── Step 5: Network boundary ───────────────────────────────────────────
-	networkLines, extraDomains, err := wizardNetworkBoundary(workspace, editMode, existFirewall, existOpts, existExtraDomains)
+	networkLines, extraDomains, err := wizardNetworkBoundary(workspace, editMode, seed.firewall, seed.opts, seed.extraDomains)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
 	// ── Step N: Options ────────────────────────────────────────────────────
-	optLines, err := wizardOptions(editMode, existOpts)
+	optLines, err := wizardOptions(editMode, seed.opts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
@@ -221,51 +222,50 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 	}
 
 	editMode := false
-	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
-	var existMCPServers []MCPServerPolicy
-	var existMCPAll bool
-	var existProviderConfig ProviderWizardConfig
-	var existProviderState ProviderWizardState
+	var seed wizardSeed
 
 	if len(existing) > 0 {
 		editMode = true
-		existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
-		existExts, _ = splitMCPLines(existExts)
-		existMCPServers, existMCPAll = loadWizardMCP(workspace, extensions)
-		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
-		existProviderConfig = loadWizardProviderConfig(workspace, extensions)
-		existProviderState = loadWizardProviderState(workspace, extensions, existProviders, existProviderConfig)
+		seed = wizardEditSeed(workspace, extensions, existing)
 		displayWizardExistingConfig(workspace, source, existing, extensions)
+	} else {
+		// No project policy: seed the ephemeral session from the user defaults
+		// baseline (init-from-default).
+		seed, editMode = defaultsSeed(extensions)
+		if editMode {
+			fmt.Fprintln(os.Stderr, wizardDim.Render("Starting from your user defaults."))
+			fmt.Fprintln(os.Stderr)
+		}
 	}
 
-	providerLines, _, err := wizardProvider(workspace, editMode, existProviderState)
+	providerLines, _, err := wizardProvider(workspace, editMode, seed.providerState)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	dirLines, err := wizardDirs(workspace, editMode, existDirs)
+	dirLines, err := wizardDirs(workspace, editMode, seed.dirs)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	extLines, err := wizardExtensions(extensions, editMode, existExts)
+	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	mcpServers, mcpAll, err := wizardMCP(editMode, existMCPServers, existMCPAll, providerNameFromLines(providerLines), workspace)
+	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), workspace)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Session runs are ephemeral; pass an empty workspace to skip arming a
 	// one-time learn pass for a "next run" that won't share this config.
-	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, existFirewall, existOpts, existExtraDomains)
+	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, seed.firewall, seed.opts, seed.extraDomains)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	optLines, err := wizardOptions(editMode, existOpts)
+	optLines, err := wizardOptions(editMode, seed.opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -294,19 +294,33 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 // Step 0: User-wide defaults
 // ---------------------------------------------------------------------------
 
+// wizardUserDefaults edits the user-wide defaults baseline. It walks the same
+// steps as the project wizard (provider, directories, extensions, MCP, network)
+// plus the WSL image-paste-key prompt, seeded from the current defaults, and
+// saves the result as the structured defaults.yaml. The baseline is a
+// seed/template: it pre-seeds `mittens init` and is the launch base only for a
+// project with no policy.
 func wizardUserDefaults() error {
+	extensions, err := loadExtensions()
+	if err != nil {
+		return fmt.Errorf("loading extensions for defaults wizard: %w", err)
+	}
+
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardTitle.Render("User-wide defaults"))
-	fmt.Fprintln(os.Stderr, wizardDim.Render("These defaults apply to all projects. You can override them per-project."))
+	fmt.Fprintln(os.Stderr, wizardDim.Render("These defaults seed new projects (mittens init) and are the launch base\nfor a project with no policy. Editing them later does not retroactively\nchange a project that already has a policy."))
 	fmt.Fprintln(os.Stderr)
 
-	// If defaults already exist, show them and offer edit/overwrite/cancel.
-	existing, _ := loadUserDefaultsRaw()
-	if len(existing) > 0 {
-		fmt.Fprintf(os.Stderr, "Existing defaults: %s\n\n", UserDefaultsPath())
-		for _, line := range existing {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+line))
-		}
+	current, source, err := LoadUserDefaultsPolicy(extensions)
+	if err != nil {
+		return err
+	}
+
+	editMode := false
+	var seed wizardSeed
+	if current != nil {
+		fmt.Fprintf(os.Stderr, "Existing defaults: %s\n\n", userDefaultsSourcePath(source))
+		fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(current, homeDir()).Render()))
 		fmt.Fprintln(os.Stderr)
 
 		var action string
@@ -314,6 +328,7 @@ func wizardUserDefaults() error {
 			Title("Existing user defaults found").
 			Options(
 				huh.NewOption("Keep current defaults", "keep"),
+				huh.NewOption("Edit (start from current)", "edit"),
 				huh.NewOption("Overwrite (start fresh)", "overwrite"),
 				huh.NewOption("Cancel", "cancel"),
 			).
@@ -327,113 +342,228 @@ func wizardUserDefaults() error {
 		case "cancel":
 			fmt.Fprintln(os.Stderr, "Cancelled.")
 			return nil
+		case "edit":
+			editMode = true
+			seed = wizardSeedFromPolicy(current)
+		case "overwrite":
+			// Start fresh: empty seed, non-edit mode.
 		}
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Parse existing defaults to pre-select current values.
-	existProvider := "claude"
-	existPasteKey := "meta+v"
-	existFirewall := "strict"
-	for _, line := range existing {
-		fields := strings.Fields(line)
-		if len(fields) == 2 {
-			switch fields[0] {
-			case "--provider":
-				existProvider = fields[1]
-			case "--image-paste-key":
-				existPasteKey = fields[1]
-			}
-		}
-		if len(fields) >= 1 {
-			switch fields[0] {
-			case "--firewall-dev":
-				existFirewall = "dev"
-			case "--no-firewall":
-				existFirewall = "off"
-			}
-		}
+	policy, err := runBaselineWizardSteps(extensions, editMode, seed, current)
+	if err != nil {
+		return gracefulAbort(err)
 	}
-
-	var lines []string
-
-	// 1. Default provider.
-	provider := existProvider
-	if err := huh.NewSelect[string]().
-		Title("Default AI provider").
-		Options(
-			huh.NewOption("Claude (Anthropic)", "claude"),
-			huh.NewOption("Codex (OpenAI)", "codex"),
-			huh.NewOption("Gemini (Google)", "gemini"),
-		).
-		Value(&provider).
-		Run(); err != nil {
-		return err
-	}
-	if provider != "claude" {
-		lines = append(lines, "--provider "+provider)
-	}
-
-	// 2. Clipboard paste key (WSL only — on macOS/Linux meta+v is always correct).
-	pasteKey := existPasteKey
-	if isWSL() {
-		if err := huh.NewSelect[string]().
-			Title("Image paste keybinding").
-			Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
-			Options(
-				huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
-				huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
-			).
-			Value(&pasteKey).
-			Run(); err != nil {
-			return err
-		}
-		if pasteKey == "ctrl+v" {
-			fmt.Fprintln(os.Stderr)
-			fmt.Fprintln(os.Stderr, "  ⚠ Windows Terminal intercepts Ctrl+V for text paste.")
-			fmt.Fprintln(os.Stderr, "    To use Ctrl+V for image paste inside mittens, rebind")
-			fmt.Fprintln(os.Stderr, "    the paste action in Windows Terminal settings to another")
-			fmt.Fprintln(os.Stderr, "    shortcut (e.g. Ctrl+Shift+V).")
-			fmt.Fprintln(os.Stderr)
-			lines = append(lines, "--image-paste-key "+pasteKey)
-		}
-	}
-
-	// 3. Default firewall mode.
-	fwMode := existFirewall
-	if err := huh.NewSelect[string]().
-		Title("Default firewall mode").
-		Options(
-			huh.NewOption("Strict — git, registries, package managers only", "strict"),
-			huh.NewOption("Developer-friendly (--firewall-dev) — adds cloud APIs, apt, CDN", "dev"),
-			huh.NewOption("Disabled (--no-firewall) — allow all outbound traffic", "off"),
-		).
-		Value(&fwMode).
-		Run(); err != nil {
-		return err
-	}
-	switch fwMode {
-	case "dev":
-		lines = append(lines, "--firewall-dev")
-	case "off":
-		lines = append(lines, "--no-firewall")
-	}
-
-	if err := SaveUserDefaults(lines); err != nil {
+	if err := SaveUserDefaultsPolicy(policy); err != nil {
 		return fmt.Errorf("saving user defaults: %w", err)
 	}
 
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardSuccess.Render("User defaults saved to: "+UserDefaultsPath()))
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render("User defaults saved to: "+UserDefaultsPolicyPath()))
 	fmt.Fprintln(os.Stderr)
-	if len(lines) > 0 {
-		for _, l := range lines {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("  "+l))
-		}
-		fmt.Fprintln(os.Stderr)
-	}
+	fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, homeDir()).Render()))
+	fmt.Fprintln(os.Stderr)
 
 	return nil
+}
+
+// userDefaultsSourcePath returns the on-disk path for the loaded defaults so the
+// wizard reports where the current baseline lives (structured vs legacy).
+func userDefaultsSourcePath(source PolicySource) string {
+	if source == PolicySourceLegacy {
+		return UserDefaultsPath()
+	}
+	return UserDefaultsPolicyPath()
+}
+
+// runBaselineWizardSteps walks the shared baseline steps (provider, directories,
+// extensions, MCP, network, options, WSL paste key) and assembles a policy. It
+// is used by the user-defaults wizard; the picker is anchored at the user's home
+// directory and an empty workspace is passed to the network step so no
+// project-specific firewall-learn sentinel is armed.
+func runBaselineWizardSteps(extensions []*registry.Extension, editMode bool, seed wizardSeed, current *ProjectPolicy) (*ProjectPolicy, error) {
+	home := homeDir()
+
+	providerLines, providerConfig, err := wizardProvider(home, editMode, seed.providerState)
+	if err != nil {
+		return nil, err
+	}
+
+	dirLines, err := wizardDirs(home, editMode, seed.dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
+	if err != nil {
+		return nil, err
+	}
+
+	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), home)
+	if err != nil {
+		return nil, err
+	}
+
+	// Empty workspace: never arm a project-specific learn pass from the
+	// user-global defaults wizard (mirrors wizardSession).
+	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, seed.firewall, seed.opts, seed.extraDomains)
+	if err != nil {
+		return nil, err
+	}
+
+	optLines, err := wizardOptions(editMode, seed.opts)
+	if err != nil {
+		return nil, err
+	}
+
+	existingPasteKey := ""
+	if current != nil {
+		existingPasteKey = current.Options["image_paste_key"]
+	}
+	pasteKeyLines, err := wizardImagePasteKey(existingPasteKey)
+	if err != nil {
+		return nil, err
+	}
+	optLines = append(optLines, pasteKeyLines...)
+
+	assembly := WizardAssemblyInput{
+		ProviderLines:  providerLines,
+		ProviderConfig: providerConfig,
+		DirLines:       dirLines,
+		ExtensionLines: extLines,
+		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
+		MCPServers:     mcpServers,
+		MCPAll:         mcpAll,
+		NetworkLines:   networkLines,
+		OptionLines:    optLines,
+		ExtraDomains:   extraDomains,
+	}
+	policy, _, err := assembleWizardPolicy(assembly, extensions)
+	if err != nil {
+		return nil, fmt.Errorf("building defaults policy: %w", err)
+	}
+	return policy, nil
+}
+
+// wizardImagePasteKey prompts for the WSL image paste keybinding, returning the
+// equivalent option line(s). On non-WSL hosts meta+v is always correct, so it
+// prompts nothing but preserves any existing non-default value.
+func wizardImagePasteKey(existing string) ([]string, error) {
+	if !isWSL() {
+		if existing != "" && existing != "meta+v" {
+			return []string{"--image-paste-key " + existing}, nil
+		}
+		return nil, nil
+	}
+	pasteKey := existing
+	if pasteKey == "" {
+		pasteKey = "meta+v"
+	}
+	if err := huh.NewSelect[string]().
+		Title("Image paste keybinding").
+		Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
+		Options(
+			huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
+			huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
+		).
+		Value(&pasteKey).
+		Run(); err != nil {
+		return nil, err
+	}
+	if pasteKey == "ctrl+v" {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  ⚠ Windows Terminal intercepts Ctrl+V for text paste.")
+		fmt.Fprintln(os.Stderr, "    To use Ctrl+V for image paste inside mittens, rebind")
+		fmt.Fprintln(os.Stderr, "    the paste action in Windows Terminal settings to another")
+		fmt.Fprintln(os.Stderr, "    shortcut (e.g. Ctrl+Shift+V).")
+		fmt.Fprintln(os.Stderr)
+		return []string{"--image-paste-key ctrl+v"}, nil
+	}
+	return nil, nil
+}
+
+// wizardSeed holds the pre-selection state the interactive wizard steps consume,
+// derived from a base policy — a project policy for edit mode, or the user
+// defaults baseline for init-from-default pre-seeding.
+type wizardSeed struct {
+	dirs          []string
+	exts          []string
+	firewall      []string
+	opts          []string
+	extraDomains  []string
+	mcpServers    []MCPServerPolicy
+	mcpAll        bool
+	providerState ProviderWizardState
+}
+
+// wizardSeedFromPolicy derives wizard pre-selection state from a base policy. It
+// reuses the same legacy-line categorisation the edit path uses so seeding is
+// identical whether the base is a project policy or the user defaults baseline.
+func wizardSeedFromPolicy(policy *ProjectPolicy) wizardSeed {
+	if policy == nil {
+		return wizardSeed{}
+	}
+	lines := legacyArgsToConfigLines(policy.ToLegacyFlags())
+	dirs, _, exts, firewall, opts := parseExistingConfig(lines)
+	exts, _ = splitMCPLines(exts)
+	return wizardSeed{
+		dirs:          dirs,
+		exts:          filterNonExtensionLines(exts),
+		firewall:      firewall,
+		opts:          opts,
+		extraDomains:  append([]string(nil), policy.Network.ExtraDomains...),
+		mcpServers:    append([]MCPServerPolicy(nil), policy.MCP.Servers...),
+		mcpAll:        policy.MCP.All,
+		providerState: providerWizardStateFromPolicy(policy.Provider),
+	}
+}
+
+// filterNonExtensionLines drops option flags that parseExistingConfig lumps into
+// the extension bucket (they are handled by dedicated steps, not the extension
+// picker).
+func filterNonExtensionLines(lines []string) []string {
+	var out []string
+	for _, line := range lines {
+		switch configLineFlag(line) {
+		case "--image-paste-key", "--name":
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// defaultsSeed loads the user defaults baseline as wizard seed state for
+// init-from-default (a new project, or "overwrite / start fresh"). editMode is
+// true only when a non-empty baseline exists, so the wizard pre-selects without
+// a spurious "existing configuration" prompt.
+func defaultsSeed(extensions []*registry.Extension) (wizardSeed, bool) {
+	policy, _, err := LoadUserDefaultsPolicy(extensions)
+	if err != nil || policy == nil {
+		return wizardSeed{}, false
+	}
+	return wizardSeedFromPolicy(policy), true
+}
+
+// wizardEditSeed builds seed state for editing an existing project policy. It
+// reads structured MCP/provider details from the saved policy where available
+// and categorises the rest from the existing config lines.
+func wizardEditSeed(workspace string, extensions []*registry.Extension, existing []string) wizardSeed {
+	dirs, providers, exts, firewall, opts := parseExistingConfig(existing)
+	exts, _ = splitMCPLines(exts)
+	mcpServers, mcpAll := loadWizardMCP(workspace, extensions)
+	providerConfig := loadWizardProviderConfig(workspace, extensions)
+	return wizardSeed{
+		dirs:          dirs,
+		exts:          exts,
+		firewall:      firewall,
+		opts:          opts,
+		extraDomains:  loadWizardExtraDomains(workspace, extensions),
+		mcpServers:    mcpServers,
+		mcpAll:        mcpAll,
+		providerState: loadWizardProviderState(workspace, extensions, providers, providerConfig),
+	}
 }
 
 // ---------------------------------------------------------------------------

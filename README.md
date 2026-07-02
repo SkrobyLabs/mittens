@@ -63,7 +63,7 @@ The installed binary carries the built-in Docker runtime files with it. If no ad
 cd your-project
 mittens                  # run in a container — that's it
 mittens init             # interactive project setup (extensions, dirs, firewall)
-mittens init --defaults  # set user-wide defaults (provider, firewall, paste key)
+mittens init --defaults  # set the user-wide defaults baseline (provider, dirs, extensions, MCP, firewall)
 mittens init --help      # see all init subcommands
 mittens policy show      # inspect the effective project policy and boundary
 mittens policy set host.open_urls deny

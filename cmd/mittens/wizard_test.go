@@ -645,3 +645,66 @@ func TestExistingCloudConfig(t *testing.T) {
 		t.Fatalf("empty config = (%q, %#v), want (select, nil)", action, selected)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// wizardSeedFromPolicy — pre-seed state from a base policy
+// ---------------------------------------------------------------------------
+
+func TestWizardSeedFromPolicy(t *testing.T) {
+	policy := defaultProjectPolicy()
+	policy.Provider.Name = "codex"
+	policy.Workspace.Mounts = []PolicyMount{{Path: "/shared", Access: "ro"}}
+	policy.Network.Firewall = "dev"
+	policy.Network.ExtraDomains = []string{"api.example.com"}
+	policy.Capabilities = []CapabilityPolicy{{Name: "aws"}}
+	policy.MCP.Servers = []MCPServerPolicy{{Name: "shortcut", Mode: "mount"}}
+	policy.Options = map[string]string{"image_paste_key": "ctrl+v"}
+
+	seed := wizardSeedFromPolicy(policy)
+
+	if seed.providerState.Default != "codex" {
+		t.Fatalf("provider default = %q, want codex", seed.providerState.Default)
+	}
+	if len(seed.dirs) != 1 || seed.dirs[0] != "--dir-ro /shared" {
+		t.Fatalf("dirs = %v", seed.dirs)
+	}
+	if !hasLine(seed.firewall, "--firewall-dev") {
+		t.Fatalf("firewall = %v, want --firewall-dev", seed.firewall)
+	}
+	if len(seed.extraDomains) != 1 || seed.extraDomains[0] != "api.example.com" {
+		t.Fatalf("extraDomains = %v", seed.extraDomains)
+	}
+	if len(seed.mcpServers) != 1 || seed.mcpServers[0].Mode != "mount" {
+		t.Fatalf("mcpServers = %v", seed.mcpServers)
+	}
+	// The image-paste-key option must not leak into the extension bucket.
+	for _, line := range seed.exts {
+		if configLineFlag(line) == "--image-paste-key" {
+			t.Fatalf("image-paste-key leaked into exts: %v", seed.exts)
+		}
+	}
+	if !hasLine(seed.exts, "--aws") {
+		t.Fatalf("exts = %v, want --aws", seed.exts)
+	}
+}
+
+func TestWizardSeedFromPolicy_Nil(t *testing.T) {
+	seed := wizardSeedFromPolicy(nil)
+	if seed.providerState.Default != "" || len(seed.dirs) != 0 || len(seed.exts) != 0 {
+		t.Fatalf("nil policy should yield empty seed, got %+v", seed)
+	}
+}
+
+func TestFilterNonExtensionLines(t *testing.T) {
+	in := []string{"--aws", "--image-paste-key ctrl+v", "--dotnet 8", "--name foo"}
+	got := filterNonExtensionLines(in)
+	want := []string{"--aws", "--dotnet 8"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

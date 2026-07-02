@@ -2317,7 +2317,7 @@ Usage: mittens [flags] [-- provider-args...]
 Commands:
   help                          Show this help message
   init                          Interactive project setup wizard
-  init --defaults               Edit user-wide defaults (provider, firewall, paste key)
+  init --defaults               Edit user-wide defaults baseline (provider, dirs, extensions, MCP, firewall)
   init --profile NAME           Configure a model profile (model + effort)
   init --profile NAME --delete  Delete a model profile
   logs [-f]                     Show broker logs (-f to follow)

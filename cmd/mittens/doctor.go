@@ -49,6 +49,7 @@ func runDoctor(args []string) error {
 
 	if migrateAll {
 		d.migrateAllProjects(exts)
+		d.migrateUserDefaults(exts)
 	} else {
 		d.checkProjectPolicy(exts)
 	}
@@ -123,10 +124,13 @@ func (d *doctorReport) checkPaths() {
 	} else {
 		d.ok("Broker transport: unix socket")
 	}
-	if UserDefaultsExist() {
-		d.ok("User defaults: %s", UserDefaultsPath())
-	} else {
+	switch {
+	case !UserDefaultsExist():
 		d.warn("No user defaults set (optional; run 'mittens init --defaults')")
+	case fileExists(UserDefaultsPolicyPath()):
+		d.ok("User defaults: %s", UserDefaultsPolicyPath())
+	default:
+		d.warn("User defaults: legacy %s (run 'mittens doctor --migrate-all' to convert)", UserDefaultsPath())
 	}
 }
 
@@ -199,4 +203,27 @@ func (d *doctorReport) migrateAllProjects(exts []*registry.Extension) {
 		migrated++
 	}
 	d.ok("Migrated %d legacy project config(s); %d already structured", migrated, skipped)
+}
+
+// migrateUserDefaults converts a legacy flat ~/.mittens/defaults file into the
+// structured defaults.yaml, leaving an already-structured baseline untouched.
+func (d *doctorReport) migrateUserDefaults(exts []*registry.Extension) {
+	if fileExists(UserDefaultsPolicyPath()) {
+		d.ok("User defaults: already structured (defaults.yaml)")
+		return
+	}
+	policy, source, err := LoadUserDefaultsPolicy(exts)
+	if err != nil {
+		d.fail("User defaults: %v", err)
+		return
+	}
+	if policy == nil || source != PolicySourceLegacy {
+		d.ok("No legacy user defaults to migrate")
+		return
+	}
+	if err := SaveUserDefaultsPolicy(policy); err != nil {
+		d.fail("User defaults: migration failed: %v", err)
+		return
+	}
+	d.ok("Migrated legacy user defaults → defaults.yaml")
 }

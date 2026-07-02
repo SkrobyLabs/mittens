@@ -433,3 +433,100 @@ func TestSaveProfileConfigRoundTrip(t *testing.T) {
 		t.Fatalf("loaded deep preset = %v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// User defaults: structured storage and legacy migration
+// ---------------------------------------------------------------------------
+
+func TestLoadUserDefaultsPolicy_None(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	policy, source, err := LoadUserDefaultsPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy != nil || source != PolicySourceNone {
+		t.Fatalf("got (%v, %q), want (nil, none)", policy, source)
+	}
+	if UserDefaultsExist() {
+		t.Fatal("UserDefaultsExist should be false with no defaults")
+	}
+}
+
+func TestLoadUserDefaultsPolicy_PrefersStructured(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+
+	// A legacy flat file says codex; the structured file says gemini and must win.
+	if err := SaveUserDefaults([]string{"--provider codex"}); err != nil {
+		t.Fatal(err)
+	}
+	structured := defaultProjectPolicy()
+	structured.Provider.Name = "gemini"
+	if err := SaveUserDefaultsPolicy(structured); err != nil {
+		t.Fatal(err)
+	}
+
+	policy, source, err := LoadUserDefaultsPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != PolicySourceV2 {
+		t.Fatalf("source = %q, want v2", source)
+	}
+	if policy.Provider.Name != "gemini" {
+		t.Fatalf("provider = %q, want gemini from defaults.yaml", policy.Provider.Name)
+	}
+}
+
+func TestLoadUserDefaultsPolicy_LegacyFallback(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	if err := SaveUserDefaults([]string{"--provider codex", "--no-firewall"}); err != nil {
+		t.Fatal(err)
+	}
+
+	policy, source, err := LoadUserDefaultsPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != PolicySourceLegacy {
+		t.Fatalf("source = %q, want legacy", source)
+	}
+	if policy.Provider.Name != "codex" || policy.Network.Firewall != "disabled" {
+		t.Fatalf("policy = %+v, want codex + disabled firewall", policy)
+	}
+	if !UserDefaultsExist() {
+		t.Fatal("UserDefaultsExist should be true with legacy file")
+	}
+}
+
+func TestSaveUserDefaultsPolicy_RoundTrip(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	policy := defaultProjectPolicy()
+	policy.Provider.Name = "codex"
+	policy.Network.Firewall = "dev"
+	policy.Workspace.Mounts = []PolicyMount{{Path: "/shared", Access: "ro"}}
+	policy.MCP.Servers = []MCPServerPolicy{{Name: "shortcut", Mode: "mount"}}
+
+	if err := SaveUserDefaultsPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(UserDefaultsPolicyPath()) {
+		t.Fatalf("defaults.yaml not written at %s", UserDefaultsPolicyPath())
+	}
+
+	loaded, source, err := LoadUserDefaultsPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != PolicySourceV2 {
+		t.Fatalf("source = %q, want v2", source)
+	}
+	if loaded.Provider.Name != "codex" || loaded.Network.Firewall != "dev" {
+		t.Fatalf("loaded = %+v", loaded)
+	}
+	if len(loaded.Workspace.Mounts) != 1 || loaded.Workspace.Mounts[0].Path != "/shared" {
+		t.Fatalf("mounts = %+v", loaded.Workspace.Mounts)
+	}
+	if len(loaded.MCP.Servers) != 1 || loaded.MCP.Servers[0].Mode != "mount" {
+		t.Fatalf("mcp servers = %+v", loaded.MCP.Servers)
+	}
+}

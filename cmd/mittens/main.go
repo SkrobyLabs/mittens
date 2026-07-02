@@ -159,12 +159,10 @@ func runMain(args []string) error {
 	firewallext.EmbeddedDevConf = embeddedFirewallDevConf
 
 	// 3. Load config: either ephemeral (--session wizard) or from disk.
-	var userArgs []string
+	var defaultsPolicy *ProjectPolicy
 	var projectPolicy *ProjectPolicy
 
 	if sessionMode {
-		userArgs, _ = LoadUserDefaults()
-
 		ephemeralLines, ephemeralDomains, err := wizardSession(app.Extensions)
 		if err != nil {
 			if err == huh.ErrUserAborted {
@@ -197,16 +195,11 @@ func runMain(args []string) error {
 		}
 
 		if !noConfig {
-			userArgs, _ = LoadUserDefaults()
-			if len(userArgs) > 0 {
-				logInfo("Loaded user defaults")
-			}
-
 			if policyPath != "" {
 				// Explicit per-run policy file. It fully replaces the
 				// workspace-derived project policy and is never written back
-				// (so concurrent runs can pass distinct throwaway files safely);
-				// user defaults still merge underneath, then this policy wins.
+				// (so concurrent runs can pass distinct throwaway files safely).
+				// It is standalone: user defaults are NOT merged underneath.
 				policy, err := loadPolicyFile(policyPath)
 				if err != nil {
 					return fmt.Errorf("loading --policy file: %w", err)
@@ -231,31 +224,20 @@ func runMain(args []string) error {
 						logInfo("Migrated legacy project config to policy.yaml")
 					}
 					logInfo("Loaded project config for %s", ProjectDir(workspace))
+				} else {
+					// User defaults form the launch base only when this project
+					// has no policy (init-from-default). Load them best-effort so
+					// a broken or unwritable global defaults file cannot block a
+					// launch that would use the built-in defaults anyway.
+					defaultsPolicy = loadDefaultsBaseline(app.Extensions)
 				}
 			}
 		}
 	}
 
-	// 5. Apply user defaults, then structured project/session policy, then CLI runtime args.
-	provider, err := resolveProviderFromArgs(userArgs)
-	if err != nil {
-		return err
-	}
-	app.Provider = provider
-
-	if err := app.ParseFlags(userArgs); err != nil {
-		return err
-	}
-	if projectPolicy != nil {
-		provider, err := providerByName(projectPolicy.Provider.Name)
-		if err != nil {
-			return err
-		}
-		provider.ApplyPolicy(projectPolicy.Provider)
-		app.Provider = provider
-		app.applyProjectPolicy(projectPolicy)
-	}
-	if err := app.ParseFlags(args); err != nil {
+	// 5. Assemble the effective App state from the base layer and CLI runtime
+	// args.
+	if err := app.applyLaunchConfig(projectPolicy, defaultsPolicy, args); err != nil {
 		return err
 	}
 
@@ -362,7 +344,7 @@ Usage: mittens init [command]
 
 Commands:
   (none)                        Interactive project setup wizard
-  --defaults                    Edit user-wide defaults (provider, firewall, paste key)
+  --defaults                    Edit user-wide defaults baseline (provider, dirs, extensions, MCP, firewall)
   --profile NAME                Configure a model profile (model + effort)
   --profile NAME --delete       Delete a model profile
   --profile NAME --provider P   Configure profile for a specific provider (default: claude)
@@ -428,23 +410,53 @@ func runVersion(args []string) error {
 	return nil
 }
 
-func resolveProviderFromArgs(args []string) (*Provider, error) {
-	provider := DefaultProvider()
-	for i := 0; i < len(args); i++ {
-		if args[i] != "--provider" {
-			continue
-		}
-		if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-			return nil, fmt.Errorf("--provider requires an argument")
-		}
-		p, err := providerByName(args[i+1])
-		if err != nil {
-			return nil, err
-		}
-		provider = p
-		i++
+// loadDefaultsBaseline loads the user defaults baseline used as the launch base
+// for a project with no policy. It is best-effort: a missing, malformed, or
+// unwritable global defaults file logs a warning and yields nil (falling back to
+// the built-in defaults) rather than aborting the launch. A legacy flat defaults
+// file is opportunistically migrated to defaults.yaml.
+func loadDefaultsBaseline(extensions []*registry.Extension) *ProjectPolicy {
+	dp, source, err := LoadUserDefaultsPolicy(extensions)
+	if err != nil {
+		logWarn("Ignoring user defaults: %v", err)
+		return nil
 	}
-	return provider, nil
+	if dp == nil {
+		return nil
+	}
+	if source == PolicySourceLegacy {
+		if err := SaveUserDefaultsPolicy(dp); err != nil {
+			logWarn("Could not migrate legacy user defaults to defaults.yaml: %v", err)
+		} else {
+			logInfo("Migrated legacy user defaults to defaults.yaml")
+		}
+	}
+	return dp
+}
+
+// applyLaunchConfig assembles the effective App state from the base policy and
+// CLI runtime args. User defaults (defaultsPolicy) are a seed/template, not a
+// runtime overlay: they form the base only when there is no project/session
+// policy (init-from-default). When a project or session policy (or --policy
+// file) is present it is the sole base, so `mittens init`/`policy show` stay
+// WYSIWYG and defaults never leak in invisibly underneath an existing policy.
+// CLI runtime args apply last, on top of whichever base was chosen.
+func (a *App) applyLaunchConfig(projectPolicy, defaultsPolicy *ProjectPolicy, cliArgs []string) error {
+	base := projectPolicy
+	if base == nil && defaultsPolicy != nil {
+		base = defaultsPolicy
+		logInfo("Applying user defaults (no project policy)")
+	}
+	if base != nil {
+		provider, err := providerByName(base.Provider.Name)
+		if err != nil {
+			return err
+		}
+		provider.ApplyPolicy(base.Provider)
+		a.Provider = provider
+		a.applyProjectPolicy(base)
+	}
+	return a.ParseFlags(cliArgs)
 }
 
 func providerByName(name string) (*Provider, error) {

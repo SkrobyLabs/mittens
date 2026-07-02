@@ -48,6 +48,73 @@ func TestParseFlags_CoreBooleans(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// applyLaunchConfig — user defaults are seed-only, never overlaid under a policy
+// ---------------------------------------------------------------------------
+
+func defaultsPolicyForTest(provider string, mounts ...PolicyMount) *ProjectPolicy {
+	p := defaultProjectPolicy()
+	if provider != "" {
+		p.Provider.Name = provider
+	}
+	p.Workspace.Mounts = mounts
+	return p
+}
+
+func TestApplyLaunchConfig_DefaultsDoNotOverlayProjectPolicy(t *testing.T) {
+	defaults := defaultsPolicyForTest("codex", PolicyMount{Path: "/defaults-dir", Access: "rw"})
+
+	policy := defaultProjectPolicy()
+	policy.Provider.Name = "gemini"
+	policy.Workspace.Mounts = []PolicyMount{{Path: "/policy-dir", Access: "rw"}}
+
+	a := &App{}
+	if err := a.applyLaunchConfig(policy, defaults, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a.Provider == nil || a.Provider.Name != "gemini" {
+		t.Fatalf("provider = %v, want gemini from policy", a.Provider)
+	}
+	if containsString(a.ExtraDirs, "/defaults-dir") {
+		t.Fatalf("user-default dir leaked under project policy: %v", a.ExtraDirs)
+	}
+	if !containsString(a.ExtraDirs, "/policy-dir") {
+		t.Fatalf("policy dir missing: %v", a.ExtraDirs)
+	}
+}
+
+func TestApplyLaunchConfig_DefaultsApplyWithoutProjectPolicy(t *testing.T) {
+	defaults := defaultsPolicyForTest("codex", PolicyMount{Path: "/defaults-dir", Access: "rw"})
+
+	a := &App{}
+	if err := a.applyLaunchConfig(nil, defaults, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a.Provider == nil || a.Provider.Name != "codex" {
+		t.Fatalf("provider = %v, want codex from defaults", a.Provider)
+	}
+	if !containsString(a.ExtraDirs, "/defaults-dir") {
+		t.Fatalf("user-default dir not applied for policy-less run: %v", a.ExtraDirs)
+	}
+}
+
+func TestApplyLaunchConfig_CLIArgsApplyOverPolicyNotDefaults(t *testing.T) {
+	defaults := defaultsPolicyForTest("", PolicyMount{Path: "/defaults-dir", Access: "rw"})
+	policy := defaultProjectPolicy()
+	policy.Workspace.Mounts = []PolicyMount{{Path: "/policy-dir", Access: "rw"}}
+
+	a := &App{}
+	if err := a.applyLaunchConfig(policy, defaults, []string{"--dir", "/cli-dir"}); err != nil {
+		t.Fatal(err)
+	}
+	if containsString(a.ExtraDirs, "/defaults-dir") {
+		t.Fatalf("defaults leaked: %v", a.ExtraDirs)
+	}
+	if !containsString(a.ExtraDirs, "/policy-dir") || !containsString(a.ExtraDirs, "/cli-dir") {
+		t.Fatalf("expected policy + cli dirs: %v", a.ExtraDirs)
+	}
+}
+
 func TestClassifyFinalCredentialJSON(t *testing.T) {
 	now := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
 	future := now.Add(time.Hour).UnixMilli()

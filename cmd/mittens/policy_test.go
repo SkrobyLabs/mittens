@@ -562,6 +562,27 @@ func TestEffectivePolicyForShowPrefersProjectPolicy(t *testing.T) {
 	}
 }
 
+func TestEffectivePolicyForShowUsesStructuredDefaults(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	defaults := defaultProjectPolicy()
+	defaults.Provider.Name = "gemini"
+	defaults.Network.Firewall = "dev"
+	if err := SaveUserDefaultsPolicy(defaults); err != nil {
+		t.Fatal(err)
+	}
+
+	got, source, err := effectivePolicyForShow("/repo/no-project-policy", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != PolicySourceNone {
+		t.Fatalf("source = %q", source)
+	}
+	if got.Provider.Name != "gemini" || got.Network.Firewall != "dev" {
+		t.Fatalf("policy = %+v, want gemini + dev from defaults.yaml", got)
+	}
+}
+
 func TestEffectivePolicyForShowUsesUserDefaultsWithoutProjectPolicy(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)

@@ -25,62 +25,26 @@ func TestHasSubFlag_AfterSeparator(t *testing.T) {
 	}
 }
 
-func TestResolveProviderFromArgs_Default(t *testing.T) {
-	p, err := resolveProviderFromArgs(nil)
-	if err != nil {
-		t.Fatal(err)
+func TestProviderByName_Aliases(t *testing.T) {
+	cases := map[string]string{
+		"openai":    "codex",
+		"anthropic": "claude",
+		"local":     "ollama",
+		"":          "claude", // applyLaunchConfig relies on empty -> claude
 	}
-	if p.Name != "claude" {
-		t.Fatalf("expected default provider claude, got %q", p.Name)
-	}
-}
-
-func TestResolveProviderFromArgs_LastWins(t *testing.T) {
-	p, err := resolveProviderFromArgs([]string{"--provider", "claude", "--provider", "codex"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "codex" {
-		t.Fatalf("expected last provider codex, got %q", p.Name)
+	for alias, want := range cases {
+		p, err := providerByName(alias)
+		if err != nil {
+			t.Fatalf("providerByName(%q): %v", alias, err)
+		}
+		if p.Name != want {
+			t.Fatalf("providerByName(%q) = %q, want %q", alias, p.Name, want)
+		}
 	}
 }
 
-func TestResolveProviderFromArgs_Aliases(t *testing.T) {
-	p, err := resolveProviderFromArgs([]string{"--provider", "openai"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "codex" {
-		t.Fatalf("expected openai alias to resolve to codex, got %q", p.Name)
-	}
-
-	p, err = resolveProviderFromArgs([]string{"--provider", "anthropic"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "claude" {
-		t.Fatalf("expected anthropic alias to resolve to claude, got %q", p.Name)
-	}
-
-	p, err = resolveProviderFromArgs([]string{"--provider", "local"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "ollama" {
-		t.Fatalf("expected local alias to resolve to ollama, got %q", p.Name)
-	}
-}
-
-func TestResolveProviderFromArgs_MissingArg(t *testing.T) {
-	_, err := resolveProviderFromArgs([]string{"--provider"})
-	if err == nil {
-		t.Fatal("expected missing argument error")
-	}
-}
-
-func TestResolveProviderFromArgs_Unknown(t *testing.T) {
-	_, err := resolveProviderFromArgs([]string{"--provider", "nope"})
-	if err == nil {
+func TestProviderByName_Unknown(t *testing.T) {
+	if _, err := providerByName("nope"); err == nil {
 		t.Fatal("expected unknown provider error")
 	}
 }

@@ -98,6 +98,31 @@ Important policy areas:
 - `capabilities`: built-in or external capability selections
 - `execution`: yolo, history, worktree, shell, and Docker access
 
+### User Defaults
+
+User defaults are stored as `~/.mittens/defaults.yaml` in the same
+`ProjectPolicy` YAML shape as a project policy (same marshal/validate path).
+`mittens init --defaults` is a full baseline wizard covering the same steps as
+the project wizard — provider selection (claude/codex/gemini/ollama, incl.
+claude→OpenAI backend), always-include mounts, extensions, MCP servers with
+modes, and firewall mode + extra domains — plus the WSL image-paste-key prompt.
+A legacy flat `~/.mittens/defaults` (one flag per line) is still read when
+`defaults.yaml` is absent and is auto-migrated to `defaults.yaml` on first load
+at launch or init; `mittens doctor --migrate-all` migrates it too.
+
+User defaults are a **seed/template, not a runtime overlay**. They are consumed
+only at init-from-default time — as the base for a launch in a project that has
+no `policy.yaml` yet, and to pre-seed the `mittens init` wizard (a new project,
+or "Overwrite (start fresh)"; `--session` seeds the same way). Once a project
+policy (or a `--policy` file or `--session` policy) exists, it is the sole base
+and defaults are never merged underneath. This keeps `mittens init` and
+`mittens policy show` WYSIWYG: what they show is what runs, with no invisible
+default-only settings leaking into the launch. Consequence: editing user
+defaults later does not retroactively change a project that already has a
+`policy.yaml`. The base-vs-CLI assembly lives in `App.applyLaunchConfig`
+(`cmd/mittens/main.go`) — structured defaults, else project/session policy, then
+CLI runtime args on top; `--no-config` skips defaults entirely.
+
 ## Extension And Capability System
 
 See [docs/EXTENSIONS.md](docs/EXTENSIONS.md) for the full architecture, YAML
@@ -172,8 +197,9 @@ deprecated `SkipPermsFlag` on the CLI.
 `--policy PATH` loads policy from an explicit file instead of the
 workspace-derived `~/.mittens/projects/<project>/policy.yaml`. It fully replaces
 the project-policy lookup, is never written back (safe under concurrency for
-throwaway per-task files), and still merges user defaults underneath (the policy
-file wins). Mutually exclusive with `--no-config` and `--session`.
+throwaway per-task files), and is standalone — user defaults are NOT merged
+underneath (see "User Defaults" below). Mutually exclusive with `--no-config`
+and `--session`.
 
 `--firewall-learn` runs one permissive-but-logging pass that records out-of-allowlist domains and offers to add them to `network.extra_domains`; `mittens init` can arm a one-time pass via a `.learn-once` sentinel under the project dir (transient operational state, deliberately not a policy field).
 

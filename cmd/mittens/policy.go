@@ -191,10 +191,31 @@ func savePolicyFile(path string, policy *ProjectPolicy) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating policy dir: %w", err)
 	}
-	return os.WriteFile(path, payload, 0o644)
+	// Write atomically (temp file + rename) so concurrent launches never read a
+	// half-written policy. This matters for the single shared user
+	// defaults.yaml, which parallel-worktree runs may migrate simultaneously.
+	tmp, err := os.CreateTemp(dir, ".policy-*.yaml.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp policy file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func PolicyFromLegacyFlags(args []string, extensions []*registry.Extension) (*ProjectPolicy, error) {

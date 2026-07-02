@@ -138,9 +138,16 @@ func copyExe(src, dst string) error {
 	return err
 }
 
-// readUserDefaultsPasteKey reads ~/.mittens/defaults via WSL and returns the
-// --image-paste-key value, or empty string if not set.
+// readUserDefaultsPasteKey returns the configured image paste key from the user
+// defaults, preferring the structured ~/.mittens/defaults.yaml
+// (options.image_paste_key) and falling back to the legacy flat
+// ~/.mittens/defaults (--image-paste-key). Empty string if unset.
 func readUserDefaultsPasteKey() string {
+	// Once defaults.yaml exists it is the source of truth; do not fall back to a
+	// stale legacy flat file (which could resurrect a key the user has cleared).
+	if key, present := pasteKeyFromDefaultsYAML(); present {
+		return key
+	}
 	out, err := exec.Command("wsl", "bash", "-c", "cat ~/.mittens/defaults 2>/dev/null").Output()
 	if err != nil {
 		return ""
@@ -156,6 +163,26 @@ func readUserDefaultsPasteKey() string {
 		}
 	}
 	return ""
+}
+
+// pasteKeyFromDefaultsYAML reads options.image_paste_key from the structured
+// defaults.yaml. It matches the marshalled `image_paste_key: <value>` line
+// without a YAML dependency. The bool reports whether defaults.yaml exists at
+// all, so the caller can decide whether to fall back to the legacy flat file.
+func pasteKeyFromDefaultsYAML() (string, bool) {
+	out, err := exec.Command("wsl", "bash", "-c", "cat ~/.mittens/defaults.yaml 2>/dev/null").Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "image_paste_key:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "image_paste_key:"))
+			value = strings.Trim(value, `"'`)
+			return value, true
+		}
+	}
+	return "", true
 }
 
 // mittens-managed action lines injected into WT settings.json.

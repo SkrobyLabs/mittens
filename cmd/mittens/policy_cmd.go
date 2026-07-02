@@ -92,15 +92,14 @@ func effectivePolicyForShow(workspace string, extensions []*registry.Extension) 
 		return projectPolicy, source, nil
 	}
 
-	userArgs, _ := LoadUserDefaults()
-	if len(userArgs) == 0 {
-		return defaultProjectPolicy(), PolicySourceNone, nil
-	}
-	policy, err := PolicyFromLegacyFlags(userArgs, extensions)
+	defaultsPolicy, _, err := LoadUserDefaultsPolicy(extensions)
 	if err != nil {
 		return nil, PolicySourceNone, err
 	}
-	return policy, PolicySourceNone, nil
+	if defaultsPolicy == nil {
+		return defaultProjectPolicy(), PolicySourceNone, nil
+	}
+	return defaultsPolicy, PolicySourceNone, nil
 }
 
 func runPolicySet(args []string, extensions []*registry.Extension) error {
