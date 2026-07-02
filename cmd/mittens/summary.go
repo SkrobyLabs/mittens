@@ -20,6 +20,10 @@ type LaunchSummary struct {
 	Profile          string
 	Workspace        SummaryMount
 	ExtraDirs        []SummaryMount
+	MCPServers       []string
+	MCPProxy         []string
+	MCPEnv           []string
+	MCPHelperMounts  []SummaryMount
 	Credentials      []string
 	Network          string
 	Extensions       []string
@@ -30,17 +34,22 @@ type LaunchSummary struct {
 
 func (a *App) buildLaunchSummary(cfg *initcfg.ContainerConfig, firewallDomains []string) LaunchSummary {
 	extraDirs := a.launchSummary.ExtraDirs
+	mcpHelperMounts := a.launchSummary.MCPHelperMounts
 	s := LaunchSummary{
-		Provider:  a.Provider.DisplayName,
-		Profile:   a.Profile,
-		Workspace: SummaryMount{Path: a.WorkspaceMountSrc, Access: "rw"},
-		ExtraDirs: extraDirs,
-		History:   a.historySummary(),
+		Provider:        a.Provider.DisplayName,
+		Profile:         a.Profile,
+		Workspace:       SummaryMount{Path: a.WorkspaceMountSrc, Access: "rw"},
+		ExtraDirs:       extraDirs,
+		MCPHelperMounts: mcpHelperMounts,
+		History:         a.historySummary(),
 	}
 
 	s.Credentials = a.credentialSummary()
 	s.Network = a.networkSummary(cfg, firewallDomains)
 	s.Extensions = a.enabledExtensionNames()
+	s.MCPServers = a.selectedMCPServerSummary()
+	s.MCPProxy = a.mcpProxySummary()
+	s.MCPEnv = a.mcpEnvSummary()
 	s.HostIntegrations = a.hostIntegrationSummary(cfg)
 	s.Execution = a.executionSummary(cfg)
 
@@ -94,7 +103,7 @@ func (a *App) networkSummary(cfg *initcfg.ContainerConfig, firewallDomains []str
 func (a *App) enabledExtensionNames() []string {
 	var names []string
 	for _, ext := range a.Extensions {
-		if ext.Enabled {
+		if ext.Enabled && ext.Name != "mcp" {
 			names = append(names, ext.Name)
 		}
 	}
@@ -103,6 +112,56 @@ func (a *App) enabledExtensionNames() []string {
 		return []string{"none"}
 	}
 	return names
+}
+
+func (a *App) selectedMCPServerSummary() []string {
+	var out []string
+	if a.MCPAll {
+		out = append(out, "all configured")
+	}
+	for _, s := range a.MCPServers {
+		mode := s.Mode
+		if mode == "" {
+			mode = mcpModeDirect
+		}
+		label := s.Name + " (" + mode + ")"
+		if refusal := a.mcpProxyRefusals[s.Name]; refusal != "" {
+			label = s.Name + " (proxy: " + refusal + ")"
+		}
+		out = append(out, label)
+	}
+	if len(out) == 0 {
+		return []string{"none"}
+	}
+	return out
+}
+
+// mcpProxySummary lists approved proxy servers (traffic egresses from the host,
+// outside the container firewall).
+func (a *App) mcpProxySummary() []string {
+	var out []string
+	for _, s := range a.proxyMCPServers() {
+		if a.mcpProxyRefusals[s.Name] != "" {
+			continue
+		}
+		out = append(out, s.Name+" via host broker (traffic outside firewall)")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mcpEnvSummary lists the env variable NAMES injected into each server's staged
+// config (values are never shown).
+func (a *App) mcpEnvSummary() []string {
+	var out []string
+	for name, vars := range a.mcpInjectedEnv {
+		if len(vars) == 0 {
+			continue
+		}
+		out = append(out, name+": "+strings.Join(uniqueSorted(vars), ", "))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a *App) hostIntegrationSummary(cfg *initcfg.ContainerConfig) []string {
@@ -186,6 +245,14 @@ func (s LaunchSummary) Render() string {
 		b.WriteString(fmt.Sprintf("  Workspace: %s %s\n", s.Workspace.Path, valueOr(s.Workspace.Access, "rw")))
 	}
 	b.WriteString("  Extra dirs: " + renderMounts(s.ExtraDirs) + "\n")
+	b.WriteString("  MCP servers (experimental): " + strings.Join(valueOrList(s.MCPServers, []string{"none"}), ", ") + "\n")
+	if len(s.MCPProxy) > 0 {
+		b.WriteString("  MCP proxy: " + strings.Join(s.MCPProxy, ", ") + "\n")
+	}
+	if len(s.MCPEnv) > 0 {
+		b.WriteString("  MCP env injected: " + strings.Join(s.MCPEnv, "; ") + "\n")
+	}
+	b.WriteString("  MCP helper mounts: " + renderMounts(s.MCPHelperMounts) + "\n")
 	b.WriteString("  Credentials: " + strings.Join(s.Credentials, ", ") + "\n")
 	b.WriteString("  Network: " + valueOr(s.Network, "unknown") + "\n")
 	b.WriteString("  Extensions: " + strings.Join(s.Extensions, ", ") + "\n")
@@ -227,6 +294,13 @@ func uniqueSorted(in []string) []string {
 
 func valueOr(value, fallback string) string {
 	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func valueOrList(value, fallback []string) []string {
+	if len(value) == 0 {
 		return fallback
 	}
 	return value

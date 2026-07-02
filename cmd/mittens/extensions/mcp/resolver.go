@@ -6,13 +6,13 @@ package mcp
 
 import (
 	"bufio"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/internal/mcpconfig"
 )
 
 func init() {
@@ -154,119 +154,23 @@ func readMCPDomainNames(path string) ([]string, error) {
 	return names, scanner.Err()
 }
 
-// readMCPServerKeys reads a JSON file and returns the keys of its MCP server object.
+// readMCPServerKeys reads a JSON MCP config file and returns its server names.
 func readMCPServerKeys(path string) ([]string, error) {
 	return readMCPConfigServerNames(mcpConfig{Path: path, Format: "json", Key: "mcpServers"})
 }
 
+// readMCPConfigServerNames returns the server names in a provider MCP config
+// using the shared mcpconfig parser. A missing/unreadable file is an error so
+// callers can distinguish "no config" from "no servers".
 func readMCPConfigServerNames(cfg mcpConfig) ([]string, error) {
-	switch cfg.Format {
-	case "json":
-		return readMCPJSONServerKeys(cfg.Path, cfg.Key, cfg.ProjectPath)
-	case "toml":
-		return readMCPTOMLServerKeys(cfg.Path, cfg.Key)
-	default:
-		return nil, nil
+	if _, err := os.Stat(cfg.Path); err != nil {
+		return nil, err
 	}
+	return mcpconfig.Names(mcpconfig.ReadProvider(cfg.Path, cfg.Format, cfg.Key, cfg.ProjectPath)), nil
 }
 
+// readMCPJSONServerKeys returns the server names from a JSON MCP config,
+// including project-scoped entries when projectPath is set.
 func readMCPJSONServerKeys(path, key, projectPath string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-
-	var names []string
-	if serversRaw, ok := raw[key]; ok {
-		serverNames, err := serverNamesFromRawJSON(serversRaw)
-		if err != nil {
-			return nil, err
-		}
-		names = append(names, serverNames...)
-	}
-
-	if projectPath != "" {
-		projectsRaw, ok := raw["projects"]
-		if ok {
-			var projects map[string]json.RawMessage
-			if err := json.Unmarshal(projectsRaw, &projects); err == nil {
-				if projectRaw, ok := projects[projectPath]; ok {
-					var project map[string]json.RawMessage
-					if err := json.Unmarshal(projectRaw, &project); err == nil {
-						if serversRaw, ok := project[key]; ok {
-							serverNames, err := serverNamesFromRawJSON(serversRaw)
-							if err != nil {
-								return nil, err
-							}
-							names = append(names, serverNames...)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return names, nil
-}
-
-func serverNamesFromRawJSON(raw json.RawMessage) ([]string, error) {
-	var serversMap map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &serversMap); err != nil {
-		return nil, err
-	}
-	var names []string
-	for name := range serversMap {
-		names = append(names, name)
-	}
-	return names, nil
-}
-
-func readMCPTOMLServerKeys(path, table string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	prefix := table + "."
-	for _, line := range strings.Split(string(data), "\n") {
-		section := tomlSectionName(line)
-		if section == "" || !strings.HasPrefix(section, prefix) {
-			continue
-		}
-		name := strings.TrimPrefix(section, prefix)
-		if idx := strings.IndexByte(name, '.'); idx >= 0 {
-			name = name[:idx]
-		}
-		name = unquoteTOMLKey(name)
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names, nil
-}
-
-func tomlSectionName(line string) string {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
-		return ""
-	}
-	if strings.HasPrefix(line, "[[") || strings.HasSuffix(line, "]]") {
-		return ""
-	}
-	return strings.TrimSpace(line[1 : len(line)-1])
-}
-
-func unquoteTOMLKey(key string) string {
-	key = strings.TrimSpace(key)
-	if len(key) >= 2 {
-		if (key[0] == '"' && key[len(key)-1] == '"') || (key[0] == '\'' && key[len(key)-1] == '\'') {
-			return key[1 : len(key)-1]
-		}
-	}
-	return key
+	return readMCPConfigServerNames(mcpConfig{Path: path, Format: "json", Key: key, ProjectPath: projectPath})
 }

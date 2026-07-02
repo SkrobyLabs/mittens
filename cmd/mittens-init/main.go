@@ -42,6 +42,8 @@ func main() {
 		os.Exit(runNotify())
 	case "clipboard-x11-sync.sh":
 		os.Exit(runX11ClipboardSync())
+	case "mittens-mcp-proxy":
+		os.Exit(runMCPProxy())
 	}
 
 	// Default: run as container entrypoint.

@@ -438,12 +438,20 @@ func TestAssembleWizardPolicy(t *testing.T) {
 				{Name: "--aws-all", Arg: "none"},
 			},
 		},
+		{
+			Name: "mcp",
+			Flags: []registry.ExtensionFlag{
+				{Name: "--mcp", Arg: "csv"},
+				{Name: "--mcp-all", Arg: "none"},
+			},
+		},
 	}
 	input := WizardAssemblyInput{
 		ProviderLines:  []string{"--provider codex"},
 		ProviderConfig: ProviderWizardConfig{Endpoint: "http://localhost:11434", Model: "qwen3-coder:30b"},
 		DirLines:       []string{"--dir /repo/extra", "--dir-ro /repo/docs"},
 		ExtensionLines: []string{"--aws dev,prod"},
+		MCPLines:       []string{"--mcp shortcut,github"},
 		NetworkLines:   []string{"--network-host", "--no-firewall"},
 		OptionLines:    []string{"--no-yolo", "--worktree"},
 		ExtraDomains:   []string{"api.example.test"},
@@ -459,6 +467,7 @@ func TestAssembleWizardPolicy(t *testing.T) {
 		"--dir /repo/extra",
 		"--dir-ro /repo/docs",
 		"--aws dev,prod",
+		"--mcp shortcut,github",
 		"--network-host",
 		"--no-firewall",
 		"--no-yolo",
@@ -479,6 +488,12 @@ func TestAssembleWizardPolicy(t *testing.T) {
 	}
 	if len(policy.Capabilities) != 1 || policy.Capabilities[0].Name != "aws" || !reflect.DeepEqual(policy.Capabilities[0].Args, []string{"dev", "prod"}) {
 		t.Fatalf("capabilities = %#v", policy.Capabilities)
+	}
+	// The mcp capability is migrated into the first-class mcp section (direct mode).
+	if len(policy.MCP.Servers) != 2 ||
+		policy.MCP.Servers[0].Name != "shortcut" || policy.MCP.Servers[0].Mode != "direct" ||
+		policy.MCP.Servers[1].Name != "github" || policy.MCP.Servers[1].Mode != "direct" {
+		t.Fatalf("mcp servers = %#v", policy.MCP.Servers)
 	}
 	if policy.Network.Mode != "host" || policy.Network.Firewall != "disabled" {
 		t.Fatalf("network = %#v", policy.Network)
@@ -573,6 +588,23 @@ func TestExtensionLineHelpers(t *testing.T) {
 	want = []string{"--provider codex", "--dotnet 8", "--aws prod,shared"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("upsertExtensionLines = %#v, want %#v", got, want)
+	}
+}
+
+func TestSplitMCPLines(t *testing.T) {
+	lines := []string{
+		"--aws dev",
+		"--mcp shortcut,github",
+		"--mcp-all",
+		"--dotnet 8",
+	}
+
+	rest, mcp := splitMCPLines(lines)
+	if want := []string{"--aws dev", "--dotnet 8"}; !reflect.DeepEqual(rest, want) {
+		t.Fatalf("rest = %#v, want %#v", rest, want)
+	}
+	if want := []string{"--mcp shortcut,github", "--mcp-all"}; !reflect.DeepEqual(mcp, want) {
+		t.Fatalf("mcp = %#v, want %#v", mcp, want)
 	}
 }
 

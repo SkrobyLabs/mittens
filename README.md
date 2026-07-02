@@ -334,7 +334,9 @@ Built-in capabilities include SSH, GitHub, AWS, Azure, GCP, Kubernetes, Helm, Do
 
 External plugins: drop an executable at `~/.mittens/extensions/<name>/plugin` — no recompilation needed.
 
-See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension system docs.
+See [EXTENSIONS.md](docs/EXTENSIONS.md) for the full extension system docs, and
+[MCP.md](docs/MCP.md) for MCP sandbox support (per-server modes, command
+pinning, and the broker-enforced stdio proxy).
 
 ## Support the Project
 

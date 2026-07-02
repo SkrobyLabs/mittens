@@ -28,6 +28,7 @@ type ProjectPolicy struct {
 	Credentials  CredentialPolicy      `yaml:"credentials,omitempty"`
 	Host         HostIntegrationPolicy `yaml:"host,omitempty"`
 	Capabilities []CapabilityPolicy    `yaml:"capabilities,omitempty"`
+	MCP          MCPPolicy             `yaml:"mcp,omitempty"`
 	Execution    ExecutionPolicy       `yaml:"execution,omitempty"`
 	Options      map[string]string     `yaml:"options,omitempty"`
 	ExtraArgs    []string              `yaml:"extra_args,omitempty"`
@@ -86,6 +87,28 @@ type CapabilityPolicy struct {
 	All     bool     `yaml:"all,omitempty"`
 	RawFlag string   `yaml:"raw_flag,omitempty"`
 }
+
+// MCPPolicy is the first-class MCP policy section. All enables every configured
+// server in direct mode (firewall whitelisting only); Servers holds explicit
+// per-server mode selections that override or supplement All.
+type MCPPolicy struct {
+	All     bool              `yaml:"all,omitempty"`
+	Servers []MCPServerPolicy `yaml:"servers,omitempty"`
+}
+
+// MCPServerPolicy selects one MCP server and its sandbox mode. Env/headers stay
+// in provider config and are never persisted here.
+type MCPServerPolicy struct {
+	Name       string `yaml:"name"`
+	Mode       string `yaml:"mode,omitempty"`
+	CommandPin string `yaml:"command_pin,omitempty"`
+}
+
+const (
+	mcpModeDirect = "direct"
+	mcpModeMount  = "mount"
+	mcpModeProxy  = "proxy"
+)
 
 type ExecutionPolicy struct {
 	Yolo        *bool  `yaml:"yolo,omitempty"`
@@ -362,8 +385,25 @@ func (p *ProjectPolicy) ToLegacyFlags() []string {
 			args = append(args, strings.Join(cap.Args, ","))
 		}
 	}
+	// MCP section round-trips names only; modes and pins are intentionally
+	// dropped (the wizard reads modes from policy.MCP, not legacy lines).
+	if p.MCP.All {
+		args = append(args, "--mcp-all")
+	} else if names := mcpServerNames(p.MCP.Servers); len(names) > 0 {
+		args = append(args, "--mcp", strings.Join(names, ","))
+	}
 	args = append(args, p.ExtraArgs...)
 	return args
+}
+
+func mcpServerNames(servers []MCPServerPolicy) []string {
+	names := make([]string, 0, len(servers))
+	for _, s := range servers {
+		if s.Name != "" {
+			names = append(names, s.Name)
+		}
+	}
+	return names
 }
 
 func (p *ProjectPolicy) Validate() error {
@@ -431,6 +471,24 @@ func (p *ProjectPolicy) Validate() error {
 		if strings.TrimSpace(cap.Name) == "" {
 			return fmt.Errorf("capability name cannot be empty")
 		}
+	}
+	seenMCP := map[string]struct{}{}
+	for _, server := range p.MCP.Servers {
+		if strings.TrimSpace(server.Name) == "" {
+			return fmt.Errorf("mcp server name cannot be empty")
+		}
+		switch server.Mode {
+		case "", mcpModeDirect, mcpModeMount, mcpModeProxy:
+		default:
+			return fmt.Errorf("invalid mcp mode %q for server %s", server.Mode, server.Name)
+		}
+		if server.CommandPin != "" && server.Mode != mcpModeProxy {
+			return fmt.Errorf("mcp server %s: command_pin is only valid with mode proxy", server.Name)
+		}
+		if _, ok := seenMCP[server.Name]; ok {
+			return fmt.Errorf("duplicate mcp server %s", server.Name)
+		}
+		seenMCP[server.Name] = struct{}{}
 	}
 	return nil
 }
@@ -529,6 +587,52 @@ func (p *ProjectPolicy) applyDefaults() {
 	if p.Options == nil {
 		p.Options = map[string]string{}
 	}
+	p.normalizeMCP()
+}
+
+// normalizeMCP migrates the legacy capability representation of MCP into the
+// first-class mcp section and applies the default direct mode. In-memory
+// migration is sufficient for correctness; persistence happens on next save.
+func (p *ProjectPolicy) normalizeMCP() {
+	var remaining []CapabilityPolicy
+	migrated := false
+	for _, cap := range p.Capabilities {
+		if cap.Name != "mcp" {
+			remaining = append(remaining, cap)
+			continue
+		}
+		migrated = true
+		if cap.All {
+			p.MCP.All = true
+		}
+		for _, name := range cap.Args {
+			p.MCP.Servers = upsertMCPServer(p.MCP.Servers, MCPServerPolicy{Name: name, Mode: mcpModeDirect})
+		}
+	}
+	if migrated {
+		p.Capabilities = remaining
+		logWarn("policy: migrating deprecated capability 'mcp' into the mcp section")
+	}
+	for i := range p.MCP.Servers {
+		if p.MCP.Servers[i].Mode == "" {
+			p.MCP.Servers[i].Mode = mcpModeDirect
+		}
+	}
+}
+
+func upsertMCPServer(servers []MCPServerPolicy, next MCPServerPolicy) []MCPServerPolicy {
+	for i := range servers {
+		if servers[i].Name == next.Name {
+			if next.Mode != "" {
+				servers[i].Mode = next.Mode
+			}
+			if next.CommandPin != "" {
+				servers[i].CommandPin = next.CommandPin
+			}
+			return servers
+		}
+	}
+	return append(servers, next)
 }
 
 func normalizeNetworkDomains(domains []string) []string {

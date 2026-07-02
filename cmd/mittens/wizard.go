@@ -26,7 +26,7 @@ var (
 
 // ---------------------------------------------------------------------------
 // Extensions with dedicated wizard steps (excluded from the generic multi-select).
-var wizardExcluded = map[string]bool{"firewall": true}
+var wizardExcluded = map[string]bool{"firewall": true, "mcp": true}
 
 // ---------------------------------------------------------------------------
 // Main entry point
@@ -59,6 +59,8 @@ func runWizard(extensions []*registry.Extension) error {
 
 	editMode := false
 	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
+	var existMCPServers []MCPServerPolicy
+	var existMCPAll bool
 	var existProviderConfig ProviderWizardConfig
 	var existProviderState ProviderWizardState
 
@@ -95,6 +97,8 @@ func runWizard(extensions []*registry.Extension) error {
 		case "edit":
 			editMode = true
 			existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
+			existExts, _ = splitMCPLines(existExts)
+			existMCPServers, existMCPAll = loadWizardMCP(workspace, extensions)
 			existProviderState = loadWizardProviderState(workspace, extensions, existProviders, existProviderConfig)
 		}
 		fmt.Fprintln(os.Stderr)
@@ -112,13 +116,19 @@ func runWizard(extensions []*registry.Extension) error {
 		return gracefulAbort(err)
 	}
 
-	// ── Step 4+5: Extensions ───────────────────────────────────────────────
+	// ── Step 3: Extensions ─────────────────────────────────────────────────
 	extLines, err := wizardExtensions(extensions, editMode, existExts)
 	if err != nil {
 		return gracefulAbort(err)
 	}
 
-	// ── Step 4: Network boundary ───────────────────────────────────────────
+	// ── Step 4: MCP servers ────────────────────────────────────────────────
+	mcpServers, mcpAll, err := wizardMCP(editMode, existMCPServers, existMCPAll, providerNameFromLines(providerLines), workspace)
+	if err != nil {
+		return gracefulAbort(err)
+	}
+
+	// ── Step 5: Network boundary ───────────────────────────────────────────
 	networkLines, extraDomains, err := wizardNetworkBoundary(workspace, editMode, existFirewall, existOpts, existExtraDomains)
 	if err != nil {
 		return gracefulAbort(err)
@@ -136,6 +146,9 @@ func runWizard(extensions []*registry.Extension) error {
 		ProviderConfig: providerConfig,
 		DirLines:       dirLines,
 		ExtensionLines: extLines,
+		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
+		MCPServers:     mcpServers,
+		MCPAll:         mcpAll,
 		NetworkLines:   networkLines,
 		OptionLines:    optLines,
 		ExtraDomains:   extraDomains,
@@ -209,12 +222,16 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 
 	editMode := false
 	var existDirs, existProviders, existExts, existFirewall, existOpts, existExtraDomains []string
+	var existMCPServers []MCPServerPolicy
+	var existMCPAll bool
 	var existProviderConfig ProviderWizardConfig
 	var existProviderState ProviderWizardState
 
 	if len(existing) > 0 {
 		editMode = true
 		existDirs, existProviders, existExts, existFirewall, existOpts = parseExistingConfig(existing)
+		existExts, _ = splitMCPLines(existExts)
+		existMCPServers, existMCPAll = loadWizardMCP(workspace, extensions)
 		existExtraDomains = loadWizardExtraDomains(workspace, extensions)
 		existProviderConfig = loadWizardProviderConfig(workspace, extensions)
 		existProviderState = loadWizardProviderState(workspace, extensions, existProviders, existProviderConfig)
@@ -236,6 +253,11 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 		return nil, nil, err
 	}
 
+	mcpServers, mcpAll, err := wizardMCP(editMode, existMCPServers, existMCPAll, providerNameFromLines(providerLines), workspace)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Session runs are ephemeral; pass an empty workspace to skip arming a
 	// one-time learn pass for a "next run" that won't share this config.
 	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, existFirewall, existOpts, existExtraDomains)
@@ -251,6 +273,7 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 		ProviderLines:  providerLines,
 		DirLines:       dirLines,
 		ExtensionLines: extLines,
+		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
 		NetworkLines:   networkLines,
 		OptionLines:    optLines,
 	})
@@ -485,11 +508,11 @@ func wizardProfile(workspace, profileName, providerName string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Directories
+// Step 2: Directories
 // ---------------------------------------------------------------------------
 
 func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 3: Directories"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Directories"))
 	fmt.Fprintf(os.Stderr, "Primary workspace: %s\n", workspace)
 	existingMounts := mountsFromDirLines(existDirs)
 	currentMounts := existingMounts
@@ -1051,7 +1074,7 @@ func parseProviderLines(lines []string) (selected map[string]bool, defaultProvid
 }
 
 // ---------------------------------------------------------------------------
-// Step 3+4: Extensions
+// Step 3: Extensions
 // ---------------------------------------------------------------------------
 
 func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts []string) ([]string, error) {
@@ -1266,7 +1289,7 @@ var customConfigurers = map[string]func(*registry.Extension, []string) ([]string
 		return configureCloud("kubectl", "--k8s", "", "Kubernetes contexts", "Select Kubernetes contexts", existing)
 	},
 	"mcp": func(_ *registry.Extension, existing []string) ([]string, error) {
-		return configureCloud("mcp", "--mcp", "--mcp-all", "MCP server passthrough", "Select MCP servers", existing)
+		return configureCloud("mcp", "--mcp", "--mcp-all", "MCP server passthrough (experimental)", "Select MCP servers", existing)
 	},
 }
 
@@ -1485,11 +1508,11 @@ func mapFromValues(values []string) map[string]bool {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Network boundary
+// Step 5: Network boundary
 // ---------------------------------------------------------------------------
 
 func wizardNetworkBoundary(workspace string, editMode bool, existFirewall, existOpts, existExtraDomains []string) ([]string, []string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 4: Network boundary"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 5: Network boundary"))
 	state := networkWizardStateFromLines(existFirewall, existOpts, existExtraDomains)
 
 	if editMode {
@@ -1827,6 +1850,9 @@ type WizardAssemblyInput struct {
 	ProviderConfig ProviderWizardConfig
 	DirLines       []string
 	ExtensionLines []string
+	MCPLines       []string
+	MCPServers     []MCPServerPolicy
+	MCPAll         bool
 	NetworkLines   []string
 	OptionLines    []string
 	ExtraDomains   []string
@@ -1844,6 +1870,11 @@ func assembleWizardPolicy(input WizardAssemblyInput, extensions []*registry.Exte
 	policy.Provider.Endpoint = input.ProviderConfig.Endpoint
 	policy.Provider.Model = input.ProviderConfig.Model
 	policy.Network.ExtraDomains = normalizeNetworkDomains(input.ExtraDomains)
+	// Structured MCP selections carry modes and pins that legacy --mcp lines
+	// cannot; override the migrated (direct-only) result when present.
+	if input.MCPAll || len(input.MCPServers) > 0 {
+		policy.MCP = MCPPolicy{All: input.MCPAll, Servers: input.MCPServers}
+	}
 	return policy, lines, nil
 }
 
@@ -1852,6 +1883,7 @@ func wizardEquivalentLines(input WizardAssemblyInput) []string {
 	lines = append(lines, input.ProviderLines...)
 	lines = append(lines, input.DirLines...)
 	lines = append(lines, input.ExtensionLines...)
+	lines = append(lines, input.MCPLines...)
 	lines = append(lines, input.NetworkLines...)
 	lines = append(lines, input.OptionLines...)
 	return lines
@@ -1881,6 +1913,18 @@ func parseExistingConfig(lines []string) (dirs, providers, exts, firewall, opts 
 		}
 	}
 	return
+}
+
+func splitMCPLines(lines []string) (rest, mcp []string) {
+	for _, line := range lines {
+		flag := configLineFlag(line)
+		if flag == "--mcp" || flag == "--mcp-all" {
+			mcp = append(mcp, line)
+			continue
+		}
+		rest = append(rest, line)
+	}
+	return rest, mcp
 }
 
 func loadWizardExtraDomains(workspace string, extensions []*registry.Extension) []string {

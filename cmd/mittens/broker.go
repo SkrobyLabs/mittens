@@ -83,6 +83,14 @@ type HostBroker struct {
 	// pendingCallback holds a captured OAuth callback URL for the container to replay.
 	pendingCallback string
 
+	// MCP proxy state: registered specs and live host children, guarded by mcpMu.
+	// mcpMu is held only for state transitions, never across stream I/O.
+	mcpSpecs     map[string]MCPProxySpec
+	mcpChildren  map[string]*mcpChild
+	mcpLocks     map[string]*sync.Mutex
+	mcpWorkspace string
+	mcpMu        sync.Mutex
+
 	// Refresh coordination: only one container should perform a proactive token
 	// refresh at a time. The first to POST /refresh becomes the coordinator;
 	// others receive "wait" until fresh credentials arrive or the deadline expires.
@@ -157,6 +165,7 @@ func NewHostBroker(sockPath, seed string, stores []CredentialStore) *HostBroker 
 	mux.HandleFunc("/login-callback", b.withAuth(b.handleLoginCallback))
 	mux.HandleFunc("/clipboard", b.withAuth(b.handleClipboard))
 	mux.HandleFunc("/egress-deny", b.withAuth(b.handleEgressDeny))
+	mux.HandleFunc("/mcp/", b.withAuth(b.handleMCPStream))
 	mux.HandleFunc("/", b.withAuth(b.handle))
 	b.srv = &http.Server{Handler: mux}
 	return b
@@ -232,6 +241,7 @@ func (b *HostBroker) Serve() error {
 // Close gracefully shuts down the broker and stops the host sync loop.
 func (b *HostBroker) Close() error {
 	b.blog("shutting down")
+	b.closeMCPChildren()
 	close(b.done)
 	if b.LogFile != nil {
 		b.LogFile.Close()

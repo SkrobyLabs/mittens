@@ -108,6 +108,10 @@ override during source/runtime development. User extensions are discovered from
 `~/.mittens/extensions/<name>/` and may provide YAML, a `plugin`, and optional
 `build.sh`.
 
+See [docs/MCP.md](docs/MCP.md) for MCP sandbox support: the `mcp` policy
+section, per-server modes, command pinning, and the broker-enforced stdio
+proxy.
+
 ## Key Patterns
 
 - Providers encapsulate CLI identity, config paths, credential files, firewall domains, history handling, and resume/continue flags.

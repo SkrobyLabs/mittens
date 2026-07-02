@@ -74,11 +74,23 @@ type App struct {
 	EffectiveWorkspace string // worktree path if --worktree, else same as Workspace
 	WorkspaceMountSrc  string // what actually gets bind-mounted into the container (identity mount)
 	Extensions         []*registry.Extension
-	Credentials        *CredentialManager
-	ContainerName      string
-	ImageName          string
-	ImageTag           string
-	HostProjectDir     string // cx_project_dir(Workspace)
+
+	// MCP policy: per-server mode selections and the all-configured toggle.
+	// Downstream MCP behavior (mounts, staging, proxy, firewall) reads these
+	// rather than the mcp capability/extension RawArg path.
+	MCPServers []MCPServerPolicy
+	MCPAll     bool
+	// mcpProxyRefusals maps a proxy server name to a short refusal reason
+	// (e.g. "refused: command changed") when pin verification fails at launch.
+	mcpProxyRefusals map[string]string
+	// mcpInjectedEnv maps a server name to the env variable names expanded into
+	// its staged config, for the launch summary.
+	mcpInjectedEnv map[string][]string
+	Credentials    *CredentialManager
+	ContainerName  string
+	ImageName      string
+	ImageTag       string
+	HostProjectDir string // cx_project_dir(Workspace)
 
 	// Image build state
 	imageTagParts []string
@@ -1236,6 +1248,9 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 		a.NoNotify = true
 	}
 	a.applyPolicyCapabilities(policy)
+	a.MCPServers = append([]MCPServerPolicy(nil), policy.MCP.Servers...)
+	a.MCPAll = policy.MCP.All
+	a.configureMCPExtension()
 	a.ClaudeArgs = append(a.ClaudeArgs, policy.ExtraArgs...)
 }
 
@@ -1411,6 +1426,24 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	if a.Headless {
 		ttyFlag = "-i"
 	}
+
+	// MCP staging: verify proxy pins, register approved proxy servers with the
+	// broker, and transform the staged provider config. Failures here are never
+	// fatal to the launch.
+	mcpStage, err := a.planMCPStaging(home)
+	if err != nil {
+		logWarn("MCP staging: %v", err)
+		mcpStage = nil
+	}
+	if mcpStage != nil && len(mcpStage.proxySpecs) > 0 && a.broker != nil {
+		a.broker.mcpWorkspace = a.EffectiveWorkspace
+		a.broker.RegisterMCPServers(mcpStage.proxySpecs)
+		for _, spec := range mcpStage.proxySpecs {
+			logInfo("MCP proxy: %s via host broker (env: %s)", spec.Name, redactEnvNames(spec.Env))
+		}
+	}
+	a.warnUnmountableDirectMCPServers(home)
+
 	args := []string{
 		ttyFlag,
 		"--name", a.ContainerName,
@@ -1622,12 +1655,35 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 		}
 	}
 
+	// MCP stdio helper mounts. These deliberately do not use the extra-dir
+	// worktree path, because provider MCP configs can contain absolute paths.
+	if helperMounts := a.planMCPHelperMounts(home); len(helperMounts) > 0 {
+		var summaryMounts []SummaryMount
+		for _, mount := range helperMounts {
+			args = append(args, "-v", mount.Path+":"+mount.Path+":ro")
+			summaryMounts = append(summaryMounts, SummaryMount{Path: mount.Path, Access: mount.Access})
+			logInfo("MCP helper mount (%s): %s", mount.Server, mount.Path)
+		}
+		a.launchSummary.MCPHelperMounts = summaryMounts
+	}
+
 	// User prefs file (account info, MCP servers) — skip if provider has no prefs file.
+	// When MCP staging produced a transformed prefs copy, mount that instead of
+	// the host original so proxied/expanded MCP config reaches the container.
 	if a.Provider.UserPrefsFile != "" {
 		userPrefsPath := a.Provider.HostUserPrefsPath(home)
-		if fileExists(userPrefsPath) {
+		if mcpStage != nil && mcpStage.prefsOverride != "" {
+			args = append(args, "-v", mcpStage.prefsOverride+":"+a.Provider.StagingUserPrefsPath()+":ro")
+		} else if fileExists(userPrefsPath) {
 			args = append(args, "-v", userPrefsPath+":"+a.Provider.StagingUserPrefsPath()+":ro")
 		}
+	}
+
+	// MCP config-dir bind for prefs-less providers (Codex/Gemini): shadow the
+	// staged config file with the transformed copy (nested file-over-dir bind;
+	// Docker applies nested binds by destination even under an ro parent).
+	if mcpStage != nil && mcpStage.configBindSrc != "" {
+		args = append(args, "-v", mcpStage.configBindSrc+":"+mcpStage.configBindDst+":ro")
 	}
 
 	// .gitconfig

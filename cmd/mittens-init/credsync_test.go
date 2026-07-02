@@ -4,10 +4,10 @@ import "testing"
 
 func TestShouldAcceptPull_NormalMode(t *testing.T) {
 	tests := []struct {
-		name     string
-		remote   int64
-		local    int64
-		want     bool
+		name   string
+		remote int64
+		local  int64
+		want   bool
 	}{
 		{"remote fresher", 2000, 1000, true},
 		{"remote equal", 1000, 1000, false},

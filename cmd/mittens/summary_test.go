@@ -12,6 +12,7 @@ func TestLaunchSummaryRender_Default(t *testing.T) {
 	s := LaunchSummary{
 		Provider:         "Codex",
 		Workspace:        SummaryMount{Path: "/repo/app", Access: "rw"},
+		MCPServers:       []string{"none"},
 		Credentials:      []string{"Codex OAuth"},
 		Network:          "docker bridge, firewall allowlist (+2 dynamic domains)",
 		Extensions:       []string{"firewall", "go"},
@@ -26,6 +27,8 @@ func TestLaunchSummaryRender_Default(t *testing.T) {
 		"Provider: Codex",
 		"Workspace: /repo/app rw",
 		"Extra dirs: none",
+		"MCP servers (experimental): none",
+		"MCP helper mounts: none",
 		"Credentials: Codex OAuth",
 		"Network: docker bridge, firewall allowlist (+2 dynamic domains)",
 		"Extensions: firewall, go",
@@ -44,6 +47,7 @@ func TestLaunchSummaryRender_SortsExtraDirs(t *testing.T) {
 		Provider:         "Claude",
 		Workspace:        SummaryMount{Path: "/repo/app", Access: "rw"},
 		ExtraDirs:        []SummaryMount{{Path: "/z", Access: "rw"}, {Path: "/a", Access: "ro"}},
+		MCPServers:       []string{"none"},
 		Credentials:      []string{"none staged"},
 		Network:          "docker bridge, firewall disabled",
 		Extensions:       []string{"none"},
@@ -58,6 +62,29 @@ func TestLaunchSummaryRender_SortsExtraDirs(t *testing.T) {
 	}
 }
 
+func TestLaunchSummaryRender_MCPHelperMounts(t *testing.T) {
+	s := LaunchSummary{
+		Provider:         "Codex",
+		Workspace:        SummaryMount{Path: "/repo/app", Access: "rw"},
+		MCPServers:       []string{"shortcut"},
+		MCPHelperMounts:  []SummaryMount{{Path: "/repo/mcpfilter", Access: "ro"}},
+		Credentials:      []string{"none staged"},
+		Network:          "docker bridge, firewall disabled",
+		Extensions:       []string{"mcp"},
+		HostIntegrations: []string{"none"},
+		Execution:        []string{"permission prompts", "no Docker access"},
+		History:          "disabled",
+	}
+
+	out := s.Render()
+	if !strings.Contains(out, "MCP servers (experimental): shortcut") {
+		t.Fatalf("MCP servers not rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "MCP helper mounts: /repo/mcpfilter ro") {
+		t.Fatalf("MCP helper mounts not rendered:\n%s", out)
+	}
+}
+
 func TestBuildLaunchSummary_RuntimeState(t *testing.T) {
 	app := &App{
 		Provider:          CodexProvider(),
@@ -69,8 +96,10 @@ func TestBuildLaunchSummary_RuntimeState(t *testing.T) {
 		Extensions: []*registry.Extension{
 			{Name: "firewall", Enabled: true},
 			{Name: "go", Enabled: true},
+			{Name: "mcp", Enabled: true, Args: []string{"shortcut", "github"}},
 			{Name: "aws", Enabled: false},
 		},
+		MCPServers: []MCPServerPolicy{{Name: "shortcut", Mode: "direct"}, {Name: "github", Mode: "direct"}},
 		launchSummary: LaunchSummary{
 			ExtraDirs: []SummaryMount{{Path: "/repo/shared", Access: "ro"}},
 		},
@@ -98,6 +127,9 @@ func TestBuildLaunchSummary_RuntimeState(t *testing.T) {
 	}
 	if got := strings.Join(s.Extensions, ", "); got != "firewall, go" {
 		t.Fatalf("extensions = %q", got)
+	}
+	if got := strings.Join(s.MCPServers, ", "); got != "shortcut (direct), github (direct)" {
+		t.Fatalf("mcp servers = %q", got)
 	}
 	if got := strings.Join(s.Execution, ", "); !strings.Contains(got, "Docker-in-Docker") {
 		t.Fatalf("execution missing dind: %q", got)

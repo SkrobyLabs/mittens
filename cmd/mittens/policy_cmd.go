@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/SkrobyLabs/mittens/internal/mcpconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -114,7 +115,11 @@ func runPolicySet(args []string, extensions []*registry.Extension) error {
 	if policy == nil {
 		policy = defaultProjectPolicy()
 	}
-	if err := setPolicyField(policy, args[0], args[1]); err != nil {
+	if strings.HasPrefix(args[0], "mcp.") {
+		if err := setMCPPolicyField(policy, workspace, args[0], args[1]); err != nil {
+			return err
+		}
+	} else if err := setPolicyField(policy, args[0], args[1]); err != nil {
 		return err
 	}
 	if err := SaveProjectPolicy(workspace, policy); err != nil {
@@ -281,6 +286,57 @@ func setPolicyField(policy *ProjectPolicy, field, value string) error {
 	return policy.Validate()
 }
 
+// setMCPPolicyField handles `mcp.<server>.mode <mode>`. Proxy mode resolves the
+// server from current host config, refuses workspace-only servers (v1), prints
+// the resolved command line, and records a command pin.
+func setMCPPolicyField(policy *ProjectPolicy, workspace, field, value string) error {
+	parts := strings.Split(field, ".")
+	if len(parts) != 3 || parts[0] != "mcp" || parts[2] != "mode" {
+		return fmt.Errorf("unsupported mcp policy field %q (expected mcp.<server>.mode)", field)
+	}
+	name := parts[1]
+	mode := strings.TrimSpace(value)
+	switch mode {
+	case mcpModeDirect, mcpModeMount, mcpModeProxy:
+	default:
+		return fmt.Errorf("invalid mcp mode %q (expected direct, mount, or proxy)", value)
+	}
+
+	provider, err := providerByName(policy.Provider.Name)
+	if err != nil {
+		return err
+	}
+	servers := readMCPServers(provider, os.Getenv("HOME"), workspace)
+	server, ok := servers[name]
+	if !ok {
+		return fmt.Errorf("unknown MCP server %q; configured servers: %s", name, strings.Join(mcpconfigNames(servers), ", "))
+	}
+
+	entry := MCPServerPolicy{Name: name, Mode: mode}
+	if mode == mcpModeProxy {
+		if server.Scope == mcpconfig.ScopeWorkspace {
+			return fmt.Errorf("MCP server %q is defined only in workspace .mcp.json; proxy mode for workspace-scope servers is not supported in v1 (use the wizard for user-scope servers)", name)
+		}
+		entry.CommandPin = mcpCommandPin(server)
+		fmt.Fprintf(os.Stdout, "Proxying %q on the host: %s\n", name, mcpCommandLine(server))
+		fmt.Fprintf(os.Stdout, "Command pin: %s\n", entry.CommandPin)
+	}
+	policy.MCP.Servers = upsertMCPServer(policy.MCP.Servers, entry)
+	policy.applyDefaults()
+	return policy.Validate()
+}
+
+func mcpconfigNames(servers map[string]mcpconfig.Server) []string {
+	return mcpconfig.Names(servers)
+}
+
+func mcpCommandLine(s mcpconfig.Server) string {
+	if s.URL != "" {
+		return s.URL
+	}
+	return strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
+}
+
 func parsePolicyBool(value string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "true", "yes", "on", "1", "allow", "enabled":
@@ -373,6 +429,7 @@ func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string) LaunchSumm
 		Profile:          policy.Provider.Profile,
 		Workspace:        SummaryMount{Path: workspacePath, Access: workspaceMode},
 		ExtraDirs:        extraDirs,
+		MCPServers:       mcpServersFromPolicy(policy),
 		Credentials:      credentialsFromPolicy(policy),
 		Network:          network,
 		Extensions:       capabilitiesFromPolicy(policy),
@@ -402,9 +459,30 @@ func credentialsFromPolicy(policy *ProjectPolicy) []string {
 	return uniqueSorted(out)
 }
 
+func mcpServersFromPolicy(policy *ProjectPolicy) []string {
+	var out []string
+	if policy.MCP.All {
+		out = append(out, "all configured")
+	}
+	for _, server := range policy.MCP.Servers {
+		mode := server.Mode
+		if mode == "" {
+			mode = mcpModeDirect
+		}
+		out = append(out, server.Name+" ("+mode+")")
+	}
+	if len(out) == 0 {
+		return []string{"none"}
+	}
+	return out
+}
+
 func capabilitiesFromPolicy(policy *ProjectPolicy) []string {
 	var out []string
 	for _, cap := range policy.Capabilities {
+		if cap.Name == "mcp" {
+			continue
+		}
 		out = append(out, cap.Name)
 	}
 	if len(out) == 0 {

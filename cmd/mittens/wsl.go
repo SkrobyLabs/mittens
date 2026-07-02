@@ -115,7 +115,7 @@ func unescapeMountInfo(s string) string {
 			s[i+1] >= '0' && s[i+1] <= '7' &&
 			s[i+2] >= '0' && s[i+2] <= '7' &&
 			s[i+3] >= '0' && s[i+3] <= '7' {
-			val := (s[i+1]-'0')*64 + (s[i+2]-'0')*8 + (s[i+3]-'0')
+			val := (s[i+1]-'0')*64 + (s[i+2]-'0')*8 + (s[i+3] - '0')
 			b.WriteByte(val)
 			i += 3
 			continue

@@ -4,12 +4,11 @@
 # unless explicitly whitelisted. The entrypoint resolves domains at runtime.
 
 name: mcp
-description: Whitelist MCP server API domains through the firewall
+description: Experimental MCP server passthrough
 
 flags:
   - name: "--mcp"
-    description: "Whitelist MCP server API domains (repeatable, comma-separated)"
+    description: "Experimental: whitelist MCP server API domains (repeatable, comma-separated)"
     arg: "csv"
   - name: "--mcp-all"
-    description: "Whitelist all configured MCP servers"
-
+    description: "Experimental: whitelist all configured MCP servers"

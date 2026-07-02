@@ -16,16 +16,16 @@ import (
 
 // BuildContext holds the parameters needed to build a Docker image.
 type BuildContext struct {
-	ContextDir     string               // project root (docker build context)
-	Dockerfile     string               // path to Dockerfile (relative to ContextDir or absolute)
-	ImageName      string               // e.g. "mittens"
-	ImageTag       string               // e.g. "latest" or "aws-kubectl"
-	UserID         int                  // host UID to bake into the image
-	GroupID        int                  // host GID to bake into the image
+	ContextDir     string                // project root (docker build context)
+	Dockerfile     string                // path to Dockerfile (relative to ContextDir or absolute)
+	ImageName      string                // e.g. "mittens"
+	ImageTag       string                // e.g. "latest" or "aws-kubectl"
+	UserID         int                   // host UID to bake into the image
+	GroupID        int                   // host GID to bake into the image
 	Extensions     []*registry.Extension // enabled extensions with build configs
-	ExtraBuildArgs map[string]string    // additional --build-arg key=value pairs (e.g. provider args)
-	Verbose        bool                 // pass --progress=plain to docker build
-	NoCache        bool                 // pass --no-cache to docker build
+	ExtraBuildArgs map[string]string     // additional --build-arg key=value pairs (e.g. provider args)
+	Verbose        bool                  // pass --progress=plain to docker build
+	NoCache        bool                  // pass --no-cache to docker build
 }
 
 // platformPreBuildHook is called before `docker build` to perform platform-specific

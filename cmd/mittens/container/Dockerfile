@@ -126,6 +126,7 @@ RUN chmod +x /usr/local/bin/mittens-init && \
     ln -sf mittens-init /usr/local/bin/xclip && \
     ln -sf mittens-init /usr/local/bin/notify.sh && \
     ln -sf mittens-init /usr/local/bin/clipboard-x11-sync.sh && \
+    ln -sf mittens-init /usr/local/bin/mittens-mcp-proxy && \
     ln -sf mittens-init /usr/local/bin/entrypoint.sh
 
 # NOTE: No USER directive here — mittens-init handles the root→claude

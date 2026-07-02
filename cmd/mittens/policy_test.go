@@ -595,6 +595,7 @@ func TestLaunchSummaryFromPolicy(t *testing.T) {
 	policy.Execution.History = &history
 	policy.Execution.Docker = "host"
 	policy.Capabilities = []CapabilityPolicy{{Name: "aws"}}
+	policy.MCP.Servers = []MCPServerPolicy{{Name: "shortcut", Mode: "direct"}, {Name: "github", Mode: "direct"}}
 
 	summary := launchSummaryFromPolicy(policy, "/repo/app")
 	if summary.Provider != "Codex" || summary.Profile != "fast" {
@@ -608,6 +609,12 @@ func TestLaunchSummaryFromPolicy(t *testing.T) {
 	}
 	if summary.Network != "host network, firewall disabled" {
 		t.Fatalf("network = %q", summary.Network)
+	}
+	if got := strings.Join(summary.Extensions, ", "); got != "aws" {
+		t.Fatalf("extensions = %q", got)
+	}
+	if got := strings.Join(summary.MCPServers, ", "); got != "shortcut (direct), github (direct)" {
+		t.Fatalf("mcp servers = %q", got)
 	}
 	if got := strings.Join(summary.Execution, ", "); !strings.Contains(got, "permission prompts") || !strings.Contains(got, "host Docker socket") {
 		t.Fatalf("execution = %q", got)

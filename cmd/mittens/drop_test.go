@@ -209,10 +209,10 @@ func TestWindowsToWSLPath(t *testing.T) {
 		{`C:\Users\foo\file.txt`, `/mnt/c/Users/foo/file.txt`},
 		{`D:\project\src\main.go`, `/mnt/d/project/src/main.go`},
 		{`c:\lowercase\drive`, `/mnt/c/lowercase/drive`},
-		{"/unix/path", "/unix/path"},           // passthrough
-		{"relative/path", "relative/path"},     // passthrough
-		{"C:", "C:"},                           // too short, passthrough
-		{`C:\`, `/mnt/c/`},                    // root only
+		{"/unix/path", "/unix/path"},       // passthrough
+		{"relative/path", "relative/path"}, // passthrough
+		{"C:", "C:"},                       // too short, passthrough
+		{`C:\`, `/mnt/c/`},                 // root only
 	}
 	for _, tc := range tests {
 		got := windowsToWSLPath(tc.input)
