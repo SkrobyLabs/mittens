@@ -1,11 +1,68 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestSetupNotificationHooksPreservesExistingHooks(t *testing.T) {
+	dir := t.TempDir()
+	settingsFile := filepath.Join(dir, "settings.json")
+
+	// A plugin-registered PreToolUse hook that must survive re-init, plus a
+	// stale notify command that must be refreshed.
+	seed := `{
+		"hooks": {
+			"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"~/.claude/hooks/git-commit-validator.sh"}]}],
+			"Notification": [{"hooks":[{"type":"command","command":"OLD notify command"}]}]
+		}
+	}`
+	if err := os.WriteFile(settingsFile, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config{
+		AIDir:            dir,
+		AISettingsFile:   "settings.json",
+		AISettingsFormat: "json",
+		AIStopHookEvent:  "Stop",
+		BrokerPort:       "9999",
+	}
+
+	setupNotificationHooks(cfg)
+
+	data, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		t.Fatal(err)
+	}
+	hooks, ok := obj["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected hooks map, got %T", obj["hooks"])
+	}
+
+	// The plugin hook must still be there.
+	if _, ok := hooks["PreToolUse"]; !ok {
+		t.Errorf("PreToolUse hook was dropped: %s", data)
+	}
+	// mittens' own hooks must be present and refreshed (no stale command).
+	if _, ok := hooks["Notification"]; !ok {
+		t.Errorf("Notification hook missing")
+	}
+	if _, ok := hooks["Stop"]; !ok {
+		t.Errorf("Stop hook missing")
+	}
+	if strings.Contains(string(data), "OLD notify command") {
+		t.Errorf("stale notify command was not refreshed: %s", data)
+	}
+}
 
 func gitInit(t *testing.T, dir string) {
 	t.Helper()

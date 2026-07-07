@@ -591,14 +591,21 @@ func setupNotificationHooks(cfg *config) {
 
 	notifyCmd := `MSG=$(jq -r '.message // "needs attention"'); /usr/local/bin/notify.sh notification "$MSG"`
 
-	hooks := map[string]interface{}{
-		"Notification": []interface{}{
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": notifyCmd,
-					},
+	// Merge into any existing hooks map rather than replacing it wholesale.
+	// Plugin-registered events (PreToolUse, UserPromptSubmit, SessionStart, ...)
+	// must survive a re-init; only mittens' own notify keys are (re)set so the
+	// commands stay current.
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = map[string]interface{}{}
+	}
+
+	hooks["Notification"] = []interface{}{
+		map[string]interface{}{
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": notifyCmd,
 				},
 			},
 		},
