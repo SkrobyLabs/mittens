@@ -1,0 +1,24 @@
+# helmfile extension for mittens
+# Installs Helmfile plus the plugins/tooling required for real-world use:
+# helm-diff, helm-secrets, sops, and age. Helm itself comes from the
+# 'helm' extension, which must also be enabled. Dynamic resolver scans the
+# workspace for helmfile config files and whitelists declared chart repos.
+
+name: helmfile
+description: Install Helmfile, helm-diff, helm-secrets, sops, and age
+
+flags:
+  - name: "--helmfile"
+    description: "Install Helmfile and SOPS-based secret tooling"
+    arg: "none"
+
+firewall:
+  - "get.helm.sh"
+
+env:
+  HELM_DATA_HOME: "/opt/helm/data"
+  HELM_PLUGINS: "/opt/helm/data/plugins"
+
+build:
+  script: "build.sh"
+  image_tag: "helmfile"

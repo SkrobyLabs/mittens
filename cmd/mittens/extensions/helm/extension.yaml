@@ -1,13 +1,13 @@
 # helm extension for mittens
-# Installs Helm 3 CLI and optionally mounts chart repository configuration.
+# Installs Helm 3 CLI, Helm-focused test tooling, and optionally mounts chart repository configuration.
 # Dynamic resolver parses repositories.yaml to whitelist custom repo domains.
 
 name: helm
-description: Install Helm CLI and mount chart repository configuration
+description: Install Helm CLI, Helmfile, helm-unittest, and mount chart repository configuration
 
 flags:
   - name: "--helm"
-    description: "Install Helm CLI and mount config"
+    description: "Install Helm CLI, Helmfile, helm-unittest, and mount config"
     arg: "none"
 
 firewall:
@@ -20,6 +20,10 @@ mounts:
     mode: "ro"
     when: "dir_exists"
 
+env:
+  HELM_DATA_HOME: "/opt/helm/data"
+  HELM_PLUGINS: "/opt/helm/data/plugins"
+
 build:
-  script: "helm.sh"
+  script: "build.sh"
   image_tag: "helm"
