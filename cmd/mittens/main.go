@@ -22,6 +22,7 @@ import (
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/gcp"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/gh"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/helm"
+	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/helmfile"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/kubectl"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/mcp"
 	_ "github.com/SkrobyLabs/mittens/cmd/mittens/extensions/trivy"

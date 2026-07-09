@@ -1,4 +1,4 @@
-package helm
+package helmfile
 
 import (
 	"os"
@@ -9,50 +9,50 @@ import (
 )
 
 func init() {
-	registry.Register("helm", &registry.Registration{
+	registry.Register("helmfile", &registry.Registration{
 		Setup: setup,
 	})
 }
 
+// setup scans the workspace for helmfile configuration files and extracts
+// chart repository hostnames so the firewall whitelists them automatically.
+// Mirrors helm/resolver.go but reads from the project root rather than $HOME.
 func setup(ctx *registry.SetupContext) error {
-	reposFile := filepath.Join(ctx.Home, ".config", "helm", "repositories.yaml")
-	pattern := `(?m)^\s*-?\s*url:\s*(https?://\S+)`
-	hosts := uniqueHosts(registry.ExtractUniqueHosts(reposFile, pattern))
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
 
-	if cwd, err := os.Getwd(); err == nil {
-		for _, path := range helmfileCandidates(cwd) {
-			hosts = appendUniqueHosts(hosts, registry.ExtractUniqueHosts(path, pattern)...)
+	pattern := `(?m)^\s*url:\s*(https?://\S+)`
+	candidates := helmfileCandidates(cwd)
+
+	seen := make(map[string]bool)
+	var hosts []string
+	for _, path := range candidates {
+		for _, h := range registry.ExtractUniqueHosts(path, pattern) {
+			if !seen[h] {
+				seen[h] = true
+				hosts = append(hosts, h)
+			}
 		}
 	}
 
 	if len(hosts) > 0 {
 		*ctx.FirewallExtra = append(*ctx.FirewallExtra, hosts...)
-		registry.LogInfo("helm: added %d chart repo domain(s) to firewall", len(hosts))
+		registry.LogInfo("helmfile: added %d chart repo domain(s) to firewall", len(hosts))
 	}
 	return nil
 }
 
-func uniqueHosts(hosts []string) []string {
-	return appendUniqueHosts(nil, hosts...)
-}
-
-func appendUniqueHosts(hosts []string, more ...string) []string {
-	seen := make(map[string]bool, len(hosts)+len(more))
-	for _, h := range hosts {
-		seen[h] = true
-	}
-	for _, h := range more {
-		if seen[h] {
-			continue
-		}
-		seen[h] = true
-		hosts = append(hosts, h)
-	}
-	return hosts
-}
-
-// helmfileCandidates returns paths to Helmfile config files that may declare
-// chart repository URLs needed by helmfile template/lint/test workflows.
+// helmfileCandidates returns paths to helmfile config files mittens should
+// scan for chart repository URLs. Covers the conventional layout:
+//
+//   - helmfile.yaml / helmfile.yaml.gotmpl
+//   - helmfile-*.yaml / helmfile-*.yaml.gotmpl at the repo root
+//   - helmfile.d/*.yaml{,.gotmpl}
+//   - helmfiles/*.yaml{,.gotmpl} (Quix-style)
+//
+// Missing files are silently skipped by ExtractUniqueHosts.
 func helmfileCandidates(root string) []string {
 	var paths []string
 
