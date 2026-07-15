@@ -387,6 +387,13 @@ func (p *ProjectPolicy) ToLegacyFlags() []string {
 	if key := p.Options["image_paste_key"]; key != "" {
 		args = append(args, "--image-paste-key", key)
 	}
+	// Docker mode is stored as a first-class execution field in policy.yaml,
+	// but the wizard and legacy compatibility helpers consume this projection.
+	// Preserve it here so re-running `mittens init` cannot silently remove the
+	// Docker capability from the policy.
+	if p.Execution.Docker != "" {
+		args = append(args, "--docker", p.Execution.Docker)
+	}
 	for _, cap := range p.Capabilities {
 		if cap.Name == "" || cap.Name == "docker" {
 			if cap.Name == "docker" && len(cap.Args) > 0 && p.Execution.Docker == "" {

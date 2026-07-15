@@ -688,6 +688,21 @@ func TestWizardSeedFromPolicy(t *testing.T) {
 	}
 }
 
+func TestWizardSeedFromPolicyPreservesDockerMode(t *testing.T) {
+	for _, mode := range []string{"dind", "host"} {
+		t.Run(mode, func(t *testing.T) {
+			policy := defaultProjectPolicy()
+			policy.Execution.Docker = mode
+
+			seed := wizardSeedFromPolicy(policy)
+			want := "--docker " + mode
+			if !hasLine(seed.exts, want) {
+				t.Fatalf("extension seed = %v, want %q", seed.exts, want)
+			}
+		})
+	}
+}
+
 func TestWizardSeedFromPolicy_Nil(t *testing.T) {
 	seed := wizardSeedFromPolicy(nil)
 	if seed.providerState.Default != "" || len(seed.dirs) != 0 || len(seed.exts) != 0 {

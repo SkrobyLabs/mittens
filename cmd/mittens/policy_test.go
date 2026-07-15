@@ -93,6 +93,27 @@ func TestSaveLoadProjectPolicy(t *testing.T) {
 	}
 }
 
+func TestToLegacyFlagsIncludesStructuredDockerMode(t *testing.T) {
+	for _, mode := range []string{"dind", "host"} {
+		t.Run(mode, func(t *testing.T) {
+			policy := defaultProjectPolicy()
+			policy.Execution.Docker = mode
+
+			got := policy.ToLegacyFlags()
+			found := false
+			for i := 0; i+1 < len(got); i++ {
+				if got[i] == "--docker" && got[i+1] == mode {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("legacy flags = %#v, want --docker %s", got, mode)
+			}
+		})
+	}
+}
+
 func TestLoadProjectConfig_PrefersProjectPolicy(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)
