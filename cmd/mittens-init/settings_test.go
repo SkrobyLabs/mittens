@@ -128,6 +128,91 @@ func TestNormalizeEmptyJSONObjectFilePreservesNonEmptyFile(t *testing.T) {
 	}
 }
 
+func TestStripGeneratedInstructionBlocksRemovesLegacyAccumulation(t *testing.T) {
+	input := `# Personal guidance
+Keep this line.
+
+# Additional Workspace Directories
+These directories are mounted read-write and trusted. You can read, edit, and search files in them.
+- /old/workspace
+
+# Network Firewall
+This container runs behind an outbound network firewall (proxy + iptables).
+Only the domains listed below are reachable over HTTP/HTTPS.
+
+## Whitelisted domains
+` + "```" + `
+example.com
+` + "```" + `
+
+# Extension Guides
+- **trivy**: Legacy generated guide.
+
+# Repository guidance
+Preserve this section.
+`
+
+	got := stripGeneratedInstructionBlocks(input)
+	want := "# Personal guidance\nKeep this line.\n\n# Repository guidance\nPreserve this section.\n"
+	if got != want {
+		t.Fatalf("cleaned instructions = %q, want %q", got, want)
+	}
+}
+
+func TestStripGeneratedInstructionBlocksRemovesMarkedBlocks(t *testing.T) {
+	input := `# Personal guidance
+Keep this line.
+
+<!-- mittens:generated:start -->
+# Additional Workspace Directories
+- /current/workspace
+<!-- mittens:generated:end -->
+
+# Extension Guides
+This user-authored section does not have the generated bullet format.
+`
+
+	got := stripGeneratedInstructionBlocks(input)
+	want := "# Personal guidance\nKeep this line.\n\n\n# Extension Guides\nThis user-authored section does not have the generated bullet format.\n"
+	if got != want {
+		t.Fatalf("cleaned instructions = %q, want %q", got, want)
+	}
+}
+
+func TestResetGeneratedProjectInstructionsMakesLaunchContentBounded(t *testing.T) {
+	aidir := t.TempDir()
+	path := filepath.Join(aidir, "AGENTS.md")
+	legacy := "# Personal guidance\nKeep this line.\n\n# Additional Workspace Directories\nThese directories are mounted read-write and trusted. You can read, edit, and search files in them.\n- /old\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config{
+		AIDir:         aidir,
+		AIProjectFile: "AGENTS.md",
+		ExtraDirs:     []string{"/current"},
+	}
+
+	resetGeneratedProjectInstructions(cfg)
+	appendExtraDirsInfo(cfg)
+	resetGeneratedProjectInstructions(cfg)
+	appendExtraDirsInfo(cfg)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Count(text, "# Additional Workspace Directories") != 1 {
+		t.Fatalf("generated section count = %d, want 1:\n%s", strings.Count(text, "# Additional Workspace Directories"), text)
+	}
+	if !strings.Contains(text, "# Personal guidance\nKeep this line.") {
+		t.Fatalf("personal guidance was not preserved:\n%s", text)
+	}
+	if !strings.Contains(text, "- /current") {
+		t.Fatalf("current launch directory missing:\n%s", text)
+	}
+}
+
 func TestCopyConfigFilesCopiesPersistedDirsAndGlobs(t *testing.T) {
 	root := t.TempDir()
 	staging := filepath.Join(root, "staging")

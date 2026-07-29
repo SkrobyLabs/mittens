@@ -989,7 +989,7 @@ func TestAssembleDockerArgs_CodexSessionPersistenceUsesStagingCopy(t *testing.T)
 	if argPairExists(args, "-v", p.HostConfigDir(home)+":"+p.ContainerConfigDir()) {
 		t.Fatalf("did not expect whole-config history mount for codex")
 	}
-	for _, rel := range []string{"history.jsonl", "memories", "plans", "projects", "sessions", "tasks"} {
+	for _, rel := range []string{"history.jsonl", "memories", "plans", "projects", "sessions", "sqlite", "tasks"} {
 		hostPath := filepath.Join(p.HostConfigDir(home), rel)
 		containerPath := filepath.Join(p.ContainerConfigDir(), rel)
 		if !argPairExists(args, "-v", hostPath+":"+containerPath) {
@@ -1767,6 +1767,17 @@ func TestAssembleDockerArgs_OllamaProvider(t *testing.T) {
 	}
 	if !argExists(a.ClaudeArgs, "--oss") || !argPairExists(a.ClaudeArgs, "--local-provider", "ollama") || !argPairExists(a.ClaudeArgs, "--model", "qwen3-coder:30b") {
 		t.Fatalf("unexpected Ollama default args: %#v", a.ClaudeArgs)
+	}
+}
+
+func TestApplyProviderDefaultArgs_CodexDisablesUpdateCheck(t *testing.T) {
+	p := CodexProvider()
+	a := &App{Provider: p}
+
+	a.applyProviderDefaultArgs(p.RuntimePlan())
+
+	if !argExists(a.ClaudeArgs, "--config=check_for_update_on_startup=false") {
+		t.Fatalf("Codex default args = %#v, want startup update check disabled", a.ClaudeArgs)
 	}
 }
 

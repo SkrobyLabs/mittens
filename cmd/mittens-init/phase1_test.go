@@ -1,11 +1,14 @@
 package main
 
 import (
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestLookupSupplementaryGroupsInFile(t *testing.T) {
@@ -86,6 +89,51 @@ func TestEnsureProjectsDirWritableCreatesMissingParent(t *testing.T) {
 
 	if fi, err := os.Stat(filepath.Join(cfg.AIDir, "projects")); err != nil || !fi.IsDir() {
 		t.Fatalf("projects dir not created: %v", err)
+	}
+}
+
+func TestPingDockerDaemonUsesLightweightPingEndpoint(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_ping" {
+			t.Errorf("request path = %q, want /_ping", r.URL.Path)
+		}
+		_, _ = w.Write([]byte("OK"))
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+
+	if err := pingDockerDaemon(sock, time.Second); err != nil {
+		t.Fatalf("pingDockerDaemon() error = %v", err)
+	}
+}
+
+func TestPingDockerDaemonHonorsTimeout(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-block
+	})}
+	go server.Serve(listener)
+	defer func() {
+		close(block)
+		server.Close()
+	}()
+
+	start := time.Now()
+	if err := pingDockerDaemon(sock, 20*time.Millisecond); err == nil {
+		t.Fatal("pingDockerDaemon() error = nil, want timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("pingDockerDaemon() took %s, want bounded timeout", elapsed)
 	}
 }
 

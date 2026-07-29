@@ -274,6 +274,7 @@ func CodexProvider() *Provider {
 			"plans",
 			"projects",
 			"sessions",
+			"sqlite",
 			"tasks",
 		},
 		ModelFlag:  "--model",
@@ -283,6 +284,7 @@ func CodexProvider() *Provider {
 		// Codex streams JSON events under `codex exec --json`.
 		ProgressArgs:         []string{"--json"},
 		ProgressConflictFlag: "--json",
+		DefaultArgs:          []string{"--config=check_for_update_on_startup=false"},
 
 		ContainerEnv: map[string]string{
 			// codex login opens the auth URL via the Rust webbrowser crate, which
@@ -290,7 +292,8 @@ func CodexProvider() *Provider {
 			// environment/x-www-browser — none of which exist in the container.
 			// Point it at the broker shim so the URL is forwarded to the host and
 			// the OAuth callback intercept gets armed.
-			"BROWSER": "/usr/local/bin/xdg-open",
+			"BROWSER":           "/usr/local/bin/xdg-open",
+			"CODEX_SQLITE_HOME": "/home/codex/.codex/sqlite",
 		},
 	}
 }

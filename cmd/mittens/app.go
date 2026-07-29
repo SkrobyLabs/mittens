@@ -229,6 +229,7 @@ func (a *App) ParseFlags(args []string) error {
 // Run is the main orchestration method.
 func (a *App) Run() error {
 	defer a.Cleanup()
+	startupStarted := time.Now()
 	a.ensureHostPolicyDefaults()
 
 	// Compute worktree suffix once for consistent naming across all worktrees.
@@ -488,9 +489,11 @@ func (a *App) Run() error {
 
 	// Build Docker image.
 	if !a.NoBuild {
+		buildStarted := time.Now()
 		if err := a.buildImage(); err != nil {
 			return err
 		}
+		logVerbose(a.Verbose, "Startup timing: Docker image check/build took %s", time.Since(buildStarted).Round(time.Millisecond))
 	}
 
 	// Yolo mode: bypass permission prompts. Providers that can express the
@@ -516,6 +519,7 @@ func (a *App) Run() error {
 	}
 
 	if a.Verbose {
+		logInfo("Startup timing: host preparation took %s", time.Since(startupStarted).Round(time.Millisecond))
 		logInfo("Command: docker run %s", strings.Join(sanitizeDockerArgsForLog(dockerArgs), " "))
 	}
 
@@ -1823,6 +1827,11 @@ func (a *App) runContainer(dockerArgs []string) error {
 			defer cleanup()
 		}
 		stdin = s
+	}
+	if a.Verbose {
+		dockerArgs = append(dockerArgs,
+			"-e", "MITTENS_LAUNCH_STARTED_NS="+strconv.FormatInt(time.Now().UnixNano(), 10),
+		)
 	}
 
 	code, err := RunContainer(dockerArgs, a.ImageName, a.ImageTag, a.Shell, a.Provider.Binary, a.ClaudeArgs, stdin)

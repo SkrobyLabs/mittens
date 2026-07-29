@@ -17,9 +17,11 @@ import (
 // runPhase2 performs user-level setup: config staging, trust dirs, hooks,
 // credential sync, then execs the AI CLI.
 func runPhase2(cfg *config) error {
+	phaseStarted := time.Now()
 	os.MkdirAll(cfg.AIDir, 0755)
 
 	// Source extension environments (Go, .NET, etc.).
+	started := time.Now()
 	sourceProfileD()
 
 	// Ensure ~/.local/bin/<binary> exists.
@@ -34,12 +36,21 @@ func runPhase2(cfg *config) error {
 	if cfg.WSLClipboard {
 		setupWSLClipboard(cfg)
 	}
+	logStartupDuration(cfg, "user environment setup", started)
 
 	// Copy read-only credential staging mounts into writable home.
+	started = time.Now()
 	copyCredStagingDirs(cfg)
 
 	// Copy read-only config into writable home.
 	copyConfigFiles(cfg)
+	logStartupDuration(cfg, "config staging", started)
+
+	// Remove Mittens-generated instruction blocks copied from the host. Older
+	// releases mounted the whole Codex config directory read-write, so the
+	// per-launch workspace/firewall additions could accumulate in AGENTS.md.
+	started = time.Now()
+	resetGeneratedProjectInstructions(cfg)
 
 	// Pre-trust directories.
 	setupTrustedDirs(cfg)
@@ -77,8 +88,10 @@ func runPhase2(cfg *config) error {
 
 	// Write OAuth credentials.
 	setupCredentials(cfg)
+	logStartupDuration(cfg, "provider config setup", started)
 
 	// Inform AI about extra directories.
+	started = time.Now()
 	appendExtraDirsInfo(cfg)
 
 	// Inform AI about firewall.
@@ -89,6 +102,7 @@ func runPhase2(cfg *config) error {
 
 	// Inject notification hooks.
 	setupNotificationHooks(cfg)
+	logStartupDuration(cfg, "runtime instruction setup", started)
 
 	// Start credential sync daemon as a forked child process.
 	// Must be a separate process because syscall.Exec (below) kills goroutines.
@@ -112,6 +126,14 @@ func runPhase2(cfg *config) error {
 	}
 
 	// Exec the remaining args (typically the AI CLI binary).
+	logStartupDuration(cfg, "user entrypoint phase", phaseStarted)
+	if cfg.Verbose {
+		target := cfg.AIBinary
+		if len(os.Args) > 1 {
+			target = os.Args[1]
+		}
+		logInfo("Startup timing: handing off to %s", target)
+	}
 	return execArgs(cfg.AIBinary)
 }
 
@@ -520,25 +542,107 @@ func setupCredentials(cfg *config) {
 	}
 }
 
-func appendExtraDirsInfo(cfg *config) {
-	if len(cfg.ExtraDirs) == 0 {
+const (
+	generatedInstructionsStart = "<!-- mittens:generated:start -->"
+	generatedInstructionsEnd   = "<!-- mittens:generated:end -->"
+)
+
+func resetGeneratedProjectInstructions(cfg *config) {
+	if cfg.AIProjectFile == "" {
 		return
 	}
-	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
-	f, err := os.OpenFile(projectFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	path := cfg.AIDir + "/" + cfg.AIProjectFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	cleaned := stripGeneratedInstructionBlocks(string(data))
+	if cleaned == string(data) {
+		return
+	}
+	_ = os.WriteFile(path, []byte(cleaned), 0o644)
+}
+
+func stripGeneratedInstructionBlocks(content string) string {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	skippingMarked := false
+	skippingLegacy := false
+
+	for i, line := range lines {
+		switch {
+		case line == generatedInstructionsStart:
+			skippingMarked = true
+			continue
+		case skippingMarked:
+			if line == generatedInstructionsEnd {
+				skippingMarked = false
+			}
+			continue
+		case isLegacyGeneratedHeading(lines, i):
+			skippingLegacy = true
+			continue
+		case skippingLegacy && strings.HasPrefix(line, "# "):
+			skippingLegacy = false
+		case skippingLegacy:
+			continue
+		}
+		out = append(out, line)
+	}
+
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+}
+
+func isLegacyGeneratedHeading(lines []string, index int) bool {
+	switch lines[index] {
+	case "# Additional Workspace Directories":
+		return nextNonEmptyLine(lines, index+1) == "These directories are mounted read-write and trusted. You can read, edit, and search files in them."
+	case "# Network Firewall":
+		return nextNonEmptyLine(lines, index+1) == "This container runs behind an outbound network firewall (proxy + iptables)."
+	case "# Extension Guides":
+		next := nextNonEmptyLine(lines, index+1)
+		return strings.HasPrefix(next, "- **") && strings.Contains(next, "**:")
+	default:
+		return false
+	}
+}
+
+func nextNonEmptyLine(lines []string, start int) string {
+	for _, line := range lines[start:] {
+		if strings.TrimSpace(line) != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func appendGeneratedInstructions(path string, write func(*os.File)) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
 	fmt.Fprintln(f)
-	fmt.Fprintln(f, "# Additional Workspace Directories")
-	fmt.Fprintln(f, "These directories are mounted read-write and trusted. You can read, edit, and search files in them.")
-	for _, d := range cfg.ExtraDirs {
-		if d != "" {
-			fmt.Fprintf(f, "- %s\n", d)
-		}
+	fmt.Fprintln(f, generatedInstructionsStart)
+	write(f)
+	fmt.Fprintln(f, generatedInstructionsEnd)
+}
+
+func appendExtraDirsInfo(cfg *config) {
+	if len(cfg.ExtraDirs) == 0 {
+		return
 	}
+	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
+	appendGeneratedInstructions(projectFile, func(f *os.File) {
+		fmt.Fprintln(f, "# Additional Workspace Directories")
+		fmt.Fprintln(f, "These directories are mounted read-write and trusted. You can read, edit, and search files in them.")
+		for _, d := range cfg.ExtraDirs {
+			if d != "" {
+				fmt.Fprintf(f, "- %s\n", d)
+			}
+		}
+	})
 }
 
 func appendFirewallInfo(cfg *config) {
@@ -557,26 +661,21 @@ func appendFirewallInfo(cfg *config) {
 	domains = dedup(domains)
 
 	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
-	f, err := os.OpenFile(projectFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	fmt.Fprintln(f)
-	fmt.Fprintln(f, "# Network Firewall")
-	fmt.Fprintln(f, "This container runs behind an outbound network firewall (proxy + iptables).")
-	fmt.Fprintln(f, "Only the domains listed below are reachable over HTTP/HTTPS.")
-	fmt.Fprintln(f, "Requests to any other FQDN will **time out or be refused** by the proxy — do not retry, the domain is blocked by policy.")
-	fmt.Fprintln(f)
-	fmt.Fprintln(f, "If a tool or package manager fails with a network error, check whether the target domain is in this list before troubleshooting further.")
-	fmt.Fprintln(f)
-	fmt.Fprintln(f, "## Whitelisted domains")
-	fmt.Fprintln(f, "```")
-	for _, d := range domains {
-		fmt.Fprintln(f, d)
-	}
-	fmt.Fprintln(f, "```")
+	appendGeneratedInstructions(projectFile, func(f *os.File) {
+		fmt.Fprintln(f, "# Network Firewall")
+		fmt.Fprintln(f, "This container runs behind an outbound network firewall (proxy + iptables).")
+		fmt.Fprintln(f, "Only the domains listed below are reachable over HTTP/HTTPS.")
+		fmt.Fprintln(f, "Requests to any other FQDN will **time out or be refused** by the proxy — do not retry, the domain is blocked by policy.")
+		fmt.Fprintln(f)
+		fmt.Fprintln(f, "If a tool or package manager fails with a network error, check whether the target domain is in this list before troubleshooting further.")
+		fmt.Fprintln(f)
+		fmt.Fprintln(f, "## Whitelisted domains")
+		fmt.Fprintln(f, "```")
+		for _, d := range domains {
+			fmt.Fprintln(f, d)
+		}
+		fmt.Fprintln(f, "```")
+	})
 }
 
 func setupNotificationHooks(cfg *config) {
@@ -785,26 +884,21 @@ func appendExtensionPrompts(cfg *config) {
 	os.MkdirAll(guidesDir, 0755)
 
 	projectFile := cfg.AIDir + "/" + cfg.AIProjectFile
-	f, err := os.OpenFile(projectFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+	appendGeneratedInstructions(projectFile, func(f *os.File) {
+		fmt.Fprintln(f, "# Extension Guides")
 
-	fmt.Fprintln(f)
-	fmt.Fprintln(f, "# Extension Guides")
-
-	for _, p := range cfg.ExtensionPrompts {
-		if p.Short == "" {
-			continue
-		}
-		fmt.Fprintf(f, "- **%s**: %s", p.Name, p.Short)
-		if p.Guide != "" {
-			guidePath := guidesDir + "/" + p.Name + ".md"
-			if err := os.WriteFile(guidePath, []byte(p.Guide), 0644); err == nil {
-				fmt.Fprintf(f, " See `%s` for detailed usage.", guidePath)
+		for _, p := range cfg.ExtensionPrompts {
+			if p.Short == "" {
+				continue
 			}
+			fmt.Fprintf(f, "- **%s**: %s", p.Name, p.Short)
+			if p.Guide != "" {
+				guidePath := guidesDir + "/" + p.Name + ".md"
+				if err := os.WriteFile(guidePath, []byte(p.Guide), 0644); err == nil {
+					fmt.Fprintf(f, " See `%s` for detailed usage.", guidePath)
+				}
+			}
+			fmt.Fprintln(f)
 		}
-		fmt.Fprintln(f)
-	}
+	})
 }

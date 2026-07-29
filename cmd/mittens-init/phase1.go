@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,21 +18,31 @@ import (
 // runPhase1 performs root-level setup: DinD, Docker socket, network firewall
 // (Go proxy + iptables), then drops privileges and re-execs as the AI user.
 func runPhase1(cfg *config) error {
+	phaseStarted := time.Now()
+	logContainerStartDelay(cfg)
+
 	if cfg.DinD {
+		started := time.Now()
 		startDinD()
+		logStartupDuration(cfg, "DinD readiness", started)
 	}
 
 	if cfg.DockerHost {
+		started := time.Now()
 		setupDockerSocket(cfg)
+		logStartupDuration(cfg, "host Docker setup", started)
 	}
 
 	if cfg.Firewall {
+		started := time.Now()
 		if err := setupFirewall(cfg); err != nil {
 			logWarn("Firewall setup failed: %v", err)
 		}
+		logStartupDuration(cfg, "firewall setup", started)
 	}
 
 	ensureProjectsDirWritable(cfg)
+	logStartupDuration(cfg, "root entrypoint phase", phaseStarted)
 
 	// Drop privileges and re-exec this binary as the AI user.
 	return dropPrivileges(cfg)
@@ -120,11 +133,40 @@ func setupDockerSocket(cfg *config) {
 		_ = os.Chmod(sock, 0666)
 	}
 
-	if exec.Command("docker", "info").Run() == nil {
+	if err := pingDockerDaemon(sock, time.Second); err == nil {
 		logInfo("Host Docker daemon accessible")
 	} else {
-		logWarn("host Docker socket not accessible")
+		logWarn("host Docker daemon did not answer its readiness ping: %v", err)
 	}
+}
+
+func pingDockerDaemon(sock string, timeout time.Duration) error {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", sock)
+		},
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+	resp, err := client.Get("http://docker/_ping")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "OK" {
+		return fmt.Errorf("unexpected response: status %d, body %q", resp.StatusCode, body)
+	}
+	return nil
 }
 
 // setupFirewall configures the Go forward proxy and iptables rules.

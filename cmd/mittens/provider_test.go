@@ -249,6 +249,12 @@ func TestCodexProvider_FieldsPopulated(t *testing.T) {
 	if len(p.LiveMountDirs) == 0 {
 		t.Error("CodexProvider().LiveMountDirs is empty")
 	}
+	if got := p.ContainerEnv["CODEX_SQLITE_HOME"]; got != "/home/codex/.codex/sqlite" {
+		t.Errorf("CodexProvider().ContainerEnv[CODEX_SQLITE_HOME] = %q, want /home/codex/.codex/sqlite", got)
+	}
+	if got, want := p.DefaultArgs, []string{"--config=check_for_update_on_startup=false"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("CodexProvider().DefaultArgs = %v, want %v", got, want)
+	}
 	if len(p.ResumeFlags) == 0 {
 		t.Error("CodexProvider().ResumeFlags is empty")
 	}

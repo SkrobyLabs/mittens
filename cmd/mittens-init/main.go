@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 )
 
 func main() {
@@ -71,4 +73,22 @@ func logInfo(format string, args ...interface{}) {
 
 func logWarn(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "[mittens] Warning: "+format+"\n", args...)
+}
+
+func logStartupDuration(cfg *config, label string, started time.Time) {
+	if cfg.Verbose {
+		logInfo("Startup timing: %s took %s", label, time.Since(started).Round(time.Millisecond))
+	}
+}
+
+func logContainerStartDelay(cfg *config) {
+	if !cfg.Verbose {
+		return
+	}
+	raw := os.Getenv("MITTENS_LAUNCH_STARTED_NS")
+	startedNS, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || startedNS <= 0 {
+		return
+	}
+	logInfo("Startup timing: Docker create/start took %s", time.Since(time.Unix(0, startedNS)).Round(time.Millisecond))
 }
