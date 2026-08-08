@@ -98,7 +98,7 @@ func materializeRuntimeAssets(root string) error {
 
 func runtimeAssetMode(path string) fs.FileMode {
 	base := filepath.Base(path)
-	if base == "mittens-init" || strings.HasSuffix(base, ".sh") {
+	if strings.HasPrefix(base, "mittens-init-") || strings.HasSuffix(base, ".sh") {
 		return 0755
 	}
 	return 0644

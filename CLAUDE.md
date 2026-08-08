@@ -33,7 +33,7 @@ cmd/
     embed.go                 # go:embed runtime assets and extension manifests
     container/               # runtime files embedded into the mittens binary
       Dockerfile
-      mittens-init           # container entrypoint binary (built from cmd/mittens-init)
+      mittens-init-{arch}    # amd64/arm64 entrypoints (built from cmd/mittens-init)
       firewall.conf          # default domain whitelist
       firewall-dev.conf      # developer-friendly whitelist superset
       mcp-domains.conf       # MCP server name -> domain mappings
@@ -171,7 +171,7 @@ The full set:
 
 `--verbose`, `--session`, `--no-config`, `--policy PATH`, `--headless`,
 `--no-headless`, `--report-progress`, `--no-history`, `--no-build`, `--rebuild`,
-`--name NAME`, `--firewall-learn`, `--worktree-root PATH`,
+`--arch amd64|arm64`, `--name NAME`, `--firewall-learn`, `--worktree-root PATH`,
 `--worktree-branch NAME`, `--worktree-manifest PATH`,
 `--worktree-cleanup keep|keep-dirty`, `--extensions`, `--json-caps`,
 `--version`, `--help`

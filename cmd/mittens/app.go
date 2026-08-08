@@ -53,6 +53,7 @@ type App struct {
 	Headless         bool
 	headlessSet      bool // true once --headless/--no-headless or policy set it explicitly
 	ReportProgress   bool
+	ImageArch        string // target container architecture: "amd64", "arm64", or empty for Docker default
 	PolicyPath       string // explicit per-run policy file (--policy); empty uses the workspace-derived path
 	Worktree         bool
 	WorktreeRoot     string // --worktree-root: parent dir for worktrees instead of sibling paths
@@ -157,6 +158,7 @@ var coreFlagsWithArg = map[string]func(*App, string){
 	"--image-paste-key":   func(a *App, val string) { a.ImagePasteKey = val },
 	"--profile":           func(a *App, val string) { a.Profile = val },
 	"--policy":            func(a *App, val string) { a.PolicyPath = val },
+	"--arch":              func(a *App, val string) { a.ImageArch = val },
 	"--worktree-root":     func(a *App, val string) { a.WorktreeRoot = val },
 	"--worktree-branch":   func(a *App, val string) { a.WorktreeBranch = val },
 	"--worktree-manifest": func(a *App, val string) { a.WorktreeManifest = val },
@@ -223,7 +225,30 @@ func (a *App) ParseFlags(args []string) error {
 		a.ClaudeArgs = append(a.ClaudeArgs, arg)
 		i++
 	}
-	return nil
+	return validateImageArch(a.ImageArch)
+}
+
+func validateImageArch(arch string) error {
+	switch arch {
+	case "", "amd64", "arm64":
+		return nil
+	default:
+		return fmt.Errorf("invalid --arch %q: must be amd64 or arm64", arch)
+	}
+}
+
+func imagePlatform(arch string) string {
+	if arch == "" {
+		return ""
+	}
+	return "linux/" + arch
+}
+
+func imageTagForArch(tag, arch string) string {
+	if arch == "" {
+		return tag
+	}
+	return tag + "-" + arch
 }
 
 // Run is the main orchestration method.
@@ -395,6 +420,7 @@ func (a *App) Run() error {
 		sort.Strings(a.imageTagParts)
 		a.ImageTag = strings.Join(a.imageTagParts, "-")
 	}
+	a.ImageTag = imageTagForArch(a.ImageTag, a.ImageArch)
 
 	// Setup credentials.
 	// Skip OAuth credential staging when using a custom base URL (local/third-party
@@ -1372,6 +1398,7 @@ func (a *App) buildImage() error {
 		Dockerfile:     dockerfile,
 		ImageName:      a.ImageName,
 		ImageTag:       a.ImageTag,
+		Platform:       imagePlatform(a.ImageArch),
 		UserID:         uid,
 		GroupID:        gid,
 		Extensions:     enabledExts,
@@ -1451,6 +1478,9 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	args := []string{
 		ttyFlag,
 		"--name", a.ContainerName,
+	}
+	if platform := imagePlatform(a.ImageArch); platform != "" {
+		args = append(args, "--platform", platform)
 	}
 	if providerPlan.ContainerHostname != "" {
 		args = append(args, "--hostname", providerPlan.ContainerHostname)
@@ -2350,6 +2380,7 @@ Core flags:
   --no-history      Disable session persistence for this run
   --no-build        Skip the Docker image build step
   --rebuild         Rebuild image without layer cache
+  --arch ARCH       Build and run a linux/amd64 or linux/arm64 image
   --name NAME       Name this instance (default: PID-based)
   --firewall-learn  Run once permissive-but-logging, then offer to add the
                     observed domains to network.extra_domains
@@ -2425,6 +2456,7 @@ func printJSONCaps(exts []*registry.Extension) {
 			{Name: "--no-build", Description: "Skip the Docker image build step"},
 			{Name: "--rebuild", Description: "Rebuild image without layer cache"},
 			{Name: "--no-history", Description: "Disable session persistence for this run"},
+			{Name: "--arch", Description: "Build and run an amd64 or arm64 image", ArgType: "string", EnumValues: []string{"amd64", "arm64"}},
 			{Name: "--name", Description: "Name this instance (default: PID-based)", ArgType: "string"},
 		},
 	}

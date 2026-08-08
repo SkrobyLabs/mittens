@@ -563,6 +563,37 @@ func TestParseFlags_MultipleDir(t *testing.T) {
 	}
 }
 
+func TestParseFlags_ImageArch(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
+		t.Run(arch, func(t *testing.T) {
+			a := &App{}
+			if err := a.ParseFlags([]string{"--arch", arch}); err != nil {
+				t.Fatal(err)
+			}
+			if a.ImageArch != arch {
+				t.Fatalf("ImageArch = %q, want %q", a.ImageArch, arch)
+			}
+		})
+	}
+}
+
+func TestParseFlags_InvalidImageArch(t *testing.T) {
+	a := &App{}
+	err := a.ParseFlags([]string{"--arch", "386"})
+	if err == nil || !strings.Contains(err.Error(), "must be amd64 or arm64") {
+		t.Fatalf("expected architecture validation error, got %v", err)
+	}
+}
+
+func TestImageTagForArch(t *testing.T) {
+	if got := imageTagForArch("codex-go1.24", "amd64"); got != "codex-go1.24-amd64" {
+		t.Fatalf("imageTagForArch() = %q", got)
+	}
+	if got := imageTagForArch("latest", ""); got != "latest" {
+		t.Fatalf("native imageTagForArch() = %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ParseFlags — empty args
 // ---------------------------------------------------------------------------
@@ -804,6 +835,25 @@ func TestAssembleDockerArgs_Baseline(t *testing.T) {
 	}
 	if argPairContains(args, "-v", "/projects/") {
 		t.Error("session persistence mounts should not be present with NoHistory=true")
+	}
+}
+
+func TestAssembleDockerArgs_ImageArch(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+
+	a := &App{
+		Provider:          DefaultProvider(),
+		NoHistory:         true,
+		ContainerName:     "mittens-arch-test",
+		WorkspaceMountSrc: "/tmp/workspace",
+		Credentials:       &CredentialManager{},
+		ImageArch:         "arm64",
+	}
+
+	args := a.assembleDockerArgs(nil, nil)
+	if !argPairExists(args, "--platform", "linux/arm64") {
+		t.Fatalf("missing target platform in docker args: %v", args)
 	}
 }
 

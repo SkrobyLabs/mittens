@@ -14,8 +14,9 @@ node_modules/
 /mittens-*
 dist/
 
-# Container init binary (built by `make init-binary`)
+# Container init binaries (built by `make init-binary`)
 cmd/mittens/container/mittens-init
+cmd/mittens/container/mittens-init-*
 
 .vscode/settings.json
 

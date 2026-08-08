@@ -20,6 +20,7 @@ type BuildContext struct {
 	Dockerfile     string                // path to Dockerfile (relative to ContextDir or absolute)
 	ImageName      string                // e.g. "mittens"
 	ImageTag       string                // e.g. "latest" or "aws-kubectl"
+	Platform       string                // optional Docker platform, e.g. "linux/amd64"
 	UserID         int                   // host UID to bake into the image
 	GroupID        int                   // host GID to bake into the image
 	Extensions     []*registry.Extension // enabled extensions with build configs
@@ -44,6 +45,9 @@ func buildImageArgs(ctx BuildContext, hasBuildx bool) []string {
 
 	if ctx.NoCache {
 		args = append(args, "--no-cache")
+	}
+	if ctx.Platform != "" {
+		args = append(args, "--platform", ctx.Platform)
 	}
 
 	// Dockerfile path

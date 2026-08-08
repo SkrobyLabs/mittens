@@ -119,8 +119,11 @@ COPY container/mcp-domains.conf /etc/mittens/mcp-domains.conf
 # Container entrypoint binary — handles root setup (firewall proxy, iptables,
 # DinD, privilege drop) and user setup (config staging, JSON settings, cred sync).
 # Busybox-style symlinks provide xdg-open, xclip, and notify.sh handlers.
-# Built as: CGO_ENABLED=0 GOOS=linux go build -o mittens-init ./cmd/mittens-init
-COPY container/mittens-init /usr/local/bin/mittens-init
+# Both supported Linux variants are embedded with the host CLI. Docker sets
+# TARGETARCH from the selected --platform (or its native default), so the
+# entrypoint always matches the image even during a cross-architecture build.
+ARG TARGETARCH
+COPY container/mittens-init-${TARGETARCH} /usr/local/bin/mittens-init
 RUN chmod +x /usr/local/bin/mittens-init && \
     ln -sf mittens-init /usr/local/bin/xdg-open && \
     ln -sf mittens-init /usr/local/bin/xclip && \

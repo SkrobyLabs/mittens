@@ -13,7 +13,7 @@ normal installed use:
 ```
 cmd/mittens/container/
   Dockerfile                     # base Docker image definition
-  mittens-init                   # container entrypoint binary (built from cmd/mittens-init)
+  mittens-init-{amd64,arm64}     # container entrypoints (built from cmd/mittens-init)
   firewall.conf                  # default domain whitelist
   firewall-dev.conf              # developer-friendly whitelist superset
   mcp-domains.conf               # MCP server -> domain mappings

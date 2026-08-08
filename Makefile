@@ -73,11 +73,12 @@ build: tidy init-binary ## Build the mittens binary
 	@echo "Built ./$(BINARY) - run 'make help' to see all targets"
 endif
 
-# Container-side init binary (always linux, matches container arch).
-# Cross-compiled as a static binary so it works in any container base image.
+# Container-side init binaries (always Linux). Both supported architectures are
+# embedded in the host CLI so --arch can select either image on any host.
 init-binary: ## Build the container-side mittens-init binary
-	CGO_ENABLED=0 GOOS=linux $(GO) build -ldflags "-s -w" -o cmd/mittens/container/$(INIT_BINARY) ./cmd/mittens-init
-	@echo "Built cmd/mittens/container/$(INIT_BINARY)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w" -o cmd/mittens/container/$(INIT_BINARY)-amd64 ./cmd/mittens-init
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags "-s -w" -o cmd/mittens/container/$(INIT_BINARY)-arm64 ./cmd/mittens-init
+	@echo "Built cmd/mittens/container/$(INIT_BINARY)-{amd64,arm64}"
 
 install: build ## Symlink binary into PREFIX/bin (default: /usr/local/bin)
 	install -d $(PREFIX)/bin
@@ -138,18 +139,18 @@ tidy: ## Run go mod tidy
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
-docker: ## Build the Docker base image (no extensions)
+docker: init-binary ## Build the Docker base image (no extensions)
 	docker build -f cmd/mittens/container/Dockerfile -t $(IMAGE):$(TAG) cmd/mittens
 
 # ─── Quality ──────────────────────────────────────────────────────────────────
 
-test: ## Run all tests
+test: init-binary ## Run all tests
 	$(GO) test ./...
 
-test-v: ## Run tests with verbose output
+test-v: init-binary ## Run tests with verbose output
 	$(GO) test -v ./...
 
-test-race: ## Run tests with race detector
+test-race: init-binary ## Run tests with race detector
 	$(GO) test -race ./...
 
 # Integration tests build the container image(s) and assert behavior inside them.
@@ -177,7 +178,7 @@ check: fmt vet lint test ## Run fmt, vet, lint, and test
 
 DIST := dist
 
-release: tidy ## Cross-compile for common platforms into dist/
+release: tidy init-binary ## Cross-compile for common platforms into dist/
 	@mkdir -p $(DIST)
 	GOOS=darwin  GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  ./cmd/mittens
 	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  ./cmd/mittens
@@ -185,8 +186,8 @@ release: tidy ## Cross-compile for common platforms into dist/
 	GOOS=linux   GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   ./cmd/mittens
 	GOOS=windows GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe ./cmd/shim
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST)/$(BINARY)-clipboard-helper-windows-amd64.exe ./cmd/mittens-clipboard-helper
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w" -o $(DIST)/$(INIT_BINARY)-linux-amd64 ./cmd/mittens-init
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags "-s -w" -o $(DIST)/$(INIT_BINARY)-linux-arm64 ./cmd/mittens-init
+	cp cmd/mittens/container/$(INIT_BINARY)-amd64 $(DIST)/$(INIT_BINARY)-linux-amd64
+	cp cmd/mittens/container/$(INIT_BINARY)-arm64 $(DIST)/$(INIT_BINARY)-linux-arm64
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ dist: build ## Build a self-contained dist/ folder with all runtime files
 
 clean: ## Remove build artifacts
 	rm -f $(BINARY) $(BINARY).exe $(BINARY)-linux $(BINARY)-clipboard-helper.exe
-	rm -f cmd/mittens/container/$(INIT_BINARY)
+	rm -f cmd/mittens/container/$(INIT_BINARY) cmd/mittens/container/$(INIT_BINARY)-amd64 cmd/mittens/container/$(INIT_BINARY)-arm64
 	rm -rf $(DIST)
 	$(GO) clean
 

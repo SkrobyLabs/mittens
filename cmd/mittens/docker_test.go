@@ -283,6 +283,20 @@ func TestBuildImageArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "target platform adds --platform",
+			ctx: BuildContext{
+				ContextDir: ".",
+				ImageName:  "m",
+				ImageTag:   "t-arm64",
+				Platform:   "linux/arm64",
+			},
+			check: func(t *testing.T, args []string) {
+				if !argPairExists(args, "--platform", "linux/arm64") {
+					t.Errorf("missing --platform linux/arm64: %v", args)
+				}
+			},
+		},
+		{
 			name: "Verbose with buildx adds --progress=plain",
 			ctx: BuildContext{
 				ContextDir: ".",

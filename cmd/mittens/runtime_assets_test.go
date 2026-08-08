@@ -33,7 +33,8 @@ func TestMaterializeRuntimeAssetsWritesRequiredFiles(t *testing.T) {
 	required := []string{
 		filepath.Join("container", "Dockerfile"),
 		filepath.Join("container", "firewall.conf"),
-		filepath.Join("container", "mittens-init"),
+		filepath.Join("container", "mittens-init-amd64"),
+		filepath.Join("container", "mittens-init-arm64"),
 		filepath.Join("extensions", "dotnet", "build.sh"),
 		filepath.Join("extensions", "python", "extension.yaml"),
 	}
@@ -43,12 +44,14 @@ func TestMaterializeRuntimeAssetsWritesRequiredFiles(t *testing.T) {
 		}
 	}
 
-	info, err := os.Stat(filepath.Join(root, "container", "mittens-init"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&0111 == 0 {
-		t.Fatalf("container/mittens-init mode = %v, want executable", info.Mode())
+	for _, name := range []string{"mittens-init-amd64", "mittens-init-arm64"} {
+		info, err := os.Stat(filepath.Join(root, "container", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&0111 == 0 {
+			t.Fatalf("container/%s mode = %v, want executable", name, info.Mode())
+		}
 	}
 }
 
