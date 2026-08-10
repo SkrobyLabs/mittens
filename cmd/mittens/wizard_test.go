@@ -223,6 +223,34 @@ func TestDirectoryMountPreselection(t *testing.T) {
 	}
 }
 
+func TestKeepDirectoryMountsFiltersPathsAndPreservesAccess(t *testing.T) {
+	current := []PolicyMount{
+		{Path: "/repo/extra", Access: "rw"},
+		{Path: "/repo/docs", Access: "ro"},
+		{Path: "/repo/cache", Access: "rw"},
+	}
+
+	got := keepDirectoryMounts(current, []string{"/repo/docs", "/repo/cache"})
+	want := []PolicyMount{
+		{Path: "/repo/docs", Access: "ro"},
+		{Path: "/repo/cache", Access: "rw"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keepDirectoryMounts = %#v, want %#v", got, want)
+	}
+}
+
+func TestKeepDirectoryMountsCanRemoveAll(t *testing.T) {
+	current := []PolicyMount{
+		{Path: "/repo/extra", Access: "rw"},
+		{Path: "/repo/docs", Access: "ro"},
+	}
+
+	if got := keepDirectoryMounts(current, nil); len(got) != 0 {
+		t.Fatalf("keepDirectoryMounts = %#v, want no mounts", got)
+	}
+}
+
 func TestDirectorySelectionsToMounts(t *testing.T) {
 	selections := []dirMountSelection{
 		{Path: "/repo/extra"},

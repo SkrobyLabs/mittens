@@ -778,6 +778,9 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 					huh.NewOption("Keep", "keep"),
 					huh.NewOption("Change", "change"),
 				}
+				if len(currentMounts) > 0 {
+					actionOptions = append(actionOptions, huh.NewOption("Remove", "remove"))
+				}
 			}
 
 			var action string
@@ -792,6 +795,13 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 			case "keep":
 				fmt.Fprintln(os.Stderr)
 				return dirLinesFromMounts(existingMounts), nil
+			case "remove":
+				remaining, err := wizardRemoveDirs(currentMounts)
+				if err != nil {
+					return nil, err
+				}
+				fmt.Fprintln(os.Stderr)
+				return dirLinesFromMounts(remaining), nil
 			case "done":
 				fmt.Fprintln(os.Stderr)
 				return dirLinesFromMounts(currentMounts), nil
@@ -816,6 +826,45 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		fmt.Fprintln(os.Stderr)
 		return dirLinesFromMounts(mountsFromDirSelections(chosen)), nil
 	}
+}
+
+func wizardRemoveDirs(current []PolicyMount) ([]PolicyMount, error) {
+	remainingPaths := make([]string, 0, len(current))
+	options := make([]huh.Option[string], 0, len(current))
+	for _, mount := range current {
+		path := strings.TrimSpace(mount.Path)
+		if path == "" {
+			continue
+		}
+		remainingPaths = append(remainingPaths, path)
+		options = append(options, huh.NewOption(path, path).Selected(true))
+	}
+
+	if err := huh.NewMultiSelect[string]().
+		Title("Included extra directories").
+		Description("Uncheck directories to remove them.").
+		Options(options...).
+		Value(&remainingPaths).
+		Run(); err != nil {
+		return nil, err
+	}
+
+	return keepDirectoryMounts(current, remainingPaths), nil
+}
+
+func keepDirectoryMounts(current []PolicyMount, paths []string) []PolicyMount {
+	keep := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		keep[strings.TrimSpace(path)] = struct{}{}
+	}
+
+	remaining := make([]PolicyMount, 0, len(current))
+	for _, mount := range current {
+		if _, ok := keep[strings.TrimSpace(mount.Path)]; ok {
+			remaining = append(remaining, mount)
+		}
+	}
+	return remaining
 }
 
 func mountsFromDirLines(lines []string) []PolicyMount {
