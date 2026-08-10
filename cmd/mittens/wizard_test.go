@@ -723,3 +723,31 @@ func TestFilterNonExtensionLines(t *testing.T) {
 		}
 	}
 }
+
+func TestPreserveUntouchedWizardPolicyKeepsNamedBoundaryFields(t *testing.T) {
+	existing := defaultProjectPolicy()
+	existing.Provider.Name = "codex"
+	existing.Provider.Effort = "high"
+	existing.Provider.Profile = "legacy"
+	existing.Credentials.ProviderOAuth = true
+	existing.Host.OpenURLs = "deny"
+	existing.ExtraArgs = []string{"--dangerously-allow"}
+	existing.Execution.Headless = boolPtr(true)
+	existing.Execution.History = boolPtr(false)
+
+	assembled := defaultProjectPolicy()
+	assembled.Provider.Name = "codex"
+	assembled.Provider.Model = "gpt-5"
+	assembled.Network.Firewall = "disabled"
+
+	merged, err := preserveUntouchedWizardPolicy(existing, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Provider.Profile != "" || merged.Provider.Effort != "high" || merged.Provider.Model != "gpt-5" {
+		t.Fatalf("provider preservation = %+v", merged.Provider)
+	}
+	if !merged.Credentials.ProviderOAuth || merged.Host.OpenURLs != "deny" || len(merged.ExtraArgs) != 1 || !boolValue(merged.Execution.Headless, false) || boolValue(merged.Execution.History, true) {
+		t.Fatalf("untouched named boundary fields were reset: %+v", merged)
+	}
+}

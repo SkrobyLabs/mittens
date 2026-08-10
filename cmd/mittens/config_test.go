@@ -273,6 +273,32 @@ func TestLoadProfileConfig_Missing(t *testing.T) {
 	}
 }
 
+func TestLoadProfileConfigRejectsDuplicateKeys(t *testing.T) {
+	t.Setenv("MITTENS_HOME", t.TempDir())
+	workspace := "/test/duplicate-profile-keys"
+	dir := filepath.Dir(profileConfigPath(workspace))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, file, data string
+	}{
+		{"profiles", "profiles.json", `{"profiles":{"codex":{"fast":{"model":"one","model":"two"}}}}`},
+		{"roles", "roles.json", `{"roles":{"codex":{"fast":{"effort":"low","effort":"high"}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(filepath.Join(dir, "profiles.json"))
+			_ = os.Remove(filepath.Join(dir, "roles.json"))
+			if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadProfileConfig(workspace); err == nil || !strings.Contains(err.Error(), "duplicate key") {
+				t.Fatalf("LoadProfileConfig error = %v, want duplicate-key rejection", err)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // readConfigLines
 // ---------------------------------------------------------------------------

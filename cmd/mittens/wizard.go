@@ -36,6 +36,12 @@ var wizardExcluded = map[string]bool{"firewall": true, "mcp": true}
 // is the loaded extension list from the embedded YAML manifests (so the wizard
 // knows which extensions are available).
 func runWizard(extensions []*registry.Extension) error {
+	return runWizardForProfile(extensions, detectWorkspace(), "default")
+}
+
+// runWizardForProfile uses the same full configuration workflow for default
+// and named profiles. Named profiles never use policy.yaml as scratch state.
+func runWizardForProfile(extensions []*registry.Extension, workspace, profileName string) error {
 
 	// 0. First-run: set up user-wide defaults if they don't exist yet.
 	if !UserDefaultsExist() {
@@ -45,23 +51,28 @@ func runWizard(extensions []*registry.Extension) error {
 	}
 
 	// 1. Detect workspace.
-	workspace := detectWorkspace()
-
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens project setup"))
 	fmt.Fprintln(os.Stderr)
 
 	// 2. Handle existing policy/config.
-	existing, source, err := loadWizardExistingConfig(workspace, extensions)
+	existing, source, err := loadWizardExistingProfileConfig(workspace, profileName, extensions)
 	if err != nil {
 		return fmt.Errorf("loading existing config: %w", err)
 	}
 
 	editMode := false
 	var seed wizardSeed
+	var existingPolicy *ProjectPolicy
+	if source == PolicySourceV2 {
+		existingPolicy, err = loadWizardProfilePolicy(workspace, profileName, extensions)
+		if err != nil {
+			return fmt.Errorf("loading existing policy: %w", err)
+		}
+	}
 
 	if len(existing) > 0 {
-		displayWizardExistingConfig(workspace, source, existing, extensions)
+		displayWizardExistingProfileConfig(workspace, profileName, source, existing, extensions)
 
 		var action string
 		if err := huh.NewSelect[string]().
@@ -84,13 +95,20 @@ func runWizard(extensions []*registry.Extension) error {
 				return fmt.Errorf("finding executable path: %w", err)
 			}
 			exe, _ = filepath.EvalSymlinks(exe)
+			if profileName != "default" {
+				return execCommand(exe, "--profile", profileName)
+			}
 			return execCommand(exe)
 		case "cancel":
 			fmt.Fprintln(os.Stderr, "Cancelled.")
 			return nil
 		case "edit":
 			editMode = true
-			seed = wizardEditSeed(workspace, extensions, existing)
+			if existingPolicy != nil {
+				seed = wizardSeedFromPolicy(existingPolicy)
+			} else {
+				seed = wizardEditSeed(workspace, extensions, existing)
+			}
 		case "overwrite":
 			// Start fresh == init-from-default: seed from the user defaults baseline.
 			seed, editMode = defaultsSeed(extensions)
@@ -98,7 +116,14 @@ func runWizard(extensions []*registry.Extension) error {
 		fmt.Fprintln(os.Stderr)
 	} else {
 		// No project policy: pre-seed every step from the user defaults baseline.
-		seed, editMode = defaultsSeed(extensions)
+		if profileName != "default" {
+			if base, _, err := effectivePolicyForShow(workspace, extensions); err == nil {
+				seed = wizardSeedFromPolicy(base)
+				editMode = true
+			}
+		} else {
+			seed, editMode = defaultsSeed(extensions)
+		}
 		if editMode {
 			fmt.Fprintln(os.Stderr, wizardDim.Render("Starting from your user defaults."))
 			fmt.Fprintln(os.Stderr)
@@ -158,11 +183,18 @@ func runWizard(extensions []*registry.Extension) error {
 	if err != nil {
 		return fmt.Errorf("building policy: %w", err)
 	}
-	if err := SaveProjectPolicy(workspace, policy); err != nil {
+	policy, err = preserveUntouchedWizardPolicy(existingPolicy, policy)
+	if err != nil {
+		return fmt.Errorf("preserving existing policy boundaries: %w", err)
+	}
+	if err := SaveNamedProfile(workspace, profileName, policy); err != nil {
 		return fmt.Errorf("saving policy: %w", err)
 	}
 
 	configPath := projectPolicyPath(workspace)
+	if profileName != "default" {
+		configPath = profilesPolicyPath(workspace)
+	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Policy saved to: "+configPath))
 	fmt.Fprintln(os.Stderr)
@@ -190,10 +222,27 @@ func runWizard(extensions []*registry.Extension) error {
 			return fmt.Errorf("finding executable path: %w", err)
 		}
 		exe, _ = filepath.EvalSymlinks(exe)
+		if profileName != "default" {
+			return execCommand(exe, "--profile", profileName)
+		}
 		return execCommand(exe)
 	}
 
 	return nil
+}
+
+// runWizardProfile reuses the established full wizard while making its result
+// an independent named snapshot. The default is restored after the wizard so
+// existing project configuration is never changed by a named edit.
+func runWizardProfile(workspace, name string) error {
+	if err := validateProfileName(name, true); err != nil {
+		return err
+	}
+	exts, err := loadExtensions()
+	if err != nil {
+		return err
+	}
+	return runWizardForProfile(exts, workspace, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,24 +250,45 @@ func runWizard(extensions []*registry.Extension) error {
 // ---------------------------------------------------------------------------
 
 // wizardSession runs the wizard in edit mode but does NOT persist changes.
-// Returns the config lines for the caller to use as ephemeral config.
+// It returns the complete selected policy for the caller to use ephemerally.
 // Returns huh.ErrUserAborted on Ctrl+C (not nil) so the caller can
 // distinguish cancellation from an empty-but-valid config.
-func wizardSession(extensions []*registry.Extension) ([]string, []string, error) {
+func wizardSession(extensions []*registry.Extension, profileName string) (*ProjectPolicy, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, nil, fmt.Errorf("--session requires an interactive terminal")
+		return nil, fmt.Errorf("--session requires an interactive terminal")
 	}
 
 	workspace := detectWorkspace()
+	if profileName != "default" {
+		if _, err := LoadNamedProfile(workspace, profileName); err != nil {
+			if !strings.Contains(err.Error(), "not found") {
+				return nil, err
+			}
+			base, _, baseErr := effectivePolicyForShow(workspace, extensions)
+			if baseErr != nil {
+				return nil, baseErr
+			}
+			if _, migrateErr := MigrateLegacyProfiles(workspace, base); migrateErr != nil {
+				return nil, migrateErr
+			}
+			if _, err := LoadNamedProfile(workspace, profileName); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens session settings"))
 	fmt.Fprintln(os.Stderr, wizardDim.Render("Changes apply to this launch only and will not be saved."))
 	fmt.Fprintln(os.Stderr)
 
-	existing, source, err := loadWizardExistingConfig(workspace, extensions)
+	existing, source, err := loadWizardExistingProfileConfig(workspace, profileName, extensions)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading existing config: %w", err)
+		return nil, fmt.Errorf("loading existing config: %w", err)
+	}
+	existingPolicy, err := loadWizardProfilePolicy(workspace, profileName, extensions)
+	if err != nil {
+		return nil, fmt.Errorf("loading existing policy: %w", err)
 	}
 
 	editMode := false
@@ -226,8 +296,12 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 
 	if len(existing) > 0 {
 		editMode = true
-		seed = wizardEditSeed(workspace, extensions, existing)
-		displayWizardExistingConfig(workspace, source, existing, extensions)
+		if existingPolicy != nil {
+			seed = wizardSeedFromPolicy(existingPolicy)
+		} else {
+			seed = wizardEditSeed(workspace, extensions, existing)
+		}
+		displayWizardExistingProfileConfig(workspace, profileName, source, existing, extensions)
 	} else {
 		// No project policy: seed the ephemeral session from the user defaults
 		// baseline (init-from-default).
@@ -240,43 +314,52 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 
 	providerLines, _, err := wizardProvider(workspace, editMode, seed.providerState)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	dirLines, err := wizardDirs(workspace, editMode, seed.dirs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), workspace)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Session runs are ephemeral; pass an empty workspace to skip arming a
 	// one-time learn pass for a "next run" that won't share this config.
 	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, seed.firewall, seed.opts, seed.extraDomains)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	optLines, err := wizardOptions(editMode, seed.opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	configLines := wizardEquivalentLines(WizardAssemblyInput{
+	assembly := WizardAssemblyInput{
 		ProviderLines:  providerLines,
 		DirLines:       dirLines,
 		ExtensionLines: extLines,
 		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
 		NetworkLines:   networkLines,
 		OptionLines:    optLines,
-	})
+		ExtraDomains:   extraDomains,
+	}
+	policy, configLines, err := assembleWizardPolicy(assembly, extensions)
+	if err != nil {
+		return nil, fmt.Errorf("building session policy: %w", err)
+	}
+	policy, err = preserveUntouchedWizardPolicy(existingPolicy, policy)
+	if err != nil {
+		return nil, fmt.Errorf("preserving existing policy boundaries: %w", err)
+	}
 
 	fmt.Fprintln(os.Stderr)
 	if len(configLines) > 0 {
@@ -287,7 +370,41 @@ func wizardSession(extensions []*registry.Extension) ([]string, []string, error)
 	}
 	fmt.Fprintln(os.Stderr)
 
-	return configLines, extraDomains, nil
+	return policy, nil
+}
+
+// preserveUntouchedWizardPolicy retains boundaries the interactive wizard does
+// not expose. This is especially important for named snapshots: editing one
+// section must not silently reset credentials, host integrations, extra
+// provider arguments, or execution controls that were not visited.
+func preserveUntouchedWizardPolicy(existing, assembled *ProjectPolicy) (*ProjectPolicy, error) {
+	if existing == nil {
+		return assembled, nil
+	}
+	merged, err := clonePolicy(existing)
+	if err != nil {
+		return nil, err
+	}
+	merged.Provider = assembled.Provider
+	if merged.Provider.Name == existing.Provider.Name {
+		merged.Provider.Effort = existing.Provider.Effort
+	}
+	// provider.profile is only a legacy compatibility input. New complete
+	// snapshots must never retain an outward reference to the legacy store.
+	merged.Provider.Profile = ""
+	merged.Workspace = assembled.Workspace
+	merged.Network = assembled.Network
+	if merged.Network.SSHEgress == nil {
+		merged.Network.SSHEgress = existing.Network.SSHEgress
+	}
+	merged.Capabilities = assembled.Capabilities
+	merged.MCP = assembled.MCP
+	// The wizard currently controls these execution settings. Preserve the
+	// remaining execution boundary fields unless a dedicated wizard step edits
+	// them in a future change.
+	merged.Execution.Yolo = assembled.Execution.Yolo
+	merged.Execution.Worktree = assembled.Execution.Worktree
+	return merged, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2237,6 +2354,47 @@ func loadWizardExistingConfig(workspace string, extensions []*registry.Extension
 		return lines, source, nil
 	}
 	return legacyArgsToConfigLines(policy.ToLegacyFlags()), source, nil
+}
+
+func loadWizardExistingProfileConfig(workspace, name string, extensions []*registry.Extension) ([]string, PolicySource, error) {
+	if name == "default" {
+		return loadWizardExistingConfig(workspace, extensions)
+	}
+	p, err := LoadNamedProfile(workspace, name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, PolicySourceNone, nil
+		}
+		return nil, PolicySourceNone, err
+	}
+	return legacyArgsToConfigLines(p.ToLegacyFlags()), PolicySourceV2, nil
+}
+
+func loadWizardProfilePolicy(workspace, name string, extensions []*registry.Extension) (*ProjectPolicy, error) {
+	if name == "default" {
+		p, _, err := LoadProjectPolicy(workspace, extensions)
+		return p, err
+	}
+	p, err := LoadNamedProfile(workspace, name)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		return nil, nil
+	}
+	return p, err
+}
+
+func displayWizardExistingProfileConfig(workspace, name string, source PolicySource, lines []string, extensions []*registry.Extension) {
+	if name == "default" {
+		displayWizardExistingConfig(workspace, source, lines, extensions)
+		return
+	}
+	if source != PolicySourceV2 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Existing profile %q: %s\n\n", name, profilesPolicyPath(workspace))
+	if policy, err := LoadNamedProfile(workspace, name); err == nil {
+		fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, workspace, name).Render()))
+	}
+	fmt.Fprintln(os.Stderr)
 }
 
 func displayWizardExistingConfig(workspace string, source PolicySource, lines []string, extensions []*registry.Extension) {

@@ -82,6 +82,8 @@ func runMain(args []string) error {
 			return runClean(args[1:])
 		case "policy":
 			return runPolicy(args[1:])
+		case "profile":
+			return runProfile(args[1:])
 		case "doctor":
 			return runDoctor(args[1:])
 		case "version":
@@ -102,6 +104,14 @@ func runMain(args []string) error {
 		}
 	}
 
+	// Profile is a Mittens configuration selector only before the separator.
+	// Remove it before normal runtime parsing so a provider-native --profile
+	// after -- remains completely untouched.
+	profileName, filteredArgs, err := extractProfileSelector(args)
+	if err != nil {
+		return err
+	}
+	args = filteredArgs
 	// Pre-scan for --session (ephemeral config edit).
 	sessionMode := hasSubFlag(args, "--session")
 	if sessionMode {
@@ -124,7 +134,14 @@ func runMain(args []string) error {
 			return fmt.Errorf("--policy and --session cannot be used together")
 		}
 	}
+	if profileName != "default" && profileName != "" && (policyPath != "" || hasSubFlag(args, "--no-config")) {
+		return fmt.Errorf("--profile %s cannot be used with --policy or --no-config", profileName)
+	}
 
+	selectedProfile := profileName
+	if selectedProfile == "" {
+		selectedProfile = "default"
+	}
 	app := &App{
 		Provider:      DefaultProvider(),
 		ImageName:     "mittens",
@@ -132,6 +149,7 @@ func runMain(args []string) error {
 		Yolo:          true,
 		HostBridge:    defaultHostBridgeConfig(),
 		PathTranslate: true,
+		Profile:       selectedProfile,
 	}
 
 	// Load all extensions: bundled (disk-first, embed fallback) + user-installed.
@@ -151,6 +169,9 @@ func runMain(args []string) error {
 	if err := rejectDeprecatedLaunchPolicyFlags(args, app.Extensions); err != nil {
 		return err
 	}
+	if err := validateLaunchArgs(args); err != nil {
+		return err
+	}
 
 	// Set the default firewall.conf path for the firewall extension.
 	// Also provide the embedded copy so the binary works standalone
@@ -164,7 +185,7 @@ func runMain(args []string) error {
 	var projectPolicy *ProjectPolicy
 
 	if sessionMode {
-		ephemeralLines, ephemeralDomains, err := wizardSession(app.Extensions)
+		projectPolicy, err = wizardSession(app.Extensions, selectedProfile)
 		if err != nil {
 			if err == huh.ErrUserAborted {
 				fmt.Fprintln(os.Stderr, "\nCancelled.")
@@ -172,12 +193,6 @@ func runMain(args []string) error {
 			}
 			return err
 		}
-		projectPolicy, err = PolicyFromLegacyFlags(splitConfigFlags(ephemeralLines), app.Extensions)
-		if err != nil {
-			return fmt.Errorf("building session policy: %w", err)
-		}
-		projectPolicy.Network.ExtraDomains = ephemeralDomains
-
 		// Strip --session from args before merging.
 		var filtered []string
 		for _, a := range args {
@@ -208,29 +223,68 @@ func runMain(args []string) error {
 				if policy == nil {
 					return fmt.Errorf("--policy file not found: %s", policyPath)
 				}
+				if _, err := resolveLegacyProviderProfile(detectWorkspace(), policy, false); err != nil {
+					return fmt.Errorf("resolving legacy --policy provider profile: %w", err)
+				}
 				projectPolicy = policy
 				logInfo("Loaded policy from %s", policyPath)
 			} else {
 				workspace := detectWorkspace()
-				policy, source, err := LoadProjectPolicy(workspace, app.Extensions)
-				if err != nil {
-					return fmt.Errorf("loading project config: %w", err)
-				}
-				if policy != nil {
-					projectPolicy = policy
-					if source == PolicySourceLegacy {
-						if err := SaveProjectPolicy(workspace, policy); err != nil {
-							return fmt.Errorf("migrating legacy project config: %w", err)
+				if profileName != "" && profileName != "default" {
+					policy, err := LoadNamedProfile(workspace, profileName)
+					if err != nil {
+						// A legacy preset is converted only on demand; the old input
+						// stays intact and profiles.yaml remains authoritative.
+						if base, _, baseErr := effectivePolicyForShow(workspace, app.Extensions); baseErr == nil {
+							if _, migrateErr := MigrateLegacyProfiles(workspace, base); migrateErr != nil {
+								return migrateErr
+							}
+							policy, err = LoadNamedProfile(workspace, profileName)
 						}
-						logInfo("Migrated legacy project config to policy.yaml")
+						if err != nil {
+							return err
+						}
 					}
-					logInfo("Loaded project config for %s", ProjectDir(workspace))
+					if _, err := resolveLegacyProviderProfile(workspace, policy, false); err != nil {
+						return fmt.Errorf("resolving legacy named provider profile: %w", err)
+					}
+					projectPolicy = policy
+					logInfo("Loaded profile %q for %s", profileName, ProjectDir(workspace))
 				} else {
-					// User defaults form the launch base only when this project
-					// has no policy (init-from-default). Load them best-effort so
-					// a broken or unwritable global defaults file cannot block a
-					// launch that would use the built-in defaults anyway.
-					defaultsPolicy = loadDefaultsBaseline(app.Extensions)
+					policy, source, err := LoadProjectPolicy(workspace, app.Extensions)
+					if err != nil {
+						return fmt.Errorf("loading project config: %w", err)
+					}
+					if policy != nil {
+						changed, err := resolveLegacyProviderProfile(workspace, policy, source == PolicySourceV2)
+						if err != nil {
+							return fmt.Errorf("resolving legacy project provider profile: %w", err)
+						}
+						projectPolicy = policy
+						if source == PolicySourceLegacy {
+							if err := SaveProjectPolicy(workspace, policy); err != nil {
+								return fmt.Errorf("migrating legacy project config: %w", err)
+							}
+							logInfo("Migrated legacy project config to policy.yaml")
+						}
+						if changed {
+							if err := SaveProjectPolicy(workspace, policy); err != nil {
+								return fmt.Errorf("migrating legacy provider profile: %w", err)
+							}
+						}
+						logInfo("Loaded project config for %s", ProjectDir(workspace))
+					} else {
+						// User defaults form the launch base only when this project
+						// has no policy (init-from-default). Load them best-effort so
+						// a broken or unwritable global defaults file cannot block a
+						// launch that would use the built-in defaults anyway.
+						defaultsPolicy = loadDefaultsBaseline(app.Extensions)
+						if defaultsPolicy != nil {
+							if _, err := resolveLegacyProviderProfile(workspace, defaultsPolicy, false); err != nil {
+								return fmt.Errorf("resolving legacy user-default provider profile: %w", err)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -247,9 +301,68 @@ func runMain(args []string) error {
 	return app.Run()
 }
 
+// validateLaunchArgs keeps Mittens' launch surface distinct from provider
+// arguments. Provider-native flags, prompts, and positionals must follow --.
+func validateLaunchArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return nil
+		}
+		if _, ok := coreFlags[arg]; ok {
+			continue
+		}
+		if _, ok := coreFlagsWithArg[arg]; ok {
+			if i+1 >= len(args) || args[i+1] == "--" || strings.HasPrefix(args[i+1], "--") {
+				return fmt.Errorf("%s requires an argument", arg)
+			}
+			i++
+			continue
+		}
+		switch arg {
+		case "--init", "--help", "-h", "--version", "-V", "--extensions", "--json-caps", "--session":
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("invalid Mittens flag %q; provider-native flags must follow `--` (for example, `mittens -- %s`)", arg, arg)
+		}
+		return fmt.Errorf("invalid Mittens command %q; provider-native commands and prompts must follow `--` (for example, `mittens -- %s`)", arg, arg)
+	}
+	return nil
+}
+
+func extractProfileSelector(args []string) (string, []string, error) {
+	var name string
+	out := make([]string, 0, len(args))
+	after := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			after = true
+			out = append(out, a)
+			continue
+		}
+		if !after && a == "--profile" {
+			if i+1 >= len(args) || args[i+1] == "--" {
+				return "", nil, fmt.Errorf("--profile requires a name")
+			}
+			if name != "" {
+				return "", nil, fmt.Errorf("--profile may only be specified once")
+			}
+			name = args[i+1]
+			if err := validateProfileName(name, true); err != nil {
+				return "", nil, err
+			}
+			i++
+			continue
+		}
+		out = append(out, a)
+	}
+	return name, out, nil
+}
+
 var deprecatedLaunchPolicyFlags = map[string]string{
 	"--provider":        "provider.name",
-	"--profile":         "provider.profile",
 	"--dir":             "workspace.mounts",
 	"--dir-ro":          "workspace.mounts",
 	"--firewall-dev":    "network.firewall",
@@ -346,16 +459,15 @@ Usage: mittens init [command]
 Commands:
   (none)                        Interactive project setup wizard
   --defaults                    Edit user-wide defaults baseline (provider, dirs, extensions, MCP, firewall)
-  --profile NAME                Configure a model profile (model + effort)
-  --profile NAME --delete       Delete a model profile
-  --profile NAME --provider P   Configure profile for a specific provider (default: claude)
+  --profile NAME                Configure a complete named launch profile
+  --profile NAME --delete       Delete a named launch profile
 
 Examples:
   mittens init                          Set up a new project
   mittens init --defaults               Change default provider or firewall mode
   mittens init --profile planner        Create or edit the "planner" profile
-  mittens init --profile fast           Create a "fast" profile (e.g. haiku, low effort)
-  mittens init --profile planner --delete  Remove the "planner" profile`)
+	mittens init --profile fast           Create or edit a complete "fast" snapshot
+	mittens init --profile planner --delete  Remove the "planner" profile`)
 }
 
 // runInitDefaults launches the user-wide defaults wizard directly.
@@ -522,16 +634,14 @@ func runInit() error {
 
 // runInitProfile configures or deletes a model profile.
 func runInitProfile(profileName string, args []string) error {
-	providerName := "claude"
-	if v := getSubFlagValue(args, "--provider"); v != "" {
-		providerName = v
-	}
 	workspace := detectWorkspace()
 
 	if hasSubFlag(args, "--delete") {
-		return deleteProfile(workspace, profileName, providerName)
+		return DeleteNamedProfile(workspace, profileName)
 	}
-	return wizardProfile(workspace, profileName, providerName)
+	// The full wizard is the configuration authority. For a new name it seeds
+	// from default; interactive edits then save only the selected snapshot.
+	return runWizardProfile(workspace, profileName)
 }
 
 // deleteProfile removes a named profile for the given provider and workspace.

@@ -40,6 +40,7 @@ type ProviderPolicy struct {
 	Profile  string `yaml:"profile,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Model    string `yaml:"model,omitempty"`
+	Effort   string `yaml:"effort,omitempty"`
 }
 
 type WorkspacePolicy struct {
@@ -145,6 +146,39 @@ func LoadProjectPolicy(workspace string, extensions []*registry.Extension) (*Pro
 		return nil, PolicySourceNone, err
 	}
 	return policy, PolicySourceLegacy, nil
+}
+
+// resolveLegacyProviderProfile folds the former provider-keyed model preset
+// into a complete policy. Callers choose whether the legacy reference may be
+// cleared on disk; all non-project sources resolve strictly in memory.
+func resolveLegacyProviderProfile(workspace string, policy *ProjectPolicy, persist bool) (bool, error) {
+	changed, err := resolveLegacyProviderProfileInDir(filepath.Dir(profileConfigPath(workspace)), policy)
+	return changed && persist, err
+}
+
+func resolveLegacyProviderProfileInDir(dir string, policy *ProjectPolicy) (bool, error) {
+	if policy == nil || policy.Provider.Profile == "" {
+		return false, nil
+	}
+	if policy.Provider.Name == "" {
+		return false, fmt.Errorf("legacy provider.profile %q has no provider", policy.Provider.Profile)
+	}
+	cfg, err := loadProfileConfigFromDir(dir)
+	if err != nil {
+		return false, err
+	}
+	byProvider, ok := cfg.Profiles[policy.Provider.Name]
+	if !ok {
+		return false, fmt.Errorf("legacy provider.profile %q for %s not found", policy.Provider.Profile, policy.Provider.Name)
+	}
+	preset, ok := byProvider[policy.Provider.Profile]
+	if !ok {
+		return false, fmt.Errorf("legacy provider.profile %q for %s not found", policy.Provider.Profile, policy.Provider.Name)
+	}
+	policy.Provider.Model = preset.Model
+	policy.Provider.Effort = preset.Effort
+	policy.Provider.Profile = ""
+	return true, nil
 }
 
 func loadProjectPolicyFile(workspace string) (*ProjectPolicy, error) {

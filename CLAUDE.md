@@ -155,18 +155,23 @@ Commands:
 
 - `mittens init` edits project policy.
 - `mittens init --defaults` edits user defaults.
-- `mittens init --profile NAME` edits provider model profiles.
+- `mittens init --profile NAME` edits a complete named project profile. The
+  implicit `default` remains `policy.yaml`; non-default snapshots live in
+  project-local `profiles.yaml`. `--profile` after `--` remains provider-native.
+- `mittens profile list` lists `default` and complete named project profiles.
 - `mittens policy show [--json]` inspects effective policy and boundary.
 - `mittens policy set <field> <value>` updates narrow scalar policy fields.
 - `mittens policy allow <domain...>` appends and de-duplicates firewall allowlist domains.
 - `mittens extension list|install|remove` manages external extensions.
-- `mittens doctor [--migrate-all]` checks environment health (Docker, runtime assets, broker transport) and migrates legacy per-project config to `policy.yaml`.
+- `mittens doctor [--migrate-all]` checks environment health (Docker, runtime assets, broker transport) and migrates legacy per-project config to `policy.yaml` plus recoverable preset files to complete `profiles.yaml` snapshots.
 - `mittens logs [-f]`, `mittens clean`, and `mittens version`.
 
 Launch/runtime flags are restricted to per-run operational concerns —
 diagnostics, config source selection, headless/progress behavior, and worktree
 orchestration. Anything that shapes the run's capabilities, network, or workspace
 posture lives in policy, not a flag (policy-shaped launch flags are rejected).
+Provider-native commands, prompts, positional arguments, and flags must be
+placed after `--`.
 The full set:
 
 `--verbose`, `--session`, `--no-config`, `--policy PATH`, `--headless`,

@@ -61,6 +61,34 @@ func TestMigrateAllProjects(t *testing.T) {
 	}
 }
 
+func TestMigrateAllProjectsMigratesLegacyProfilesWithoutWorkspacePath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("MITTENS_HOME", tmpHome)
+	dir := filepath.Join(tmpHome, "projects", "stored-project-id")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "profiles.json"), []byte(`{"profiles":{"codex":{"fast":{"model":"gpt-5","effort":"high"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &doctorReport{}
+	d.migrateAllProjects(nil)
+	if d.problems != 0 {
+		t.Fatalf("migrateAllProjects reported %d problems", d.problems)
+	}
+	profiles, err := loadNamedProfilesPath(filepath.Join(dir, "profiles.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profiles.Profiles["fast"]; got == nil || got.Provider.Name != "codex" || got.Provider.Model != "gpt-5" || got.Provider.Effort != "high" {
+		t.Fatalf("migrated profile = %#v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles.json")); err != nil {
+		t.Fatalf("legacy preset input must remain recoverable: %v", err)
+	}
+}
+
 func TestMigrateUserDefaults(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("MITTENS_HOME", tmpHome)

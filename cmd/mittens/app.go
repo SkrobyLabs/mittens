@@ -61,7 +61,7 @@ type App struct {
 	WorktreeManifest string // --worktree-manifest: write a JSON manifest describing created worktrees
 	WorktreeCleanup  string // --worktree-cleanup: keep|keep-dirty (default keep-dirty)
 	Shell            bool
-	Profile          string // model profile name (e.g. "planner", "fast")
+	Profile          string // legacy provider preset compatibility input; complete profiles are selected by runMain
 	ImagePasteKey    string // "ctrl+v" or "meta+v"
 	HostBridge       HostBridgeConfig
 	PathTranslate    bool
@@ -220,8 +220,8 @@ func (a *App) ParseFlags(args []string) error {
 			os.Exit(0)
 		}
 
-		// Unrecognised flag or positional arg -- forward to the selected provider.
-		// Providers accept their own flags like --model, --print, etc.
+		// runMain validates the CLI boundary before App assembly. Keep this
+		// lower-level parser permissive for embedded callers and direct tests.
 		a.ClaudeArgs = append(a.ClaudeArgs, arg)
 		i++
 	}
@@ -503,14 +503,9 @@ func (a *App) Run() error {
 
 	logVerbose(a.Verbose, "Image tag: %s:%s", a.ImageName, a.ImageTag)
 
-	// Apply model profile before Docker build so interactive setup happens first.
-	if err := a.maybeApplyProfile(); err != nil {
-		if err == huh.ErrUserAborted {
-			fmt.Fprintln(os.Stderr, "\nCancelled.")
-			return nil
-		}
-		return err
-	}
+	// Complete profiles are resolved by runMain before App assembly. Do not
+	// offer the retired legacy preset picker or create a legacy preset here:
+	// an implicit launch is always the complete default profile.
 	a.applyProviderDefaultArgs(providerPlan)
 
 	// Build Docker image.
@@ -553,6 +548,8 @@ func (a *App) Run() error {
 }
 
 func (a *App) maybeApplyProfile() error {
+	// Complete profiles are resolved before App assembly. Retain the old preset
+	// compatibility path only for policies that still carry provider.profile.
 	if a.Profile == "" {
 		// If profiles exist and we're interactive, offer to pick one.
 		if a.Shell || a.Headless || argExists(a.ClaudeArgs, "--print") || !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -1237,7 +1234,9 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	if policy == nil {
 		return
 	}
-	a.Profile = policy.Provider.Profile
+	// Profile is the selected complete-profile identity, set before policy
+	// assembly. provider.profile is a compatibility input and must not replace
+	// the identity shown for this launch.
 	a.ExtraDirs = appendPolicyMounts(a.ExtraDirs, policy.Workspace.Mounts)
 	a.FirewallExtra = append(a.FirewallExtra, policy.Network.ExtraDomains...)
 	a.NetworkHost = policy.Network.Mode == "host" || policy.Execution.NetworkHost
@@ -1282,6 +1281,12 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	a.MCPAll = policy.MCP.All
 	a.configureMCPExtension()
 	a.ClaudeArgs = append(a.ClaudeArgs, policy.ExtraArgs...)
+	if policy.Provider.Model != "" && a.Provider.ModelFlag != "" && !argExists(a.ClaudeArgs, a.Provider.ModelFlag) {
+		a.ClaudeArgs = append([]string{a.Provider.ModelFlag, policy.Provider.Model}, a.ClaudeArgs...)
+	}
+	if policy.Provider.Effort != "" && effortEnabled(a.Provider) && !effortArgExists(a.Provider, a.ClaudeArgs) {
+		a.ClaudeArgs = append(effortArgs(a.Provider, policy.Provider.Effort), a.ClaudeArgs...)
+	}
 }
 
 func appendPolicyMounts(extraDirs []string, mounts []PolicyMount) []string {
@@ -2357,19 +2362,24 @@ Commands:
   help                          Show this help message
   init                          Interactive project setup wizard
   init --defaults               Edit user-wide defaults baseline (provider, dirs, extensions, MCP, firewall)
-  init --profile NAME           Configure a model profile (model + effort)
-  init --profile NAME --delete  Delete a model profile
+  init --profile NAME           Configure a complete named launch profile
+  init --profile NAME --delete  Delete a named launch profile
+  profile list                  List complete project profiles
   logs [-f]                     Show broker logs (-f to follow)
   clean [--dry-run] [--images]  Remove stopped mittens containers
   policy show [--json]          Show effective project policy and boundary
-  doctor [--migrate-all]        Check environment and migrate legacy config
+  doctor [--migrate-all]        Check environment and migrate legacy config/profiles
   extension list|install|remove Manage external extensions
   version [--json]              Show version information
 
 Core flags:
+	Provider-native commands, prompts, positionals, and flags must follow --;
+	for example: mittens -- --model opus "fix the tests"
   --verbose, -v     Show detailed output (Docker build, extension setup)
   --session         Tweak settings for this run only (opens wizard, doesn't save)
   --no-config       Skip config file loading (user defaults + project policy)
+  --profile NAME     Select a complete project profile before --; provider-native
+                    arguments after -- (including --profile) are forwarded unchanged
   --policy PATH     Load policy from PATH instead of the workspace-derived file
                     (never written back; conflicts with --no-config/--session)
   --headless        Run non-interactively: no TTY, no prompts, exit with the

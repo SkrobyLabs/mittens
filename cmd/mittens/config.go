@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -263,17 +265,26 @@ type ProfileConfig struct {
 // LoadProfileConfig reads model profiles for the given workspace.
 // Falls back to legacy roles.json if profiles.json doesn't exist.
 func LoadProfileConfig(workspace string) (*ProfileConfig, error) {
-	path := profileConfigPath(workspace)
+	return loadProfileConfigFromDir(filepath.Dir(profileConfigPath(workspace)))
+}
+
+// loadProfileConfigFromDir permits migrations over stored project directories,
+// whose names cannot be reversed into their original workspace paths.
+func loadProfileConfigFromDir(dir string) (*ProfileConfig, error) {
+	path := filepath.Join(dir, "profiles.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Fallback: try legacy roles.json //legacy-delete-after:2026-04-21
-			return loadLegacyRoleConfig(workspace)
+			return loadLegacyRoleConfigFromDir(dir)
 		}
 		return nil, fmt.Errorf("reading profile config %s: %w", path, err)
 	}
 
 	var cfg ProfileConfig
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("parsing profile config %s: %w", path, err)
+	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing profile config %s: %w", path, err)
 	}
@@ -285,7 +296,11 @@ func LoadProfileConfig(workspace string) (*ProfileConfig, error) {
 
 // loadLegacyRoleConfig reads the old roles.json and converts to ProfileConfig. //legacy-delete-after:2026-04-21
 func loadLegacyRoleConfig(workspace string) (*ProfileConfig, error) {
-	path := filepath.Join(ConfigHome(), "projects", ProjectDir(workspace), "roles.json")
+	return loadLegacyRoleConfigFromDir(filepath.Join(ConfigHome(), "projects", ProjectDir(workspace)))
+}
+
+func loadLegacyRoleConfigFromDir(dir string) (*ProfileConfig, error) {
+	path := filepath.Join(dir, "roles.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -297,6 +312,9 @@ func loadLegacyRoleConfig(workspace string) (*ProfileConfig, error) {
 	var legacy struct {
 		Roles map[string]map[string]ProfilePreset `json:"roles"`
 	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("parsing legacy role config %s: %w", path, err)
+	}
 	if err := json.Unmarshal(data, &legacy); err != nil {
 		return nil, fmt.Errorf("parsing legacy role config %s: %w", path, err)
 	}
@@ -305,6 +323,67 @@ func loadLegacyRoleConfig(workspace string) (*ProfileConfig, error) {
 		profiles = map[string]map[string]ProfilePreset{}
 	}
 	return &ProfileConfig{Profiles: profiles}, nil
+}
+
+// rejectDuplicateJSONKeys rejects duplicate object keys at every nesting level.
+// encoding/json otherwise silently keeps the last value, which could weaken a
+// legacy profile before it is migrated into the strict YAML collection.
+func rejectDuplicateJSONKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := rejectDuplicateJSONValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func rejectDuplicateJSONValue(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]bool{}
+		for dec.More() {
+			key, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if seen[name] {
+				return fmt.Errorf("duplicate key %q", name)
+			}
+			seen[name] = true
+			if err := rejectDuplicateJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token() // closing '}'; the decoder validates its kind.
+		return err
+	case '[':
+		for dec.More() {
+			if err := rejectDuplicateJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token() // closing ']'
+		return err
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
 }
 
 // SaveProfileConfig persists model profiles for the given workspace.

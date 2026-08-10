@@ -179,10 +179,15 @@ Project policy needed:
 - `provider.name: codex`
 - `network.mode: host` gives the container direct LAN access, which is required to reach the local server
 - `network.firewall: disabled` disables the HTTP proxy, which only allows ports 80/443 and would block port 11434
-- `--profile gemma` -- selects the Ollama provider and model (passed through to Codex via `--`)
+- `--profile gemma` -- is provider-native here because it appears after `--`; Codex uses it to select the Ollama provider/model profile. It is not Mittens' complete-project profile selector.
 - `OPENAI_API_KEY` -- Ollama doesn't require a real key, but Codex expects one to be set. Any non-empty value works.
 
 Mittens automatically skips OAuth credential staging when a custom model provider base URL is configured.
+
+Mittens' own complete project profile selector must appear before the separator,
+for example `mittens --profile local-ollama -- --profile gemma`. The first
+selector loads the project-local `local-ollama` snapshot from `profiles.yaml`;
+the second is forwarded verbatim to Codex.
 
 ### 3. Save as project policy
 

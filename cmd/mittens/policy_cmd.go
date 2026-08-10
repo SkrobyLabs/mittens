@@ -42,10 +42,21 @@ func runPolicy(args []string) error {
 
 func runPolicyShow(args []string, extensions []*registry.Extension) error {
 	jsonOut := false
-	for _, arg := range args {
+	profile := "default"
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "--json":
 			jsonOut = true
+		case "--profile":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--profile requires a name")
+			}
+			profile = args[i+1]
+			i++
+			if err := validateProfileName(profile, true); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("policy show no longer accepts launch flag overrides; use `mittens policy set` or `mittens init`")
 		}
@@ -53,18 +64,24 @@ func runPolicyShow(args []string, extensions []*registry.Extension) error {
 
 	workspace := detectWorkspace()
 	policy, source, err := effectivePolicyForShow(workspace, extensions)
+	if profile != "default" {
+		policy, err = LoadNamedProfile(workspace, profile)
+		source = PolicySourceV2
+	}
 	if err != nil {
 		return err
 	}
 
-	summary := launchSummaryFromPolicy(policy, workspace)
+	summary := launchSummaryFromPolicy(policy, workspace, profile)
 	if jsonOut {
 		out := struct {
 			Source  PolicySource   `json:"source"`
+			Profile string         `json:"profile"`
 			Policy  *ProjectPolicy `json:"policy"`
 			Summary LaunchSummary  `json:"summary"`
 		}{
 			Source:  source,
+			Profile: profile,
 			Policy:  policy,
 			Summary: summary,
 		}
@@ -74,7 +91,7 @@ func runPolicyShow(args []string, extensions []*registry.Extension) error {
 	}
 
 	fmt.Fprint(os.Stdout, summary.Render())
-	fmt.Fprintf(os.Stdout, "\nPolicy source: %s\n\n", source)
+	fmt.Fprintf(os.Stdout, "\nPolicy source: %s (profile: %s)\n\n", source, profile)
 	payload, err := yaml.Marshal(policy)
 	if err != nil {
 		return err
@@ -103,11 +120,18 @@ func effectivePolicyForShow(workspace string, extensions []*registry.Extension) 
 }
 
 func runPolicySet(args []string, extensions []*registry.Extension) error {
+	profile, args, err := policyProfileArgs(args)
+	if err != nil {
+		return err
+	}
 	if len(args) != 2 {
 		return fmt.Errorf("usage: mittens policy set <field> <value>")
 	}
 	workspace := detectWorkspace()
 	policy, _, err := LoadProjectPolicy(workspace, extensions)
+	if profile != "default" {
+		policy, err = LoadNamedProfile(workspace, profile)
+	}
 	if err != nil {
 		return err
 	}
@@ -121,7 +145,7 @@ func runPolicySet(args []string, extensions []*registry.Extension) error {
 	} else if err := setPolicyField(policy, args[0], args[1]); err != nil {
 		return err
 	}
-	if err := SaveProjectPolicy(workspace, policy); err != nil {
+	if err := SaveNamedProfile(workspace, profile, policy); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Updated %s for %s\n", args[0], ProjectDir(workspace))
@@ -132,11 +156,15 @@ func runPolicySet(args []string, extensions []*registry.Extension) error {
 // command the in-container firewall denial message points operators at, and the
 // same path the firewall-learn report uses to persist discovered domains.
 func runPolicyAllow(args []string, extensions []*registry.Extension) error {
+	profile, args, err := policyProfileArgs(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: mittens policy allow <domain> [domain...]")
 	}
 	workspace := detectWorkspace()
-	added, err := addExtraDomains(workspace, extensions, args)
+	added, err := addExtraDomainsForProfile(workspace, extensions, profile, args)
 	if err != nil {
 		return err
 	}
@@ -146,6 +174,56 @@ func runPolicyAllow(args []string, extensions []*registry.Extension) error {
 	}
 	fmt.Fprintf(os.Stdout, "Added %s to network.extra_domains for %s\n", strings.Join(added, ", "), ProjectDir(workspace))
 	return nil
+}
+
+func policyProfileArgs(args []string) (string, []string, error) {
+	profile := "default"
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--profile" {
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--profile requires a name")
+			}
+			profile = args[i+1]
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	if err := validateProfileName(profile, true); err != nil {
+		return "", nil, err
+	}
+	return profile, out, nil
+}
+
+func addExtraDomainsForProfile(workspace string, extensions []*registry.Extension, profile string, domains []string) ([]string, error) {
+	if profile == "default" {
+		return addExtraDomains(workspace, extensions, domains)
+	}
+	incoming := normalizeNetworkDomains(domains)
+	if len(incoming) == 0 {
+		return nil, fmt.Errorf("no valid domains to add")
+	}
+	p, err := LoadNamedProfile(workspace, profile)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, d := range p.Network.ExtraDomains {
+		seen[d] = true
+	}
+	var added []string
+	for _, d := range incoming {
+		if !seen[d] {
+			seen[d] = true
+			p.Network.ExtraDomains = append(p.Network.ExtraDomains, d)
+			added = append(added, d)
+		}
+	}
+	if len(added) > 0 {
+		err = SaveNamedProfile(workspace, profile, p)
+	}
+	return added, err
 }
 
 // addExtraDomains normalizes, de-duplicates against the existing allowlist, and
@@ -351,13 +429,14 @@ func printPolicyHelp() {
 	fmt.Println(`mittens policy - Inspect and edit project policy
 
 Usage:
-  mittens policy show [--json]
-  mittens policy set <field> <value>
-  mittens policy allow <domain> [domain...]
+  mittens policy show [--profile NAME] [--json]
+  mittens policy set [--profile NAME] <field> <value>
+  mittens policy allow [--profile NAME] <domain> [domain...]
 
 Examples:
   mittens policy show
   mittens policy show --json
+  mittens policy show --profile planner
   mittens policy set provider.name codex
   mittens policy set provider.backend openai
   mittens policy set provider.endpoint http://host.docker.internal:9223
@@ -381,7 +460,7 @@ func parsePolicyList(value string) []string {
 	return out
 }
 
-func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string) LaunchSummary {
+func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string, selectedProfile ...string) LaunchSummary {
 	if policy == nil {
 		policy = defaultProjectPolicy()
 	}
@@ -423,9 +502,13 @@ func launchSummaryFromPolicy(policy *ProjectPolicy, workspace string) LaunchSumm
 		network += ", firewall allowlist"
 	}
 
+	profile := policy.Provider.Profile
+	if len(selectedProfile) > 0 {
+		profile = selectedProfile[0]
+	}
 	return LaunchSummary{
 		Provider:         providerName,
-		Profile:          policy.Provider.Profile,
+		Profile:          profile,
 		Workspace:        SummaryMount{Path: workspacePath, Access: workspaceMode},
 		ExtraDirs:        extraDirs,
 		MCPServers:       mcpServersFromPolicy(policy),

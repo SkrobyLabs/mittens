@@ -238,17 +238,29 @@ Sibling placement and detached-HEAD behavior are unchanged when these flags are
 omitted. See [docs/WORKTREE-ORCHESTRATION.md](docs/WORKTREE-ORCHESTRATION.md) for
 the full integration guide.
 
-### Model Profiles
+### Complete Project Profiles
 
-`mittens policy set provider.profile NAME` selects a saved model + effort preset. Profiles are per-provider and per-project.
+`mittens` is exactly `mittens --profile default`. The existing project
+`policy.yaml` is that default profile; additional complete, standalone project
+profiles are stored atomically in `profiles.yaml`. A named profile includes the
+provider, model/effort, mounts, network, credentials, capabilities, MCP, host
+integration, execution settings, options, and provider arguments.
 
 ```bash
-mittens policy set provider.profile planner
-mittens init --profile fast     # configure the "fast" profile
-mittens init --profile planner --delete  # remove a profile
+mittens --profile planner
+mittens profile list                         # list default and named profiles
+mittens init --profile fast                 # configure a complete snapshot
+mittens policy allow --profile planner api.example.com
+mittens init --profile planner --delete     # remove a named profile
 ```
 
-If profiles exist for the current provider and no policy profile is set, mittens shows a picker at startup.
+Mittens recognizes `--profile NAME` only before `--`. Mittens commands and
+launch flags must also appear before the separator. Arguments after the
+separator always go to the selected provider, so `mittens -- --profile gemma`
+or `mittens -- --model opus "fix the tests"` are provider-native arguments,
+not Mittens configuration. Legacy
+per-provider `profiles.json`/`roles.json` entries are retained as recoverable
+inputs and are migrated to complete snapshots when needed.
 
 ### Session Persistence
 
@@ -299,7 +311,7 @@ If your threat model includes an agent or dependency *actively trying* to exfilt
 - `--verbose` — prints the full `docker run` command so you can see all mounts, env vars, and flags.
 - `--arch amd64|arm64` — builds and runs that Linux image architecture. Mittens keeps architecture-specific image tags, so switching architectures does not replace the other local image. Cross-architecture execution requires Docker emulation support (included with Docker Desktop; native Linux engines may need binfmt/QEMU configured). The host `mittens` binary stays native, and Mittens bundles matching container entrypoints for both architectures; other prebuilt binaries in mounted workspaces still need to target Linux and the selected architecture.
 - `mittens policy set execution.shell true` — drops into a bash shell inside the container for manual inspection.
-- `mittens doctor` — checks Docker, runtime assets, and broker prerequisites, and reports any problems. Run `mittens doctor --migrate-all` to convert every legacy per-project config under `~/.mittens/projects` to `policy.yaml` in one pass.
+- `mittens doctor` — checks Docker, runtime assets, and broker prerequisites, and reports any problems. Run `mittens doctor --migrate-all` to convert every legacy per-project config under `~/.mittens/projects` to `policy.yaml` and recoverable `profiles.json`/`roles.json` presets to complete `profiles.yaml` snapshots in one pass.
 
 ## Troubleshooting
 

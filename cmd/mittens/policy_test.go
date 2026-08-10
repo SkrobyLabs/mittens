@@ -294,7 +294,8 @@ func TestApplyProjectPolicyConfiguresRuntimeAndCapabilities(t *testing.T) {
 	policy.ExtraArgs = []string{"--model", "opus"}
 
 	app := &App{
-		Yolo: true,
+		Yolo:    true,
+		Profile: "selected-complete-profile",
 		Extensions: []*registry.Extension{
 			{Name: "firewall", DefaultOn: true, Enabled: true},
 			{Name: "docker"},
@@ -303,7 +304,7 @@ func TestApplyProjectPolicyConfiguresRuntimeAndCapabilities(t *testing.T) {
 	}
 	app.applyProjectPolicy(policy)
 
-	if app.Profile != "fast" || !app.Worktree || !app.NetworkHost || !app.Shell {
+	if app.Profile != "selected-complete-profile" || !app.Worktree || !app.NetworkHost || !app.Shell {
 		t.Fatalf("runtime fields not applied: %+v", app)
 	}
 	if app.Yolo || !app.NoHistory || !app.NoNotify {

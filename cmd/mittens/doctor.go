@@ -24,9 +24,9 @@ func runDoctor(args []string) error {
 			fmt.Println("Usage: mittens doctor [--migrate-all]")
 			fmt.Println()
 			fmt.Println("Checks Docker, runtime assets, and broker prerequisites, and migrates")
-			fmt.Println("legacy project config to policy.yaml.")
+			fmt.Println("legacy project config to policy.yaml and legacy model presets to complete profiles.")
 			fmt.Println()
-			fmt.Println("  --migrate-all   Convert every legacy project config under ~/.mittens/projects")
+			fmt.Println("  --migrate-all   Convert every stored project config and recoverable legacy profile")
 			return nil
 		default:
 			return fmt.Errorf("unknown flag %q for \"mittens doctor\" (supported: --migrate-all)", a)
@@ -170,39 +170,95 @@ func (d *doctorReport) migrateAllProjects(exts []*registry.Extension) {
 	}
 
 	var migrated, skipped, failed int
+	var profileMigrated, qualified, escaped, profileFailed int
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		dir := filepath.Join(projectsDir, e.Name())
-		if _, err := os.Stat(filepath.Join(dir, "policy.yaml")); err == nil {
+		// Validate legacy preset input before converting or writing any project
+		// policy. Duplicate JSON keys otherwise silently select the last value
+		// and could persist a weakened boundary during doctor migration.
+		if _, err := loadProfileConfigFromDir(dir); err != nil {
+			d.fail("%s: reading legacy profiles: %v", e.Name(), err)
+			profileFailed++
+			continue
+		}
+		policyPath := filepath.Join(dir, "policy.yaml")
+		var seed *ProjectPolicy
+		if _, err := os.Stat(policyPath); err == nil {
 			skipped++
+			seed, err = loadPolicyFile(policyPath)
+			if err != nil {
+				d.fail("%s: reading policy.yaml: %v", e.Name(), err)
+				failed++
+				continue
+			}
+		} else if !os.IsNotExist(err) {
+			d.fail("%s: reading policy.yaml: %v", e.Name(), err)
+			failed++
 			continue
+		} else {
+			lines, err := readConfigLines(filepath.Join(dir, "config"))
+			if err != nil {
+				d.fail("%s: reading config: %v", e.Name(), err)
+				failed++
+				continue
+			}
+			legacyArgs := splitConfigFlags(lines)
+			if len(legacyArgs) > 0 {
+				seed, err = PolicyFromLegacyFlags(legacyArgs, exts)
+				if err != nil {
+					d.fail("%s: converting legacy config: %v", e.Name(), err)
+					failed++
+					continue
+				}
+				if err := savePolicyFile(policyPath, seed); err != nil {
+					d.fail("%s: writing policy.yaml: %v", e.Name(), err)
+					failed++
+					continue
+				}
+				migrated++
+			} else {
+				seed = defaultProjectPolicy()
+			}
 		}
-		lines, err := readConfigLines(filepath.Join(dir, "config"))
+		if seed == nil {
+			seed = defaultProjectPolicy()
+		}
+		changed, err := resolveLegacyProviderProfileInDir(dir, seed)
 		if err != nil {
-			d.fail("%s: reading config: %v", e.Name(), err)
-			failed++
+			d.fail("%s: resolving legacy provider profile: %v", e.Name(), err)
+			profileFailed++
 			continue
 		}
-		legacyArgs := splitConfigFlags(lines)
-		if len(legacyArgs) == 0 {
-			continue
+		if changed {
+			if err := savePolicyFile(policyPath, seed); err != nil {
+				d.fail("%s: saving resolved provider profile: %v", e.Name(), err)
+				profileFailed++
+				continue
+			}
 		}
-		policy, err := PolicyFromLegacyFlags(legacyArgs, exts)
+		migrations, err := migrateLegacyProfilesInDir(dir, seed)
 		if err != nil {
-			d.fail("%s: converting legacy config: %v", e.Name(), err)
-			failed++
+			d.fail("%s: migrating legacy profiles: %v", e.Name(), err)
+			profileFailed++
 			continue
 		}
-		if err := savePolicyFile(filepath.Join(dir, "policy.yaml"), policy); err != nil {
-			d.fail("%s: writing policy.yaml: %v", e.Name(), err)
-			failed++
-			continue
+		for _, migration := range migrations {
+			switch migration.Kind {
+			case "qualified":
+				qualified++
+			case "escaped":
+				escaped++
+			case "existing":
+				continue
+			}
+			profileMigrated++
+			d.ok("%s: migrated legacy profile %s/%s → %s (%s)", e.Name(), migration.Provider, migration.Name, migration.Target, migration.Kind)
 		}
-		migrated++
 	}
-	d.ok("Migrated %d legacy project config(s); %d already structured", migrated, skipped)
+	d.ok("Migrated %d legacy project config(s), %d legacy profile(s) (%d qualified, %d escaped); %d already structured/skipped; %d profile migration(s) failed", migrated, profileMigrated, qualified, escaped, skipped, profileFailed)
 }
 
 // migrateUserDefaults converts a legacy flat ~/.mittens/defaults file into the

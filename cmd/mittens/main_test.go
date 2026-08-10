@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -22,6 +23,19 @@ func TestHasSubFlag_AfterSeparator(t *testing.T) {
 	}
 	if hasSubFlag([]string{"--verbose", "--", "--init"}, "--init") {
 		t.Fatal("did not expect --init after -- to match")
+	}
+}
+
+func TestExtractProfileSelectorRespectsProviderSeparator(t *testing.T) {
+	name, args, err := extractProfileSelector([]string{"--profile", "planner", "--", "--profile", "gemma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "planner" || !reflect.DeepEqual(args, []string{"--", "--profile", "gemma"}) {
+		t.Fatalf("selector result = %q %#v", name, args)
+	}
+	if _, _, err := extractProfileSelector([]string{"--profile", "one", "--profile", "two"}); err == nil {
+		t.Fatal("expected duplicate Mittens selector to fail")
 	}
 }
 
@@ -100,5 +114,16 @@ func TestRejectDeprecatedLaunchPolicyFlags(t *testing.T) {
 	}
 	if err := rejectDeprecatedLaunchPolicyFlags([]string{"--", "--resume", "latest"}, exts); err != nil {
 		t.Fatalf("resume args after separator should be forwarded: %v", err)
+	}
+}
+
+func TestValidateLaunchArgsRequiresSeparatorForProviderArgs(t *testing.T) {
+	for _, args := range [][]string{{"asdf"}, {"--model", "opus"}} {
+		if err := validateLaunchArgs(args); err == nil || !strings.Contains(err.Error(), "follow `--`") {
+			t.Fatalf("validateLaunchArgs(%q) = %v, want actionable error", args, err)
+		}
+	}
+	if err := validateLaunchArgs([]string{"--no-build", "--", "--model", "opus", "fix tests"}); err != nil {
+		t.Fatalf("provider args after separator rejected: %v", err)
 	}
 }
