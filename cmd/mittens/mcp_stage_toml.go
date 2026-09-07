@@ -12,9 +12,10 @@ import (
 const mcpProxyBinary = "mittens-mcp-proxy"
 
 // transformMCPTOML applies MCP transforms to a Codex-style config.toml via a
-// targeted line edit: it rewrites command/args and strips the env subtable for
-// proxied servers, and expands ${VAR} tokens for direct/mount servers. Every
-// other line is left byte-identical.
+// targeted line edit: it retains only allowed MCP server sections, rewrites
+// command/args and strips the env subtable for proxied servers, and expands
+// ${VAR} tokens for direct/mount servers. Every non-MCP line is left
+// byte-identical.
 func transformMCPTOML(data []byte, serversKey string, actions map[string]mcpServerAction) ([]byte, map[string][]string, error) {
 	injected := map[string][]string{}
 	prefix := serversKey + "."
@@ -24,6 +25,7 @@ func transformMCPTOML(data []byte, serversKey string, actions map[string]mcpServ
 	currentName := ""
 	var action mcpServerAction
 	managed := false
+	included := true
 	inEnvSub := false
 	skipArgsCont := false
 
@@ -34,18 +36,26 @@ func transformMCPTOML(data []byte, serversKey string, actions map[string]mcpServ
 			skipArgsCont = false
 			currentName = ""
 			managed = false
+			included = true
 			inEnvSub = false
 			if strings.HasPrefix(section, prefix) {
 				name, sub := mcpconfig.SplitServerSection(strings.TrimPrefix(section, prefix))
 				currentName = name
 				action, managed = actions[name]
+				included = managed
 				inEnvSub = sub == "env"
+				if !included {
+					continue
+				}
 				// Drop the [mcp_servers.<name>.env] header for proxied servers.
 				if managed && action.rewriteProxy && inEnvSub {
 					continue
 				}
 			}
 			out = append(out, line)
+			continue
+		}
+		if !included {
 			continue
 		}
 

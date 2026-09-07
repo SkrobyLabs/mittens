@@ -531,8 +531,12 @@ func (a *App) Run() error {
 
 	a.applyReportProgress()
 
-	// Assemble docker run args and run.
-	dockerArgs := a.assembleDockerArgs(resolverDockerArgs, resolverFirewallExtra)
+	// Assemble docker run args and run. MCP staging failures are fail-closed:
+	// do not start a container with its unfiltered provider config.
+	dockerArgs, err := a.assembleDockerArgsE(resolverDockerArgs, resolverFirewallExtra)
+	if err != nil {
+		return err
+	}
 
 	fmt.Fprint(os.Stderr, a.launchSummary.Render())
 	if len(a.ClaudeArgs) > 0 {
@@ -1451,6 +1455,17 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 // assembleDockerArgs builds the full docker run argument list.
 // resolverArgs and resolverFirewall come from extension setup resolvers.
 func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []string) []string {
+	args, err := a.assembleDockerArgsE(resolverArgs, resolverFirewall)
+	if err != nil {
+		logWarn("MCP staging: %v", err)
+		return nil
+	}
+	return args
+}
+
+// assembleDockerArgsE builds the full docker run argument list. It returns an
+// error when MCP staging cannot produce an allowlisted provider config.
+func (a *App) assembleDockerArgsE(resolverArgs []string, resolverFirewall []string) ([]string, error) {
 	a.ensureHostPolicyDefaults()
 
 	home := os.Getenv("HOME")
@@ -1464,12 +1479,10 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 	}
 
 	// MCP staging: verify proxy pins, register approved proxy servers with the
-	// broker, and transform the staged provider config. Failures here are never
-	// fatal to the launch.
+	// broker, and transform the staged provider config.
 	mcpStage, err := a.planMCPStaging(home)
 	if err != nil {
-		logWarn("MCP staging: %v", err)
-		mcpStage = nil
+		return nil, fmt.Errorf("MCP staging: %w", err)
 	}
 	if mcpStage != nil && len(mcpStage.proxySpecs) > 0 && a.broker != nil {
 		a.broker.mcpWorkspace = a.EffectiveWorkspace
@@ -1838,7 +1851,7 @@ func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []strin
 
 	a.launchSummary = a.buildLaunchSummary(initCfg, firewallDomains)
 
-	return args
+	return args, nil
 }
 
 // exitCodeError carries the agent's non-zero exit code up to main so the

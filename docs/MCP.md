@@ -10,7 +10,8 @@ callbacks that work on the host often fail when the listener moves into a
 container. Mittens does not try to infer or mount arbitrary credential
 directories for this; instead it chooses per server between leaving MCP config
 alone, mounting MCP helper code, and proxying MCP protocol traffic through the
-host broker.
+host broker. For Codex, the selection is also a config allowlist: only selected
+server definitions are copied into the container.
 
 ## Policy Model
 
@@ -41,7 +42,7 @@ Each configured server has an explicit mode:
 
 | Mode | Behavior |
 |---|---|
-| `direct` | Provider MCP config is left unchanged. The server runs (or fails) inside the container exactly as configured. Works for URL-based remote servers (subject to firewall whitelisting) and stdio servers whose command resolves inside the container image (`npx`, `uvx`, container-installed binaries). A stdio server with a host-absolute command path fails to start under `direct` -- that's expected; use `mount` or `proxy` instead. |
+| `direct` | The server runs (or fails) inside the container as configured. For Codex, only selected server definitions are staged into the container. Works for URL-based remote servers (subject to firewall whitelisting) and stdio servers whose command resolves inside the container image (`npx`, `uvx`, container-installed binaries). A stdio server with a host-absolute command path fails to start under `direct` -- that's expected; use `mount` or `proxy` instead. |
 | `mount` | The server runs inside the container; its helper code is mounted read-only (see Mount Mode below). |
 | `proxy` | The provider MCP command is replaced with a container shim that forwards MCP protocol traffic to a host-side process managed by the broker. |
 
@@ -82,9 +83,9 @@ repo-controlled definition would be a sandbox escape by configuration.
   (`sha256` over canonical JSON, pre-env-expansion) into `command_pin`. At
   launch, the broker recomputes the hash from current config; on mismatch it
   refuses to register the proxy endpoint, logs the old and new command lines,
-  and skips the staged config rewrite for that server. The launch summary
-  shows it as `proxy (refused: command changed)`. Pin verification failure is
-  never fatal to the launch. Re-approval through the wizard or `policy set`
+  and omits that server from the staged Codex config. The launch summary shows
+  it as `proxy (refused: command changed)`. Pin verification failure is never
+  fatal to the launch. Re-approval through the wizard or `policy set`
   updates the pin.
 - **Workspace refusal.** `mode: proxy` is user-scope config only. Servers
   defined solely in the workspace `.mcp.json` are refused proxy mode in both
@@ -204,11 +205,11 @@ transform is applied per provider:
   place of the host `.claude.json`; everything outside the `mcpServers` keys
   (top-level and the current project's `projects.<path>` entry) is copied
   through byte-identical.
-- **Codex**: the TOML `[mcp_servers.<name>]` sections are rewritten with a
-  targeted line edit (command/args replaced, `env` table lines dropped for
-  proxied servers), leaving the rest of the file untouched. If this proves too
-  fragile for a given config, refusing Codex proxy mode is the sanctioned
-  fallback.
+- **Codex**: the TOML `[mcp_servers.<name>]` sections are an allowlist: only
+  selected, non-refused servers are staged. A targeted line edit rewrites
+  command/args and drops `env` table lines for proxied servers, leaving all
+  non-MCP content untouched. A staging read, transform, or write failure stops
+  launch rather than mounting the unfiltered host config.
 - **Gemini**: a nested file-over-dir bind mounts the transformed file over its
   path inside the staged config directory.
 

@@ -86,7 +86,7 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	all := existingAll
 	if err := huh.NewConfirm().
 		Title("Whitelist all configured MCP servers in direct mode?").
-		Description("Enables every configured server (firewall whitelisting only). Choose No to pick servers and modes individually.").
+		Description("Enables every configured server. For Codex, selection also controls which server definitions enter the container. Choose No to pick servers and modes individually.").
 		Value(&all).
 		Run(); err != nil {
 		return nil, false, err

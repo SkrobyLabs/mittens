@@ -109,6 +109,157 @@ env = { TOKEN = "${GH_TOKEN}" }
 	}
 }
 
+func TestTransformMCPTOML_FiltersUnselectedServers(t *testing.T) {
+	input := `# retain this comment
+model = "gpt"
+
+[mcp_servers.selected]
+command = "npx"
+
+[mcp_servers.selected.env]
+TOKEN = "${TOKEN:-default}"
+
+[mcp_servers."not.selected"]
+command = "should-not-remain"
+
+[mcp_servers."not.selected".env]
+SECRET = "nope"
+
+[other.section]
+value = "unchanged"
+`
+	out, _, err := transformMCPTOML([]byte(input), "mcp_servers", map[string]mcpServerAction{
+		"selected": {expand: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `[mcp_servers.selected.env]`) || !strings.Contains(got, `TOKEN = "default"`) {
+		t.Errorf("selected server was not retained and expanded:\n%s", got)
+	}
+	if strings.Contains(got, "not.selected") || strings.Contains(got, "should-not-remain") || strings.Contains(got, "SECRET") {
+		t.Errorf("unselected server remained in staged TOML:\n%s", got)
+	}
+	if !strings.Contains(got, "# retain this comment\nmodel = \"gpt\"") || !strings.Contains(got, "[other.section]\nvalue = \"unchanged\"") {
+		t.Errorf("non-MCP content changed:\n%s", got)
+	}
+}
+
+func TestPlanMCPStaging_CodexEmptySelectionStagesDenyAll(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostConfig := filepath.Join(home, ".codex", "config.toml")
+	hostData := []byte("model = \"gpt\"\n\n[mcp_servers.one]\ncommand = \"one\"\n\n[mcp_servers.two]\ncommand = \"two\"\n")
+	if err := os.WriteFile(hostConfig, hostData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Provider: CodexProvider(), Workspace: t.TempDir()}
+	plan, err := app.planMCPStaging(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil || plan.configBindSrc == "" || plan.configBindDst == "" {
+		t.Fatalf("expected staged Codex config, got %#v", plan)
+	}
+	staged, err := os.ReadFile(plan.configBindSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(staged), "mcp_servers") || string(staged) != "model = \"gpt\"\n" {
+		t.Errorf("staged config = %q, want non-MCP config only", staged)
+	}
+	unchanged, err := os.ReadFile(hostConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchanged) != string(hostData) {
+		t.Errorf("host config changed: %q", unchanged)
+	}
+}
+
+func TestPlanMCPStaging_CodexSelectedServerIsAllowlisted(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(`model = "gpt"
+
+[mcp_servers.keep]
+command = "npx"
+env = { TOKEN = "${CODEX_MCP_TOKEN}" }
+
+[mcp_servers.remove]
+command = "unwanted"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_MCP_TOKEN", "expanded")
+	app := &App{
+		Provider:   CodexProvider(),
+		Workspace:  t.TempDir(),
+		MCPServers: []MCPServerPolicy{{Name: "keep", Mode: mcpModeDirect}},
+	}
+	plan, err := app.planMCPStaging(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := os.ReadFile(plan.configBindSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(staged)
+	if !strings.Contains(got, `[mcp_servers.keep]`) || !strings.Contains(got, `TOKEN = "expanded"`) {
+		t.Errorf("selected server was not staged: %s", got)
+	}
+	if strings.Contains(got, "remove") || strings.Contains(got, "unwanted") {
+		t.Errorf("unselected server was staged: %s", got)
+	}
+}
+
+func TestPlanMCPStaging_CodexAllIncludesEveryConfiguredServer(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[mcp_servers.one]\ncommand = \"one\"\n\n[mcp_servers.two]\ncommand = \"two\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Provider: CodexProvider(), Workspace: t.TempDir(), MCPAll: true}
+	plan, err := app.planMCPStaging(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := os.ReadFile(plan.configBindSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(staged); !strings.Contains(got, `[mcp_servers.one]`) || !strings.Contains(got, `[mcp_servers.two]`) {
+		t.Errorf("MCPAll did not retain every configured server: %s", got)
+	}
+}
+
+func TestAssembleDockerArgsE_CodexStagingFailureIsReturned(t *testing.T) {
+	home := setupTestHome(t)
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "config.toml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		Provider:          CodexProvider(),
+		NoHistory:         true,
+		ContainerName:     "mittens-test",
+		WorkspaceMountSrc: t.TempDir(),
+		Credentials:       &CredentialManager{},
+		MCPAll:            true,
+	}
+	if _, err := a.assembleDockerArgsE(nil, nil); err == nil {
+		t.Fatal("expected Codex staging error")
+	}
+}
+
 // TestPlanMCPStaging_PinMismatchRefused verifies a changed command refuses the
 // proxy and never registers a spec.
 func TestPlanMCPStaging_PinMismatchRefused(t *testing.T) {

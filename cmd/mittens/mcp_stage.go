@@ -26,10 +26,11 @@ type mcpServerAction struct {
 }
 
 // planMCPStaging computes proxy pin verification and the staged provider-config
-// transform. It records refusals and injected env names on the App and returns
-// nil (no staging) when there is nothing to transform.
+// transform. It records refusals and injected env names on the App. Codex
+// always receives a staged config when one exists, since an empty selection is
+// a deny-all inclusion policy rather than an instruction to use the host file.
 func (a *App) planMCPStaging(home string) (*mcpStagePlan, error) {
-	if !a.MCPAll && len(a.MCPServers) == 0 {
+	if !a.MCPAll && len(a.MCPServers) == 0 && (a.Provider == nil || a.Provider.MCPConfigFormat != "toml") {
 		return nil, nil
 	}
 	if a.Provider == nil || a.Provider.MCPConfigFile == "" {
@@ -88,7 +89,7 @@ func (a *App) planMCPStaging(home string) (*mcpStagePlan, error) {
 		})
 	}
 
-	if !anyStagingAction(actions) {
+	if !anyStagingAction(actions) && a.Provider.MCPConfigFormat != "toml" {
 		// No transform needed; still return any proxy specs (none survive here
 		// since rewriteProxy implies an action).
 		return &mcpStagePlan{proxySpecs: proxySpecs}, nil

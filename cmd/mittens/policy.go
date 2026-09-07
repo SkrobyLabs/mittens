@@ -90,8 +90,9 @@ type CapabilityPolicy struct {
 }
 
 // MCPPolicy is the first-class MCP policy section. All enables every configured
-// server in direct mode (firewall whitelisting only); Servers holds explicit
-// per-server mode selections that override or supplement All.
+// server in direct mode; for Codex it also includes every configured server in
+// the staged config. Servers holds explicit per-server mode selections that
+// override or supplement All.
 type MCPPolicy struct {
 	All     bool              `yaml:"all,omitempty"`
 	Servers []MCPServerPolicy `yaml:"servers,omitempty"`
