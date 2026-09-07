@@ -56,12 +56,23 @@ pre-selects `proxy`:
 | stdio, host auth dependency (keychain, CLI token, PAT) | `proxy` | credential never enters the container |
 | stdio, broad local capability (filesystem, shell, docker, kubernetes) | `direct` or nothing | wizard warns; never defaults to `proxy` |
 
-The wizard asks mode per selected server (not one mode for all).
+The wizard asks mode per selected server. Its first option, `Auto (direct)` or
+`Auto (mount)`, is the default for new selections and saves the resolved mode.
+Existing direct/mount choices are preserved. Auto detects local helper entry
+points in arguments too, such as `node /path/server.js`. When classification
+suggests proxy, Auto uses mount and explains that host execution requires an
+explicit proxy selection. Auto is a wizard choice, not a mode re-evaluated at launch.
+
+The picker lists definitions for the selected provider, including workspace
+`.mcp.json` for Claude. It does not add other providers' servers or names from
+firewall domain lists. Saved selections missing from that provider remain visible
+with a warning so they can be removed; launching with a missing selection also
+warns. Selecting an MCP does not install or register it in the provider.
 
 ## Config Provenance
 
 MCP server definitions come from two trust domains: user-scope provider config
-(`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`) and the
+(`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`) and Claude’s
 workspace `.mcp.json`, which is repo-controlled. `proxy` mode executes the
 configured command on the host with host environment, so granting it to a
 repo-controlled definition would be a sandbox escape by configuration.

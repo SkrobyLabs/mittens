@@ -41,7 +41,7 @@ func classifyMCPServer(s mcpconfig.Server) mcpClassification {
 	case s.URL != "":
 		c.Shape = mcpShapeRemote
 		c.RecommendedMode = mcpModeDirect
-	case isHostCommand(s.Command):
+	case isHostCommand(s.Command) || len(mcpMountCandidates(s)) > 0:
 		c.Shape = mcpShapeStdioHost
 		if len(s.Env) > 0 {
 			c.RecommendedMode = mcpModeProxy
@@ -74,4 +74,14 @@ func hasBroadLocalCapability(s mcpconfig.Server) bool {
 		}
 	}
 	return false
+}
+
+// automaticMCPMode resolves the wizard's Auto choice to a concrete policy mode.
+// Host execution always requires choosing proxy explicitly.
+func automaticMCPMode(s mcpconfig.Server) string {
+	mode := classifyMCPServer(s).RecommendedMode
+	if mode == mcpModeProxy {
+		return mcpModeMount
+	}
+	return mode
 }

@@ -68,12 +68,15 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 		}
 	}
 
-	provider, _ := providerByName(providerName)
+	provider, err := providerByName(providerName)
+	if err != nil {
+		return nil, false, err
+	}
 	hostServers := readMCPServers(provider, os.Getenv("HOME"), workspace)
 	available := discoverMCPNames(hostServers, existing)
 
 	if len(available) == 0 {
-		fmt.Fprintln(os.Stderr, "  No MCP servers discovered.")
+		fmt.Fprintln(os.Stderr, "  No MCP servers configured for "+provider.DisplayName+".")
 		fmt.Fprintln(os.Stderr)
 		return nil, false, nil
 	}
@@ -103,10 +106,14 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	}
 	var opts []huh.Option[string]
 	for _, name := range available {
-		opts = append(opts, huh.NewOption(name, name).Selected(existingMode[name] != ""))
+		label := name
+		if _, known := hostServers[name]; !known {
+			label += " — not configured for " + provider.DisplayName + " (saved selection; network access only)"
+		}
+		opts = append(opts, huh.NewOption(label, name).Selected(existingMode[name] != ""))
 	}
 	if err := huh.NewMultiSelect[string]().
-		Title("Select MCP servers").
+		Title("Select MCP servers for " + provider.DisplayName).
 		Options(opts...).
 		Value(&selected).
 		Run(); err != nil {
@@ -133,31 +140,42 @@ func wizardMCPMode(name string, srv mcpconfig.Server, known bool, existingMode s
 	class := classifyMCPServer(srv)
 	workspaceScope := known && srv.Scope == mcpconfig.ScopeWorkspace
 
-	opts := []huh.Option[string]{
-		huh.NewOption("direct — run in the container as configured", mcpModeDirect),
-		huh.NewOption("mount — run in the container, mount helper code read-only", mcpModeMount),
+	autoMode := automaticMCPMode(srv)
+	description := strings.Join(class.Warnings, "; ")
+	if class.RecommendedMode == mcpModeProxy {
+		description += " Auto mounts helper code; choose proxy explicitly to use host execution and credentials."
 	}
-	if known && !workspaceScope {
+	if !known {
+		description = "No server definition for this harness. This saved selection only allows network access; configure the server in your harness before using it."
+	}
+	opts := []huh.Option[string]{
+		huh.NewOption("Auto ("+autoMode+")", "auto"),
+		huh.NewOption("direct — run in the container as configured", mcpModeDirect),
+	}
+	if known {
+		opts = append(opts, huh.NewOption("mount — run in the container, mount helper code read-only", mcpModeMount))
+	}
+	if known && srv.IsStdio() && !workspaceScope {
 		opts = append(opts, huh.NewOption("proxy — run on the host via broker: "+mcpCommandLine(srv), mcpModeProxy))
 	} else if workspaceScope {
 		opts = append(opts, huh.NewOption("proxy — unavailable: workspace-defined server", "proxy-unavailable"))
 	}
 
 	mode := existingMode
-	if mode == "" || mode == mcpModeProxy {
-		mode = class.RecommendedMode // never pre-select proxy
-	}
-	if mode == mcpModeProxy {
-		mode = mcpModeMount
+	if mode == "" || mode == mcpModeProxy || !known {
+		mode = "auto"
 	}
 
 	if err := huh.NewSelect[string]().
 		Title("Mode for " + name).
-		Description(strings.Join(class.Warnings, "; ")).
+		Description(strings.TrimSpace(description)).
 		Options(opts...).
 		Value(&mode).
 		Run(); err != nil {
 		return MCPServerPolicy{}, err
+	}
+	if mode == "auto" {
+		mode = autoMode
 	}
 	if mode == "proxy-unavailable" {
 		mode = mcpModeDirect
@@ -196,13 +214,6 @@ func discoverMCPNames(hostServers map[string]mcpconfig.Server, existing []MCPSer
 		}
 		seen[n] = struct{}{}
 		names = append(names, n)
-	}
-	if resolver := registry.GetListResolver("mcp"); resolver != nil {
-		if items, err := resolver(); err == nil {
-			for _, it := range items {
-				add(it.Value)
-			}
-		}
 	}
 	for name := range hostServers {
 		add(name)

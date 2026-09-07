@@ -53,8 +53,9 @@ url = "https://example.com/mcp"
 		t.Fatal(err)
 	}
 
+	servers := readMCPServers(CodexProvider(), home, workspace)
 	app := mountApp(CodexProvider(), home, workspace, workspace, false,
-		MCPServerPolicy{Name: "shortcut", Mode: mcpModeMount},
+		MCPServerPolicy{Name: "shortcut", Mode: automaticMCPMode(servers["shortcut"])},
 		MCPServerPolicy{Name: "remote", Mode: mcpModeMount})
 
 	mounts := app.planMCPHelperMounts(home)

@@ -37,6 +37,9 @@ func (a *App) planMCPStaging(home string) (*mcpStagePlan, error) {
 	}
 
 	hostServers := readMCPServers(a.Provider, home, a.Workspace)
+	for _, name := range missingMCPServerNames(hostServers, a.MCPServers) {
+		logWarn("MCP server %q is not configured for %s; selecting it does not register a server. Configure it in %s", name, a.Provider.DisplayName, filepath.Join(home, a.Provider.MCPConfigFile))
+	}
 	actions := map[string]mcpServerAction{}
 	var proxySpecs []MCPProxySpec
 	a.mcpProxyRefusals = map[string]string{}

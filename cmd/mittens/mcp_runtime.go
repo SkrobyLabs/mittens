@@ -18,7 +18,7 @@ type mcpHelperMount struct {
 }
 
 // readMCPServers returns all MCP servers configured for the provider, merging
-// user-scope provider config with the workspace .mcp.json (workspace wins).
+// user-scope provider config with Claude workspace .mcp.json (workspace wins).
 func readMCPServers(provider *Provider, home, workspace string) map[string]mcpconfig.Server {
 	var servers map[string]mcpconfig.Server
 	if provider != nil && provider.MCPConfigFile != "" {
@@ -29,7 +29,10 @@ func readMCPServers(provider *Provider, home, workspace string) map[string]mcpco
 			workspace,
 		)
 	}
-	return mcpconfig.Merge(servers, mcpconfig.ReadWorkspace(workspace))
+	if provider != nil && provider.Name == "claude" {
+		servers = mcpconfig.Merge(servers, mcpconfig.ReadWorkspace(workspace))
+	}
+	return servers
 }
 
 func (a *App) planMCPHelperMounts(home string) []mcpHelperMount {
@@ -320,4 +323,14 @@ func mcpPathSensitive(path, home string) bool {
 		}
 	}
 	return false
+}
+
+func missingMCPServerNames(servers map[string]mcpconfig.Server, selected []MCPServerPolicy) []string {
+	missing := map[string]mcpconfig.Server{}
+	for _, server := range selected {
+		if _, ok := servers[server.Name]; !ok {
+			missing[server.Name] = mcpconfig.Server{}
+		}
+	}
+	return mcpconfig.Names(missing)
 }
