@@ -1206,7 +1206,7 @@ func wizardClaudeProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 	}
 	if err := huh.NewInput().
 		Title("Claude model alias").
-		Description("Optional Claude-facing alias. Managed proxy maps opus to gpt-5.5 medium, sonnet to gpt-5.5 low, fable to xhigh, and haiku to a fast mini route.").
+		Description("Optional Claude-facing alias. Managed proxy maps fable to gpt-6-astra medium, opus to gpt-5.6-sol high, sonnet to gpt-5.6-terra medium, and haiku to gpt-5.6-luna low.").
 		Placeholder("opus").
 		Value(&model).
 		Run(); err != nil {
