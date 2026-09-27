@@ -60,10 +60,23 @@ func setup(ctx *registry.SetupContext) error {
 	}
 
 	staging := ctx.StagingDir
+	available, err := listContexts()
+	if err != nil {
+		return err
+	}
+	known := make(map[string]bool, len(available))
+	for _, item := range available {
+		known[item.Value] = true
+	}
 
 	// Extract each context into a separate temp file.
 	var tmpFiles []string
+	var selected []string
 	for _, ctxName := range ext.Args {
+		if !known[ctxName] {
+			registry.LogWarn("kubectl context %q is not available; skipping", ctxName)
+			continue
+		}
 		out, err := exec.Command("kubectl", "config", "view", "--minify", "--flatten", "--context="+ctxName).Output()
 		if err != nil {
 			return fmt.Errorf("extracting kubectl context '%s': %w", ctxName, err)
@@ -73,6 +86,11 @@ func setup(ctx *registry.SetupContext) error {
 			return fmt.Errorf("writing kubectl context '%s': %w", ctxName, err)
 		}
 		tmpFiles = append(tmpFiles, tmpFile)
+		selected = append(selected, ctxName)
+	}
+	// Never merge an empty selection: kubectl would read the host's default config.
+	if len(tmpFiles) == 0 {
+		return nil
 	}
 
 	// Merge all extracted configs into a single kubeconfig by setting
@@ -90,8 +108,8 @@ func setup(ctx *registry.SetupContext) error {
 		return fmt.Errorf("writing merged kubeconfig: %w", err)
 	}
 
-	// Set current-context to the first selected context.
-	useCtxCmd := exec.Command("kubectl", "config", "use-context", ext.Args[0])
+	// Set current-context to the first available selected context.
+	useCtxCmd := exec.Command("kubectl", "config", "use-context", selected[0])
 	useCtxCmd.Env = append(os.Environ(), "KUBECONFIG="+configPath)
 	_ = useCtxCmd.Run() // best-effort
 
