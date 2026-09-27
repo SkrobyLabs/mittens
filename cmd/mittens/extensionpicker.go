@@ -92,7 +92,7 @@ func (m extensionPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.termHeight = msg.Height
 		m.termWidth = msg.Width
-		m.height = msg.Height - 6
+		m.height = msg.Height - 9
 		if m.height < 3 {
 			m.height = 3
 		}
@@ -192,12 +192,23 @@ func (m extensionPickerModel) View() string {
 			if item.flag != "" {
 				label = item.flag + "  " + item.description
 			}
+			if strings.HasPrefix(item.extension.Source, "user") {
+				label += "  [" + item.extension.Source + "]"
+			}
 			b.WriteString(fmt.Sprintf("%s%s %s %s\n", cursor, marker, name, label))
 		}
 		if len(m.items) > m.height {
 			b.WriteString(dpStyleHelp.Render(fmt.Sprintf("  (%d/%d)", m.cursor+1, len(m.items))))
 			b.WriteString("\n")
 		}
+	}
+
+	if len(m.items) > 0 && strings.HasPrefix(m.items[m.cursor].extension.Source, "user") {
+		ext := m.items[m.cursor].extension
+		b.WriteString(dpStyleHelp.Render("  " + strings.Replace(ext.ProvenanceLabel(), "; revision: ", "\n  revision: ", 1)))
+		b.WriteString("\n")
+		b.WriteString(dpStyleHelp.Render("  Trusted host code; may add Docker arguments and override built-ins."))
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")

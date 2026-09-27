@@ -42,6 +42,54 @@ func TestPathMapper_Translate_ExactRoot(t *testing.T) {
 	}
 }
 
+func TestPathMapper_Translate_MatchesOnlyPathComponents(t *testing.T) {
+	m := &PathMapper{
+		mappings: []pathMapping{
+			{"/home/user/project/", "/workspace"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "exact root", path: "/home/user/project", want: "/workspace"},
+		{name: "nested path", path: "/home/user/project/src/main.go", want: "/workspace/src/main.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.Translate(tc.path); got != tc.want {
+				t.Errorf("Translate(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPathMapper_Translate_NamesakeSiblingUsesDropZone(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "project")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(base, "project-notes.txt")
+	if err := os.WriteFile(sibling, []byte("notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dropDir := t.TempDir()
+	m := &PathMapper{
+		mappings:         []pathMapping{{workspace, "/workspace"}},
+		dropDir:          dropDir,
+		containerDropDir: "/tmp/mittens-drops",
+	}
+
+	if got := m.Translate(sibling); got != "/tmp/mittens-drops/project-notes.txt" {
+		t.Fatalf("Translate(%q) = %q, want drop-zone path", sibling, got)
+	}
+	if _, err := os.Stat(filepath.Join(dropDir, "project-notes.txt")); err != nil {
+		t.Fatalf("namesake sibling was not copied into drop zone: %v", err)
+	}
+}
+
 func TestPathMapper_Translate_ExtraDir(t *testing.T) {
 	m := &PathMapper{
 		mappings: []pathMapping{

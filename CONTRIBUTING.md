@@ -29,3 +29,40 @@ This lets us discuss the approach before you invest time on a PR that might not 
 - Follow existing patterns in the codebase.
 - Run `make fmt` and `make vet` before submitting.
 - Don't add features, abstractions, or refactors beyond what the issue calls for.
+
+## Container tests from inside Mittens
+
+The Docker integration suite needs access to a Docker daemon. When running it
+inside Mittens with access to the host daemon, keep temporary bind-mount
+fixtures under the persistent workspace so sibling containers can see them:
+
+```bash
+mkdir -p .cache/integration-tmp
+TMPDIR="$PWD/.cache/integration-tmp" \
+GIT_CEILING_DIRECTORIES="$PWD/.cache/integration-tmp" \
+  make test-integration-short
+```
+
+The Git discovery boundary prevents temporary test projects from inheriting
+the surrounding repository. Short mode skips additional extension-image
+builds; it still builds and tests the base image.
+
+## Release verification
+
+`make release VERSION=vX.Y.Z` builds the supported host binaries and Linux
+entrypoints under `dist/`, with a `SHA256SUMS` manifest for those artifacts.
+Release builds require a clean working tree, including untracked files, so
+the stamped commit identifies the source being built. They use the commit
+timestamp, trim local source paths, and keep module dependencies read-only.
+Use the same Go toolchain and source commit
+when comparing rebuilds; override `DATE` explicitly only when required.
+
+Verify a release from inside `dist/` with `sha256sum -c SHA256SUMS` on Linux or
+`shasum -a 256 -c SHA256SUMS` on macOS. Publish the manifest alongside the
+binaries. Checksums detect corruption; they do not authenticate the publisher.
+The verification workflow builds all release targets, checks hashes, and
+smoke-tests version metadata without publishing artifacts.
+
+These controls cover Mittens binaries. Container builds still use moving apt
+repositories and some upstream provider/tool installers; they are not fully
+reproducible or independently authenticated by the binary checksum manifest.

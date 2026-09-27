@@ -146,6 +146,22 @@ func LoadAllExtensions(bundledDir, userDir string, embeddedFS fs.FS) ([]*Extensi
 				}
 				ext = &pluginExt
 			}
+			if err := ValidateExtensionName(ext.Name); err != nil {
+				LogWarn("external extension %q: %v", entry.Name(), err)
+				continue
+			}
+
+			// Provenance comes from installer metadata, never the plugin manifest.
+			ext.Provenance = nil
+			if data, err := os.ReadFile(filepath.Join(extDir, ProvenanceFile)); err == nil {
+				var provenance ExtensionProvenance
+				if err := json.Unmarshal(data, &provenance); err != nil {
+					LogWarn("external extension %q has invalid source metadata: %v", entry.Name(), err)
+				} else {
+					provenance.Source = SanitizeExtensionSource(provenance.Source)
+					ext.Provenance = &provenance
+				}
+			}
 
 			// If a plugin executable exists, register subprocess resolvers.
 			// This is best-effort: a failing plugin doesn't prevent the

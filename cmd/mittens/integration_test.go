@@ -345,7 +345,11 @@ func TestDockerRun_ConfigSubdirCopyDoesNotNest(t *testing.T) {
 	}
 	defer os.Remove(cfgPath)
 
+	// The shared image prepares .claude; a real Codex image prepares a writable
+	// .codex directory at build time. Provide that target without another image.
+	uid, gid := CurrentUserIDs()
 	runArgs := []string{
+		"--tmpfs", fmt.Sprintf("/home/claude/.codex:uid=%d,gid=%d,mode=0755", uid, gid),
 		"-v", codexDir + ":/mnt/mittens-staging/.codex:ro",
 		"-v", cfgPath + ":" + initcfg.ConfigPath + ":ro",
 		"-e", "MITTENS_CONFIG=" + initcfg.ConfigPath,

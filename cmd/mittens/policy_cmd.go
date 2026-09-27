@@ -131,6 +131,8 @@ func runPolicySet(args []string, extensions []*registry.Extension) error {
 	policy, _, err := LoadProjectPolicy(workspace, extensions)
 	if profile != "default" {
 		policy, err = LoadNamedProfile(workspace, profile)
+	} else if policy == nil && err == nil {
+		policy, err = defaultPolicyForMutation(workspace, extensions)
 	}
 	if err != nil {
 		return err
@@ -240,7 +242,10 @@ func addExtraDomains(workspace string, extensions []*registry.Extension, domains
 		return nil, err
 	}
 	if policy == nil {
-		policy = defaultProjectPolicy()
+		policy, err = defaultPolicyForMutation(workspace, extensions)
+		if err != nil {
+			return nil, err
+		}
 	}
 	seen := make(map[string]bool, len(policy.Network.ExtraDomains))
 	for _, d := range policy.Network.ExtraDomains {
@@ -266,6 +271,28 @@ func addExtraDomains(workspace string, extensions []*registry.Extension, domains
 		return nil, err
 	}
 	return added, nil
+}
+
+// defaultPolicyForMutation returns the baseline for the first project-policy
+// edit. It resolves any legacy provider preset in the copied baseline so the
+// saved policy is standalone. Later changes to user defaults never overlay it.
+func defaultPolicyForMutation(workspace string, extensions []*registry.Extension) (*ProjectPolicy, error) {
+	defaults, _, err := LoadUserDefaultsPolicy(extensions)
+	if err != nil {
+		return nil, err
+	}
+	if defaults == nil {
+		return defaultProjectPolicy(), nil
+	}
+
+	policy, err := clonePolicy(defaults)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := resolveLegacyProviderProfile(workspace, policy, false); err != nil {
+		return nil, err
+	}
+	return policy, nil
 }
 
 func setPolicyField(policy *ProjectPolicy, field, value string) error {

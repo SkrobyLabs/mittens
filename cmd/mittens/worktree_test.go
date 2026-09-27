@@ -229,6 +229,88 @@ func TestCleanupWorktrees_KeepRetainsClean(t *testing.T) {
 	}
 }
 
+func TestCleanupWorktrees_KeepsIgnoredNestedWorktrees(t *testing.T) {
+	for _, subdirectory := range []string{"", "nested-workspace"} {
+		t.Run(subdirectory, func(t *testing.T) {
+			repo := initGitRepo(t, filepath.Join(t.TempDir(), "repo"))
+			a := newWorktreeApp()
+			a.WorktreeManifest = filepath.Join(t.TempDir(), "manifest.json")
+			rec, err := a.createWorktree(repo, "wt-parent", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec.MountPath = filepath.Join(rec.Path, subdirectory)
+			child := filepath.Join(rec.MountPath, ".mittens-worktrees", "child")
+			if out, err := exec.Command("git", "-C", repo, "worktree", "add", "--detach", child, "HEAD").CombinedOutput(); err != nil {
+				t.Fatalf("create child worktree: %v: %s", err, out)
+			}
+			if err := os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte(".mittens-worktrees/\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			childFile := filepath.Join(child, "README.md")
+			if err := os.WriteFile(childFile, []byte("uncommitted child work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			status, err := exec.Command("git", "-C", rec.Path, "status", "--porcelain").CombinedOutput()
+			if err != nil || len(status) != 0 {
+				t.Fatalf("parent should appear clean to Git: %v, %q", err, status)
+			}
+			a.cleanupWorktrees()
+			a.writeWorktreeManifest()
+			if got, err := os.ReadFile(childFile); err != nil || string(got) != "uncommitted child work\n" {
+				t.Fatalf("child work must survive cleanup: %q, %v", got, err)
+			}
+			data, err := os.ReadFile(a.WorktreeManifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest WorktreeManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Worktrees) != 1 || !manifest.Worktrees[0].Kept || manifest.Worktrees[0].Dirty {
+				t.Fatalf("manifest should record clean parent retained for child work: %+v", manifest.Worktrees)
+			}
+		})
+	}
+}
+
+func TestCleanupWorktrees_NestedStorageInspection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		asFile   bool
+		wantKept bool
+	}{
+		{name: "empty directory"},
+		{name: "cannot read as directory", asFile: true, wantKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := initGitRepo(t, filepath.Join(t.TempDir(), "repo"))
+			a := newWorktreeApp()
+			rec, err := a.createWorktree(repo, "wt-parent", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(rec.Path, ".mittens-worktrees")
+			if tc.asFile {
+				err = os.WriteFile(root, []byte("unexpected file"), 0o644)
+			} else {
+				err = os.Mkdir(root, 0o755)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte(".mittens-worktrees\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			a.cleanupWorktrees()
+			if rec.Kept != tc.wantKept {
+				t.Fatalf("Kept = %v, want %v", rec.Kept, tc.wantKept)
+			}
+		})
+	}
+}
+
 func TestCleanupWorktrees_KeepsDirty(t *testing.T) {
 	repo := initGitRepo(t, filepath.Join(t.TempDir(), "repo"))
 	a := newWorktreeApp()

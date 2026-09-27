@@ -87,6 +87,7 @@ func extensionList() error {
 				line += fmt.Sprintf("  (%s)", source)
 			}
 			fmt.Println(line)
+			fmt.Printf("    %s\n", ext.ProvenanceLabel())
 		}
 	}
 
@@ -106,7 +107,10 @@ func extensionInstall(source string) error {
 
 	// Determine source type: git URL vs local path.
 	isGit := strings.HasPrefix(source, "https://") || strings.HasPrefix(source, "http://") ||
-		strings.HasPrefix(source, "git@") || strings.HasSuffix(source, ".git")
+		strings.HasPrefix(source, "ssh://") || strings.HasPrefix(source, "git://") ||
+		strings.HasPrefix(source, "file://") || strings.HasPrefix(source, "git@") || strings.HasSuffix(source, ".git")
+	safeSource := registry.SanitizeExtensionSource(source)
+	fmt.Printf("Extension trust: installing %s trusts its code on your host. Plugin manifest, list, and setup commands run with your user permissions; extensions can add Docker arguments and override built-in capabilities.\n", safeSource)
 
 	tmpDir, err := os.MkdirTemp("", "mittens-ext-install.*")
 	if err != nil {
@@ -115,13 +119,18 @@ func extensionInstall(source string) error {
 	defer os.RemoveAll(tmpDir)
 
 	srcDir := tmpDir
+	provenance := registry.ExtensionProvenance{Source: safeSource, Local: !isGit}
 	if isGit {
-		fmt.Printf("Cloning %s...\n", source)
-		cmd := exec.Command("git", "clone", "--depth=1", source, tmpDir)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		fmt.Printf("Cloning %s...\n", safeSource)
+		cmd := exec.Command("git", "clone", "--quiet", "--depth=1", "--", source, tmpDir)
+		// Git diagnostics may echo credentialed URLs; keep them out of output.
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
+			return fmt.Errorf("git clone from %s failed: %w", safeSource, err)
+		}
+		provenance.Revision, provenance.Dirty = extensionGitRevision(tmpDir)
+		// The copied .git/config must not retain credentials from the clone URL.
+		if err := exec.Command("git", "-C", tmpDir, "remote", "set-url", "origin", safeSource).Run(); err != nil {
+			return fmt.Errorf("sanitizing extension origin: %w", err)
 		}
 	} else {
 		// Local directory: copy to temp.
@@ -132,6 +141,8 @@ func extensionInstall(source string) error {
 		if !fileutil.DirExists(absPath) {
 			return fmt.Errorf("source directory does not exist: %s", absPath)
 		}
+		provenance.Source = registry.SanitizeExtensionSource(absPath)
+		provenance.Revision, provenance.Dirty = extensionGitRevision(absPath)
 		if err := fileutil.CopyDir(absPath, tmpDir); err != nil {
 			return fmt.Errorf("copying extension: %w", err)
 		}
@@ -173,9 +184,19 @@ func extensionInstall(source string) error {
 	}
 	if name == "" {
 		// Fall back to directory name.
-		name = filepath.Base(source)
+		name = filepath.Base(safeSource)
 		name = strings.TrimSuffix(name, ".git")
 		name = strings.TrimSuffix(name, "/")
+	}
+	if err := registry.ValidateExtensionName(name); err != nil {
+		return err
+	}
+	metadata, err := json.MarshalIndent(provenance, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding extension source: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, registry.ProvenanceFile), append(metadata, '\n'), 0600); err != nil {
+		return fmt.Errorf("recording extension source: %w", err)
 	}
 
 	// Validate build script naming.
@@ -185,13 +206,16 @@ func extensionInstall(source string) error {
 	// Install: copy to ~/.mittens/extensions/<name>/
 	destDir := filepath.Join(extBaseDir, name)
 	if fileutil.DirExists(destDir) {
-		_ = os.RemoveAll(destDir)
+		if err := os.RemoveAll(destDir); err != nil {
+			return fmt.Errorf("replacing extension: %w", err)
+		}
 	}
 	if err := fileutil.CopyDir(srcDir, destDir); err != nil {
 		return fmt.Errorf("installing extension: %w", err)
 	}
 
 	fmt.Printf("Installed extension %q to %s\n", name, destDir)
+	fmt.Printf("  %s\n", (&registry.Extension{Provenance: &provenance}).ProvenanceLabel())
 	if hasBuild {
 		fmt.Println("Note: This extension includes a build script. The Docker image will need to be rebuilt.")
 	}
@@ -199,6 +223,9 @@ func extensionInstall(source string) error {
 }
 
 func extensionRemove(name string) error {
+	if err := registry.ValidateExtensionName(name); err != nil {
+		return err
+	}
 	home := homeDir()
 	extDir := filepath.Join(home, ".mittens", "extensions", name)
 	if !fileutil.DirExists(extDir) {
@@ -216,4 +243,17 @@ func extensionRemove(name string) error {
 		fmt.Println("Note: This extension had a build script. You may want to rebuild the Docker image.")
 	}
 	return nil
+}
+
+func extensionGitRevision(dir string) (string, bool) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").Output()
+	if err != nil {
+		return "", false
+	}
+	status, err := exec.Command("git", "-C", dir, "status", "--porcelain", "--", ".").Output()
+	if err != nil {
+		// A revision without a reliable worktree status cannot describe the copy.
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), len(status) > 0
 }

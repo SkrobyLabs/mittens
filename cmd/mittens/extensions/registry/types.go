@@ -29,12 +29,13 @@ type Extension struct {
 	Prompt       string            `yaml:"prompt"`
 
 	// Runtime state (not from YAML)
-	Enabled bool     `yaml:"-"`
-	Args    []string `yaml:"-"` // csv values or enum choice
-	RawArg  string   `yaml:"-"` // first arg as string (for templates)
-	AllMode bool     `yaml:"-"` // --ext-all was used
-	Source     string `yaml:"-" json:"source,omitempty"` // "built-in" or "user"
-	PromptFile string `yaml:"-"` // content loaded from prompt.md (convention)
+	Enabled    bool                 `yaml:"-"`
+	Args       []string             `yaml:"-"`                         // csv values or enum choice
+	RawArg     string               `yaml:"-"`                         // first arg as string (for templates)
+	AllMode    bool                 `yaml:"-"`                         // --ext-all was used
+	Source     string               `yaml:"-" json:"source,omitempty"` // "built-in" or "user"
+	PromptFile string               `yaml:"-"`                         // content loaded from prompt.md (convention)
+	Provenance *ExtensionProvenance `yaml:"-" json:"provenance,omitempty"`
 }
 
 // ExtensionFlag describes a CLI flag contributed by an extension.
@@ -72,14 +73,14 @@ type ResolvedMount struct {
 
 // SetupContext is passed to setup resolvers.
 type SetupContext struct {
-	Home          string
-	ContainerHome string    // container-side home directory (e.g. "/home/claude")
-	ContainerName string    // docker container name for this invocation
-	Extension     *Extension
-	DockerArgs    *[]string // append docker run flags
-	FirewallExtra *[]string // append extra domains
-	TempDirs      *[]string // track temp dirs for cleanup
-	StagingDir    string    // pre-created temp dir for this extension
+	Home            string
+	ContainerHome   string // container-side home directory (e.g. "/home/claude")
+	ContainerName   string // docker container name for this invocation
+	Extension       *Extension
+	DockerArgs      *[]string // append docker run flags
+	FirewallExtra   *[]string // append extra domains
+	TempDirs        *[]string // track temp dirs for cleanup
+	StagingDir      string    // pre-created temp dir for this extension
 	CredStagingDirs *[]string // "staging_path:target_dir" entries for writable credential copy
 }
 

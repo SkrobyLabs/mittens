@@ -83,11 +83,13 @@ func (m *PathMapper) Translate(hostPath string) string {
 		fallback = cleaned
 	}
 
-	// Try prefix mappings (longest match first — mappings should be ordered).
+	// Try path-component mappings (longest match first — mappings should be ordered).
 	for _, pm := range m.mappings {
-		if strings.HasPrefix(cleaned, pm.hostPrefix) {
-			rel := strings.TrimPrefix(cleaned, pm.hostPrefix)
-			result := pm.containerPrefix + rel
+		if rel, ok := pathRelativeToPrefix(cleaned, pm.hostPrefix); ok {
+			result := pm.containerPrefix
+			if rel != "" {
+				result = filepath.Join(pm.containerPrefix, rel)
+			}
 			// Re-escape spaces if the original had escaped spaces.
 			if strings.Contains(hostPath, "\\ ") {
 				result = strings.ReplaceAll(result, " ", "\\ ")
@@ -132,6 +134,24 @@ func (m *PathMapper) Translate(hostPath string) string {
 		containerPath = strings.ReplaceAll(containerPath, " ", "\\ ")
 	}
 	return containerPath
+}
+
+// pathRelativeToPrefix returns the path below prefix when path is exactly prefix
+// or one of its descendants. It deliberately rejects namesake siblings such as
+// /work/app-notes for a /work/app mount.
+func pathRelativeToPrefix(path, prefix string) (string, bool) {
+	path = filepath.Clean(path)
+	prefix = filepath.Clean(prefix)
+	if path == prefix {
+		return "", true
+	}
+	if prefix == string(filepath.Separator) {
+		return strings.TrimPrefix(path, prefix), strings.HasPrefix(path, prefix)
+	}
+	if !strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+		return "", false
+	}
+	return strings.TrimPrefix(path, prefix+string(filepath.Separator)), true
 }
 
 // dropItoa is a simple int-to-string without importing strconv.

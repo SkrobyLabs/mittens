@@ -93,6 +93,7 @@ func runPhase2(cfg *config) error {
 	// Inform AI about extra directories.
 	started = time.Now()
 	appendExtraDirsInfo(cfg)
+	appendWorktreeInfo(cfg)
 
 	// Inform AI about firewall.
 	appendFirewallInfo(cfg)
@@ -642,6 +643,22 @@ func appendExtraDirsInfo(cfg *config) {
 				fmt.Fprintf(f, "- %s\n", d)
 			}
 		}
+	})
+}
+
+// Keep agent-created worktrees under the persistent workspace mount. Sibling
+// paths are usually container-only and disappear when Docker removes the run.
+func appendWorktreeInfo(cfg *config) {
+	if cfg.HostWorkspace == "" || cfg.AIProjectFile == "" {
+		return
+	}
+	root := filepath.Join(cfg.HostWorkspace, ".mittens-worktrees")
+	projectFile := filepath.Join(cfg.AIDir, cfg.AIProjectFile)
+	appendGeneratedInstructions(projectFile, func(f *os.File) {
+		fmt.Fprintln(f, "# Persistent Git Worktrees")
+		fmt.Fprintf(f, "The persistent workspace is %q. Create any additional git worktrees under %q, using a unique child directory for each task.\n", cfg.HostWorkspace, root)
+		fmt.Fprintln(f, "Create that directory only when needed. Use an absolute destination under it with git worktree add; do not use sibling paths such as ../feature, which are outside the workspace mount and can be lost when this container exits.")
+		fmt.Fprintln(f, "Do not force-remove worktrees containing uncommitted or unmerged work. Keep the worktree directory out of commits; if needed, add /.mittens-worktrees/ to the repository's local Git exclude file.")
 	})
 }
 

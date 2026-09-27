@@ -504,6 +504,9 @@ func (p *ProjectPolicy) Validate() error {
 	if p.Network.Firewall == "custom" && p.Network.CustomConfig == "" {
 		return fmt.Errorf("custom firewall requires custom_config")
 	}
+	if (p.Network.Mode == "host" || p.Execution.NetworkHost) && p.Network.Firewall != "disabled" {
+		return fmt.Errorf("host networking cannot be combined with the firewall because it can modify the host firewall; set network.mode to bridge (and execution.network_host to false) or network.firewall to disabled")
+	}
 	seenDomains := map[string]struct{}{}
 	for _, domain := range p.Network.ExtraDomains {
 		domain = strings.TrimSpace(domain)
@@ -527,8 +530,11 @@ func (p *ProjectPolicy) Validate() error {
 	default:
 		return fmt.Errorf("invalid provider backend %q", p.Provider.Backend)
 	}
-	if p.Host.OpenURLs != "" && p.Host.OpenURLs != "allow" && p.Host.OpenURLs != "ask" && p.Host.OpenURLs != "deny" {
-		return fmt.Errorf("invalid open_urls mode %q", p.Host.OpenURLs)
+	if p.Host.OpenURLs == "ask" {
+		return fmt.Errorf("host.open_urls: ask is not supported; choose allow to open URLs automatically or deny to disable host URL opening")
+	}
+	if p.Host.OpenURLs != "" && p.Host.OpenURLs != "allow" && p.Host.OpenURLs != "deny" {
+		return fmt.Errorf("invalid host.open_urls mode %q: choose allow or deny", p.Host.OpenURLs)
 	}
 	for _, cap := range p.Capabilities {
 		if strings.TrimSpace(cap.Name) == "" {

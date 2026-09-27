@@ -184,10 +184,38 @@ Extensions are installed to `~/.mittens/extensions/<name>/`. Each extension dire
 - `extension.yaml` — YAML manifest (defines flags, mounts, env, firewall, build config)
 - `plugin` — executable implementing the subprocess protocol (for custom resolver logic)
 - `build.sh` — shell script run during `docker build` to install tools in the container
+- `.mittens-source.json` — installer-written source and Git revision metadata
 
 An extension needs at least one of `extension.yaml` or `plugin`. YAML-only extensions work for simple mount/env/build configurations. Add a `plugin` executable when you need custom logic (credential filtering, dynamic firewall rules, etc.).
 
 mittens discovers user-installed extensions at startup alongside built-in ones.
+
+### Trust and provenance
+
+Installing an external extension trusts code on your **host**, with your user
+permissions. A plugin's `manifest` command can run during installation and
+discovery (including `extension list`); its `list` and `setup` commands also run
+on the host. YAML mounts can expose host files, and plugins can supply raw
+Docker arguments. An extension with the same name as a built-in can override
+that capability. Install only sources you trust and review their manifests,
+plugins, and build scripts first. Mittens prints this trust boundary before
+running a plugin during installation; this notice is informational and does not
+add a confirmation prompt or sandbox the extension.
+
+Installation records the source and resolved Git commit in
+`.mittens-source.json`. Local installations record an absolute source path and,
+when available, the repository commit plus whether local changes were present.
+URL credentials, query parameters, and fragments are removed from recorded and
+displayed sources. `mittens extension list` shows this metadata; the extension
+picker shows it for the highlighted user extension and labels built-in
+overrides. Older or manually copied extensions show unknown provenance.
+
+The recorded commit describes the installation source. It does not pin future
+reinstallations, authenticate the source, or verify that installed files still
+match that commit. Review the displayed revision when updating. Extension names
+must start with an ASCII letter or digit and contain only letters, digits,
+periods, underscores, or hyphens; path components are rejected on installation
+and removal.
 
 ### Protocol
 

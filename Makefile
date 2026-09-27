@@ -19,10 +19,10 @@ endif
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS  := -s -w \
-	-X '$(MODULE)/cmd/mittens.version=$(VERSION)' \
-	-X '$(MODULE)/cmd/mittens.commit=$(COMMIT)' \
-	-X '$(MODULE)/cmd/mittens.date=$(DATE)'
+LDFLAGS  = -s -w \
+	-X 'main.version=$(VERSION)' \
+	-X 'main.commit=$(COMMIT)' \
+	-X 'main.date=$(DATE)'
 
 # Disable Go's automatic VCS stamping — version info is already injected via
 # LDFLAGS above, and the automatic stamping can fail in some environments
@@ -177,8 +177,17 @@ check: fmt vet lint test ## Run fmt, vet, lint, and test
 # ─── Release ──────────────────────────────────────────────────────────────────
 
 DIST := dist
+RELEASE_ARTIFACTS := $(BINARY)-darwin-arm64 $(BINARY)-darwin-amd64 \
+	$(BINARY)-linux-amd64 $(BINARY)-linux-arm64 $(BINARY)-windows-amd64.exe \
+	$(BINARY)-clipboard-helper-windows-amd64.exe \
+	$(INIT_BINARY)-linux-amd64 $(INIT_BINARY)-linux-arm64
 
-release: tidy init-binary ## Cross-compile for common platforms into dist/
+# Use commit time, fixed module inputs and trimmed paths for release binaries.
+# Command-line DATE/GOFLAGS overrides remain available for release tooling.
+release: DATE = $(shell git show -s --format=%cI HEAD)
+release: GOFLAGS := -buildvcs=false -mod=readonly -trimpath
+release: export CGO_ENABLED = 0
+release: release-check init-binary ## Cross-compile release binaries and SHA256SUMS into dist/
 	@mkdir -p $(DIST)
 	GOOS=darwin  GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  ./cmd/mittens
 	GOOS=darwin  GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  ./cmd/mittens
@@ -188,6 +197,14 @@ release: tidy init-binary ## Cross-compile for common platforms into dist/
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST)/$(BINARY)-clipboard-helper-windows-amd64.exe ./cmd/mittens-clipboard-helper
 	cp cmd/mittens/container/$(INIT_BINARY)-amd64 $(DIST)/$(INIT_BINARY)-linux-amd64
 	cp cmd/mittens/container/$(INIT_BINARY)-arm64 $(DIST)/$(INIT_BINARY)-linux-arm64
+	sh scripts/release-checksums.sh "$(DIST)" $(RELEASE_ARTIFACTS)
+
+release-check: ## Require committed source before stamping release provenance
+	@release_status=$$(git status --porcelain --untracked-files=normal) || exit 1; \
+	if [ -n "$$release_status" ]; then \
+		echo "Release builds require a clean working tree, including untracked files; commit or remove local changes first." >&2; \
+		exit 1; \
+	fi
 
 # ─── Distribution ────────────────────────────────────────────────────────────
 
@@ -233,4 +250,4 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all build init init-windows install tidy docker test test-v test-race test-integration test-integration-short lint fmt vet check release dist clean run help init-binary
+.PHONY: all build init init-windows install tidy docker test test-v test-race test-integration test-integration-short lint fmt vet check release release-check dist clean run help init-binary

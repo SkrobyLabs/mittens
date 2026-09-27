@@ -18,6 +18,10 @@ import (
 // runPhase1 performs root-level setup: DinD, Docker socket, network firewall
 // (Go proxy + iptables), then drops privileges and re-execs as the AI user.
 func runPhase1(cfg *config) error {
+	return runPhase1WithSetup(cfg, setupFirewall, dropPrivileges)
+}
+
+func runPhase1WithSetup(cfg *config, firewallSetup, drop func(*config) error) error {
 	phaseStarted := time.Now()
 	logContainerStartDelay(cfg)
 
@@ -35,8 +39,8 @@ func runPhase1(cfg *config) error {
 
 	if cfg.Firewall {
 		started := time.Now()
-		if err := setupFirewall(cfg); err != nil {
-			logWarn("Firewall setup failed: %v", err)
+		if err := firewallSetup(cfg); err != nil {
+			return fmt.Errorf("firewall setup failed; refusing to start agent: %w", err)
 		}
 		logStartupDuration(cfg, "firewall setup", started)
 	}
@@ -45,7 +49,7 @@ func runPhase1(cfg *config) error {
 	logStartupDuration(cfg, "root entrypoint phase", phaseStarted)
 
 	// Drop privileges and re-exec this binary as the AI user.
-	return dropPrivileges(cfg)
+	return drop(cfg)
 }
 
 // ensureProjectsDirWritable makes ~/.claude/projects owned by the AI user.
@@ -171,6 +175,10 @@ func pingDockerDaemon(sock string, timeout time.Duration) error {
 
 // setupFirewall configures the Go forward proxy and iptables rules.
 func setupFirewall(cfg *config) error {
+	return setupFirewallWithNetwork(cfg, startFirewallProxy, setupIPTables)
+}
+
+func setupFirewallWithNetwork(cfg *config, start func([]string, *config) error, installRules func(*config) error) error {
 	if _, err := os.Stat(cfg.FirewallConf); err != nil {
 		return fmt.Errorf("firewall.conf not found: %s", cfg.FirewallConf)
 	}
@@ -197,30 +205,12 @@ func setupFirewall(cfg *config) error {
 
 	domains = dedup(domains)
 
-	// Fork the proxy as a separate child process. It must run as root
-	// (UID 0) so the iptables uid-owner rule allows its outbound connections.
-	// A goroutine would be killed by the syscall.Exec privilege drop.
-	if err := forkProxy(domains, cfg); err != nil {
+	if err := start(domains, cfg); err != nil {
 		return fmt.Errorf("starting proxy: %w", err)
 	}
 
-	// Wait for the child proxy to be listening.
-	wl := newDomainWhitelist(domains)
-	for i := 0; i < 40; i++ {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:3128", 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			logInfo("Proxy ready (%d domains whitelisted)", wl.count())
-			break
-		}
-		if i == 39 {
-			return fmt.Errorf("proxy failed to start on :3128")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
 	// Configure iptables to force all HTTP(S) through the proxy.
-	if err := setupIPTables(cfg); err != nil {
+	if err := installRules(cfg); err != nil {
 		return fmt.Errorf("iptables setup: %w", err)
 	}
 
@@ -244,10 +234,72 @@ func setupFirewall(cfg *config) error {
 	return nil
 }
 
+func startFirewallProxy(domains []string, cfg *config) error {
+	// Fork as root so the iptables uid-owner rule allows proxy connections.
+	// A goroutine would be killed by the syscall.Exec privilege drop.
+	if err := forkProxy(domains, cfg); err != nil {
+		return err
+	}
+
+	for i := 0; i < 40; i++ {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:3128", 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			logInfo("Proxy ready (%d domains whitelisted)", newDomainWhitelist(domains).count())
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("proxy failed to start on :3128")
+}
+
 // setupIPTables configures iptables/ip6tables to force traffic through the proxy.
 // The proxy process itself runs as root, so we allow root to make direct connections.
 func setupIPTables(cfg *config) error {
-	for _, cmd := range []string{"iptables", "ip6tables"} {
+	ipv6, err := firewallNeedsIPv6(os.ReadFile)
+	if err != nil {
+		return err
+	}
+	return setupIPTablesWithRunner(cfg, ipv6, func(args ...string) error {
+		return exec.Command(args[0], args[1:]...).Run()
+	})
+}
+
+// Skip IPv6 rules only when the kernel has no IPv6 support, or IPv6 is
+// explicitly disabled on both current and future interfaces. An empty address
+// list alone cannot establish that IPv6 will remain unavailable.
+func firewallNeedsIPv6(readFile func(string) ([]byte, error)) (bool, error) {
+	addresses, err := readFile("/proc/net/if_inet6")
+	if os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("checking IPv6 support: %w", err)
+	}
+	if strings.TrimSpace(string(addresses)) != "" {
+		return true, nil
+	}
+	for _, scope := range []string{"all", "default"} {
+		data, err := readFile("/proc/sys/net/ipv6/conf/" + scope + "/disable_ipv6")
+		if err != nil {
+			return false, fmt.Errorf("checking IPv6 %s setting: %w", scope, err)
+		}
+		switch strings.TrimSpace(string(data)) {
+		case "0":
+			return true, nil
+		case "1":
+		default:
+			return false, fmt.Errorf("invalid IPv6 %s disable setting %q", scope, strings.TrimSpace(string(data)))
+		}
+	}
+	return false, nil
+}
+
+func setupIPTablesWithRunner(cfg *config, ipv6 bool, run func(...string) error) error {
+	commands := []string{"iptables"}
+	if ipv6 {
+		commands = append(commands, "ip6tables")
+	}
+	for _, cmd := range commands {
 		rules := [][]string{
 			{cmd, "-F", "OUTPUT"},
 			{cmd, "-P", "OUTPUT", "DROP"},
@@ -262,12 +314,8 @@ func setupIPTables(cfg *config) error {
 		}
 
 		for _, args := range rules {
-			c := exec.Command(args[0], args[1:]...)
-			if err := c.Run(); err != nil {
-				// Non-fatal: ip6tables may not be available.
-				if cmd == "iptables" {
-					return fmt.Errorf("%s failed: %w", strings.Join(args, " "), err)
-				}
+			if err := run(args...); err != nil {
+				return fmt.Errorf("%s failed: %w", strings.Join(args, " "), err)
 			}
 		}
 
@@ -280,10 +328,10 @@ func setupIPTables(cfg *config) error {
 				"-m", "limit", "--limit", "5/min", "--limit-burst", "5",
 				"-j", "LOG", "--log-prefix", "MITTENS-SSH-OUT "}
 			// Best-effort: the limit/LOG modules may be absent in minimal images.
-			_ = exec.Command(logRule[0], logRule[1:]...).Run()
+			_ = run(logRule...)
 
 			acceptRule := []string{cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"}
-			if err := exec.Command(acceptRule[0], acceptRule[1:]...).Run(); err != nil && cmd == "iptables" {
+			if err := run(acceptRule...); err != nil {
 				return fmt.Errorf("%s failed: %w", strings.Join(acceptRule, " "), err)
 			}
 		} else if cmd == "iptables" {
@@ -292,8 +340,7 @@ func setupIPTables(cfg *config) error {
 
 		// Allow container to reach the host broker.
 		if cfg.BrokerPort != "" {
-			c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", cfg.BrokerPort, "-j", "ACCEPT")
-			_ = c.Run()
+			_ = run(cmd, "-A", "OUTPUT", "-p", "tcp", "--dport", cfg.BrokerPort, "-j", "ACCEPT")
 		}
 
 		for _, hostPort := range cfg.FirewallHostPorts {
@@ -314,8 +361,7 @@ func setupIPTables(cfg *config) error {
 				if cmd == "ip6tables" && ip.To4() != nil {
 					continue
 				}
-				c := exec.Command(cmd, "-A", "OUTPUT", "-p", "tcp", "-d", ip.String(), "--dport", port, "-j", "ACCEPT")
-				_ = c.Run()
+				_ = run(cmd, "-A", "OUTPUT", "-p", "tcp", "-d", ip.String(), "--dport", port, "-j", "ACCEPT")
 			}
 		}
 	}

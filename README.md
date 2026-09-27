@@ -156,6 +156,11 @@ When the AI CLI opens an OAuth URL inside the container:
 
 Result: seamless login without manual copy-paste between host and container.
 
+`host.open_urls` supports `allow` (automatic browser opening) and `deny`.
+`ask` is rejected because Mittens does not implement browser-opening approval
+prompts. If an existing policy uses `ask`, edit its YAML to choose `allow` or
+`deny` before launching or editing it through the CLI.
+
 ### Stdin Path Translation
 
 When you drag-and-drop files from Finder (macOS) or a file manager into the terminal, the pasted paths refer to the host filesystem. Mittens wraps stdin through a PTY proxy (`DropProxy`) that intercepts bracketed paste sequences and:
@@ -168,6 +173,13 @@ This works transparently — the AI CLI sees container-valid paths.
 ### Network Firewall
 
 Enabled by default. Use `mittens policy set network.firewall disabled` to disable it. Uses a built-in Go forward proxy + iptables to restrict outbound HTTP/HTTPS to whitelisted domains only.
+
+If enabled firewall enforcement cannot be installed, startup stops before the
+agent runs. Host networking requires `network.firewall: disabled` and cannot
+be combined with firewall learn mode. When changing settings with `policy set`,
+disable the firewall before switching `network.mode` to `host`. Existing YAML
+policies with an incompatible combination must be corrected before loading;
+also clear legacy `execution.network_host` when switching back to bridge mode.
 
 Default whitelist includes: provider API endpoints, GitHub/GitLab/Bitbucket, npm/PyPI/crates.io/Go proxy, Docker registries, Helm, and Terraform.
 
@@ -203,7 +215,7 @@ Use `mittens policy show` to inspect the same boundary without launching a conta
 
 `mittens policy set execution.worktree true` creates a detached-HEAD git worktree for each invocation, so the AI works on a copy instead of the primary working tree. On exit, the worktree is removed if clean (no changes, no new commits) or kept if dirty. Extra directories configured as policy mounts also get their own worktrees when possible.
 
-Git worktrees that the AI agent creates *inside* the container during a session also work. However, `git worktree add` defaults to sibling directories (e.g. `../feature`), which land outside the bind-mounted workspace and are **lost when the container exits**. Worktrees created *under* `/workspace` (or another RW-mounted path) do persist. Directories mounted read-only by policy will fail worktree creation entirely.
+Git worktrees that the AI agent creates *inside* the container during a session also work. Sibling destinations such as `git worktree add ../feature` land outside the bind-mounted workspace and are **lost when the container exits**. Mittens adds guidance to the provider's instruction file directing the agent to create additional worktrees under `<workspace>/.mittens-worktrees/`, using the workspace's actual absolute path. This directory is inside the persistent mount and is created only when the agent needs it. Keep it out of commits with the repository's local Git exclude file. Automatic cleanup retains a managed parent worktree while this directory has contents, even when Git ignores it, and also retains it if the directory cannot be inspected. Remove nested worktrees only after their work is safely committed or merged; an empty directory does not prevent normal cleanup. Directories mounted read-only by policy will fail worktree creation entirely.
 
 #### Orchestration: explicit worktree root, branch, and manifest
 

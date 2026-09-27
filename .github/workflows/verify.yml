@@ -1,0 +1,36 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Use the Go caches configured by setup-go
+        run: |
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+      - name: Verify dependencies and tests
+        run: |
+          go mod verify
+          make init-binary
+          go test ./...
+          go vet ./...
+      - name: Build and verify release artifacts
+        run: |
+          make release VERSION=ci COMMIT="$GITHUB_SHA"
+          (cd dist && sha256sum -c SHA256SUMS)
+          dist/mittens-linux-amd64 version --json | jq -e --arg commit "$GITHUB_SHA" '.version == "ci" and .commit == $commit'

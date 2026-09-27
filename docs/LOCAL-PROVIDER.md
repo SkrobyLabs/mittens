@@ -196,9 +196,13 @@ Configure the project once:
 ```bash
 mittens init
 mittens policy set provider.name codex
-mittens policy set network.mode host
 mittens policy set network.firewall disabled
+mittens policy set network.mode host
 ```
+
+Disable the firewall before selecting host networking: Mittens rejects that
+combination because firewall setup could otherwise change the Linux host's
+network rules. Firewall learn mode also requires bridge networking.
 
 You can also choose these through `mittens init`: select Codex as provider and
 choose the host-network boundary for local/LAN model access.

@@ -299,6 +299,9 @@ func (a *App) Run() error {
 	if a.FirewallLearn {
 		a.enableFirewallForLearn()
 	}
+	if err := a.validateNetworkOptions(); err != nil {
+		return err
+	}
 
 	// Session persistence setup.
 	if !a.NoHistory && providerPlan.HistoryMountsWholeConfig {
@@ -1272,7 +1275,7 @@ func (a *App) applyProjectPolicy(policy *ProjectPolicy) {
 	}
 	a.hostPolicyConfigured = true
 	a.HostBridge = HostBridgeConfig{
-		OpenURLs:        policy.Host.OpenURLs != "deny",
+		OpenURLs:        policy.Host.OpenURLs == "allow" || policy.Host.OpenURLs == "",
 		Notifications:   boolValue(policy.Host.Notifications, true),
 		ClipboardImages: boolValue(policy.Host.ClipboardImages, true),
 	}
@@ -1302,6 +1305,23 @@ func appendPolicyMounts(extraDirs []string, mounts []PolicyMount) []string {
 		}
 	}
 	return extraDirs
+}
+
+// validateNetworkOptions checks the effective network configuration after all
+// policy, runtime arguments, and one-time learn activation have been applied.
+func (a *App) validateNetworkOptions() error {
+	if !a.NetworkHost {
+		return nil
+	}
+	if a.FirewallLearn {
+		return fmt.Errorf("host networking cannot be combined with firewall learn because it can modify the host firewall; use network.mode: bridge and execution.network_host: false for a learn pass")
+	}
+	for _, ext := range a.Extensions {
+		if ext != nil && ext.Name == "firewall" && ext.Enabled {
+			return fmt.Errorf("host networking cannot be combined with the firewall because it can modify the host firewall; use bridge networking or disable the firewall")
+		}
+	}
+	return nil
 }
 
 // enableFirewallForLearn ensures the firewall proxy runs for a learn pass even
@@ -1457,15 +1477,18 @@ func (a *App) buildInitConfig() *initcfg.ContainerConfig {
 func (a *App) assembleDockerArgs(resolverArgs []string, resolverFirewall []string) []string {
 	args, err := a.assembleDockerArgsE(resolverArgs, resolverFirewall)
 	if err != nil {
-		logWarn("MCP staging: %v", err)
+		logWarn("Docker launch configuration: %v", err)
 		return nil
 	}
 	return args
 }
 
 // assembleDockerArgsE builds the full docker run argument list. It returns an
-// error when MCP staging cannot produce an allowlisted provider config.
+// error for unsafe network settings or failed MCP configuration staging.
 func (a *App) assembleDockerArgsE(resolverArgs []string, resolverFirewall []string) ([]string, error) {
+	if err := a.validateNetworkOptions(); err != nil {
+		return nil, err
+	}
 	a.ensureHostPolicyDefaults()
 
 	home := os.Getenv("HOME")
@@ -2161,6 +2184,23 @@ func (a *App) cleanupWorktrees() {
 			// Remove only when clean and still at the starting commit; keep
 			// anything dirty or with new commits so work is never lost.
 			remove = clean
+		}
+
+		if remove {
+			// Agent-created worktrees can be ignored by Git, so a clean parent
+			// status does not prove they are safe to delete. The mounted workspace
+			// may also be a subdirectory of the managed worktree.
+			for _, workspace := range []string{rec.Path, rec.MountPath} {
+				if workspace == "" {
+					continue
+				}
+				entries, err := os.ReadDir(filepath.Join(workspace, ".mittens-worktrees"))
+				if len(entries) > 0 || (err != nil && !os.IsNotExist(err)) {
+					remove = false
+					logInfo("Keeping worktree (nested worktree storage is populated or unreadable): %s", rec.Path)
+					break
+				}
+			}
 		}
 
 		if remove {

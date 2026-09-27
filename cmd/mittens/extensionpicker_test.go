@@ -177,6 +177,29 @@ func TestExtensionPickerViewShowsConfiguredMarker(t *testing.T) {
 	}
 }
 
+func TestExtensionPickerShowsExternalTrustAndProvenance(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	exts := []*registry.Extension{{
+		Name: "custom", Description: "Custom capability", Source: "user (overrides built-in)",
+		Provenance: &registry.ExtensionProvenance{Source: "https://user:secret@example.com/ext.git?token=hidden", Revision: revision},
+	}}
+	// Fill the list to ensure the fixed viewport leaves room for the details.
+	for i := 0; i < 25; i++ {
+		exts = append(exts, &registry.Extension{Name: "built-in", Source: "built-in"})
+	}
+	model := newExtensionPickerModel("Extensions", exts, nil)
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	view := updated.(extensionPickerModel).View()
+	for _, want := range []string{"user (overrides built-in)", "source: https://example.com/ext.git", "revision: " + revision, "Trusted host code"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("picker missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "secret") || strings.Contains(view, "hidden") {
+		t.Fatalf("picker leaked source credentials:\n%s", view)
+	}
+}
+
 func testPickerExtensions() []*registry.Extension {
 	return []*registry.Extension{
 		{

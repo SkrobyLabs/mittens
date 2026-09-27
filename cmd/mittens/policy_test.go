@@ -70,7 +70,7 @@ func TestSaveLoadProjectPolicy(t *testing.T) {
 	policy.Provider.Profile = "planner"
 	policy.Workspace.Mounts = []PolicyMount{{Path: "../shared", Access: "ro"}}
 	policy.Network.Mode = "host"
-	policy.Network.Firewall = "dev"
+	policy.Network.Firewall = "disabled"
 	policy.Execution.Yolo = &yolo
 	policy.Capabilities = []CapabilityPolicy{{Name: "dotnet", Args: []string{"9"}, RawFlag: "--dotnet"}}
 
@@ -88,7 +88,7 @@ func TestSaveLoadProjectPolicy(t *testing.T) {
 	if loaded.Provider.Name != "codex" || loaded.Provider.Profile != "planner" {
 		t.Fatalf("provider = %+v", loaded.Provider)
 	}
-	if got := loaded.ToLegacyFlags(); !reflect.DeepEqual(got, []string{"--provider", "codex", "--profile", "planner", "--dir-ro", "../shared", "--firewall-dev", "--network-host", "--no-yolo", "--dotnet", "9"}) {
+	if got := loaded.ToLegacyFlags(); !reflect.DeepEqual(got, []string{"--provider", "codex", "--profile", "planner", "--dir-ro", "../shared", "--no-firewall", "--network-host", "--no-yolo", "--dotnet", "9"}) {
 		t.Fatalf("legacy flags = %#v", got)
 	}
 }
