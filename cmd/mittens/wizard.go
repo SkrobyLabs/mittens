@@ -42,198 +42,11 @@ func runWizard(extensions []*registry.Extension) error {
 // runWizardForProfile uses the same full configuration workflow for default
 // and named profiles. Named profiles never use policy.yaml as scratch state.
 func runWizardForProfile(extensions []*registry.Extension, workspace, profileName string) error {
-
-	// 0. First-run: set up user-wide defaults if they don't exist yet.
-	if !UserDefaultsExist() {
-		if err := wizardUserDefaults(); err != nil {
-			return gracefulAbort(err)
-		}
-	}
-
-	// 1. Detect workspace.
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens project setup"))
-	fmt.Fprintln(os.Stderr)
-
-	// 2. Handle existing policy/config.
-	existing, source, err := loadWizardExistingProfileConfig(workspace, profileName, extensions)
-	if err != nil {
-		return fmt.Errorf("loading existing config: %w", err)
-	}
-
-	editMode := false
-	var seed wizardSeed
-	var existingPolicy *ProjectPolicy
-	if source == PolicySourceV2 {
-		existingPolicy, err = loadWizardProfilePolicy(workspace, profileName, extensions)
-		if err != nil {
-			return fmt.Errorf("loading existing policy: %w", err)
-		}
-	}
-
-	if len(existing) > 0 {
-		displayWizardExistingProfileConfig(workspace, profileName, source, existing, extensions)
-
-		var action string
-		if err := huh.NewSelect[string]().
-			Title("Existing configuration found").
-			Options(
-				huh.NewOption("Launch mittens", "launch"),
-				huh.NewOption("Edit (keep defaults)", "edit"),
-				huh.NewOption("Overwrite (start fresh)", "overwrite"),
-				huh.NewOption("Cancel", "cancel"),
-			).
-			Value(&action).
-			Run(); err != nil {
-			return gracefulAbort(err)
-		}
-
-		switch action {
-		case "launch":
-			exe, err := os.Executable()
-			if err != nil {
-				return fmt.Errorf("finding executable path: %w", err)
-			}
-			exe, _ = filepath.EvalSymlinks(exe)
-			if profileName != "default" {
-				return execCommand(exe, "--profile", profileName)
-			}
-			return execCommand(exe)
-		case "cancel":
-			fmt.Fprintln(os.Stderr, "Cancelled.")
-			return nil
-		case "edit":
-			editMode = true
-			if existingPolicy != nil {
-				seed = wizardSeedFromPolicy(existingPolicy)
-			} else {
-				seed = wizardEditSeed(workspace, extensions, existing)
-			}
-		case "overwrite":
-			// Start fresh == init-from-default: seed from the user defaults baseline.
-			seed, editMode = defaultsSeed(extensions)
-		}
-		fmt.Fprintln(os.Stderr)
-	} else {
-		// No project policy: pre-seed every step from the user defaults baseline.
-		if profileName != "default" {
-			if base, _, err := effectivePolicyForShow(workspace, extensions); err == nil {
-				seed = wizardSeedFromPolicy(base)
-				editMode = true
-			}
-		} else {
-			seed, editMode = defaultsSeed(extensions)
-		}
-		if editMode {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("Starting from your user defaults."))
-			fmt.Fprintln(os.Stderr)
-		}
-	}
-
-	// ── Step 1: Provider ───────────────────────────────────────────────────
-	providerLines, providerConfig, err := wizardProvider(workspace, editMode, seed.providerState)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Step 2: Extra directories ──────────────────────────────────────────
-	dirLines, err := wizardDirs(workspace, editMode, seed.dirs)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Step 3: Extensions ─────────────────────────────────────────────────
-	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Step 4: MCP servers ────────────────────────────────────────────────
-	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), workspace)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Step 5: Network boundary ───────────────────────────────────────────
-	networkLines, extraDomains, err := wizardNetworkBoundary(workspace, editMode, seed.firewall, seed.opts, seed.extraDomains)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Step N: Options ────────────────────────────────────────────────────
-	optLines, err := wizardOptions(editMode, seed.opts)
-	if err != nil {
-		return gracefulAbort(err)
-	}
-
-	// ── Write structured project policy ────────────────────────────────────
-	assembly := WizardAssemblyInput{
-		ProviderLines:  providerLines,
-		ProviderConfig: providerConfig,
-		DirLines:       dirLines,
-		ExtensionLines: extLines,
-		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
-		MCPServers:     mcpServers,
-		MCPAll:         mcpAll,
-		NetworkLines:   networkLines,
-		OptionLines:    optLines,
-		ExtraDomains:   extraDomains,
-	}
-	policy, configLines, err := assembleWizardPolicy(assembly, extensions)
-	if err != nil {
-		return fmt.Errorf("building policy: %w", err)
-	}
-	policy, err = preserveUntouchedWizardPolicy(existingPolicy, policy)
-	if err != nil {
-		return fmt.Errorf("preserving existing policy boundaries: %w", err)
-	}
-	if err := SaveNamedProfile(workspace, profileName, policy); err != nil {
-		return fmt.Errorf("saving policy: %w", err)
-	}
-
-	configPath := projectPolicyPath(workspace)
-	if profileName != "default" {
-		configPath = profilesPolicyPath(workspace)
-	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardSuccess.Render("Policy saved to: "+configPath))
-	fmt.Fprintln(os.Stderr)
-
-	if len(configLines) > 0 {
-		equiv := "mittens " + strings.Join(configLines, " ")
-		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: "+equiv))
-	} else {
-		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: mittens (default settings)"))
-	}
-	fmt.Fprintln(os.Stderr)
-
-	// ── Offer to run now ───────────────────────────────────────────────────
-	runNow := true
-	if err := huh.NewConfirm().
-		Title("Run mittens now?").
-		Value(&runNow).
-		Run(); err != nil {
-		return gracefulAbort(err)
-	}
-
-	if runNow {
-		exe, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("finding executable path: %w", err)
-		}
-		exe, _ = filepath.EvalSymlinks(exe)
-		if profileName != "default" {
-			return execCommand(exe, "--profile", profileName)
-		}
-		return execCommand(exe)
-	}
-
-	return nil
+	return runProjectWizardEditor(extensions, workspace, profileName)
 }
 
-// runWizardProfile reuses the established full wizard while making its result
-// an independent named snapshot. The default is restored after the wizard so
-// existing project configuration is never changed by a named edit.
+// runWizardProfile edits an independent named snapshot without touching the
+// default project configuration.
 func runWizardProfile(workspace, name string) error {
 	if err := validateProfileName(name, true); err != nil {
 		return err
@@ -277,100 +90,17 @@ func wizardSession(extensions []*registry.Extension, profileName string) (*Proje
 		}
 	}
 
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardTitle.Render("mittens session settings"))
-	fmt.Fprintln(os.Stderr, wizardDim.Render("Changes apply to this launch only and will not be saved."))
-	fmt.Fprintln(os.Stderr)
-
-	existing, source, err := loadWizardExistingProfileConfig(workspace, profileName, extensions)
-	if err != nil {
-		return nil, fmt.Errorf("loading existing config: %w", err)
-	}
-	existingPolicy, err := loadWizardProfilePolicy(workspace, profileName, extensions)
-	if err != nil {
-		return nil, fmt.Errorf("loading existing policy: %w", err)
-	}
-
-	editMode := false
-	var seed wizardSeed
-
-	if len(existing) > 0 {
-		editMode = true
-		if existingPolicy != nil {
-			seed = wizardSeedFromPolicy(existingPolicy)
-		} else {
-			seed = wizardEditSeed(workspace, extensions, existing)
-		}
-		displayWizardExistingProfileConfig(workspace, profileName, source, existing, extensions)
-	} else {
-		// No project policy: seed the ephemeral session from the user defaults
-		// baseline (init-from-default).
-		seed, editMode = defaultsSeed(extensions)
-		if editMode {
-			fmt.Fprintln(os.Stderr, wizardDim.Render("Starting from your user defaults."))
-			fmt.Fprintln(os.Stderr)
-		}
-	}
-
-	providerLines, _, err := wizardProvider(workspace, editMode, seed.providerState)
+	base, err := wizardInitialPolicy(workspace, profileName, extensions)
 	if err != nil {
 		return nil, err
 	}
-
-	dirLines, err := wizardDirs(workspace, editMode, seed.dirs)
+	result, err := runWizardEditor(base, wizardEditorConfig{
+		Workspace: workspace, Profile: profileName, Mode: "session", Extensions: extensions,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
-	if err != nil {
-		return nil, err
-	}
-
-	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), workspace)
-	if err != nil {
-		return nil, err
-	}
-
-	// Session runs are ephemeral; pass an empty workspace to skip arming a
-	// one-time learn pass for a "next run" that won't share this config.
-	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, seed.firewall, seed.opts, seed.extraDomains)
-	if err != nil {
-		return nil, err
-	}
-
-	optLines, err := wizardOptions(editMode, seed.opts)
-	if err != nil {
-		return nil, err
-	}
-	assembly := WizardAssemblyInput{
-		ProviderLines:  providerLines,
-		DirLines:       dirLines,
-		ExtensionLines: extLines,
-		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
-		NetworkLines:   networkLines,
-		OptionLines:    optLines,
-		ExtraDomains:   extraDomains,
-	}
-	policy, configLines, err := assembleWizardPolicy(assembly, extensions)
-	if err != nil {
-		return nil, fmt.Errorf("building session policy: %w", err)
-	}
-	policy, err = preserveUntouchedWizardPolicy(existingPolicy, policy)
-	if err != nil {
-		return nil, fmt.Errorf("preserving existing policy boundaries: %w", err)
-	}
-
-	fmt.Fprintln(os.Stderr)
-	if len(configLines) > 0 {
-		equiv := "mittens " + strings.Join(configLines, " ")
-		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: "+equiv))
-	} else {
-		fmt.Fprintln(os.Stderr, wizardDim.Render("Equivalent: mittens (default settings)"))
-	}
-	fmt.Fprintln(os.Stderr)
-
-	return policy, nil
+	return result.Policy, nil
 }
 
 // preserveUntouchedWizardPolicy retains boundaries the interactive wizard does
@@ -411,77 +141,30 @@ func preserveUntouchedWizardPolicy(existing, assembled *ProjectPolicy) (*Project
 // Step 0: User-wide defaults
 // ---------------------------------------------------------------------------
 
-// wizardUserDefaults edits the user-wide defaults baseline. It walks the same
-// steps as the project wizard (provider, directories, extensions, MCP, network)
-// plus the WSL image-paste-key prompt, seeded from the current defaults, and
-// saves the result as the structured defaults.yaml. The baseline is a
-// seed/template: it pre-seeds `mittens init` and is the launch base only for a
-// project with no policy.
+// wizardUserDefaults uses the same draft editor as project setup and only
+// persists the baseline after an explicit save.
 func wizardUserDefaults() error {
 	extensions, err := loadExtensions()
 	if err != nil {
-		return fmt.Errorf("loading extensions for defaults wizard: %w", err)
+		return err
 	}
-
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardTitle.Render("User-wide defaults"))
-	fmt.Fprintln(os.Stderr, wizardDim.Render("These defaults seed new projects (mittens init) and are the launch base\nfor a project with no policy. Editing them later does not retroactively\nchange a project that already has a policy."))
-	fmt.Fprintln(os.Stderr)
-
-	current, source, err := LoadUserDefaultsPolicy(extensions)
+	current, _, err := LoadUserDefaultsPolicy(extensions)
 	if err != nil {
 		return err
 	}
-
-	editMode := false
-	var seed wizardSeed
-	if current != nil {
-		fmt.Fprintf(os.Stderr, "Existing defaults: %s\n\n", userDefaultsSourcePath(source))
-		fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(current, homeDir())))
-		fmt.Fprintln(os.Stderr)
-
-		var action string
-		if err := huh.NewSelect[string]().
-			Title("Existing user defaults found").
-			Options(
-				huh.NewOption("Keep current defaults", "keep"),
-				huh.NewOption("Edit (start from current)", "edit"),
-				huh.NewOption("Overwrite (start fresh)", "overwrite"),
-				huh.NewOption("Cancel", "cancel"),
-			).
-			Value(&action).
-			Run(); err != nil {
-			return err
-		}
-		switch action {
-		case "keep":
-			return nil
-		case "cancel":
-			fmt.Fprintln(os.Stderr, "Cancelled.")
-			return nil
-		case "edit":
-			editMode = true
-			seed = wizardSeedFromPolicy(current)
-		case "overwrite":
-			// Start fresh: empty seed, non-edit mode.
-		}
-		fmt.Fprintln(os.Stderr)
+	if current == nil {
+		current = defaultProjectPolicy()
 	}
-
-	policy, err := runBaselineWizardSteps(extensions, editMode, seed, current)
+	result, err := runWizardEditor(current, wizardEditorConfig{
+		Workspace: homeDir(), Mode: "defaults", Extensions: extensions,
+	})
 	if err != nil {
 		return gracefulAbort(err)
 	}
-	if err := SaveUserDefaultsPolicy(policy); err != nil {
+	if err := SaveUserDefaultsPolicy(result.Policy); err != nil {
 		return fmt.Errorf("saving user defaults: %w", err)
 	}
-
-	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardSuccess.Render("User defaults saved to: "+UserDefaultsPolicyPath()))
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(policy, homeDir())))
-	fmt.Fprintln(os.Stderr)
-
 	return nil
 }
 
@@ -492,75 +175,6 @@ func userDefaultsSourcePath(source PolicySource) string {
 		return UserDefaultsPath()
 	}
 	return UserDefaultsPolicyPath()
-}
-
-// runBaselineWizardSteps walks the shared baseline steps (provider, directories,
-// extensions, MCP, network, options, WSL paste key) and assembles a policy. It
-// is used by the user-defaults wizard; the picker is anchored at the user's home
-// directory and an empty workspace is passed to the network step so no
-// project-specific firewall-learn sentinel is armed.
-func runBaselineWizardSteps(extensions []*registry.Extension, editMode bool, seed wizardSeed, current *ProjectPolicy) (*ProjectPolicy, error) {
-	home := homeDir()
-
-	providerLines, providerConfig, err := wizardProvider(home, editMode, seed.providerState)
-	if err != nil {
-		return nil, err
-	}
-
-	dirLines, err := wizardDirs(home, editMode, seed.dirs)
-	if err != nil {
-		return nil, err
-	}
-
-	extLines, err := wizardExtensions(extensions, editMode, seed.exts)
-	if err != nil {
-		return nil, err
-	}
-
-	mcpServers, mcpAll, err := wizardMCP(editMode, seed.mcpServers, seed.mcpAll, providerNameFromLines(providerLines), home)
-	if err != nil {
-		return nil, err
-	}
-
-	// Empty workspace: never arm a project-specific learn pass from the
-	// user-global defaults wizard (mirrors wizardSession).
-	networkLines, extraDomains, err := wizardNetworkBoundary("", editMode, seed.firewall, seed.opts, seed.extraDomains)
-	if err != nil {
-		return nil, err
-	}
-
-	optLines, err := wizardOptions(editMode, seed.opts)
-	if err != nil {
-		return nil, err
-	}
-
-	existingPasteKey := ""
-	if current != nil {
-		existingPasteKey = current.Options["image_paste_key"]
-	}
-	pasteKeyLines, err := wizardImagePasteKey(existingPasteKey)
-	if err != nil {
-		return nil, err
-	}
-	optLines = append(optLines, pasteKeyLines...)
-
-	assembly := WizardAssemblyInput{
-		ProviderLines:  providerLines,
-		ProviderConfig: providerConfig,
-		DirLines:       dirLines,
-		ExtensionLines: extLines,
-		MCPLines:       mcpServersToLines(mcpServers, mcpAll),
-		MCPServers:     mcpServers,
-		MCPAll:         mcpAll,
-		NetworkLines:   networkLines,
-		OptionLines:    optLines,
-		ExtraDomains:   extraDomains,
-	}
-	policy, _, err := assembleWizardPolicy(assembly, extensions)
-	if err != nil {
-		return nil, fmt.Errorf("building defaults policy: %w", err)
-	}
-	return policy, nil
 }
 
 // wizardImagePasteKey prompts for the WSL image paste keybinding, returning the
@@ -577,15 +191,14 @@ func wizardImagePasteKey(existing string) ([]string, error) {
 	if pasteKey == "" {
 		pasteKey = "meta+v"
 	}
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("Image paste keybinding").
 		Description("meta+v = Alt+V (no terminal changes needed), ctrl+v = Ctrl+V (requires Windows Terminal rebind)").
 		Options(
 			huh.NewOption("Alt+V (meta+v) — default, no terminal changes", "meta+v"),
 			huh.NewOption("Ctrl+V (ctrl+v) — needs Windows Terminal rebind", "ctrl+v"),
 		).
-		Value(&pasteKey).
-		Run(); err != nil {
+		Value(&pasteKey)); err != nil {
 		return nil, err
 	}
 	if pasteKey == "ctrl+v" {
@@ -710,18 +323,17 @@ func wizardProfile(workspace, profileName, providerName string) error {
 	fmt.Fprintln(os.Stderr)
 
 	model := existing.Model
-	if err := huh.NewInput().
+	if err := runWizardField(huh.NewInput().
 		Title("Model").
 		Placeholder("e.g. opus, haiku, sonnet").
-		Value(&model).
-		Run(); err != nil {
+		Value(&model)); err != nil {
 		return gracefulAbort(err)
 	}
 	existing.Model = strings.TrimSpace(model)
 
 	if effortEnabled(provider) {
 		effort := existing.Effort
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Effort").
 			Options(
 				huh.NewOption("(none)", ""),
@@ -730,8 +342,7 @@ func wizardProfile(workspace, profileName, providerName string) error {
 				huh.NewOption("high", "high"),
 				huh.NewOption("max", "max"),
 			).
-			Value(&effort).
-			Run(); err != nil {
+			Value(&effort)); err != nil {
 			return gracefulAbort(err)
 		}
 		existing.Effort = effort
@@ -750,7 +361,7 @@ func wizardProfile(workspace, profileName, providerName string) error {
 	}
 
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, wizardSuccess.Render(fmt.Sprintf("Profile %q saved (model=%s, effort=%s)", profileName, existing.Model, existing.Effort)))
+	fmt.Fprintln(os.Stderr, wizardSuccess.Render(fmt.Sprintf("Model preset %q saved (model=%s, effort=%s)", profileName, existing.Model, existing.Effort)))
 	return nil
 }
 
@@ -759,7 +370,7 @@ func wizardProfile(workspace, profileName, providerName string) error {
 // ---------------------------------------------------------------------------
 
 func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 2: Directories"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Directories"))
 	fmt.Fprintf(os.Stderr, "Primary workspace: %s\n", workspace)
 	existingMounts := mountsFromDirLines(existDirs)
 	currentMounts := existingMounts
@@ -784,11 +395,10 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 			}
 
 			var action string
-			if err := huh.NewSelect[string]().
+			if err := runWizardField(huh.NewSelect[string]().
 				Title("Extra directories").
 				Options(actionOptions...).
-				Value(&action).
-				Run(); err != nil {
+				Value(&action)); err != nil {
 				return nil, err
 			}
 			switch action {
@@ -816,6 +426,9 @@ func wizardDirs(workspace string, editMode bool, existDirs []string) ([]string, 
 		fmt.Fprintln(os.Stderr)
 		chosen, err := runDirPicker(parentDir, existPathSet, workspace)
 		if err == errPickerCancelled {
+			if !editMode {
+				return nil, err
+			}
 			showMenu = true
 			continue
 		}
@@ -840,12 +453,11 @@ func wizardRemoveDirs(current []PolicyMount) ([]PolicyMount, error) {
 		options = append(options, huh.NewOption(path, path).Selected(true))
 	}
 
-	if err := huh.NewMultiSelect[string]().
+	if err := runWizardField(huh.NewMultiSelect[string]().
 		Title("Included extra directories").
 		Description("Uncheck directories to remove them.").
 		Options(options...).
-		Value(&remainingPaths).
-		Run(); err != nil {
+		Value(&remainingPaths)); err != nil {
 		return nil, err
 	}
 
@@ -947,21 +559,20 @@ type ProviderWizardState struct {
 }
 
 func wizardProvider(workspace string, editMode bool, existing ProviderWizardState) ([]string, ProviderWizardConfig, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 1: Provider"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Provider"))
 	state := normalizeProviderWizardState(existing)
 
 	if editMode {
 		displayCurrentSetup(providerSetupLinesFromState(state), "Provider: claude (default)")
 
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Provider").
 			Options(
 				huh.NewOption("Keep", "keep"),
 				huh.NewOption("Change", "change"),
 			).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, ProviderWizardConfig{}, err
 		}
 		if action == "keep" {
@@ -987,11 +598,10 @@ func wizardProvider(workspace string, editMode bool, existing ProviderWizardStat
 		opts = append(opts, huh.NewOption(p.label+"  "+p.description, p.name).Selected(selectedSet[p.name]))
 	}
 
-	if err := huh.NewMultiSelect[string]().
+	if err := runWizardField(huh.NewMultiSelect[string]().
 		Title("Select AI CLI providers to support").
 		Options(opts...).
-		Value(&selected).
-		Run(); err != nil {
+		Value(&selected)); err != nil {
 		return nil, ProviderWizardConfig{}, err
 	}
 	selected = normalizeProviderSelection(selected, state.Default)
@@ -1024,11 +634,10 @@ func wizardProvider(workspace string, editMode bool, existing ProviderWizardStat
 			}
 			defaultOpts = append(defaultOpts, huh.NewOption(label, p))
 		}
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Pick default provider").
 			Options(defaultOpts...).
-			Value(&defaultChoice).
-			Run(); err != nil {
+			Value(&defaultChoice)); err != nil {
 			return nil, ProviderWizardConfig{}, err
 		}
 	}
@@ -1051,6 +660,10 @@ func wizardProvider(workspace string, editMode bool, existing ProviderWizardStat
 		if cfgErr != nil {
 			return nil, ProviderWizardConfig{}, cfgErr
 		}
+	default:
+		// Providers without a configuration subform still retain saved model
+		// and endpoint settings when the provider selection is unchanged.
+		config = existingConfig
 	}
 
 	state = normalizeProviderWizardState(ProviderWizardState{
@@ -1078,7 +691,7 @@ func providerLinesUseCodexHarness(lines []string) bool {
 }
 
 func maybeWizardCodexTrustProject(workspace string, providerLines []string) error {
-	if !providerLinesUseCodexHarness(providerLines) {
+	if workspace == "" || !providerLinesUseCodexHarness(providerLines) {
 		return nil
 	}
 	return wizardCodexTrustProject(workspace)
@@ -1086,11 +699,10 @@ func maybeWizardCodexTrustProject(workspace string, providerLines []string) erro
 
 func wizardCodexTrustProject(workspace string) error {
 	trust := true
-	if err := huh.NewConfirm().
+	if err := runWizardField(huh.NewConfirm().
 		Title("Trust this project in Codex config?").
 		Description("This skips Codex's startup trust prompt for this workspace when using Codex or Ollama.").
-		Value(&trust).
-		Run(); err != nil {
+		Value(&trust)); err != nil {
 		return err
 	}
 	if !trust {
@@ -1117,19 +729,17 @@ func wizardOllamaProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 
 	endpoint := cfg.Endpoint
 	model := cfg.Model
-	if err := huh.NewInput().
+	if err := runWizardField(huh.NewInput().
 		Title("Ollama endpoint").
 		Description("Use host.docker.internal for Ollama running on this Mac, or a LAN host/IP for a remote server.").
 		Placeholder("http://host.docker.internal:11434").
-		Value(&endpoint).
-		Run(); err != nil {
+		Value(&endpoint)); err != nil {
 		return ProviderWizardConfig{}, err
 	}
-	if err := huh.NewInput().
+	if err := runWizardField(huh.NewInput().
 		Title("Ollama model").
 		Placeholder("qwen3-coder:30b").
-		Value(&model).
-		Run(); err != nil {
+		Value(&model)); err != nil {
 		return ProviderWizardConfig{}, err
 	}
 	cfg.Endpoint = normalizeOllamaURL(endpoint)
@@ -1155,14 +765,13 @@ func wizardClaudeProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 	}
 
 	backend := cfg.Backend
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("Claude backend").
 		Options(
 			huh.NewOption("Claude (Anthropic)", "claude"),
 			huh.NewOption("OpenAI via Anthropic-compatible proxy", "openai"),
 		).
-		Value(&backend).
-		Run(); err != nil {
+		Value(&backend)); err != nil {
 		return ProviderWizardConfig{}, err
 	}
 	cfg.Backend = backend
@@ -1176,14 +785,13 @@ func wizardClaudeProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 	if cfg.Endpoint != "" {
 		proxyMode = "external"
 	}
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("OpenAI proxy").
 		Options(
 			huh.NewOption("Managed inside the Mittens container", "managed"),
 			huh.NewOption("External/custom endpoint", "external"),
 		).
-		Value(&proxyMode).
-		Run(); err != nil {
+		Value(&proxyMode)); err != nil {
 		return ProviderWizardConfig{}, err
 	}
 	model := cfg.Model
@@ -1192,24 +800,22 @@ func wizardClaudeProviderConfig(existing ProviderWizardConfig) (ProviderWizardCo
 		if endpoint == "" {
 			endpoint = normalizeClaudeOpenAIProxyURL("")
 		}
-		if err := huh.NewInput().
+		if err := runWizardField(huh.NewInput().
 			Title("OpenAI proxy endpoint").
 			Description("Must expose Anthropic Messages API for Claude Code; the proxy itself talks to OpenAI.").
 			Placeholder("http://host.docker.internal:9223").
-			Value(&endpoint).
-			Run(); err != nil {
+			Value(&endpoint)); err != nil {
 			return ProviderWizardConfig{}, err
 		}
 		cfg.Endpoint = normalizeClaudeOpenAIProxyURL(endpoint)
 	} else {
 		cfg.Endpoint = ""
 	}
-	if err := huh.NewInput().
+	if err := runWizardField(huh.NewInput().
 		Title("Claude model alias").
 		Description("Optional Claude-facing alias. Managed proxy maps fable to gpt-6-astra medium, opus to gpt-5.6-sol high, sonnet to gpt-5.6-terra medium, and haiku to gpt-5.6-luna low.").
 		Placeholder("opus").
-		Value(&model).
-		Run(); err != nil {
+		Value(&model)); err != nil {
 		return ProviderWizardConfig{}, err
 	}
 	cfg.Model = strings.TrimSpace(model)
@@ -1374,7 +980,7 @@ func parseProviderLines(lines []string) (selected map[string]bool, defaultProvid
 // ---------------------------------------------------------------------------
 
 func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts []string) ([]string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 3: Extensions"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Extensions"))
 
 	available := wizardAvailableExtensions(extensions)
 	if len(available) == 0 {
@@ -1389,14 +995,13 @@ func wizardExtensions(extensions []*registry.Extension, editMode bool, existExts
 		displayCurrentSetup(lines, "(no extensions)")
 
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Extensions").
 			Options(
 				huh.NewOption("Keep", "keep"),
 				huh.NewOption("Edit", "edit"),
 			).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, err
 		}
 		if action == "keep" {
@@ -1432,11 +1037,10 @@ func editExtensionLines(available []*registry.Extension, lines []string) ([]stri
 		actionOptions = append(actionOptions, huh.NewOption("Done", "done"))
 
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Extensions").
 			Options(actionOptions...).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, err
 		}
 
@@ -1612,11 +1216,10 @@ func configureExtensionGeneric(ext *registry.Extension, existing []string) ([]st
 				for _, v := range f.EnumValues {
 					opts = append(opts, huh.NewOption(v, v).Selected(existingSet[v]))
 				}
-				if err := huh.NewMultiSelect[string]().
+				if err := runWizardField(huh.NewMultiSelect[string]().
 					Title(ext.Description).
 					Options(opts...).
-					Value(&vals).
-					Run(); err != nil {
+					Value(&vals)); err != nil {
 					return nil, err
 				}
 				if len(vals) > 0 {
@@ -1628,21 +1231,19 @@ func configureExtensionGeneric(ext *registry.Extension, existing []string) ([]st
 				for _, v := range f.EnumValues {
 					opts = append(opts, huh.NewOption(v, v))
 				}
-				if err := huh.NewSelect[string]().
+				if err := runWizardField(huh.NewSelect[string]().
 					Title(ext.Description).
 					Options(opts...).
-					Value(&val).
-					Run(); err != nil {
+					Value(&val)); err != nil {
 					return nil, err
 				}
 				lines = append(lines, f.Name+" "+val)
 			}
 		case "csv":
 			val := existingValue
-			if err := huh.NewInput().
+			if err := runWizardField(huh.NewInput().
 				Title(ext.Description + " (comma-separated)").
-				Value(&val).
-				Run(); err != nil {
+				Value(&val)); err != nil {
 				return nil, err
 			}
 			val = strings.TrimSpace(val)
@@ -1651,10 +1252,9 @@ func configureExtensionGeneric(ext *registry.Extension, existing []string) ([]st
 			}
 		case "path":
 			val := existingValue
-			if err := huh.NewInput().
+			if err := runWizardField(huh.NewInput().
 				Title(ext.Description + " (path)").
-				Value(&val).
-				Run(); err != nil {
+				Value(&val)); err != nil {
 				return nil, err
 			}
 			val = strings.TrimSpace(val)
@@ -1669,7 +1269,7 @@ func configureExtensionGeneric(ext *registry.Extension, existing []string) ([]st
 func configureDotnet(existing []string) ([]string, error) {
 	versions := existingDotnetVersions(existing)
 	existingSet := mapFromValues(versions)
-	if err := huh.NewMultiSelect[string]().
+	if err := runWizardField(huh.NewMultiSelect[string]().
 		Title(".NET SDK versions").
 		Options(
 			huh.NewOption("LTS (latest long-term support)", "lts").Selected(existingSet["lts"]),
@@ -1677,8 +1277,7 @@ func configureDotnet(existing []string) ([]string, error) {
 			huh.NewOption(".NET 9", "9").Selected(existingSet["9"]),
 			huh.NewOption(".NET 10", "10").Selected(existingSet["10"]),
 		).
-		Value(&versions).
-		Run(); err != nil {
+		Value(&versions)); err != nil {
 		return nil, err
 	}
 
@@ -1718,13 +1317,16 @@ func configureCloud(name, flag, allFlag, title, selectTitle string, existing []s
 	if allFlag != "" {
 		selectOpts = append(selectOpts, huh.NewOption("All ("+allFlag+")", "all"))
 	}
-	selectOpts = append(selectOpts, huh.NewOption("Skip", "skip"))
+	skipLabel := "Skip"
+	if len(existing) > 0 {
+		skipLabel = "Remove from project"
+	}
+	selectOpts = append(selectOpts, huh.NewOption(skipLabel, "skip"))
 
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title(title).
 		Options(selectOpts...).
-		Value(&action).
-		Run(); err != nil {
+		Value(&action)); err != nil {
 		return nil, err
 	}
 
@@ -1738,12 +1340,17 @@ func configureCloud(name, flag, allFlag, title, selectTitle string, existing []s
 	// "select" — use list resolver to get available items.
 	resolver := registry.GetListResolver(name)
 	if resolver == nil {
-		fmt.Fprintf(os.Stderr, "  No list resolver for %s, skipping selection.\n", name)
-		return []string{flag}, nil
+		fmt.Fprintf(os.Stderr, "  Cannot list %s: no local resolver. Keeping the current selection.\n", name)
+		return preserveCloudConfig(existing, flag), nil
 	}
 
 	items, err := resolver()
-	if err != nil || len(items) == 0 {
+	items, preserveExisting := cloudSelectionItems(items, selected, err)
+	if preserveExisting {
+		fmt.Fprintf(os.Stderr, "  Cannot list %s: %v. Keeping the current selection.\n", name, err)
+		return preserveCloudConfig(existing, flag), nil
+	}
+	if len(items) == 0 {
 		fmt.Fprintf(os.Stderr, "  No %s items found.\n", name)
 		return nil, nil
 	}
@@ -1755,11 +1362,10 @@ func configureCloud(name, flag, allFlag, title, selectTitle string, existing []s
 	}
 
 	chosen := append([]string(nil), selected...)
-	if err := huh.NewMultiSelect[string]().
+	if err := runWizardField(huh.NewMultiSelect[string]().
 		Title(selectTitle).
 		Options(opts...).
-		Value(&chosen).
-		Run(); err != nil {
+		Value(&chosen)); err != nil {
 		return nil, err
 	}
 
@@ -1768,6 +1374,55 @@ func configureCloud(name, flag, allFlag, title, selectTitle string, existing []s
 	}
 	csv := strings.Join(chosen, ",")
 	return []string{flag + " " + csv}, nil
+}
+
+// cloudSelectionItems makes saved values visible even when they cannot be
+// discovered locally. A discovery error is distinct from a valid empty list:
+// callers keep the existing configuration on an error, while an empty list can
+// be intentionally left unconfigured.
+func cloudSelectionItems(discovered []registry.ListItem, saved []string, discoveryErr error) ([]registry.ListItem, bool) {
+	if discoveryErr != nil {
+		return nil, true
+	}
+
+	seen := make(map[string]struct{}, len(discovered)+len(saved))
+	items := make([]registry.ListItem, 0, len(discovered)+len(saved))
+	for _, item := range discovered {
+		item.Value = strings.TrimSpace(item.Value)
+		if item.Value == "" {
+			continue
+		}
+		if _, ok := seen[item.Value]; ok {
+			continue
+		}
+		seen[item.Value] = struct{}{}
+		items = append(items, item)
+	}
+	for _, value := range saved {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		items = append(items, registry.ListItem{
+			Label: value + " — unavailable locally (saved selection)",
+			Value: value,
+		})
+	}
+	if len(items) == 0 {
+		return nil, false
+	}
+	return items, false
+}
+
+func preserveCloudConfig(existing []string, flag string) []string {
+	if len(existing) > 0 {
+		return append([]string(nil), existing...)
+	}
+	return []string{flag}
 }
 
 func existingCloudConfig(lines []string, flag, allFlag string) (string, []string) {
@@ -1808,21 +1463,20 @@ func mapFromValues(values []string) map[string]bool {
 // ---------------------------------------------------------------------------
 
 func wizardNetworkBoundary(workspace string, editMode bool, existFirewall, existOpts, existExtraDomains []string) ([]string, []string, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 5: Network boundary"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("Network"))
 	state := networkWizardStateFromLines(existFirewall, existOpts, existExtraDomains)
 
 	if editMode {
 		displayCurrentSetup(existingNetworkLinesFromState(state), "Network: bridge + strict firewall (default)")
 
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Network boundary").
 			Options(
 				huh.NewOption("Keep", "keep"),
 				huh.NewOption("Change", "change"),
 			).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, nil, err
 		}
 		if action == "keep" {
@@ -1834,15 +1488,14 @@ func wizardNetworkBoundary(workspace string, editMode bool, existFirewall, exist
 	fmt.Fprintln(os.Stderr)
 
 	boundary := boundaryModeFromNetworkState(state)
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("Network boundary").
 		Options(
 			huh.NewOption("Bridge + firewall allowlist (recommended)", "bridge-firewall"),
 			huh.NewOption("Bridge + unrestricted outbound HTTP(S)", "bridge-open"),
 			huh.NewOption("Host network (least isolated, for local/VPN services)", "host"),
 		).
-		Value(&boundary).
-		Run(); err != nil {
+		Value(&boundary)); err != nil {
 		return nil, nil, err
 	}
 	fmt.Fprintln(os.Stderr)
@@ -1895,13 +1548,12 @@ func wizardNetworkBoundary(workspace string, editMode bool, existFirewall, exist
 // writes the sentinel if so.
 func wizardOfferLearnArm(workspace string) error {
 	arm := false
-	if err := huh.NewConfirm().
+	if err := runWizardField(huh.NewConfirm().
 		Title("Discover required domains on your next run?").
 		Description("Arms a one-time learn pass: the next run records domains used\noutside the allowlist and offers to add them, then reverts to\nenforcing. Run a representative build to populate the allowlist.").
 		Affirmative("Arm").
 		Negative("Skip").
-		Value(&arm).
-		Run(); err != nil {
+		Value(&arm)); err != nil {
 		return err
 	}
 	if !arm {
@@ -1916,15 +1568,14 @@ func wizardOfferLearnArm(workspace string) error {
 
 func wizardFirewallMode(existing NetworkPolicy) (NetworkPolicy, error) {
 	mode := firewallModeFromNetworkPolicy(existing)
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("Firewall allowlist").
 		Options(
 			huh.NewOption("Strict (default) - git, registries, package managers only", "strict"),
 			huh.NewOption("Developer-friendly - adds cloud APIs, apt, CDN", "dev"),
 			huh.NewOption("Custom file - provide your own whitelist", "custom"),
 		).
-		Value(&mode).
-		Run(); err != nil {
+		Value(&mode)); err != nil {
 		return NetworkPolicy{}, err
 	}
 	fmt.Fprintln(os.Stderr)
@@ -1934,11 +1585,10 @@ func wizardFirewallMode(existing NetworkPolicy) (NetworkPolicy, error) {
 		return NetworkPolicy{Mode: "bridge", Firewall: "dev"}, nil
 	case "custom":
 		path := existing.CustomConfig
-		if err := huh.NewInput().
+		if err := runWizardField(huh.NewInput().
 			Title("Path to custom whitelist file").
 			Placeholder("/path/to/firewall.conf").
-			Value(&path).
-			Run(); err != nil {
+			Value(&path)); err != nil {
 			return NetworkPolicy{}, err
 		}
 		path = strings.TrimSpace(path)
@@ -1953,11 +1603,10 @@ func wizardFirewallMode(existing NetworkPolicy) (NetworkPolicy, error) {
 
 func wizardFirewallExtraDomains(existing []string) ([]string, error) {
 	value := strings.Join(existing, ", ")
-	if err := huh.NewInput().
+	if err := runWizardField(huh.NewInput().
 		Title("Additional allowed domains (comma-separated, optional)").
 		Placeholder("*.apps.example.test, api.example.com").
-		Value(&value).
-		Run(); err != nil {
+		Value(&value)); err != nil {
 		return nil, err
 	}
 	return normalizeNetworkDomains(parsePolicyList(value)), nil
@@ -1975,14 +1624,13 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 		displayCurrentSetup(displayOptionSetupLinesFromState(state), "")
 
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Title("Options").
 			Options(
 				huh.NewOption("Keep", "keep"),
 				huh.NewOption("Change", "change"),
 			).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, err
 		}
 		if action == "keep" {
@@ -1994,18 +1642,16 @@ func wizardOptions(editMode bool, existOpts []string) ([]string, error) {
 	fmt.Fprintln(os.Stderr)
 
 	yolo := boolValue(state.Execution.Yolo, true)
-	if err := huh.NewConfirm().
-		Title("YOLO mode (skip permission prompts)? (default: yes, --no-yolo to disable)").
-		Value(&yolo).
-		Run(); err != nil {
+	if err := runWizardField(huh.NewConfirm().
+		Title("Run without approval prompts?").
+		Value(&yolo)); err != nil {
 		return nil, err
 	}
 
 	worktree := state.Execution.Worktree
-	if err := huh.NewConfirm().
-		Title("Parallel agent isolation (git worktree)? (--worktree)").
-		Value(&worktree).
-		Run(); err != nil {
+	if err := runWizardField(huh.NewConfirm().
+		Title("Work in a separate Git worktree?").
+		Value(&worktree)); err != nil {
 		return nil, err
 	}
 
@@ -2347,9 +1993,9 @@ func formatCurrentSetupLine(line string) string {
 	case strings.HasPrefix(line, "--firewall "):
 		return "Firewall: custom file " + strings.TrimSpace(strings.TrimPrefix(line, "--firewall "))
 	case line == "--no-yolo":
-		return "YOLO mode: disabled"
+		return "Approval prompts: enabled"
 	case line == "--yolo":
-		return "YOLO mode: enabled"
+		return "Approval prompts: disabled"
 	case line == "--network-host":
 		return "Network: host"
 	case line == "--worktree":
@@ -2357,9 +2003,9 @@ func formatCurrentSetupLine(line string) string {
 	case strings.HasPrefix(line, "network.extra_domain "):
 		return "Allowed domain: " + strings.TrimSpace(strings.TrimPrefix(line, "network.extra_domain "))
 	case line == "option.yolo enabled":
-		return "YOLO mode: enabled"
+		return "Approval prompts: disabled"
 	case line == "option.yolo disabled":
-		return "YOLO mode: disabled"
+		return "Approval prompts: enabled"
 	case line == "option.worktree enabled":
 		return "Parallel isolation: git worktree"
 	case line == "option.worktree disabled":

@@ -51,15 +51,14 @@ func providerNameFromLines(lines []string) string {
 // wizardMCP presents per-server MCP mode selection. It returns the structured
 // selections and whether "all configured" was chosen.
 func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, providerName, workspace string) ([]MCPServerPolicy, bool, error) {
-	fmt.Fprintln(os.Stderr, wizardBold.Render("Step 4: MCP servers (experimental)"))
+	fmt.Fprintln(os.Stderr, wizardBold.Render("MCP servers (experimental)"))
 
 	if editMode {
 		displayCurrentMCP(existing, existingAll)
 		var action string
-		if err := huh.NewSelect[string]().
+		if err := runWizardField(huh.NewSelect[string]().
 			Options(huh.NewOption("Keep", "keep"), huh.NewOption("Edit", "edit")).
-			Value(&action).
-			Run(); err != nil {
+			Value(&action)); err != nil {
 			return nil, false, err
 		}
 		if action == "keep" {
@@ -75,6 +74,11 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	hostServers := readMCPServers(provider, os.Getenv("HOME"), workspace)
 	available := discoverMCPNames(hostServers, existing)
 
+	if retainMCPAllWithoutDiscovery(existingAll, available) {
+		fmt.Fprintln(os.Stderr, "  No MCP servers currently discoverable; keeping the saved all-configured selection.")
+		fmt.Fprintln(os.Stderr)
+		return nil, true, nil
+	}
 	if len(available) == 0 {
 		fmt.Fprintln(os.Stderr, "  No MCP servers configured for "+provider.DisplayName+".")
 		fmt.Fprintln(os.Stderr)
@@ -84,11 +88,10 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	// Offer the bulk "all configured (direct)" toggle first. Bulk selection
 	// never sets proxy mode (Resolved Q2).
 	all := existingAll
-	if err := huh.NewConfirm().
+	if err := runWizardField(huh.NewConfirm().
 		Title("Whitelist all configured MCP servers in direct mode?").
 		Description("Enables every configured server. For Codex, selection also controls which server definitions enter the container. Choose No to pick servers and modes individually.").
-		Value(&all).
-		Run(); err != nil {
+		Value(&all)); err != nil {
 		return nil, false, err
 	}
 	if all {
@@ -96,9 +99,9 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 		return nil, true, nil
 	}
 
-	existingMode := map[string]string{}
+	existingByName := map[string]MCPServerPolicy{}
 	for _, s := range existing {
-		existingMode[s.Name] = s.Mode
+		existingByName[s.Name] = s
 	}
 	selected := make([]string, 0)
 	for _, s := range existing {
@@ -110,13 +113,13 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 		if _, known := hostServers[name]; !known {
 			label += " — not configured for " + provider.DisplayName + " (saved selection; network access only)"
 		}
-		opts = append(opts, huh.NewOption(label, name).Selected(existingMode[name] != ""))
+		_, selected := existingByName[name]
+		opts = append(opts, huh.NewOption(label, name).Selected(selected))
 	}
-	if err := huh.NewMultiSelect[string]().
+	if err := runWizardField(huh.NewMultiSelect[string]().
 		Title("Select MCP servers for " + provider.DisplayName).
 		Options(opts...).
-		Value(&selected).
-		Run(); err != nil {
+		Value(&selected)); err != nil {
 		return nil, false, err
 	}
 	sort.Strings(selected)
@@ -124,7 +127,11 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	var out []MCPServerPolicy
 	for _, name := range selected {
 		srv, known := hostServers[name]
-		entry, err := wizardMCPMode(name, srv, known, existingMode[name])
+		if entry, keep := retainedUnavailableMCPPolicy(existingByName, name, known); keep {
+			out = append(out, entry)
+			continue
+		}
+		entry, err := wizardMCPMode(name, srv, known, existingByName[name].Mode)
 		if err != nil {
 			return nil, false, err
 		}
@@ -132,6 +139,22 @@ func wizardMCP(editMode bool, existing []MCPServerPolicy, existingAll bool, prov
 	}
 	fmt.Fprintln(os.Stderr)
 	return out, false, nil
+}
+
+// retainedUnavailableMCPPolicy keeps a saved unavailable server unchanged.
+// Its mode and command pin were approved against an earlier host definition,
+// so rebuilding it from an empty discovery result would silently weaken or
+// discard that decision. Users can still remove it from the selection list.
+func retainedUnavailableMCPPolicy(existing map[string]MCPServerPolicy, name string, known bool) (MCPServerPolicy, bool) {
+	if known {
+		return MCPServerPolicy{}, false
+	}
+	entry, ok := existing[name]
+	return entry, ok
+}
+
+func retainMCPAllWithoutDiscovery(existingAll bool, available []string) bool {
+	return existingAll && len(available) == 0
 }
 
 // wizardMCPMode prompts for a single server's mode, honouring provenance and
@@ -166,12 +189,11 @@ func wizardMCPMode(name string, srv mcpconfig.Server, known bool, existingMode s
 		mode = "auto"
 	}
 
-	if err := huh.NewSelect[string]().
+	if err := runWizardField(huh.NewSelect[string]().
 		Title("Mode for " + name).
 		Description(strings.TrimSpace(description)).
 		Options(opts...).
-		Value(&mode).
-		Run(); err != nil {
+		Value(&mode)); err != nil {
 		return MCPServerPolicy{}, err
 	}
 	if mode == "auto" {
@@ -185,11 +207,10 @@ func wizardMCPMode(name string, srv mcpconfig.Server, known bool, existingMode s
 	if mode == mcpModeProxy {
 		if len(class.Warnings) > 0 {
 			confirm := false
-			if err := huh.NewConfirm().
+			if err := runWizardField(huh.NewConfirm().
 				Title("Proxy " + name + " despite broad local capability?").
 				Description(strings.Join(class.Warnings, "; ") + "\nProxying grants the sandboxed agent host-level power via this server.").
-				Value(&confirm).
-				Run(); err != nil {
+				Value(&confirm)); err != nil {
 				return MCPServerPolicy{}, err
 			}
 			if !confirm {

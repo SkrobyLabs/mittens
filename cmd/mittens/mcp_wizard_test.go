@@ -47,3 +47,24 @@ func TestMCPDiscoveryUsesSelectedHarness(t *testing.T) {
 		t.Fatalf("missing servers = %v", got)
 	}
 }
+
+func TestRetainedUnavailableMCPPolicyPreservesApprovedPolicy(t *testing.T) {
+	existing := MCPServerPolicy{Name: "legacy", Mode: mcpModeProxy, CommandPin: "sha256:approved"}
+	entry, keep := retainedUnavailableMCPPolicy(map[string]MCPServerPolicy{"legacy": existing}, "legacy", false)
+	if !keep || !reflect.DeepEqual(entry, existing) {
+		t.Fatalf("unavailable selection = (%#v, %t), want (%#v, true)", entry, keep, existing)
+	}
+
+	if _, keep := retainedUnavailableMCPPolicy(map[string]MCPServerPolicy{"legacy": existing}, "legacy", true); keep {
+		t.Fatal("configured server should continue through mode selection")
+	}
+	if _, keep := retainedUnavailableMCPPolicy(map[string]MCPServerPolicy{}, "new", false); keep {
+		t.Fatal("new unavailable server should not be retained")
+	}
+	if !retainMCPAllWithoutDiscovery(true, nil) {
+		t.Fatal("saved all selection should survive an empty discovery")
+	}
+	if retainMCPAllWithoutDiscovery(false, nil) || retainMCPAllWithoutDiscovery(true, []string{"configured"}) {
+		t.Fatal("only an empty discovery should retain a saved all selection")
+	}
+}

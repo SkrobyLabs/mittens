@@ -72,6 +72,20 @@ mittens help             # see all flags and commands
 
 Project policies are saved to `~/.mittens/projects/` as `policy.yaml` and loaded automatically next time. Older one-flag-per-line project configs remain readable. When an older project config is found at launch, Mittens converts it to `policy.yaml` automatically. Policy-shaped launch flags are no longer accepted; use `mittens init` or `mittens policy set` instead.
 
+`mittens init` opens a compact overview: choose any section to edit, inspect full
+details, or review your changes. Escape returns from a section without applying
+its unfinished edits; other completed edits remain in the draft. Nothing is
+saved until you choose **Save and launch** or **Save and exit** and press `s` on
+the review screen. Long details and change lists scroll with the arrow and page
+keys. **Discard and exit** leaves the saved configuration unchanged.
+
+New projects start from user defaults, or recommended settings when no defaults
+exist. You can save these settings immediately or customize individual sections;
+creating user defaults is optional through **Also save as user defaults**.
+`mittens init --defaults` uses the same editor for the baseline, and `--session`
+uses it for a single launch without saving. Unavailable saved cloud contexts and
+MCP servers remain selected until you explicitly remove them.
+
 Policy can also disable host integrations directly. For example, `host.open_urls: deny`, `host.clipboard_images: false`, `host.notifications: false`, and `host.path_translation: false` are enforced at launch time.
 
 ## Providers
