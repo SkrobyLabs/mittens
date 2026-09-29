@@ -437,7 +437,7 @@ func wizardUserDefaults() error {
 	var seed wizardSeed
 	if current != nil {
 		fmt.Fprintf(os.Stderr, "Existing defaults: %s\n\n", userDefaultsSourcePath(source))
-		fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(current, homeDir()).Render()))
+		fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(current, homeDir())))
 		fmt.Fprintln(os.Stderr)
 
 		var action string
@@ -479,7 +479,7 @@ func wizardUserDefaults() error {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, wizardSuccess.Render("User defaults saved to: "+UserDefaultsPolicyPath()))
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, homeDir()).Render()))
+	fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(policy, homeDir())))
 	fmt.Fprintln(os.Stderr)
 
 	return nil
@@ -2441,7 +2441,7 @@ func displayWizardExistingProfileConfig(workspace, name string, source PolicySou
 	}
 	fmt.Fprintf(os.Stderr, "Existing profile %q: %s\n\n", name, profilesPolicyPath(workspace))
 	if policy, err := LoadNamedProfile(workspace, name); err == nil {
-		fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, workspace, name).Render()))
+		fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(policy, workspace, name)))
 	}
 	fmt.Fprintln(os.Stderr)
 }
@@ -2451,7 +2451,7 @@ func displayWizardExistingConfig(workspace string, source PolicySource, lines []
 	case PolicySourceV2:
 		fmt.Fprintf(os.Stderr, "Existing policy: %s\n\n", projectPolicyPath(workspace))
 		if policy, _, err := LoadProjectPolicy(workspace, extensions); err == nil && policy != nil {
-			fmt.Fprint(os.Stderr, wizardDim.Render(launchSummaryFromPolicy(policy, workspace).Render()))
+			fmt.Fprint(os.Stderr, renderWizardBoundary(launchSummaryFromPolicy(policy, workspace)))
 		}
 	case PolicySourceLegacy:
 		fmt.Fprintf(os.Stderr, "Existing legacy config: %s\n", projectConfigPath(workspace))
@@ -2472,4 +2472,16 @@ func gracefulAbort(err error) error {
 		return nil
 	}
 	return err
+}
+
+func renderWizardBoundary(summary LaunchSummary) string {
+	// Lipgloss pads multiline blocks to their widest line. Style each line
+	// separately so long mount lists don't turn padding into blank terminal rows.
+	lines := strings.Split(summary.Render(), "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = wizardDim.Render(line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }

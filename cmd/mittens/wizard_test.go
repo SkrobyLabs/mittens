@@ -2,10 +2,35 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/SkrobyLabs/mittens/cmd/mittens/extensions/registry"
+	"github.com/charmbracelet/x/ansi"
 )
+
+func TestRenderWizardBoundaryPreservesLineWidths(t *testing.T) {
+	for _, name := range []string{"short", "long extra directories"} {
+		t.Run(name, func(t *testing.T) {
+			summary := LaunchSummary{
+				Provider:  "Codex",
+				Workspace: SummaryMount{Path: "/workspace", Access: "rw"},
+			}
+			if name == "long extra directories" {
+				for i := 0; i < 12; i++ {
+					summary.ExtraDirs = append(summary.ExtraDirs, SummaryMount{
+						Path: "/Users/example/Documents/Source/" + strings.Repeat("project", 8), Access: "rw",
+					})
+				}
+			}
+			want := ansi.Strip(summary.Render())
+			got := ansi.Strip(renderWizardBoundary(summary))
+			if got != want {
+				t.Fatalf("styling changed boundary spacing:\ngot:  %q\nwant: %q", got, want)
+			}
+		})
+	}
+}
 
 func TestParseExistingConfig_SeparatesProviders(t *testing.T) {
 	dirs, providers, exts, firewall, opts := parseExistingConfig([]string{
